@@ -1,0 +1,14 @@
+[project]
+name = "claw-v2"
+version = "0.1.0"
+description = "Claw v2 multi-LLM agent scaffold"
+readme = "claw-v2.1-prd.md"
+requires-python = ">=3.12"
+dependencies = ["claude-agent-sdk", "openai", "google-genai"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["claw_v2*"]
