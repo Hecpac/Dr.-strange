@@ -94,7 +94,7 @@ class AppConfig:
             pipeline_state_root=Path(os.getenv("PIPELINE_STATE_ROOT", str(home / ".claw" / "pipeline"))),
             social_accounts_root=Path(os.getenv("SOCIAL_ACCOUNTS_ROOT", str(Path(__file__).parent / "agents" / "social" / "accounts"))),
             social_keychain_prefix=os.getenv("SOCIAL_KEYCHAIN_PREFIX", "com.pachano.claw.social"),
-            allowed_read_paths=[Path(p) for p in os.getenv("ALLOWED_READ_PATHS", str(home / "Projects")).split(":")],
+            allowed_read_paths=[Path(p) for p in os.getenv("ALLOWED_READ_PATHS", ":".join([str(home / "Projects"), "/private/tmp", str(home / ".claude"), str(home / ".claw")])).split(":")],
         )
 
     def ensure_directories(self) -> None:

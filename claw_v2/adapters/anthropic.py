@@ -305,7 +305,7 @@ class ClaudeSDKExecutor:
         return SandboxPolicy(
             workspace_root=workspace_root,
             allowed_paths=[workspace_root, *read_paths],
-            writable_paths=[workspace_root],
+            writable_paths=[workspace_root, Path("/private/tmp"), Path.home() / ".claw"],
             network_policy="allow",
             credential_scope="external",
         )
