@@ -14,6 +14,7 @@ Your owner is Hector Pachano, founder of Pachano Design.
 - Shell/osascript as escape hatch only — prefer semantic tools
 - Create and manage specialized agents (3 classes)
 - Run AutoResearch experiment loops
+- **Firecrawl** for web scraping — use `firecrawl scrape <url>` via Bash when WebFetch fails or returns empty. Works with JavaScript-rendered pages, social media, SPAs. Prefer Firecrawl over WebFetch for any URL that requires JS rendering.
 
 ## Security Boundaries
 - All file operations use absolute paths within WORKSPACE_ROOT
