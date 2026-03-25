@@ -67,6 +67,17 @@ class MemoryStore:
         ).fetchall()
         return [dict(row) for row in reversed(rows)]
 
+    def count_messages(self, session_id: str) -> int:
+        row = self._conn.execute(
+            """
+            SELECT COUNT(*) as count
+            FROM messages
+            WHERE session_id = ?
+            """,
+            (session_id,),
+        ).fetchone()
+        return row["count"] if row else 0
+
     def store_fact(
         self,
         key: str,

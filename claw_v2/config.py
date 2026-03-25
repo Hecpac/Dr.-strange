@@ -53,6 +53,9 @@ class AppConfig:
     social_accounts_root: Path
     social_keychain_prefix: str
     allowed_read_paths: list[Path]
+    dev_browser_path: str
+    dev_browser_browsers_path: str
+    dev_browser_timeout: int
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -68,7 +71,7 @@ class AppConfig:
             brain_provider=os.getenv("BRAIN_PROVIDER", "anthropic"),
             brain_model=os.getenv("BRAIN_MODEL", "claude-opus-4-6"),
             worker_provider=os.getenv("WORKER_PROVIDER", "anthropic"),
-            worker_model=os.getenv("WORKER_MODEL", "claude-sonnet-4-5"),
+            worker_model=os.getenv("WORKER_MODEL", "claude-sonnet-4-6"),
             verifier_provider=os.getenv("VERIFIER_PROVIDER"),
             verifier_model=os.getenv("VERIFIER_MODEL"),
             research_provider=os.getenv("RESEARCH_PROVIDER"),
@@ -95,6 +98,9 @@ class AppConfig:
             social_accounts_root=Path(os.getenv("SOCIAL_ACCOUNTS_ROOT", str(Path(__file__).parent / "agents" / "social" / "accounts"))),
             social_keychain_prefix=os.getenv("SOCIAL_KEYCHAIN_PREFIX", "com.pachano.claw.social"),
             allowed_read_paths=[Path(p) for p in os.getenv("ALLOWED_READ_PATHS", ":".join([str(home / "Projects"), "/private/tmp", str(home / ".claude"), str(home / ".claw")])).split(":")],
+            dev_browser_path=os.getenv("DEV_BROWSER_PATH", "dev-browser"),
+            dev_browser_browsers_path=os.getenv("PLAYWRIGHT_BROWSERS_PATH", "/tmp/pw-browsers"),
+            dev_browser_timeout=int(os.getenv("DEV_BROWSER_TIMEOUT", "30")),
         )
 
     def ensure_directories(self) -> None:

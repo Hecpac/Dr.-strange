@@ -431,7 +431,7 @@ class BotService:
 
         return json.dumps({
             "session_id": session_id,
-            "model": "Claude Opus 4.6 / Sonnet 4.5",
+            "model": "Claude Opus 4.6 / Sonnet 4.6",
             "context_window": context_window,
             "messages_count": message_count,
             "estimated_tokens": estimated_tokens,
