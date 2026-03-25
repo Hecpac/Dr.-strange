@@ -45,6 +45,7 @@ class AppConfig:
     eval_on_self_improve: bool
     use_compaction: bool
     cache_prefix_ttl: int
+    allowed_paths: list[Path]
     approvals_root: Path
 
     @classmethod
@@ -80,6 +81,7 @@ class AppConfig:
             eval_on_self_improve=_env_bool("EVAL_ON_SELF_IMPROVE", True),
             use_compaction=_env_bool("USE_COMPACTION", True),
             cache_prefix_ttl=int(os.getenv("CACHE_PREFIX_TTL", "3600")),
+            allowed_paths=[Path(p) for p in os.getenv("ALLOWED_PATHS", "").split(":") if p],
             approvals_root=Path(os.getenv("APPROVALS_ROOT", str(home / ".claw" / "pending_approvals"))),
         )
 
