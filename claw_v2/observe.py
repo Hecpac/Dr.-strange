@@ -22,7 +22,7 @@ class ObserveStream:
     def __init__(self, db_path: Path | str) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self.db_path)
+        self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.executescript(OBSERVE_SCHEMA)
 
     def emit(self, event_type: str, *, lane: str | None = None, provider: str | None = None, model: str | None = None, payload: dict | None = None) -> None:
