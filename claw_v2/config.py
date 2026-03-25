@@ -46,6 +46,10 @@ class AppConfig:
     use_compaction: bool
     cache_prefix_ttl: int
     approvals_root: Path
+    pipeline_repo_root: Path | None
+    pipeline_label: str
+    pipeline_max_retries: int
+    pipeline_state_root: Path
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -81,6 +85,10 @@ class AppConfig:
             use_compaction=_env_bool("USE_COMPACTION", True),
             cache_prefix_ttl=int(os.getenv("CACHE_PREFIX_TTL", "3600")),
             approvals_root=Path(os.getenv("APPROVALS_ROOT", str(home / ".claw" / "pending_approvals"))),
+            pipeline_repo_root=Path(pr) if (pr := os.getenv("PIPELINE_REPO_ROOT")) else None,
+            pipeline_label=os.getenv("PIPELINE_LABEL", "claw-auto"),
+            pipeline_max_retries=int(os.getenv("PIPELINE_MAX_RETRIES", "3")),
+            pipeline_state_root=Path(os.getenv("PIPELINE_STATE_ROOT", str(home / ".claw" / "pipeline"))),
         )
 
     def ensure_directories(self) -> None:
@@ -89,6 +97,7 @@ class AppConfig:
         self.agent_state_root.mkdir(parents=True, exist_ok=True)
         self.eval_artifacts_root.mkdir(parents=True, exist_ok=True)
         self.approvals_root.mkdir(parents=True, exist_ok=True)
+        self.pipeline_state_root.mkdir(parents=True, exist_ok=True)
 
     def validate(self) -> None:
         if self.brain_provider != "anthropic":

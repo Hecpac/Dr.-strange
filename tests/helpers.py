@@ -37,6 +37,10 @@ def make_config(root: Path) -> AppConfig:
         use_compaction=False,
         cache_prefix_ttl=3600,
         approvals_root=root / "approvals",
+        pipeline_repo_root=None,
+        pipeline_label="claw-auto",
+        pipeline_max_retries=3,
+        pipeline_state_root=root / "pipeline",
     )
     config.validate()
     config.ensure_directories()
