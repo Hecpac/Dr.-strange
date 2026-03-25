@@ -50,6 +50,8 @@ class AppConfig:
     pipeline_label: str
     pipeline_max_retries: int
     pipeline_state_root: Path
+    social_accounts_root: Path
+    social_keychain_prefix: str
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -89,6 +91,8 @@ class AppConfig:
             pipeline_label=os.getenv("PIPELINE_LABEL", "claw-auto"),
             pipeline_max_retries=int(os.getenv("PIPELINE_MAX_RETRIES", "3")),
             pipeline_state_root=Path(os.getenv("PIPELINE_STATE_ROOT", str(home / ".claw" / "pipeline"))),
+            social_accounts_root=Path(os.getenv("SOCIAL_ACCOUNTS_ROOT", str(Path(__file__).parent / "agents" / "social" / "accounts"))),
+            social_keychain_prefix=os.getenv("SOCIAL_KEYCHAIN_PREFIX", "com.pachano.claw.social"),
         )
 
     def ensure_directories(self) -> None:

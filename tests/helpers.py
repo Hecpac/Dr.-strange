@@ -41,6 +41,8 @@ def make_config(root: Path) -> AppConfig:
         pipeline_label="claw-auto",
         pipeline_max_retries=3,
         pipeline_state_root=root / "pipeline",
+        social_accounts_root=root / "social_accounts",
+        social_keychain_prefix="com.test.claw.social",
     )
     config.validate()
     config.ensure_directories()
