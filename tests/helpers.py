@@ -36,6 +36,7 @@ def make_config(root: Path) -> AppConfig:
         eval_on_self_improve=True,
         use_compaction=False,
         cache_prefix_ttl=3600,
+        allowed_paths=[],
         approvals_root=root / "approvals",
     )
     config.validate()
