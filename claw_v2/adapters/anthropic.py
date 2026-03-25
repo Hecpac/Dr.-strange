@@ -122,7 +122,7 @@ class ClaudeSDKExecutor:
             system_prompt = {"type": "preset", "preset": "claude_code"}
             if effective_system_prompt:
                 system_prompt["append"] = effective_system_prompt
-            permission_mode = "default"
+            permission_mode = "bypassPermissions"
             can_use_tool = self._build_can_use_tool(sdk, request)
 
         sdk_agents = self._build_agents(sdk, request)
@@ -136,7 +136,7 @@ class ClaudeSDKExecutor:
             model=request.model,
             cli_path=self.config.claude_cli_path,
             cwd=Path(request.cwd) if request.cwd else self.config.workspace_root,
-            setting_sources=["project"],
+            setting_sources=["user", "project"],
             hooks=hooks,
             agents=sdk_agents,
             can_use_tool=can_use_tool,
