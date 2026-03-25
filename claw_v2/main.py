@@ -19,10 +19,12 @@ from claw_v2.cron import CronScheduler, ScheduledJob
 from claw_v2.daemon import ClawDaemon
 from claw_v2.github import GitHubPullRequestService
 from claw_v2.heartbeat import HeartbeatService
+from claw_v2.linear import LinearService
 from claw_v2.llm import LLMRouter
 from claw_v2.memory import MemoryStore
 from claw_v2.metrics import MetricsTracker
 from claw_v2.observe import ObserveStream
+from claw_v2.pipeline import PipelineService
 from claw_v2.types import LLMResponse
 
 
@@ -153,6 +155,21 @@ def build_runtime(
         approvals=approvals,
         pull_requests=GitHubPullRequestService(config.workspace_root) if _is_git_repo(str(config.workspace_root)) else None,
         allowed_user_id=config.telegram_allowed_user_id,
+    )
+    linear = LinearService(mcp_caller=lambda action, **kw: None)
+    pipeline = PipelineService(
+        linear=linear,
+        router=router,
+        approvals=approvals,
+        pull_requests=GitHubPullRequestService(config.workspace_root) if _is_git_repo(str(config.workspace_root)) else None,
+        observe=observe,
+        default_repo_root=config.pipeline_repo_root or config.workspace_root,
+        max_retries=config.pipeline_max_retries,
+        state_root=config.pipeline_state_root,
+    )
+    bot.pipeline = pipeline
+    scheduler.register(
+        ScheduledJob(name="pipeline_poll", interval_seconds=300, handler=pipeline.poll_actionable)
     )
     return ClawRuntime(
         config=config,

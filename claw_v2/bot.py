@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
+from pathlib import Path
 
 from claw_v2.agents import AgentDefinition, AutoResearchAgentService
 from claw_v2.approval import ApprovalManager
 from claw_v2.brain import BrainService
 from claw_v2.github import GitHubPullRequestService
 from claw_v2.heartbeat import HeartbeatService
+from claw_v2.pipeline import PipelineService
 
 
 class BotService:
@@ -20,6 +22,7 @@ class BotService:
         approvals: ApprovalManager,
         pull_requests: GitHubPullRequestService | None = None,
         allowed_user_id: str | None = None,
+        pipeline: PipelineService | None = None,
     ) -> None:
         self.brain = brain
         self.auto_research = auto_research
@@ -27,6 +30,7 @@ class BotService:
         self.approvals = approvals
         self.pull_requests = pull_requests
         self.allowed_user_id = allowed_user_id
+        self.pipeline = pipeline
 
     def handle_text(self, *, user_id: str, session_id: str, text: str) -> str:
         if self.allowed_user_id is not None and user_id != self.allowed_user_id:
@@ -157,6 +161,38 @@ class BotService:
                 return "usage: /approve <approval_id> <token>"
             approved = self.approvals.approve(parts[1], parts[2])
             return "approval recorded" if approved else "approval rejected"
+        if stripped.startswith("/pipeline_approve "):
+            parts = stripped.split(maxsplit=2)
+            if len(parts) != 3:
+                return "usage: /pipeline_approve <approval_id> <token>"
+            approved = self.approvals.approve(parts[1], parts[2])
+            if not approved:
+                return "approval rejected"
+            if self.pipeline is None:
+                return "pipeline service unavailable"
+            for run in self.pipeline.list_active():
+                if run.approval_id == parts[1]:
+                    result = self.pipeline.complete_pipeline(run.issue_id)
+                    return json.dumps({"status": result.status, "pr_url": result.pr_url}, indent=2)
+            return "approval recorded but no matching pipeline run found"
+        if stripped == "/pipeline_status":
+            if self.pipeline is None:
+                return "pipeline service unavailable"
+            active = self.pipeline.list_active()
+            if not active:
+                return "no active pipeline runs"
+            return json.dumps([{"issue": r.issue_id, "status": r.status, "branch": r.branch_name} for r in active], indent=2)
+        if stripped.startswith("/pipeline "):
+            if self.pipeline is None:
+                return "pipeline service unavailable"
+            parts = stripped.split(maxsplit=2)
+            issue_id = parts[1]
+            repo_root = Path(parts[2]) if len(parts) == 3 else None
+            try:
+                run = self.pipeline.process_issue(issue_id, repo_root=repo_root)
+                return json.dumps({"issue": run.issue_id, "status": run.status, "branch": run.branch_name, "approval_id": run.approval_id, "approval_token": run.approval_token}, indent=2)
+            except Exception as exc:
+                return f"pipeline error: {exc}"
         return self.brain.handle_message(session_id, stripped).content
 
     def _list_agents_payload(self) -> list[dict]:
