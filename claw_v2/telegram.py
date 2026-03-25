@@ -70,6 +70,8 @@ class TelegramTransport:
         except Exception:
             logger.exception("Error handling message")
             response = "Error processing your message."
+        if not response or not response.strip():
+            response = "(sin respuesta)"
         for part in _split_message(response):
             await update.message.reply_text(part)
 

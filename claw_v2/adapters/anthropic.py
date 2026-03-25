@@ -363,6 +363,8 @@ def _extract_assistant_text(blocks: list[Any]) -> list[str]:
 def _coalesce_content(assistant_text_chunks: list[str], result_text: str | None) -> str:
     content = "\n".join(chunk.strip() for chunk in assistant_text_chunks if chunk.strip()).strip()
     if content:
+        if result_text and result_text.strip() and result_text.strip() not in content:
+            return f"{content}\n\n{result_text.strip()}"
         return content
     if result_text:
         return result_text.strip()
