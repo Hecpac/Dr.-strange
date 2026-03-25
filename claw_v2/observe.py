@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from pathlib import Path
 
 
@@ -24,27 +25,30 @@ class ObserveStream:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.executescript(OBSERVE_SCHEMA)
+        self._lock = threading.Lock()
 
     def emit(self, event_type: str, *, lane: str | None = None, provider: str | None = None, model: str | None = None, payload: dict | None = None) -> None:
-        self._conn.execute(
-            """
-            INSERT INTO observe_stream (event_type, lane, provider, model, payload)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (event_type, lane, provider, model, json.dumps(payload or {})),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO observe_stream (event_type, lane, provider, model, payload)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (event_type, lane, provider, model, json.dumps(payload or {})),
+            )
+            self._conn.commit()
 
     def recent_events(self, limit: int = 20) -> list[dict]:
-        rows = self._conn.execute(
-            """
-            SELECT event_type, lane, provider, model, payload, timestamp
-            FROM observe_stream
-            ORDER BY id DESC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT event_type, lane, provider, model, payload, timestamp
+                FROM observe_stream
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
         return [
             {
                 "event_type": row[0],

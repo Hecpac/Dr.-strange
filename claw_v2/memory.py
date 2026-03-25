@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Iterable
 
@@ -46,13 +47,15 @@ class MemoryStore:
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(SCHEMA)
+        self._lock = threading.Lock()
 
     def store_message(self, session_id: str, role: str, content: str) -> None:
-        self._conn.execute(
-            "INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)",
-            (session_id, role, content),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)",
+                (session_id, role, content),
+            )
+            self._conn.commit()
 
     def get_recent_messages(self, session_id: str, limit: int = 20) -> list[dict]:
         rows = self._conn.execute(
@@ -90,24 +93,25 @@ class MemoryStore:
         valid_from: str | None = None,
         valid_until: str | None = None,
     ) -> None:
-        self._conn.execute(
-            """
-            INSERT INTO facts (
-                key, value, source, source_trust, confidence, entity_tags, valid_from, valid_until
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                key,
-                value,
-                source,
-                source_trust,
-                confidence,
-                json.dumps(list(entity_tags)),
-                valid_from,
-                valid_until,
-            ),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO facts (
+                    key, value, source, source_trust, confidence, entity_tags, valid_from, valid_until
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    key,
+                    value,
+                    source,
+                    source_trust,
+                    confidence,
+                    json.dumps(list(entity_tags)),
+                    valid_from,
+                    valid_until,
+                ),
+            )
+            self._conn.commit()
 
     def search_facts(self, query: str, limit: int = 10) -> list[dict]:
         rows = self._conn.execute(
@@ -157,13 +161,14 @@ class MemoryStore:
         return row["provider_session_id"]
 
     def link_provider_session(self, app_session_id: str, provider: str, provider_session_id: str) -> None:
-        self._conn.execute(
-            """
-            INSERT INTO provider_sessions (app_session_id, provider, provider_session_id)
-            VALUES (?, ?, ?)
-            ON CONFLICT(app_session_id, provider)
-            DO UPDATE SET provider_session_id = excluded.provider_session_id, updated_at = CURRENT_TIMESTAMP
-            """,
-            (app_session_id, provider, provider_session_id),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO provider_sessions (app_session_id, provider, provider_session_id)
+                VALUES (?, ?, ?)
+                ON CONFLICT(app_session_id, provider)
+                DO UPDATE SET provider_session_id = excluded.provider_session_id, updated_at = CURRENT_TIMESTAMP
+                """,
+                (app_session_id, provider, provider_session_id),
+            )
+            self._conn.commit()

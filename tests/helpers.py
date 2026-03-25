@@ -47,6 +47,7 @@ def make_config(root: Path) -> AppConfig:
         dev_browser_path="dev-browser",
         dev_browser_browsers_path="/tmp/pw-browsers",
         dev_browser_timeout=30,
+        sdk_bypass_permissions=False,
     )
     config.validate()
     config.ensure_directories()

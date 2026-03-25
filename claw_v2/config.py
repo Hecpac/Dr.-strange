@@ -56,6 +56,7 @@ class AppConfig:
     dev_browser_path: str
     dev_browser_browsers_path: str
     dev_browser_timeout: int
+    sdk_bypass_permissions: bool
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -101,6 +102,7 @@ class AppConfig:
             dev_browser_path=os.getenv("DEV_BROWSER_PATH", "dev-browser"),
             dev_browser_browsers_path=os.getenv("PLAYWRIGHT_BROWSERS_PATH", "/tmp/pw-browsers"),
             dev_browser_timeout=int(os.getenv("DEV_BROWSER_TIMEOUT", "30")),
+            sdk_bypass_permissions=_env_bool("SDK_BYPASS_PERMISSIONS", False),
         )
 
     def ensure_directories(self) -> None:

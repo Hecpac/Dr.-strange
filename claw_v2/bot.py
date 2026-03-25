@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import asdict
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from claw_v2.agents import AgentDefinition, AutoResearchAgentService
 from claw_v2.approval import ApprovalManager
@@ -28,6 +31,7 @@ class BotService:
         content_engine: ContentEngine | None = None,
         social_publisher: SocialPublisher | None = None,
         config: object | None = None,
+        browser: object | None = None,
     ) -> None:
         self.brain = brain
         self.auto_research = auto_research
@@ -39,9 +43,12 @@ class BotService:
         self.content_engine = content_engine
         self.social_publisher = social_publisher
         self.config = config
+        self.browser = browser
 
     def handle_text(self, *, user_id: str, session_id: str, text: str) -> str:
-        if self.allowed_user_id is not None and user_id != self.allowed_user_id:
+        if self.allowed_user_id is None:
+            raise PermissionError("TELEGRAM_ALLOWED_USER_ID must be configured")
+        if user_id != self.allowed_user_id:
             raise PermissionError("user is not allowed to access this bot")
         stripped = text.strip()
         if stripped == "/status":
@@ -60,6 +67,11 @@ class BotService:
             return json.dumps({"lanes": lanes, "max_budget_usd": c.max_budget_usd, "daily_token_budget": c.daily_token_budget}, indent=2)
         if stripped == "/tokens":
             return self._tokens_info_response(session_id)
+        if stripped.startswith("/browse "):
+            parts = stripped.split(maxsplit=1)
+            if len(parts) != 2:
+                return "usage: /browse <url>"
+            return self._browse_response(parts[1])
         if stripped == "/agents":
             return json.dumps(self._list_agents_payload(), indent=2, sort_keys=True)
         if stripped.startswith("/agent_create "):
@@ -213,8 +225,11 @@ class BotService:
             try:
                 run = self.pipeline.process_issue(issue_id, repo_root=repo_root)
                 return json.dumps({"issue": run.issue_id, "status": run.status, "branch": run.branch_name, "approval_id": run.approval_id, "approval_token": run.approval_token}, indent=2)
-            except Exception as exc:
-                return f"pipeline error: {exc}"
+            except Exception:
+                logger.exception("pipeline error for %s", issue_id)
+                return "pipeline error — check logs for details"
+        if stripped in ("/pipeline", "/pipeline_approve", "/social_preview", "/social_publish"):
+            return f"usage: {stripped} <argument>"
         if stripped == "/social_status":
             if self.content_engine is None:
                 return "social content engine unavailable"
@@ -231,8 +246,9 @@ class BotService:
                 return json.dumps([{"platform": d.platform, "text": d.text, "hashtags": d.hashtags} for d in drafts], indent=2)
             except FileNotFoundError:
                 return f"account not found: {account}"
-            except Exception as exc:
-                return f"error: {exc}"
+            except Exception:
+                logger.exception("social_preview error for %s", account)
+                return "error generating preview — check logs"
         if stripped.startswith("/social_publish "):
             if self.content_engine is None or self.social_publisher is None:
                 return "social services unavailable"
@@ -242,8 +258,9 @@ class BotService:
                 drafts = self.content_engine.generate_batch(account)
                 results = [self.social_publisher.publish(d) for d in drafts]
                 return json.dumps([{"platform": r.platform, "post_id": r.post_id, "url": r.url} for r in results], indent=2)
-            except Exception as exc:
-                return f"error: {exc}"
+            except Exception:
+                logger.exception("social_publish error for %s", account)
+                return "error publishing — check logs"
         return self.brain.handle_message(session_id, stripped).content
 
     def _list_agents_payload(self) -> list[dict]:
@@ -406,6 +423,19 @@ class BotService:
         payload["pull_request_title"] = pr.title
         payload["pull_request_draft"] = pr.draft
         return json.dumps(payload, indent=2, sort_keys=True)
+
+    def _browse_response(self, url: str) -> str:
+        if self.browser is None:
+            return "browser service unavailable"
+        try:
+            result = self.browser.browse(url)
+            return json.dumps({
+                "url": result.url,
+                "title": result.title,
+                "content": result.content[:4000],
+            }, indent=2)
+        except Exception as exc:
+            return f"browse error: {exc}"
 
     def _tokens_info_response(self, session_id: str) -> str:
         message_count = self.brain.memory.count_messages(session_id)

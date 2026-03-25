@@ -122,7 +122,7 @@ class ClaudeSDKExecutor:
             system_prompt = {"type": "preset", "preset": "claude_code"}
             if effective_system_prompt:
                 system_prompt["append"] = effective_system_prompt
-            permission_mode = "bypassPermissions"
+            permission_mode = "bypassPermissions" if self.config.sdk_bypass_permissions else "default"
             can_use_tool = self._build_can_use_tool(sdk, request)
 
         sdk_agents = self._build_agents(sdk, request)

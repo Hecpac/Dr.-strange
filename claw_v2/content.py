@@ -68,7 +68,11 @@ class ContentEngine:
         return "\n\n".join(parts)
 
     def _load_strategy(self, account: str) -> dict:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", account):
+            raise ValueError(f"Invalid account name: {account}")
         path = self.accounts_root / account / "strategy.md"
+        if not path.resolve().is_relative_to(self.accounts_root.resolve()):
+            raise ValueError(f"Path traversal detected: {account}")
         if not path.exists():
             raise FileNotFoundError(f"No strategy.md for account: {account}")
         content = path.read_text(encoding="utf-8")
