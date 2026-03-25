@@ -49,6 +49,8 @@ class BrainService:
             lane="brain",
             session_id=provider_session_id,
             evidence_pack={"app_session_id": session_id},
+            max_budget=2.0,
+            timeout=300.0,
         )
         provider_session_artifact = response.artifacts.get("session_id")
         if isinstance(provider_session_artifact, str) and provider_session_artifact:
