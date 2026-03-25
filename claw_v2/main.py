@@ -155,6 +155,7 @@ def build_runtime(
         approvals=approvals,
         pull_requests=GitHubPullRequestService(config.workspace_root) if _is_git_repo(str(config.workspace_root)) else None,
         allowed_user_id=config.telegram_allowed_user_id,
+        config=config,
     )
     linear = LinearService(mcp_caller=lambda action, **kw: None)
     pipeline = PipelineService(

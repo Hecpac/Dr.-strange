@@ -27,6 +27,7 @@ class BotService:
         pipeline: PipelineService | None = None,
         content_engine: ContentEngine | None = None,
         social_publisher: SocialPublisher | None = None,
+        config: object | None = None,
     ) -> None:
         self.brain = brain
         self.auto_research = auto_research
@@ -37,6 +38,7 @@ class BotService:
         self.pipeline = pipeline
         self.content_engine = content_engine
         self.social_publisher = social_publisher
+        self.config = config
 
     def handle_text(self, *, user_id: str, session_id: str, text: str) -> str:
         if self.allowed_user_id is not None and user_id != self.allowed_user_id:
@@ -44,6 +46,20 @@ class BotService:
         stripped = text.strip()
         if stripped == "/status":
             return json.dumps(asdict(self.heartbeat.collect()), indent=2, sort_keys=True)
+        if stripped == "/config":
+            if self.config is None:
+                return "config not available"
+            c = self.config
+            lanes = {}
+            for lane in ("brain", "worker", "verifier", "research", "judge"):
+                lanes[lane] = {
+                    "provider": c.provider_for_lane(lane),
+                    "model": c.model_for_lane(lane),
+                    "effort": c.effort_for_lane(lane),
+                }
+            return json.dumps({"lanes": lanes, "max_budget_usd": c.max_budget_usd, "daily_token_budget": c.daily_token_budget}, indent=2)
+        if stripped == "/tokens":
+            return self._tokens_info_response(session_id)
         if stripped == "/agents":
             return json.dumps(self._list_agents_payload(), indent=2, sort_keys=True)
         if stripped.startswith("/agent_create "):
@@ -390,6 +406,40 @@ class BotService:
         payload["pull_request_title"] = pr.title
         payload["pull_request_draft"] = pr.draft
         return json.dumps(payload, indent=2, sort_keys=True)
+
+    def _tokens_info_response(self, session_id: str) -> str:
+        message_count = self.brain.memory.count_messages(session_id)
+
+        # Estimación aproximada: ~500 tokens por mensaje (muy conservador)
+        estimated_tokens = message_count * 500
+        context_window = 200_000  # Claude Sonnet 4.5/Opus 4.6
+
+        estimated_pct = (estimated_tokens / context_window) * 100
+
+        if estimated_pct > 80:
+            status = "critical"
+            status_emoji = "🔴"
+            recommendation = "Compacta ahora para evitar pérdida de contexto"
+        elif estimated_pct > 60:
+            status = "warning"
+            status_emoji = "🟡"
+            recommendation = "Considera compactar pronto"
+        else:
+            status = "healthy"
+            status_emoji = "🟢"
+            recommendation = "Espacio saludable"
+
+        return json.dumps({
+            "session_id": session_id,
+            "model": "Claude Opus 4.6 / Sonnet 4.5",
+            "context_window": context_window,
+            "messages_count": message_count,
+            "estimated_tokens": estimated_tokens,
+            "estimated_percentage": round(estimated_pct, 1),
+            "status": status,
+            "status_display": f"{status_emoji} {status.title()}",
+            "recommendation": recommendation,
+        }, indent=2, sort_keys=True)
 
 
 def _parse_toggle(value: str) -> bool:
