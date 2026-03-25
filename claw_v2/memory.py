@@ -122,15 +122,27 @@ class MemoryStore:
         ).fetchall()
         return [dict(row) for row in rows]
 
-    def build_context(self, session_id: str, message: str, budget: int = 4000) -> str:
-        recent = self.get_recent_messages(session_id, limit=12)
+    def build_context(self, session_id: str, message: str, budget: int = 12000) -> str:
+        recent = self.get_recent_messages(session_id, limit=20)
         facts = self.get_profile_facts()[:10]
-        recent_lines = [f"{row['role']}: {row['content']}" for row in recent]
         fact_lines = [f"{row['key']}={row['value']}" for row in facts]
-        context = "\n".join(
-            ["# Profile facts", *fact_lines, "# Recent messages", *recent_lines, "# Current input", message]
-        )
-        return context[:budget]
+
+        # Reserve space for current input first (never truncate the user's message)
+        current_block = f"# Current input\n{message}"
+        facts_block = "\n".join(["# Profile facts", *fact_lines])
+        remaining = budget - len(current_block) - len(facts_block) - 20  # 20 for separators
+
+        # Build recent messages from newest to oldest, fitting within remaining budget
+        recent_lines: list[str] = []
+        used = 0
+        for row in reversed(recent):
+            line = f"{row['role']}: {row['content']}"
+            if used + len(line) + 1 > remaining:
+                break
+            recent_lines.insert(0, line)
+            used += len(line) + 1
+
+        return "\n".join([facts_block, "# Recent messages", *recent_lines, current_block])
 
     def get_provider_session(self, app_session_id: str, provider: str) -> str | None:
         row = self._conn.execute(
