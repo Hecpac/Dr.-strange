@@ -7,9 +7,11 @@ from pathlib import Path
 from claw_v2.agents import AgentDefinition, AutoResearchAgentService
 from claw_v2.approval import ApprovalManager
 from claw_v2.brain import BrainService
+from claw_v2.content import ContentEngine
 from claw_v2.github import GitHubPullRequestService
 from claw_v2.heartbeat import HeartbeatService
 from claw_v2.pipeline import PipelineService
+from claw_v2.social import SocialPublisher
 
 
 class BotService:
@@ -23,6 +25,8 @@ class BotService:
         pull_requests: GitHubPullRequestService | None = None,
         allowed_user_id: str | None = None,
         pipeline: PipelineService | None = None,
+        content_engine: ContentEngine | None = None,
+        social_publisher: SocialPublisher | None = None,
     ) -> None:
         self.brain = brain
         self.auto_research = auto_research
@@ -31,6 +35,8 @@ class BotService:
         self.pull_requests = pull_requests
         self.allowed_user_id = allowed_user_id
         self.pipeline = pipeline
+        self.content_engine = content_engine
+        self.social_publisher = social_publisher
 
     def handle_text(self, *, user_id: str, session_id: str, text: str) -> str:
         if self.allowed_user_id is not None and user_id != self.allowed_user_id:
@@ -193,6 +199,35 @@ class BotService:
                 return json.dumps({"issue": run.issue_id, "status": run.status, "branch": run.branch_name, "approval_id": run.approval_id, "approval_token": run.approval_token}, indent=2)
             except Exception as exc:
                 return f"pipeline error: {exc}"
+        if stripped == "/social_status":
+            if self.content_engine is None:
+                return "social content engine unavailable"
+            accounts_root = self.content_engine.accounts_root
+            accounts = sorted(p.name for p in accounts_root.iterdir() if p.is_dir())
+            return json.dumps([{"account": a} for a in accounts], indent=2)
+        if stripped.startswith("/social_preview "):
+            if self.content_engine is None:
+                return "social content engine unavailable"
+            parts = stripped.split(maxsplit=1)
+            account = parts[1]
+            try:
+                drafts = self.content_engine.generate_batch(account)
+                return json.dumps([{"platform": d.platform, "text": d.text, "hashtags": d.hashtags} for d in drafts], indent=2)
+            except FileNotFoundError:
+                return f"account not found: {account}"
+            except Exception as exc:
+                return f"error: {exc}"
+        if stripped.startswith("/social_publish "):
+            if self.content_engine is None or self.social_publisher is None:
+                return "social services unavailable"
+            parts = stripped.split(maxsplit=1)
+            account = parts[1]
+            try:
+                drafts = self.content_engine.generate_batch(account)
+                results = [self.social_publisher.publish(d) for d in drafts]
+                return json.dumps([{"platform": r.platform, "post_id": r.post_id, "url": r.url} for r in results], indent=2)
+            except Exception as exc:
+                return f"error: {exc}"
         return self.brain.handle_message(session_id, stripped).content
 
     def _list_agents_payload(self) -> list[dict]:

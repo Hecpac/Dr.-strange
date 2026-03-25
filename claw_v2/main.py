@@ -171,6 +171,12 @@ def build_runtime(
     scheduler.register(
         ScheduledJob(name="pipeline_poll", interval_seconds=300, handler=pipeline.poll_actionable)
     )
+    from claw_v2.content import ContentEngine
+    from claw_v2.social import SocialPublisher
+
+    content_engine = ContentEngine(router=router, accounts_root=config.social_accounts_root)
+    bot.content_engine = content_engine
+    bot.social_publisher = SocialPublisher(adapters={})
     return ClawRuntime(
         config=config,
         memory=memory,
