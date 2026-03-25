@@ -67,6 +67,7 @@ class HandleTextTests(unittest.IsolatedAsyncioTestCase):
         update.effective_chat.id = 1
         update.message.text = "hello"
         update.message.reply_text = AsyncMock()
+        update.message.chat.send_action = AsyncMock()
 
         with patch("claw_v2.telegram.asyncio") as mock_asyncio:
             mock_asyncio.to_thread = AsyncMock(return_value="response text")

@@ -63,15 +63,16 @@ class TelegramTransport:
         user_id = str(update.effective_user.id)
         session_id = f"tg-{update.effective_chat.id}"
         text = update.message.text or ""
+        await update.message.chat.send_action("typing")
         try:
             response = await asyncio.to_thread(
                 self._bot_service.handle_text, user_id=user_id, session_id=session_id, text=text,
             )
-        except Exception:
+        except Exception as exc:
             logger.exception("Error handling message")
-            response = "Error processing your message."
+            response = f"Error: {exc}"
         if not response or not response.strip():
-            response = "(sin respuesta)"
+            response = "(procesando... intenta de nuevo en unos segundos)"
         for part in _split_message(response):
             await update.message.reply_text(part)
 
