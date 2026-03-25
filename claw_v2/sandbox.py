@@ -24,7 +24,7 @@ def is_within_allowed(path: Path, policy: SandboxPolicy) -> bool:
 
 
 def check_command(command: str, policy: SandboxPolicy) -> str | None:
-    dangerous_fragments = (" rm ", " shutdown", " reboot", " launchctl ", "diskutil", " mkfs", " dd ")
+    dangerous_fragments = (" rm ", " shutdown", " reboot", "diskutil", " mkfs", " dd ")
     padded = f" {command} "
     if any(fragment in padded for fragment in dangerous_fragments):
         return "dangerous shell fragment detected"

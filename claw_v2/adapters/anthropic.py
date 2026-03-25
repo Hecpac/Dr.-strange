@@ -301,9 +301,10 @@ class ClaudeSDKExecutor:
 
     def _policy_for_request(self, request: LLMRequest) -> SandboxPolicy:
         workspace_root = Path(request.cwd) if request.cwd else self.config.workspace_root
+        read_paths = getattr(self.config, "allowed_read_paths", [])
         return SandboxPolicy(
             workspace_root=workspace_root,
-            allowed_paths=[workspace_root],
+            allowed_paths=[workspace_root, *read_paths],
             writable_paths=[workspace_root],
             network_policy="allow",
             credential_scope="external",

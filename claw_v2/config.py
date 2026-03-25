@@ -52,6 +52,7 @@ class AppConfig:
     pipeline_state_root: Path
     social_accounts_root: Path
     social_keychain_prefix: str
+    allowed_read_paths: list[Path]
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -93,6 +94,7 @@ class AppConfig:
             pipeline_state_root=Path(os.getenv("PIPELINE_STATE_ROOT", str(home / ".claw" / "pipeline"))),
             social_accounts_root=Path(os.getenv("SOCIAL_ACCOUNTS_ROOT", str(Path(__file__).parent / "agents" / "social" / "accounts"))),
             social_keychain_prefix=os.getenv("SOCIAL_KEYCHAIN_PREFIX", "com.pachano.claw.social"),
+            allowed_read_paths=[Path(p) for p in os.getenv("ALLOWED_READ_PATHS", str(home / "Projects")).split(":")],
         )
 
     def ensure_directories(self) -> None:

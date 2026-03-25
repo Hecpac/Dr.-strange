@@ -43,6 +43,7 @@ def make_config(root: Path) -> AppConfig:
         pipeline_state_root=root / "pipeline",
         social_accounts_root=root / "social_accounts",
         social_keychain_prefix="com.test.claw.social",
+        allowed_read_paths=[root / "projects"],
     )
     config.validate()
     config.ensure_directories()
