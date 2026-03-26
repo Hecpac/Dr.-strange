@@ -363,6 +363,52 @@ class AutoResearchAgentService:
         return sorted(dict.fromkeys(requested_tools))
 
 
+class DockerSandbox:
+    """Wraps command execution in a Docker container with resource limits."""
+
+    def __init__(
+        self,
+        *,
+        image: str = "python:3.12-slim",
+        memory_limit: str = "2g",
+        pids_limit: int = 100,
+        network: str = "none",
+        timeout: int = 300,
+    ) -> None:
+        self.image = image
+        self.memory_limit = memory_limit
+        self.pids_limit = pids_limit
+        self.network = network
+        self.timeout = timeout
+        self._available: bool | None = None
+
+    def is_available(self) -> bool:
+        if self._available is None:
+            try:
+                result = subprocess.run(
+                    ["docker", "info"], capture_output=True, text=True, check=False, timeout=5,
+                )
+                self._available = result.returncode == 0
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                self._available = False
+        return self._available
+
+    def run(self, command: str, cwd: Path) -> subprocess.CompletedProcess[str]:
+        docker_cmd = [
+            "docker", "run", "--rm",
+            f"--memory={self.memory_limit}",
+            f"--pids-limit={self.pids_limit}",
+            f"--network={self.network}",
+            "-v", f"{cwd}:/workspace",
+            "-w", "/workspace",
+            self.image,
+            "sh", "-c", command,
+        ]
+        return subprocess.run(
+            docker_cmd, capture_output=True, text=True, check=False, timeout=self.timeout,
+        )
+
+
 class GitWorktreeExperimentRunner:
     def __init__(
         self,
@@ -373,6 +419,7 @@ class GitWorktreeExperimentRunner:
         brain: BrainService | None = None,
         evaluator: Callable[[Path, dict, str], ExperimentEvaluation] | None = None,
         promotion_executor: Callable[[Path, dict, str], Any] | None = None,
+        docker_sandbox: DockerSandbox | None = None,
     ) -> None:
         self.repo_root = Path(repo_root)
         self.worktree_root = Path(worktree_root)
@@ -380,6 +427,7 @@ class GitWorktreeExperimentRunner:
         self.brain = brain
         self.evaluator = evaluator
         self.promotion_executor = promotion_executor or WorkspacePromotionExecutor(self.repo_root)
+        self.docker_sandbox = docker_sandbox or DockerSandbox()
         self.worktree_root.mkdir(parents=True, exist_ok=True)
 
     def __call__(self, agent_name: str, experiment_number: int, state: dict) -> ExperimentRecord:
@@ -457,14 +505,16 @@ class GitWorktreeExperimentRunner:
         if not command:
             status = "no_metric" if diff.strip() else "noop"
             return ExperimentEvaluation(metric_value=baseline, status=status, output="No metric command configured.")
-        completed = subprocess.run(
-            command,
-            shell=True,
-            cwd=worktree_path,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        if self.docker_sandbox.is_available():
+            try:
+                completed = self.docker_sandbox.run(command, cwd=worktree_path)
+            except subprocess.TimeoutExpired:
+                return ExperimentEvaluation(metric_value=baseline, status="metric_failed", output="Docker timeout exceeded.")
+        else:
+            completed = subprocess.run(
+                command, shell=True, cwd=worktree_path,
+                capture_output=True, text=True, check=False, timeout=300,
+            )
         output = (completed.stdout or "") + (completed.stderr or "")
         metric_value = self._parse_metric(output, baseline)
         if completed.returncode != 0:

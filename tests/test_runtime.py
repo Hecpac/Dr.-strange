@@ -56,7 +56,8 @@ class RuntimeTests(unittest.TestCase):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 tick = runtime.daemon.tick(now=1000)
                 self.assertIn("heartbeat", tick.executed_jobs)
-                self.assertIn("daily_eval_gate", tick.executed_jobs)
+                self.assertIn("morning_brief", tick.executed_jobs)
+                self.assertIn("daily_metrics", tick.executed_jobs)
 
     def test_brain_persists_anthropic_provider_session_mapping(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

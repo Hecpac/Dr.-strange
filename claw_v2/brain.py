@@ -147,6 +147,7 @@ class BrainService:
         test_output: str,
         executor: Callable[[], Any],
         approval_id: str | None = None,
+        pre_check: Callable[[CriticalActionVerification], bool] | None = None,
     ) -> CriticalActionExecution:
         approval_status: str | None = None
         approval_override = False
@@ -164,6 +165,23 @@ class BrainService:
             action=action,
             create_approval=not approval_override,
         )
+
+        # Pre-execution pause: caller can inspect verification and abort
+        if pre_check is not None and not pre_check(verification):
+            self._emit_execution_event(
+                action=action,
+                verification=verification,
+                status="aborted_by_pre_check",
+                approval_status=approval_status,
+            )
+            return CriticalActionExecution(
+                action=action,
+                status="aborted_by_pre_check",
+                executed=False,
+                verification=verification,
+                reason="Pre-execution check rejected the action.",
+                approval_status=approval_status,
+            )
 
         if verification.should_proceed:
             result = executor()

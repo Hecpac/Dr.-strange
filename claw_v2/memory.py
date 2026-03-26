@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import threading
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 
 SCHEMA = """
@@ -37,7 +38,30 @@ CREATE TABLE IF NOT EXISTS provider_sessions (
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (app_session_id, provider)
 );
+
+CREATE TABLE IF NOT EXISTS fact_embeddings (
+    fact_id INTEGER PRIMARY KEY REFERENCES facts(id),
+    embedding TEXT NOT NULL
+);
 """
+
+
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(x * x for x in b))
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+def _simple_embedding(text: str, dim: int = 128) -> list[float]:
+    """Lightweight bag-of-chars embedding. Replace with a real model for production."""
+    vec = [0.0] * dim
+    for i, ch in enumerate(text.lower()):
+        vec[ord(ch) % dim] += 1.0 / (1 + i * 0.01)
+    norm = math.sqrt(sum(x * x for x in vec)) or 1.0
+    return [x / norm for x in vec]
 
 
 class MemoryStore:
@@ -172,3 +196,78 @@ class MemoryStore:
                 (app_session_id, provider, provider_session_id),
             )
             self._conn.commit()
+
+    # --- Semantic memory ---
+
+    def store_fact_with_embedding(
+        self,
+        key: str,
+        value: str,
+        *,
+        source: str,
+        source_trust: str = "untrusted",
+        confidence: float = 0.5,
+        entity_tags: Iterable[str] = (),
+        embed_fn: Callable[..., list[float]] | None = None,
+    ) -> int:
+        embedder = embed_fn or _simple_embedding
+        with self._lock:
+            cursor = self._conn.execute(
+                """
+                INSERT INTO facts (key, value, source, source_trust, confidence, entity_tags)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (key, value, source, source_trust, confidence, json.dumps(list(entity_tags))),
+            )
+            fact_id = cursor.lastrowid
+            embedding = embedder(f"{key} {value}")
+            self._conn.execute(
+                "INSERT INTO fact_embeddings (fact_id, embedding) VALUES (?, ?)",
+                (fact_id, json.dumps(embedding)),
+            )
+            self._conn.commit()
+        return fact_id
+
+    def search_facts_semantic(
+        self,
+        query: str,
+        limit: int = 10,
+        min_similarity: float = 0.1,
+        embed_fn: Callable[..., list[float]] | None = None,
+    ) -> list[dict]:
+        embedder = embed_fn or _simple_embedding
+        query_vec = embedder(query)
+        rows = self._conn.execute(
+            """
+            SELECT f.id, f.key, f.value, f.source, f.source_trust, f.confidence, fe.embedding
+            FROM facts f
+            JOIN fact_embeddings fe ON f.id = fe.fact_id
+            """,
+        ).fetchall()
+        scored = []
+        for row in rows:
+            stored_vec = json.loads(row["embedding"])
+            sim = _cosine_similarity(query_vec, stored_vec)
+            if sim >= min_similarity:
+                scored.append({
+                    "key": row["key"], "value": row["value"],
+                    "source": row["source"], "confidence": row["confidence"],
+                    "similarity": round(sim, 4),
+                })
+        scored.sort(key=lambda x: x["similarity"], reverse=True)
+        return scored[:limit]
+
+    def backfill_embeddings(self, embed_fn: Callable[..., list[float]] | None = None) -> int:
+        embedder = embed_fn or _simple_embedding
+        rows = self._conn.execute(
+            "SELECT id, key, value FROM facts WHERE id NOT IN (SELECT fact_id FROM fact_embeddings)"
+        ).fetchall()
+        with self._lock:
+            for row in rows:
+                embedding = embedder(f"{row['key']} {row['value']}")
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO fact_embeddings (fact_id, embedding) VALUES (?, ?)",
+                    (row["id"], json.dumps(embedding)),
+                )
+            self._conn.commit()
+        return len(rows)
