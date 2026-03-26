@@ -6,6 +6,7 @@ from typing import Callable
 from claw_v2.adapters.anthropic import create_claude_sdk_executor
 from claw_v2.adapters.base import LLMRequest
 from claw_v2.agents import (
+    AgentDefinition,
     AutoResearchAgentService,
     FileAgentStore,
     GitBranchPromotionExecutor,
@@ -136,18 +137,111 @@ def build_runtime(
         )
     auto_research = AutoResearchAgentService(router=router, store=agent_store, experiment_runner=experiment_runner)
     heartbeat = HeartbeatService(metrics=metrics, approvals=approvals, agent_store=agent_store, observe=observe)
+
+    def _self_improve_handler() -> None:
+        """Daily self-improvement: run tests, then AutoResearch loop on all active agents."""
+        import subprocess as _sp
+
+        import shutil as _sh
+        import sys as _sys
+
+        observe.emit("self_improve_start", payload={})
+        # Gate: run tests first
+        repo_root = config.pipeline_repo_root or config.workspace_root.parent
+        pytest_bin = str(repo_root / ".venv" / "bin" / "pytest")
+        from pathlib import Path as _Path
+        if not _sh.which(pytest_bin) and not _Path(pytest_bin).exists():
+            pytest_bin = _sys.executable
+            pytest_args = [pytest_bin, "-m", "pytest", "tests/", "-x", "-q", "--tb=no"]
+        else:
+            pytest_args = [pytest_bin, "tests/", "-x", "-q", "--tb=no"]
+        test_result = _sp.run(
+            pytest_args,
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=str(repo_root),
+        )
+        if test_result.returncode != 0:
+            observe.emit("self_improve_blocked", payload={"reason": "tests_failed", "output": (test_result.stdout or "")[-500:]})
+            return
+        # Ensure default agent exists
+        default_name = "self-improve"
+        if not agent_store.state_path(default_name).exists():
+            auto_research.create_agent(
+                AgentDefinition(
+                    name=default_name,
+                    agent_class="operator",
+                    instruction=(
+                        "Improve the Claw codebase: optimize prompts, fix edge cases, "
+                        "add missing error handling, improve test coverage. "
+                        "Make one small, safe, incremental change per experiment."
+                    ),
+                    lane="worker",
+                ),
+                state={"promote_on_improvement": True, "commit_on_promotion": True},
+            )
+        # Run loop on all non-paused agents
+        agents = auto_research.list_agents()
+        for agent_name in agents:
+            state = auto_research.inspect(agent_name)
+            if state.get("paused"):
+                continue
+            result = auto_research.run_loop(agent_name, max_experiments=5)
+            observe.emit(
+                "self_improve_agent_done",
+                payload={
+                    "agent": agent_name,
+                    "experiments_run": result.experiments_run,
+                    "paused": result.paused,
+                    "reason": result.reason,
+                    "last_metric": result.last_metric,
+                },
+            )
+        observe.emit("self_improve_complete", payload={"agents_run": len(agents)})
+
+    def _morning_brief_handler() -> None:
+        """Daily morning brief: summarize overnight metrics and agent status."""
+        agents = auto_research.list_agents()
+        agent_summaries = []
+        for name in agents:
+            try:
+                state = auto_research.inspect(name)
+                agent_summaries.append({
+                    "name": name,
+                    "paused": state.get("paused", False),
+                    "experiments_today": state.get("experiments_today", 0),
+                    "last_metric": state.get("last_verified_state", {}).get("metric"),
+                })
+            except FileNotFoundError:
+                continue
+        observe.emit(
+            "morning_brief",
+            payload={
+                "metrics_summary": metrics.snapshot(),
+                "agents": agent_summaries,
+                "total_agents": len(agents),
+            },
+        )
+
+    def _daily_metrics_handler() -> None:
+        """Daily metrics: persist current metrics snapshot."""
+        observe.emit("daily_metrics", payload={"metrics": metrics.snapshot()})
+        # Reset daily counters on agents
+        for name in auto_research.list_agents():
+            try:
+                state = auto_research.inspect(name)
+                state["experiments_today"] = 0
+                agent_store.save_state(name, state)
+            except FileNotFoundError:
+                continue
+
     scheduler = CronScheduler()
     scheduler.register(ScheduledJob(name="heartbeat", interval_seconds=config.heartbeat_interval, handler=heartbeat.emit))
-    scheduler.register(
-        ScheduledJob(
-            name="daily_eval_gate",
-            interval_seconds=86400,
-            handler=lambda: observe.emit(
-                "daily_eval_gate",
-                payload={"enabled": config.eval_on_self_improve},
-            ),
-        )
-    )
+    if config.eval_on_self_improve:
+        scheduler.register(ScheduledJob(name="self_improve", interval_seconds=86400, handler=_self_improve_handler))
+    scheduler.register(ScheduledJob(name="morning_brief", interval_seconds=86400, handler=_morning_brief_handler))
+    scheduler.register(ScheduledJob(name="daily_metrics", interval_seconds=86400, handler=_daily_metrics_handler))
     daemon = ClawDaemon(scheduler=scheduler, heartbeat=heartbeat, observe=observe)
     browser = DevBrowserService(
         dev_browser_path=config.dev_browser_path,
@@ -164,7 +258,11 @@ def build_runtime(
         config=config,
         browser=browser,
     )
-    linear = LinearService(mcp_caller=lambda action, **kw: None)
+    if config.linear_api_key:
+        from claw_v2.linear import build_linear_api_caller
+        linear = LinearService(mcp_caller=build_linear_api_caller(config.linear_api_key))
+    else:
+        linear = LinearService(mcp_caller=lambda action, **kw: None)
     pipeline = PipelineService(
         linear=linear,
         router=router,

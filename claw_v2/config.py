@@ -20,6 +20,7 @@ class AppConfig:
     telegram_allowed_user_id: str | None
     openai_api_key: str | None
     google_api_key: str | None
+    linear_api_key: str | None
     claude_cli_path: str
     claude_auth_mode: str
     approval_secret: str
@@ -69,6 +70,7 @@ class AppConfig:
             telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN"),
             telegram_allowed_user_id=os.getenv("TELEGRAM_ALLOWED_USER_ID"),
             openai_api_key=os.getenv("OPENAI_API_KEY"),
+            linear_api_key=os.getenv("LINEAR_API_KEY"),
             google_api_key=os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"),
             claude_cli_path=os.getenv("CLAUDE_CLI_PATH", "claude"),
             claude_auth_mode=os.getenv("CLAUDE_AUTH_MODE", "subscription"),

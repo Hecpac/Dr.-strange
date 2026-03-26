@@ -72,5 +72,52 @@ class LinkPrTests(unittest.TestCase):
         self.assertIn({"url": "https://github.com/org/repo/pull/1", "title": "feat: add feature"}, args.kwargs["links"])
 
 
+class LinearGraphQLTests(unittest.TestCase):
+    def _mock_gql_client(self, data: dict) -> MagicMock:
+        client = MagicMock()
+        resp = MagicMock()
+        resp.json.return_value = {"data": data}
+        resp.raise_for_status = MagicMock()
+        client.post.return_value = resp
+        return client
+
+    def test_query_list_issues(self) -> None:
+        from claw_v2.linear import _query_list_issues
+        client = self._mock_gql_client({
+            "issues": {"nodes": [
+                {"id": "abc", "identifier": "HEC-1", "title": "Bug", "description": "",
+                 "state": {"name": "Todo"}, "labels": {"nodes": [{"name": "claw-auto"}]},
+                 "branchName": "feat/hec-1", "url": "https://linear.app/issue/HEC-1"},
+            ]}
+        })
+        result = _query_list_issues(client, "claw-auto", "Todo")
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["identifier"], "HEC-1")
+        self.assertEqual(result[0]["labels"], [{"name": "claw-auto"}])
+
+    def test_query_get_issue(self) -> None:
+        from claw_v2.linear import _query_get_issue
+        client = self._mock_gql_client({
+            "issue": {"id": "abc", "identifier": "HEC-5", "title": "Feature",
+                      "description": "desc", "state": {"name": "Todo"},
+                      "labels": {"nodes": [{"name": "backend"}]},
+                      "branchName": "feat/hec-5", "url": "https://linear.app/issue/HEC-5"}
+        })
+        result = _query_get_issue(client, "HEC-5")
+        self.assertEqual(result["identifier"], "HEC-5")
+
+    def test_query_get_issue_not_found(self) -> None:
+        from claw_v2.linear import _query_get_issue
+        client = self._mock_gql_client({"issue": None})
+        with self.assertRaises(FileNotFoundError):
+            _query_get_issue(client, "HEC-999")
+
+    def test_normalize_node_flattens_labels(self) -> None:
+        from claw_v2.linear import _normalize_node
+        node = {"labels": {"nodes": [{"name": "a"}, {"name": "b"}]}}
+        result = _normalize_node(node)
+        self.assertEqual(result["labels"], [{"name": "a"}, {"name": "b"}])
+
+
 if __name__ == "__main__":
     unittest.main()

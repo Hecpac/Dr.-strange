@@ -11,6 +11,7 @@ def make_config(root: Path) -> AppConfig:
         telegram_allowed_user_id="123",
         openai_api_key=None,
         google_api_key=None,
+        linear_api_key=None,
         claude_cli_path="claude",
         claude_auth_mode="subscription",
         approval_secret="test-secret",
