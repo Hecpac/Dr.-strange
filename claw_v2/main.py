@@ -14,6 +14,7 @@ from claw_v2.agents import (
 from claw_v2.approval import ApprovalManager
 from claw_v2.brain import BrainService
 from claw_v2.bot import BotService
+from claw_v2.browser import DevBrowserService
 from claw_v2.config import AppConfig
 from claw_v2.cron import CronScheduler, ScheduledJob
 from claw_v2.daemon import ClawDaemon
@@ -148,6 +149,11 @@ def build_runtime(
         )
     )
     daemon = ClawDaemon(scheduler=scheduler, heartbeat=heartbeat, observe=observe)
+    browser = DevBrowserService(
+        dev_browser_path=config.dev_browser_path,
+        browsers_path=config.dev_browser_browsers_path,
+        timeout=config.dev_browser_timeout,
+    )
     bot = BotService(
         brain=brain,
         auto_research=auto_research,
@@ -156,6 +162,7 @@ def build_runtime(
         pull_requests=GitHubPullRequestService(config.workspace_root) if _is_git_repo(str(config.workspace_root)) else None,
         allowed_user_id=config.telegram_allowed_user_id,
         config=config,
+        browser=browser,
     )
     linear = LinearService(mcp_caller=lambda action, **kw: None)
     pipeline = PipelineService(

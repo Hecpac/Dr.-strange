@@ -63,6 +63,8 @@ class BotService:
                     "provider": c.provider_for_lane(lane),
                     "model": c.model_for_lane(lane),
                     "effort": c.effort_for_lane(lane),
+                    "context_window": c.context_window_for_lane(lane),
+                    "max_output": c.max_output_for_lane(lane),
                 }
             return json.dumps({"lanes": lanes, "max_budget_usd": c.max_budget_usd, "daily_token_budget": c.daily_token_budget}, indent=2)
         if stripped == "/tokens":
@@ -442,7 +444,7 @@ class BotService:
 
         # Estimación aproximada: ~500 tokens por mensaje (muy conservador)
         estimated_tokens = message_count * 500
-        context_window = 200_000  # Claude Sonnet 4.5/Opus 4.6
+        context_window = self.config.brain_context_window if self.config else 1_000_000
 
         estimated_pct = (estimated_tokens / context_window) * 100
 
@@ -459,10 +461,12 @@ class BotService:
             status_emoji = "🟢"
             recommendation = "Espacio saludable"
 
+        max_output = self.config.brain_max_output if self.config else 128_000
         return json.dumps({
             "session_id": session_id,
             "model": "Claude Opus 4.6 / Sonnet 4.6",
             "context_window": context_window,
+            "max_output": max_output,
             "messages_count": message_count,
             "estimated_tokens": estimated_tokens,
             "estimated_percentage": round(estimated_pct, 1),

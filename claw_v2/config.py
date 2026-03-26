@@ -53,6 +53,10 @@ class AppConfig:
     social_accounts_root: Path
     social_keychain_prefix: str
     allowed_read_paths: list[Path]
+    brain_context_window: int
+    brain_max_output: int
+    worker_context_window: int
+    worker_max_output: int
     dev_browser_path: str
     dev_browser_browsers_path: str
     dev_browser_timeout: int
@@ -99,6 +103,10 @@ class AppConfig:
             social_accounts_root=Path(os.getenv("SOCIAL_ACCOUNTS_ROOT", str(Path(__file__).parent / "agents" / "social" / "accounts"))),
             social_keychain_prefix=os.getenv("SOCIAL_KEYCHAIN_PREFIX", "com.pachano.claw.social"),
             allowed_read_paths=[Path(p) for p in os.getenv("ALLOWED_READ_PATHS", ":".join([str(home / "Projects"), "/private/tmp", str(home / ".claude"), str(home / ".claw")])).split(":")],
+            brain_context_window=int(os.getenv("BRAIN_CONTEXT_WINDOW", "1000000")),
+            brain_max_output=int(os.getenv("BRAIN_MAX_OUTPUT", "128000")),
+            worker_context_window=int(os.getenv("WORKER_CONTEXT_WINDOW", "1000000")),
+            worker_max_output=int(os.getenv("WORKER_MAX_OUTPUT", "64000")),
             dev_browser_path=os.getenv("DEV_BROWSER_PATH", "dev-browser"),
             dev_browser_browsers_path=os.getenv("PLAYWRIGHT_BROWSERS_PATH", "/tmp/pw-browsers"),
             dev_browser_timeout=int(os.getenv("DEV_BROWSER_TIMEOUT", "30")),
@@ -156,3 +164,13 @@ class AppConfig:
         if lane == "worker":
             return self.worker_effort
         return "low"
+
+    def context_window_for_lane(self, lane: Lane) -> int:
+        if lane == "brain":
+            return self.brain_context_window
+        return self.worker_context_window
+
+    def max_output_for_lane(self, lane: Lane) -> int:
+        if lane == "brain":
+            return self.brain_max_output
+        return self.worker_max_output
