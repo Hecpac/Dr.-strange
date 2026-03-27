@@ -92,10 +92,33 @@ class ClaudeSDKExecutor:
             raise AdapterError(f"Claude SDK execution failed: {exc}") from exc
 
         content = _coalesce_content(assistant_text_chunks, result_text)
+        cache_read = usage.get("cache_read_input_tokens", 0)
+        cache_create = usage.get("cache_creation_input_tokens", 0)
+        input_tokens = usage.get("input_tokens", 0)
+        cache_hit_ratio = cache_read / max(input_tokens, 1) if input_tokens else 0.0
         artifacts = {
             "session_id": result_session_id,
             "usage": usage,
+            "cache": {
+                "read_tokens": cache_read,
+                "create_tokens": cache_create,
+                "hit_ratio": round(cache_hit_ratio, 3),
+            },
         }
+        if self.observe is not None:
+            self.observe.emit(
+                "prompt_cache",
+                lane=request.lane,
+                provider="anthropic",
+                model=model_name,
+                payload={
+                    "cache_read_tokens": cache_read,
+                    "cache_create_tokens": cache_create,
+                    "input_tokens": input_tokens,
+                    "hit_ratio": round(cache_hit_ratio, 3),
+                    "estimated_savings_pct": round(cache_hit_ratio * 75, 1),
+                },
+            )
         return LLMResponse(
             content=content,
             lane=request.lane,
@@ -126,7 +149,7 @@ class ClaudeSDKExecutor:
             can_use_tool = self._build_can_use_tool(sdk, request)
 
         sdk_agents = self._build_agents(sdk, request)
-        return sdk.ClaudeAgentOptions(
+        options_kwargs: dict[str, Any] = dict(
             tools=tools,
             allowed_tools=list(request.allowed_tools or []),
             system_prompt=system_prompt,
@@ -142,6 +165,9 @@ class ClaudeSDKExecutor:
             can_use_tool=can_use_tool,
             effort=request.effort,
         )
+        if request.cache_ttl is not None:
+            options_kwargs["cache_prefix_ttl"] = request.cache_ttl
+        return sdk.ClaudeAgentOptions(**options_kwargs)
 
     def _build_agents(self, sdk: Any, request: LLMRequest) -> dict[str, Any] | None:
         if not request.agents:

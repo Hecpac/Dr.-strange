@@ -38,6 +38,37 @@ class ObserveStream:
             )
             self._conn.commit()
 
+    def cache_summary(self, hours: int = 24) -> dict:
+        """Return prompt cache stats for the last N hours."""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT payload
+                FROM observe_stream
+                WHERE event_type = 'prompt_cache'
+                  AND timestamp > datetime('now', ?)
+                """,
+                (f"-{hours} hours",),
+            ).fetchall()
+        total_input = 0
+        total_cache_read = 0
+        total_cache_create = 0
+        for (raw,) in rows:
+            data = json.loads(raw)
+            total_input += data.get("input_tokens", 0)
+            total_cache_read += data.get("cache_read_tokens", 0)
+            total_cache_create += data.get("cache_create_tokens", 0)
+        hit_ratio = total_cache_read / max(total_input, 1) if total_input else 0.0
+        estimated_savings_pct = round(hit_ratio * 75, 1)
+        return {
+            "requests": len(rows),
+            "total_input_tokens": total_input,
+            "cache_read_tokens": total_cache_read,
+            "cache_create_tokens": total_cache_create,
+            "hit_ratio": round(hit_ratio, 3),
+            "estimated_savings_pct": estimated_savings_pct,
+        }
+
     def recent_events(self, limit: int = 20) -> list[dict]:
         with self._lock:
             rows = self._conn.execute(

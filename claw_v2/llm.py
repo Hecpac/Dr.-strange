@@ -64,6 +64,7 @@ class LLMRouter:
             hooks=hooks,
             timeout=timeout,
             cwd=cwd,
+            cache_ttl=self.config.cache_prefix_ttl if self.config.cache_prefix_ttl > 0 else None,
         )
         adapter = self._adapter_for(selected_provider)
         if lane not in self.NON_TOOL_LANES and not adapter.tool_capable:

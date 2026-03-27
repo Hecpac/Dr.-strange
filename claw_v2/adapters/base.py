@@ -32,6 +32,7 @@ class LLMRequest:
     hooks: dict[str, Any] | None
     timeout: float
     cwd: str | None = None
+    cache_ttl: int | None = None
 
 
 class ProviderAdapter(ABC):
