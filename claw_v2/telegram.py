@@ -49,6 +49,7 @@ class TelegramTransport:
         await self._app.initialize()
         await self._app.start()
         await self._app.updater.start_polling()
+        await self._set_commands()
 
     async def stop(self) -> None:
         if self._app is None:
@@ -56,6 +57,25 @@ class TelegramTransport:
         await self._app.updater.stop()
         await self._app.stop()
         await self._app.shutdown()
+
+    async def _set_commands(self) -> None:
+        from telegram import BotCommand
+        commands = [
+            BotCommand("browse", "Abrir y leer una URL — /browse <url>"),
+            BotCommand("tokens", "Ver uso de contexto y tokens"),
+            BotCommand("config", "Ver configuración de modelos LLM"),
+            BotCommand("status", "Estado del sistema (heartbeat)"),
+            BotCommand("agents", "Listar agentes registrados"),
+            BotCommand("pipeline", "Ejecutar pipeline — /pipeline <issue_id>"),
+            BotCommand("pipeline_status", "Ver pipelines activos"),
+            BotCommand("social_status", "Ver cuentas sociales"),
+            BotCommand("social_preview", "Preview de posts — /social_preview <cuenta>"),
+            BotCommand("approvals", "Ver aprobaciones pendientes"),
+        ]
+        try:
+            await self._app.bot.set_my_commands(commands)
+        except Exception:
+            logger.warning("Could not set bot commands menu")
 
     async def _handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_authorized(update):
