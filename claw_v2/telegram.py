@@ -90,7 +90,20 @@ class TelegramTransport:
             )
         except Exception as exc:
             logger.exception("Error handling message")
-            response = f"Error: {exc}"
+            err_str = str(exc)
+            if "Could not process image" in err_str:
+                response = "No pude procesar la imagen/screenshot. Intento sin captura visual."
+                try:
+                    response = await asyncio.to_thread(
+                        self._bot_service.handle_text, user_id=user_id, session_id=session_id,
+                        text=text + " (sin usar screenshots ni imágenes)",
+                    )
+                except Exception:
+                    response = "Error procesando tu mensaje. Intenta de nuevo."
+            elif "API Error" in err_str or "invalid_request" in err_str:
+                response = "Error con la API. Intenta de nuevo en unos segundos."
+            else:
+                response = "Error procesando tu mensaje. Intenta de nuevo."
         if not response or not response.strip():
             response = "(procesando... intenta de nuevo en unos segundos)"
         for part in _split_message(response):
