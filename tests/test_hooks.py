@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from claw_v2.adapters.base import LLMRequest, PreLLMHook, PostLLMHook
+from claw_v2.hooks import make_daily_cost_gate
 from claw_v2.llm import LLMRouter
 from claw_v2.observe import ObserveStream
 from claw_v2.types import LLMResponse
@@ -154,6 +155,58 @@ class TotalCostTodayTests(unittest.TestCase):
             observe._conn.commit()
             observe.emit("llm_response", lane="brain", provider="anthropic", model="opus", payload={"cost_estimate": 2.0})
             self.assertAlmostEqual(observe.total_cost_today(), 2.0)
+
+
+class DailyCostGateTests(unittest.TestCase):
+    def _make_request(self) -> LLMRequest:
+        return LLMRequest(
+            prompt="test prompt",
+            system_prompt=None,
+            lane="brain",
+            provider="anthropic",
+            model="claude-opus-4-6",
+            effort="high",
+            session_id=None,
+            max_budget=0.5,
+            evidence_pack=None,
+            allowed_tools=None,
+            agents=None,
+            hooks=None,
+            timeout=30.0,
+        )
+
+    def test_allows_request_when_under_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "test.db")
+            observe.emit("llm_response", lane="brain", provider="anthropic", model="opus", payload={"cost_estimate": 5.0})
+            gate = make_daily_cost_gate(observe, daily_limit=10.0)
+            request = self._make_request()
+            result = gate(request)
+            self.assertIsNotNone(result)
+            self.assertIs(result, request)
+
+    def test_blocks_request_when_at_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "test.db")
+            observe.emit("llm_response", lane="brain", provider="anthropic", model="opus", payload={"cost_estimate": 10.0})
+            gate = make_daily_cost_gate(observe, daily_limit=10.0)
+            result = gate(self._make_request())
+            self.assertIsNone(result)
+
+    def test_blocks_request_when_over_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "test.db")
+            observe.emit("llm_response", lane="brain", provider="anthropic", model="opus", payload={"cost_estimate": 12.0})
+            gate = make_daily_cost_gate(observe, daily_limit=10.0)
+            result = gate(self._make_request())
+            self.assertIsNone(result)
+
+    def test_allows_when_no_prior_cost(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "test.db")
+            gate = make_daily_cost_gate(observe, daily_limit=10.0)
+            result = gate(self._make_request())
+            self.assertIsNotNone(result)
 
 
 if __name__ == "__main__":
