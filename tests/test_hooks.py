@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from claw_v2.adapters.base import LLMRequest, PreLLMHook, PostLLMHook
-from claw_v2.hooks import make_daily_cost_gate
+from claw_v2.hooks import make_daily_cost_gate, make_decision_logger
 from claw_v2.llm import LLMRouter
 from claw_v2.observe import ObserveStream
 from claw_v2.types import LLMResponse
@@ -207,6 +207,84 @@ class DailyCostGateTests(unittest.TestCase):
             gate = make_daily_cost_gate(observe, daily_limit=10.0)
             result = gate(self._make_request())
             self.assertIsNotNone(result)
+
+
+class DecisionLoggerTests(unittest.TestCase):
+    def test_emits_llm_decision_event(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "test.db")
+            hook = make_decision_logger(observe)
+            request = LLMRequest(
+                prompt="test prompt",
+                system_prompt=None,
+                lane="brain",
+                provider="anthropic",
+                model="claude-opus-4-6",
+                effort="high",
+                session_id="sess-1",
+                max_budget=0.5,
+                evidence_pack=None,
+                allowed_tools=None,
+                agents=None,
+                hooks=None,
+                timeout=30.0,
+            )
+            response = LLMResponse(
+                content="hello world",
+                lane="brain",
+                provider="anthropic",
+                model="claude-opus-4-6",
+                confidence=0.85,
+                cost_estimate=0.03,
+            )
+            result = hook(request, response)
+            self.assertIs(result, response)
+
+            events = observe.recent_events(limit=5)
+            decision_events = [e for e in events if e["event_type"] == "llm_decision"]
+            self.assertEqual(len(decision_events), 1)
+            payload = decision_events[0]["payload"]
+            self.assertEqual(payload["session_id"], "sess-1")
+            self.assertAlmostEqual(payload["confidence"], 0.85)
+            self.assertAlmostEqual(payload["cost_estimate"], 0.03)
+            self.assertEqual(payload["response_length"], len("hello world"))
+            self.assertEqual(payload["effort"], "high")
+            self.assertFalse(payload["has_evidence_pack"])
+
+    def test_handles_multimodal_prompt_length(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "test.db")
+            hook = make_decision_logger(observe)
+            request = LLMRequest(
+                prompt=[{"type": "text", "text": "hello"}, {"type": "image", "source": {}}],
+                system_prompt=None,
+                lane="brain",
+                provider="anthropic",
+                model="claude-opus-4-6",
+                effort="high",
+                session_id=None,
+                max_budget=0.5,
+                evidence_pack={"data": "test"},
+                allowed_tools=None,
+                agents=None,
+                hooks=None,
+                timeout=30.0,
+            )
+            response = LLMResponse(
+                content="ok",
+                lane="brain",
+                provider="anthropic",
+                model="claude-opus-4-6",
+                confidence=0.5,
+                cost_estimate=0.01,
+            )
+            hook(request, response)
+
+            events = observe.recent_events(limit=5)
+            decision_events = [e for e in events if e["event_type"] == "llm_decision"]
+            payload = decision_events[0]["payload"]
+            self.assertEqual(payload["prompt_length"], 2)
+            self.assertTrue(payload["has_evidence_pack"])
 
 
 if __name__ == "__main__":

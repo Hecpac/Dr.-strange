@@ -19,3 +19,27 @@ def make_daily_cost_gate(observe: ObserveStream, daily_limit: float = 10.0) -> P
 
     daily_cost_gate.__name__ = "daily_cost_gate"
     return daily_cost_gate
+
+
+def make_decision_logger(observe: ObserveStream) -> PostLLMHook:
+    def decision_logger(request: LLMRequest, response: LLMResponse) -> LLMResponse:
+        observe.emit(
+            "llm_decision",
+            lane=response.lane,
+            provider=response.provider,
+            model=response.model,
+            payload={
+                "session_id": request.session_id,
+                "confidence": response.confidence,
+                "cost_estimate": response.cost_estimate,
+                "degraded_mode": response.degraded_mode,
+                "prompt_length": len(request.prompt) if isinstance(request.prompt, str) else len(request.prompt),
+                "response_length": len(response.content),
+                "effort": request.effort,
+                "has_evidence_pack": request.evidence_pack is not None,
+            },
+        )
+        return response
+
+    decision_logger.__name__ = "decision_logger"
+    return decision_logger
