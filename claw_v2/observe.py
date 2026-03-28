@@ -69,6 +69,18 @@ class ObserveStream:
             "estimated_savings_pct": estimated_savings_pct,
         }
 
+    def total_cost_today(self) -> float:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT COALESCE(SUM(json_extract(payload, '$.cost_estimate')), 0.0)
+                FROM observe_stream
+                WHERE event_type = 'llm_response'
+                  AND timestamp >= date('now', 'start of day')
+                """,
+            ).fetchone()
+        return float(row[0]) if row else 0.0
+
     def recent_events(self, limit: int = 20) -> list[dict]:
         with self._lock:
             rows = self._conn.execute(

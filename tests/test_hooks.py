@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 
 from claw_v2.adapters.base import LLMRequest, PreLLMHook, PostLLMHook
 from claw_v2.llm import LLMRouter
+from claw_v2.observe import ObserveStream
 from claw_v2.types import LLMResponse
 
 
@@ -123,6 +126,34 @@ class PostHookTests(unittest.TestCase):
         router = _make_router()
         response = router.ask("hello", lane="brain", system_prompt="test")
         self.assertEqual(response.content, "adapter response")
+
+
+class TotalCostTodayTests(unittest.TestCase):
+    def test_returns_zero_when_no_events(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "test.db")
+            self.assertAlmostEqual(observe.total_cost_today(), 0.0)
+
+    def test_sums_cost_from_todays_llm_response_events(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "test.db")
+            observe.emit("llm_response", lane="brain", provider="anthropic", model="opus", payload={"cost_estimate": 1.5})
+            observe.emit("llm_response", lane="worker", provider="anthropic", model="sonnet", payload={"cost_estimate": 0.3})
+            # This event has a different type — should NOT be counted
+            observe.emit("llm_decision", lane="brain", provider="anthropic", model="opus", payload={"cost_estimate": 1.5})
+            self.assertAlmostEqual(observe.total_cost_today(), 1.8)
+
+    def test_ignores_events_from_previous_days(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "test.db")
+            # Insert an old event directly with a past timestamp
+            observe._conn.execute(
+                "INSERT INTO observe_stream (event_type, lane, provider, model, payload, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
+                ("llm_response", "brain", "anthropic", "opus", '{"cost_estimate": 99.0}', "2020-01-01 00:00:00"),
+            )
+            observe._conn.commit()
+            observe.emit("llm_response", lane="brain", provider="anthropic", model="opus", payload={"cost_estimate": 2.0})
+            self.assertAlmostEqual(observe.total_cost_today(), 2.0)
 
 
 if __name__ == "__main__":
