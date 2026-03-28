@@ -17,7 +17,7 @@ def make_daily_cost_gate(observe: ObserveStream, daily_limit: float = 10.0) -> P
             return None
         return request
 
-    daily_cost_gate.__name__ = "daily_cost_gate_blocked"
+    daily_cost_gate.__name__ = "daily_cost_gate"
     return daily_cost_gate
 
 

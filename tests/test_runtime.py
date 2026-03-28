@@ -176,7 +176,7 @@ class RuntimeTests(unittest.TestCase):
 
                 # Second message should be blocked
                 response2 = runtime.brain.handle_message("session-1", "world")
-                self.assertIn("blocked", response2.artifacts.get("blocked_by", ""))
+                self.assertEqual(response2.artifacts.get("blocked_by"), "daily_cost_gate")
                 self.assertEqual(response2.provider, "none")
 
 
