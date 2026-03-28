@@ -45,6 +45,7 @@ def make_config(root: Path) -> AppConfig:
         social_accounts_root=root / "social_accounts",
         social_keychain_prefix="com.test.claw.social",
         allowed_read_paths=[root / "projects"],
+        extra_workspace_roots=[],
         brain_context_window=1_000_000,
         brain_max_output=128_000,
         worker_context_window=1_000_000,
@@ -53,6 +54,7 @@ def make_config(root: Path) -> AppConfig:
         dev_browser_browsers_path="/tmp/pw-browsers",
         dev_browser_timeout=30,
         sdk_bypass_permissions=False,
+        daily_cost_limit=10.0,
     )
     config.validate()
     config.ensure_directories()

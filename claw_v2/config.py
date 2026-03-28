@@ -54,6 +54,7 @@ class AppConfig:
     social_accounts_root: Path
     social_keychain_prefix: str
     allowed_read_paths: list[Path]
+    extra_workspace_roots: list[Path]
     brain_context_window: int
     brain_max_output: int
     worker_context_window: int
@@ -62,6 +63,7 @@ class AppConfig:
     dev_browser_browsers_path: str
     dev_browser_timeout: int
     sdk_bypass_permissions: bool
+    daily_cost_limit: float
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -105,6 +107,7 @@ class AppConfig:
             social_accounts_root=Path(os.getenv("SOCIAL_ACCOUNTS_ROOT", str(Path(__file__).parent / "agents" / "social" / "accounts"))),
             social_keychain_prefix=os.getenv("SOCIAL_KEYCHAIN_PREFIX", "com.pachano.claw.social"),
             allowed_read_paths=[Path(p) for p in os.getenv("ALLOWED_READ_PATHS", ":".join([str(home / "Projects"), "/private/tmp", str(home / ".claude"), str(home / ".claw")])).split(":")],
+            extra_workspace_roots=[Path(p) for p in os.getenv("EXTRA_WORKSPACE_ROOTS", "").split(":") if p.strip()],
             brain_context_window=int(os.getenv("BRAIN_CONTEXT_WINDOW", "1000000")),
             brain_max_output=int(os.getenv("BRAIN_MAX_OUTPUT", "128000")),
             worker_context_window=int(os.getenv("WORKER_CONTEXT_WINDOW", "1000000")),
@@ -113,6 +116,7 @@ class AppConfig:
             dev_browser_browsers_path=os.getenv("PLAYWRIGHT_BROWSERS_PATH", "/tmp/pw-browsers"),
             dev_browser_timeout=int(os.getenv("DEV_BROWSER_TIMEOUT", "30")),
             sdk_bypass_permissions=_env_bool("SDK_BYPASS_PERMISSIONS", False),
+            daily_cost_limit=float(os.getenv("DAILY_COST_LIMIT", "10.0")),
         )
 
     def ensure_directories(self) -> None:

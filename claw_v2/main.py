@@ -21,12 +21,14 @@ from claw_v2.cron import CronScheduler, ScheduledJob
 from claw_v2.daemon import ClawDaemon
 from claw_v2.github import GitHubPullRequestService
 from claw_v2.heartbeat import HeartbeatService
+from claw_v2.hooks import make_daily_cost_gate, make_decision_logger
 from claw_v2.linear import LinearService
 from claw_v2.llm import LLMRouter
 from claw_v2.memory import MemoryStore
 from claw_v2.metrics import MetricsTracker
 from claw_v2.observe import ObserveStream
 from claw_v2.pipeline import PipelineService
+from claw_v2.terminal_bridge import TerminalBridgeService
 from claw_v2.types import LLMResponse
 
 
@@ -112,12 +114,17 @@ def build_runtime(
     if anthropic_executor is None:
         anthropic_executor = create_claude_sdk_executor(config, observe=observe, approvals=approvals)
 
+    pre_hooks = [make_daily_cost_gate(observe, config.daily_cost_limit)]
+    post_hooks = [make_decision_logger(observe)]
+
     router = LLMRouter.default(
         config,
         anthropic_executor=anthropic_executor,
         openai_transport=openai_transport,
         google_transport=google_transport,
         audit_sink=audit_sink,
+        pre_hooks=pre_hooks,
+        post_hooks=post_hooks,
     )
     brain = BrainService(
         router=router,
@@ -248,6 +255,7 @@ def build_runtime(
         browsers_path=config.dev_browser_browsers_path,
         timeout=config.dev_browser_timeout,
     )
+    terminal_bridge = TerminalBridgeService()
     bot = BotService(
         brain=brain,
         auto_research=auto_research,
@@ -257,6 +265,7 @@ def build_runtime(
         allowed_user_id=config.telegram_allowed_user_id,
         config=config,
         browser=browser,
+        terminal_bridge=terminal_bridge,
     )
     if config.linear_api_key:
         from claw_v2.linear import build_linear_api_caller
