@@ -99,6 +99,8 @@ class LLMRouter:
                 response = self._adapter_for("anthropic").complete(fallback_request)
                 response.degraded_mode = True
                 response.artifacts["fallback_reason"] = str(exc)
+                for hook in self.post_hooks:
+                    response = hook(request, response)
                 self._audit("llm_fallback", response, {"requested_provider": selected_provider})
                 return response
             raise
