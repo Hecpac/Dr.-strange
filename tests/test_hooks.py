@@ -1,0 +1,129 @@
+from __future__ import annotations
+
+import unittest
+
+from claw_v2.adapters.base import LLMRequest, PreLLMHook, PostLLMHook
+from claw_v2.llm import LLMRouter
+from claw_v2.types import LLMResponse
+
+
+def _fake_adapter_complete(request: LLMRequest) -> LLMResponse:
+    return LLMResponse(
+        content="adapter response",
+        lane=request.lane,
+        provider="anthropic",
+        model=request.model,
+        confidence=0.9,
+        cost_estimate=0.05,
+    )
+
+
+def _make_router(
+    *,
+    pre_hooks: list[PreLLMHook] | None = None,
+    post_hooks: list[PostLLMHook] | None = None,
+) -> LLMRouter:
+    from tests.helpers import make_config
+    from pathlib import Path
+    import tempfile
+
+    tmpdir = tempfile.mkdtemp()
+    config = make_config(Path(tmpdir))
+    return LLMRouter.default(
+        config,
+        anthropic_executor=_fake_adapter_complete,
+        pre_hooks=pre_hooks,
+        post_hooks=post_hooks,
+    )
+
+
+class PreHookTests(unittest.TestCase):
+    def test_pre_hook_can_block_request(self) -> None:
+        def blocker(request: LLMRequest) -> LLMRequest | None:
+            return None
+
+        router = _make_router(pre_hooks=[blocker])
+        response = router.ask("hello", lane="brain", system_prompt="test")
+        self.assertEqual(response.provider, "none")
+        self.assertIn("blocked_by", response.artifacts)
+
+    def test_pre_hook_can_mutate_request(self) -> None:
+        seen_efforts: list[str | None] = []
+
+        def set_effort(request: LLMRequest) -> LLMRequest:
+            request.effort = "low"
+            return request
+
+        def capture_effort(request: LLMRequest, response: LLMResponse) -> LLMResponse:
+            seen_efforts.append(request.effort)
+            return response
+
+        router = _make_router(pre_hooks=[set_effort], post_hooks=[capture_effort])
+        router.ask("hello", lane="brain", system_prompt="test")
+        self.assertEqual(seen_efforts, ["low"])
+
+    def test_multiple_pre_hooks_run_in_order(self) -> None:
+        order: list[str] = []
+
+        def hook_a(request: LLMRequest) -> LLMRequest:
+            order.append("a")
+            return request
+
+        def hook_b(request: LLMRequest) -> LLMRequest:
+            order.append("b")
+            return request
+
+        router = _make_router(pre_hooks=[hook_a, hook_b])
+        router.ask("hello", lane="brain", system_prompt="test")
+        self.assertEqual(order, ["a", "b"])
+
+    def test_second_pre_hook_not_called_after_block(self) -> None:
+        order: list[str] = []
+
+        def blocker(request: LLMRequest) -> LLMRequest | None:
+            order.append("blocker")
+            return None
+
+        def should_not_run(request: LLMRequest) -> LLMRequest:
+            order.append("second")
+            return request
+
+        router = _make_router(pre_hooks=[blocker, should_not_run])
+        router.ask("hello", lane="brain", system_prompt="test")
+        self.assertEqual(order, ["blocker"])
+
+
+class PostHookTests(unittest.TestCase):
+    def test_post_hook_can_mutate_response(self) -> None:
+        def add_artifact(request: LLMRequest, response: LLMResponse) -> LLMResponse:
+            response.artifacts["tagged"] = True
+            return response
+
+        router = _make_router(post_hooks=[add_artifact])
+        response = router.ask("hello", lane="brain", system_prompt="test")
+        self.assertTrue(response.artifacts.get("tagged"))
+        self.assertEqual(response.content, "adapter response")
+
+    def test_multiple_post_hooks_run_in_order(self) -> None:
+        order: list[str] = []
+
+        def hook_a(request: LLMRequest, response: LLMResponse) -> LLMResponse:
+            order.append("a")
+            return response
+
+        def hook_b(request: LLMRequest, response: LLMResponse) -> LLMResponse:
+            order.append("b")
+            return response
+
+        router = _make_router(post_hooks=[hook_a, hook_b])
+        router.ask("hello", lane="brain", system_prompt="test")
+        self.assertEqual(order, ["a", "b"])
+
+    def test_no_hooks_works_as_before(self) -> None:
+        router = _make_router()
+        response = router.ask("hello", lane="brain", system_prompt="test")
+        self.assertEqual(response.content, "adapter response")
+
+
+if __name__ == "__main__":
+    unittest.main()

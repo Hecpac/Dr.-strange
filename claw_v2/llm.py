@@ -4,8 +4,8 @@ from dataclasses import asdict
 from typing import Callable
 
 from claw_v2.adapters.anthropic import AnthropicAgentAdapter
+from claw_v2.adapters.base import AdapterError, LLMRequest, PostLLMHook, PreLLMHook, ProviderAdapter, UserPrompt
 from claw_v2.adapters.google import GoogleAdapter
-from claw_v2.adapters.base import AdapterError, LLMRequest, ProviderAdapter
 from claw_v2.adapters.openai import OpenAIAdapter
 from claw_v2.config import AppConfig
 from claw_v2.types import Lane, LLMResponse
@@ -21,14 +21,18 @@ class LLMRouter:
         config: AppConfig,
         adapters: dict[str, ProviderAdapter],
         audit_sink: Callable[[dict], None] | None = None,
+        pre_hooks: list[PreLLMHook] | None = None,
+        post_hooks: list[PostLLMHook] | None = None,
     ) -> None:
         self.config = config
         self.adapters = adapters
         self.audit_sink = audit_sink or (lambda event: None)
+        self.pre_hooks: list[PreLLMHook] = list(pre_hooks or [])
+        self.post_hooks: list[PostLLMHook] = list(post_hooks or [])
 
     def ask(
         self,
-        prompt: str,
+        prompt: UserPrompt,
         *,
         system_prompt: str | None = None,
         lane: Lane = "brain",
@@ -66,6 +70,21 @@ class LLMRouter:
             cwd=cwd,
             cache_ttl=self.config.cache_prefix_ttl if self.config.cache_prefix_ttl > 0 else None,
         )
+        # --- Pre-hooks ---
+        for hook in self.pre_hooks:
+            result = hook(request)
+            if result is None:
+                return LLMResponse(
+                    content="Request blocked by pre-hook.",
+                    lane=request.lane,
+                    provider="none",
+                    model="none",
+                    confidence=0.0,
+                    cost_estimate=0.0,
+                    artifacts={"blocked_by": getattr(hook, "__name__", "pre_hook")},
+                )
+            request = result
+
         adapter = self._adapter_for(selected_provider)
         if lane not in self.NON_TOOL_LANES and not adapter.tool_capable:
             raise ValueError(f"Lane '{lane}' requires a tool-capable provider adapter.")
@@ -83,6 +102,10 @@ class LLMRouter:
                 self._audit("llm_fallback", response, {"requested_provider": selected_provider})
                 return response
             raise
+
+        # --- Post-hooks ---
+        for hook in self.post_hooks:
+            response = hook(request, response)
 
         self._audit("llm_response", response, {"session_id": session_id})
         return response
@@ -115,6 +138,8 @@ class LLMRouter:
         openai_transport: Callable[[LLMRequest], LLMResponse] | None = None,
         google_transport: Callable[[LLMRequest], LLMResponse] | None = None,
         audit_sink: Callable[[dict], None] | None = None,
+        pre_hooks: list[PreLLMHook] | None = None,
+        post_hooks: list[PostLLMHook] | None = None,
     ) -> "LLMRouter":
         return cls(
             config=config,
@@ -124,6 +149,8 @@ class LLMRouter:
                 "google": GoogleAdapter(transport=google_transport, api_key=config.google_api_key),
             },
             audit_sink=audit_sink,
+            pre_hooks=pre_hooks,
+            post_hooks=post_hooks,
         )
 
     def _validate_lane_input(
