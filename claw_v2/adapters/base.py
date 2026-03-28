@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from claw_v2.types import Lane, LLMResponse
 
@@ -16,9 +16,15 @@ class AdapterUnavailableError(AdapterError):
     """Raised when a provider adapter cannot be used in the current environment."""
 
 
+UserContentBlock = dict[str, Any]
+UserPrompt = str | list[UserContentBlock]
+PreLLMHook = Callable[["LLMRequest"], "LLMRequest | None"]
+PostLLMHook = Callable[["LLMRequest", LLMResponse], LLMResponse]
+
+
 @dataclass(slots=True)
 class LLMRequest:
-    prompt: str
+    prompt: UserPrompt
     system_prompt: str | None
     lane: Lane
     provider: str
@@ -71,7 +77,7 @@ def build_effective_system_prompt(request: LLMRequest) -> str | None:
     return request.system_prompt
 
 
-def build_effective_input(request: LLMRequest) -> str:
+def build_effective_input(request: LLMRequest) -> UserPrompt:
     if request.lane not in ADVISORY_LANES:
         return request.prompt
     sections: list[str] = []
