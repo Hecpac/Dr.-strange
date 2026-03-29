@@ -563,6 +563,167 @@ class BotTests(unittest.TestCase):
                 self.assertIn("Google Ads", result)
                 self.assertIn("campaign data", result)
 
+    def test_natural_language_google_ads_shortcut_uses_chrome_browse(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                from claw_v2.browser import BrowseResult
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.browser = MagicMock()
+                runtime.bot.browser.chrome_navigate.return_value = BrowseResult(
+                    url="https://ads.google.com/campaigns",
+                    title="Google Ads",
+                    content="campaign data...",
+                )
+                result = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="Ya chrome esta abierto en Google Ads revisalo",
+                )
+                self.assertIn("Google Ads", result)
+                runtime.bot.browser.chrome_navigate.assert_called_once_with("https://ads.google.com")
+
+    def test_natural_language_url_uses_isolated_browse(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                from claw_v2.browser import BrowseResult
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.browser = MagicMock()
+                runtime.bot.browser.browse.return_value = BrowseResult(
+                    url="https://openai.com/pricing",
+                    title="Pricing",
+                    content="pricing details...",
+                )
+                result = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="Revisa https://openai.com/pricing",
+                )
+                self.assertIn("Pricing", result)
+                runtime.bot.browser.browse.assert_called_once_with("https://openai.com/pricing")
+
+    def test_natural_language_bare_domain_is_normalized_for_browse(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                from claw_v2.browser import BrowseResult
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.browser = MagicMock()
+                runtime.bot.browser.browse.return_value = BrowseResult(
+                    url="https://example.com/docs",
+                    title="Docs",
+                    content="documentation...",
+                )
+                result = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="revisa example.com/docs",
+                )
+                self.assertIn("Docs", result)
+                runtime.bot.browser.browse.assert_called_once_with("https://example.com/docs")
+
+    def test_browse_command_normalizes_bare_domain(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                from claw_v2.browser import BrowseResult
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.browser = MagicMock()
+                runtime.bot.browser.browse.return_value = BrowseResult(
+                    url="https://localhost:3000",
+                    title="Local App",
+                    content="local preview...",
+                )
+                result = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="/browse localhost:3000",
+                )
+                self.assertIn("Local App", result)
+                runtime.bot.browser.browse.assert_called_once_with("https://localhost:3000")
+
+    def test_natural_language_terminal_shortcut_opens_claude(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.terminal_bridge = MagicMock()
+                runtime.bot.terminal_bridge.open.return_value = {"session_id": "sess-1", "tool": "claude"}
+                result = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="Abre Claude code en la terminal",
+                )
+                parsed = json.loads(result)
+                self.assertEqual(parsed["tool"], "claude")
+                runtime.bot.terminal_bridge.open.assert_called_once_with("claude", cwd=None)
+
+    def test_chrome_command_returns_actionable_cdp_message_when_port_is_down(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.browser = MagicMock()
+                runtime.bot.browser.chrome_navigate.side_effect = RuntimeError("connect ECONNREFUSED 127.0.0.1:9222")
+                result = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="/chrome_browse https://ads.google.com",
+                )
+                self.assertIn("Chrome no esta exponiendo CDP", result)
+                self.assertIn("remote-debugging-port=9222", result)
+                self.assertIn("user-data-dir", result)
+                self.assertIn("/computer", result)
+
     def test_screen_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

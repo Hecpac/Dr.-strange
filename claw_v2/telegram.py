@@ -116,7 +116,13 @@ class TelegramTransport:
     async def _set_commands(self) -> None:
         from telegram import BotCommand
         commands = [
-            BotCommand("browse", "Abrir y leer una URL — /browse <url>"),
+            BotCommand("browse", "Abrir y revisar cualquier URL — /browse <url>"),
+            BotCommand("chrome_pages", "Listar tabs de Chrome con CDP"),
+            BotCommand("chrome_browse", "Abrir URL en tu Chrome — /chrome_browse <url>"),
+            BotCommand("chrome_shot", "Screenshot del tab actual de Chrome"),
+            BotCommand("screen", "Screenshot del escritorio actual"),
+            BotCommand("computer", "Control de escritorio — /computer <instruccion>"),
+            BotCommand("computer_abort", "Cancelar sesión activa de Computer Use"),
             BotCommand("tokens", "Ver uso de contexto y tokens"),
             BotCommand("config", "Ver configuración de modelos LLM"),
             BotCommand("status", "Estado del sistema (heartbeat)"),
@@ -127,6 +133,8 @@ class TelegramTransport:
             BotCommand("terminal_read", "Leer salida PTY — /terminal_read <session_id> [offset]"),
             BotCommand("terminal_send", "Enviar texto a una PTY — /terminal_send <session_id> <text>"),
             BotCommand("terminal_close", "Cerrar una PTY — /terminal_close <session_id>"),
+            BotCommand("action_approve", "Aprobar acción pendiente — /action_approve <id> <token>"),
+            BotCommand("action_abort", "Abortar acción pendiente — /action_abort <id>"),
             BotCommand("pipeline", "Ejecutar pipeline — /pipeline <issue_id>"),
             BotCommand("pipeline_status", "Ver pipelines activos"),
             BotCommand("social_status", "Ver cuentas sociales"),

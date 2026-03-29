@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import unicodedata
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +19,29 @@ from claw_v2.github import GitHubPullRequestService
 from claw_v2.heartbeat import HeartbeatService
 from claw_v2.pipeline import PipelineService
 from claw_v2.social import SocialPublisher
+
+_BROWSE_SHORTCUT_TOKENS = (
+    "abre",
+    "abrir",
+    "open",
+    "revisa",
+    "revisalo",
+    "review",
+    "check",
+    "lee",
+    "read",
+    "analiza",
+    "analyze",
+    "visita",
+    "visit",
+    "navega",
+    "browse",
+)
+_SCHEME_URL_RE = re.compile(r"(?P<url>https?://[^\s<>()]+)", re.IGNORECASE)
+_HOST_URL_RE = re.compile(
+    r"(?P<url>(?<!@)(?:localhost(?::\d+)?|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}(?::\d+)?)(?:/[^\s<>()]*)?)",
+    re.IGNORECASE,
+)
 
 
 class BotService:
@@ -156,6 +182,9 @@ class BotService:
             if len(parts) != 2:
                 return "usage: /action_abort <approval_id>"
             return self._action_abort_response(parts[1])
+        shortcut_response = self._maybe_handle_shortcut(stripped)
+        if shortcut_response is not None:
+            return shortcut_response
         if stripped == "/agents":
             return json.dumps(self._list_agents_payload(), indent=2, sort_keys=True)
         if stripped.startswith("/agent_create "):
@@ -527,10 +556,14 @@ class BotService:
         return json.dumps(payload, indent=2, sort_keys=True)
 
     def _browse_response(self, url: str) -> str:
+        try:
+            normalized_url = _normalize_url(url)
+        except ValueError as exc:
+            return str(exc)
         if self.browser is None:
             return "browser service unavailable"
         try:
-            result = self.browser.browse(url)
+            result = self.browser.browse(normalized_url)
             return json.dumps({
                 "url": result.url,
                 "title": result.title,
@@ -635,16 +668,20 @@ class BotService:
         try:
             pages = self.browser.connect_to_chrome()
         except Exception as exc:
-            return f"chrome CDP error: {exc}"
+            return _format_chrome_cdp_error(exc, prefix="chrome CDP error")
         return json.dumps({"pages": pages}, indent=2, sort_keys=True)
 
     def _chrome_browse_response(self, url: str) -> str:
+        try:
+            normalized_url = _normalize_url(url)
+        except ValueError as exc:
+            return str(exc)
         if self.browser is None:
             return "browser unavailable"
         try:
-            result = self.browser.chrome_navigate(url)
+            result = self.browser.chrome_navigate(normalized_url)
         except Exception as exc:
-            return f"chrome browse error: {exc}"
+            return _format_chrome_cdp_error(exc, prefix="chrome browse error")
         return f"**{result.title}** ({result.url})\n\n{result.content[:3000]}"
 
     def _chrome_shot_response(self, command: str) -> str:
@@ -653,7 +690,7 @@ class BotService:
         try:
             result = self.browser.chrome_screenshot()
         except Exception as exc:
-            return f"chrome screenshot error: {exc}"
+            return _format_chrome_cdp_error(exc, prefix="chrome screenshot error")
         return json.dumps({
             "url": result.url,
             "title": result.title,
@@ -695,6 +732,31 @@ class BotService:
     def _computer_abort_response(self, session_id: str) -> str:
         return "no active computer session"
 
+    def _maybe_handle_shortcut(self, text: str) -> str | None:
+        if not text or text.startswith("/"):
+            return None
+
+        normalized = _normalize_command_text(text)
+        extracted_url = _extract_url_candidate(text)
+
+        if extracted_url is not None:
+            if "chrome" in normalized and (any(token in normalized for token in _BROWSE_SHORTCUT_TOKENS) or _looks_like_standalone_url(text, extracted_url)):
+                return self._chrome_browse_response(extracted_url)
+            if any(token in normalized for token in _BROWSE_SHORTCUT_TOKENS) or _looks_like_standalone_url(text, extracted_url):
+                return self._browse_response(extracted_url)
+
+        if any(token in normalized for token in ("abre", "abrir", "open", "inicia", "iniciar", "run", "corre")):
+            if "terminal" in normalized and "claude" in normalized:
+                return self._terminal_open_response("claude", cwd=None)
+            if "terminal" in normalized and "codex" in normalized:
+                return self._terminal_open_response("codex", cwd=None)
+
+        if "google ads" in normalized or "ads.google.com" in normalized:
+            if any(token in normalized for token in ("abre", "abrir", "open", "revisa", "revisa", "revisalo", "review", "check")):
+                return self._chrome_browse_response("https://ads.google.com")
+
+        return None
+
 
 def _parse_toggle(value: str) -> bool:
     normalized = value.strip().lower()
@@ -703,6 +765,65 @@ def _parse_toggle(value: str) -> bool:
     if normalized in {"off", "false", "0", "no"}:
         return False
     raise ValueError("toggle must be one of: on, off")
+
+
+def _normalize_command_text(text: str) -> str:
+    folded = unicodedata.normalize("NFKD", text)
+    return "".join(ch for ch in folded if not unicodedata.combining(ch)).lower()
+
+
+def _extract_url_candidate(text: str) -> str | None:
+    for pattern in (_SCHEME_URL_RE, _HOST_URL_RE):
+        match = pattern.search(text)
+        if match is None:
+            continue
+        candidate = _strip_url_punctuation(match.group("url"))
+        if candidate:
+            return candidate
+    return None
+
+
+def _strip_url_punctuation(value: str) -> str:
+    candidate = value.strip().strip("<>[]{}\"'")
+    while candidate and candidate[-1] in ".,;:!?":
+        candidate = candidate[:-1]
+    return candidate
+
+
+def _looks_like_standalone_url(text: str, url: str) -> bool:
+    remainder = text.replace(url, " ", 1)
+    remainder = re.sub(r"[\s`\"'“”‘’<>()\[\]{}.,;:!?-]+", "", remainder)
+    return remainder == ""
+
+
+def _normalize_url(value: str) -> str:
+    candidate = _strip_url_punctuation(value)
+    if not candidate:
+        raise ValueError("usage: /browse <url>")
+    if "://" not in candidate:
+        candidate = f"https://{candidate}"
+    parsed = urlsplit(candidate)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("invalid url")
+    return candidate
+
+
+def _format_chrome_cdp_error(exc: Exception, *, prefix: str) -> str:
+    message = str(exc)
+    lowered = message.lower()
+    if any(token in lowered for token in ("9222", "econnrefused", "connection refused", "connect_over_cdp", "browser_type.connect_over_cdp")):
+        return (
+            "Chrome no esta exponiendo CDP en `9222`.\n\n"
+            "En Chrome 136+ la bandera `--remote-debugging-port` se ignora sobre el perfil normal si no pasas tambien `--user-data-dir`.\n\n"
+            "Si quieres CDP, cierra Chrome completamente y abrelo desde Terminal con un perfil aparte:\n\n"
+            "```bash\n"
+            "/Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome \\\n"
+            "  --remote-debugging-port=9222 \\\n"
+            "  --user-data-dir=/tmp/chrome-cdp-profile\n"
+            "```\n\n"
+            "Ese perfil NO reutiliza tu sesion autenticada actual. Si necesitas controlar tu Chrome ya logueado, usa `/computer`."
+        )
+    return f"{prefix}: {exc}"
 
 
 def _parse_non_negative_int(value: str, *, field_name: str) -> int:
