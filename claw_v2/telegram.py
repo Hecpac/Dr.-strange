@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
+import mimetypes
 from pathlib import Path
+from typing import Any
 
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
@@ -13,6 +16,7 @@ from claw_v2.voice import VoiceUnavailableError, transcribe
 logger = logging.getLogger(__name__)
 
 MAX_TELEGRAM_LEN = 4096
+DEFAULT_IMAGE_PROMPT = "El usuario envio esta imagen por Telegram. Analizala y responde de forma util."
 
 
 def _split_message(text: str, max_len: int = MAX_TELEGRAM_LEN) -> list[str]:
@@ -23,6 +27,55 @@ def _split_message(text: str, max_len: int = MAX_TELEGRAM_LEN) -> list[str]:
         parts.append(text[:max_len])
         text = text[max_len:]
     return parts
+
+
+def _build_image_content_blocks(
+    image_path: Path,
+    *,
+    caption: str | None,
+    mime_type: str | None = None,
+) -> tuple[list[dict[str, Any]], str]:
+    prompt_text = caption.strip() if caption and caption.strip() else DEFAULT_IMAGE_PROMPT
+    memory_text = "[Imagen adjunta]"
+    if caption and caption.strip():
+        memory_text = f"{memory_text}\n{caption.strip()}"
+    resolved_mime_type = _resolve_image_mime_type(image_path, mime_type)
+    image_data = base64.b64encode(image_path.read_bytes()).decode("ascii")
+    return (
+        [
+            {"type": "text", "text": prompt_text},
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": resolved_mime_type,
+                    "data": image_data,
+                },
+            },
+        ],
+        memory_text,
+    )
+
+
+def _resolve_image_mime_type(image_path: Path, declared_mime_type: str | None) -> str:
+    if declared_mime_type and declared_mime_type.startswith("image/"):
+        return declared_mime_type
+    guessed_mime_type, _ = mimetypes.guess_type(str(image_path))
+    if guessed_mime_type and guessed_mime_type.startswith("image/"):
+        return guessed_mime_type
+    return "image/jpeg"
+
+
+def _download_suffix(file_path: str | None, mime_type: str | None) -> str:
+    if file_path:
+        suffix = Path(file_path).suffix
+        if suffix:
+            return suffix
+    if mime_type:
+        guessed_suffix = mimetypes.guess_extension(mime_type)
+        if guessed_suffix:
+            return guessed_suffix
+    return ".jpg"
 
 
 class TelegramTransport:
@@ -45,6 +98,8 @@ class TelegramTransport:
         self._app = ApplicationBuilder().token(self._token).build()
         self._app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_text))
         self._app.add_handler(MessageHandler(filters.COMMAND, self._handle_text))
+        self._app.add_handler(MessageHandler(filters.PHOTO, self._handle_photo))
+        self._app.add_handler(MessageHandler(filters.Document.IMAGE, self._handle_image_document))
         self._app.add_handler(MessageHandler(filters.VOICE, self._handle_voice))
         await self._app.initialize()
         await self._app.start()
@@ -66,6 +121,12 @@ class TelegramTransport:
             BotCommand("config", "Ver configuración de modelos LLM"),
             BotCommand("status", "Estado del sistema (heartbeat)"),
             BotCommand("agents", "Listar agentes registrados"),
+            BotCommand("terminal_list", "Listar sesiones PTY de claude/codex"),
+            BotCommand("terminal_open", "Abrir puente PTY — /terminal_open <claude|codex> [cwd]"),
+            BotCommand("terminal_status", "Ver estado PTY — /terminal_status <session_id>"),
+            BotCommand("terminal_read", "Leer salida PTY — /terminal_read <session_id> [offset]"),
+            BotCommand("terminal_send", "Enviar texto a una PTY — /terminal_send <session_id> <text>"),
+            BotCommand("terminal_close", "Cerrar una PTY — /terminal_close <session_id>"),
             BotCommand("pipeline", "Ejecutar pipeline — /pipeline <issue_id>"),
             BotCommand("pipeline_status", "Ver pipelines activos"),
             BotCommand("social_status", "Ver cuentas sociales"),
@@ -124,6 +185,82 @@ class TelegramTransport:
         finally:
             tmp_path.unlink(missing_ok=True)
         await self._handle_text_content(update, text)
+
+    async def _handle_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_authorized(update):
+            return
+        if not update.message.photo:
+            return
+        photo = update.message.photo[-1]
+        await self._handle_image_content(
+            update,
+            context,
+            file_id=photo.file_id,
+            file_unique_id=photo.file_unique_id,
+            caption=update.message.caption,
+        )
+
+    async def _handle_image_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_authorized(update):
+            return
+        document = update.message.document
+        if document is None:
+            return
+        await self._handle_image_content(
+            update,
+            context,
+            file_id=document.file_id,
+            file_unique_id=document.file_unique_id,
+            caption=update.message.caption,
+            mime_type=document.mime_type,
+        )
+
+    async def _handle_image_content(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        *,
+        file_id: str,
+        file_unique_id: str,
+        caption: str | None,
+        mime_type: str | None = None,
+    ) -> None:
+        user_id = str(update.effective_user.id)
+        session_id = f"tg-{update.effective_chat.id}"
+        await update.message.chat.send_action("typing")
+        file = await context.bot.get_file(file_id)
+        tmp_path = Path(
+            f"/tmp/claw-image-{file_unique_id}{_download_suffix(getattr(file, 'file_path', None), mime_type)}"
+        )
+        await file.download_to_drive(str(tmp_path))
+        try:
+            content_blocks, memory_text = _build_image_content_blocks(
+                tmp_path,
+                caption=caption,
+                mime_type=mime_type,
+            )
+            response = await asyncio.to_thread(
+                self._bot_service.handle_multimodal,
+                user_id=user_id,
+                session_id=session_id,
+                content_blocks=content_blocks,
+                memory_text=memory_text,
+            )
+        except Exception:
+            logger.exception("Error handling image message")
+            response = "Error procesando tu imagen. Intenta de nuevo."
+        finally:
+            tmp_path.unlink(missing_ok=True)
+        if not response or not response.strip():
+            response = "(procesando... intenta de nuevo en unos segundos)"
+        for part in _split_message(response):
+            await update.message.reply_text(part)
+
+    async def send_photo(self, *, chat_id: int, photo_path: str, caption: str | None = None) -> None:
+        if self._app is None:
+            return
+        with open(photo_path, "rb") as photo:
+            await self._app.bot.send_photo(chat_id=chat_id, photo=photo, caption=caption)
 
     async def _handle_text_content(self, update: Update, text: str) -> None:
         user_id = str(update.effective_user.id)
