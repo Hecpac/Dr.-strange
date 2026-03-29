@@ -55,6 +55,12 @@ def make_config(root: Path) -> AppConfig:
         dev_browser_timeout=30,
         sdk_bypass_permissions=False,
         daily_cost_limit=10.0,
+        chrome_cdp_enabled=False,
+        chrome_cdp_url="http://localhost:9222",
+        computer_use_enabled=False,
+        computer_display_width=1280,
+        computer_display_height=800,
+        sensitive_urls=["ads.google.com", "polymarket.com"],
     )
     config.validate()
     config.ensure_directories()

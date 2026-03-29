@@ -64,6 +64,12 @@ class AppConfig:
     dev_browser_timeout: int
     sdk_bypass_permissions: bool
     daily_cost_limit: float
+    chrome_cdp_enabled: bool
+    chrome_cdp_url: str
+    computer_use_enabled: bool
+    computer_display_width: int
+    computer_display_height: int
+    sensitive_urls: list[str]
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -116,7 +122,13 @@ class AppConfig:
             dev_browser_browsers_path=os.getenv("PLAYWRIGHT_BROWSERS_PATH", "/tmp/pw-browsers"),
             dev_browser_timeout=int(os.getenv("DEV_BROWSER_TIMEOUT", "30")),
             sdk_bypass_permissions=_env_bool("SDK_BYPASS_PERMISSIONS", False),
-            daily_cost_limit=float(os.getenv("DAILY_COST_LIMIT", "10.0")),
+            daily_cost_limit=float(os.getenv("DAILY_COST_LIMIT", "0")),
+            chrome_cdp_enabled=_env_bool("CHROME_CDP_ENABLED", True),
+            chrome_cdp_url=os.getenv("CHROME_CDP_URL", "http://localhost:9222"),
+            computer_use_enabled=_env_bool("COMPUTER_USE_ENABLED", True),
+            computer_display_width=int(os.getenv("COMPUTER_DISPLAY_WIDTH", "1280")),
+            computer_display_height=int(os.getenv("COMPUTER_DISPLAY_HEIGHT", "800")),
+            sensitive_urls=[u for u in os.getenv("SENSITIVE_URLS", "ads.google.com:polymarket.com:robinhood.com:binance.com:stripe.com:paypal.com").split(":") if u.strip()],
         )
 
     def ensure_directories(self) -> None:
