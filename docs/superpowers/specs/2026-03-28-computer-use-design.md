@@ -6,7 +6,7 @@
 
 ## Goal
 
-Give the bot full autonomy to browse authenticated sites and control the user's Mac. Two tiers: Browser CDP for web (90% of use cases), Computer Use for desktop apps (10%).
+Give the bot controlled autonomy to browse authenticated sites and control the user's Mac. Two tiers: Browser CDP for web (90% of use cases), Computer Use for desktop apps (10%). Reads should be easy; writes must be explicit and approval-gated.
 
 ## Two-Tier Architecture
 
@@ -21,7 +21,7 @@ The existing `browser.py` uses Playwright with a bundled dev-browser. By connect
 - Access to all authenticated sessions (Google Ads, analytics, trading)
 - DOM-level interaction (click by selector/role, fill by label) — more reliable than pixel coordinates
 - Page snapshots (accessibility tree) without sending screenshots to the API
-- The existing `/browse` command and brain integration already work
+- The existing isolated browser flow already works and remains available for non-authenticated browsing
 
 Computer Use is reserved for when the task genuinely needs desktop scope: non-browser apps, multi-app copy/paste, or controlling UI that isn't web-based.
 
@@ -39,7 +39,7 @@ Playwright connects to the running Chrome:
 ```python
 browser = await playwright.chromium.connect_over_cdp("http://localhost:9222")
 context = browser.contexts[0]  # user's existing browser context with all cookies/auth
-page = context.pages[0]        # or find by URL
+page = select_page(context, page_url_pattern="ads.google.com") or context.new_page()
 ```
 
 ### Changes to `claw_v2/browser.py`
@@ -54,17 +54,29 @@ class DevBrowserService:
     def connect_to_chrome(self, *, cdp_url: str = "http://localhost:9222") -> BrowseResult:
         """Connect to Chrome via CDP. Returns list of open pages."""
 
-    def chrome_navigate(self, url: str, *, page_index: int = 0) -> BrowseResult:
-        """Navigate a Chrome tab to URL, return page snapshot."""
+    def chrome_navigate(self, url: str, *, page_index: int | None = None, page_title: str | None = None, page_url_pattern: str | None = None) -> BrowseResult:
+        """Navigate a matched Chrome tab, or a dedicated Claw tab, to URL and return page snapshot."""
 
-    def chrome_interact(self, *, actions: list[dict], page_index: int = 0) -> BrowseResult:
-        """Run structured actions on a Chrome tab (same action format as interact())."""
+    def chrome_interact(self, *, actions: list[dict], page_index: int | None = None, page_title: str | None = None, page_url_pattern: str | None = None) -> BrowseResult:
+        """Run structured actions on a matched Chrome tab (same action format as interact())."""
 
-    def chrome_screenshot(self, *, page_index: int = 0, name: str = "chrome.png") -> BrowseResult:
-        """Screenshot a Chrome tab, return path."""
+    def chrome_screenshot(self, *, page_index: int | None = None, page_title: str | None = None, page_url_pattern: str | None = None, name: str = "chrome.png") -> BrowseResult:
+        """Screenshot a matched Chrome tab, return path."""
 ```
 
 These methods use the same `BrowseResult` dataclass and action format as the existing `interact()` method. The difference is the browser instance: CDP-connected Chrome vs. bundled dev-browser.
+
+### Chrome Page Selection
+
+Never assume `context.pages[0]`.
+
+Page selection order:
+1. Exact `page_index`, if explicitly provided
+2. First page whose URL matches `page_url_pattern`
+3. First page whose title matches `page_title`
+4. Otherwise create a dedicated new tab for Claw via `context.new_page()`
+
+The bot must never navigate an arbitrary existing user tab by default.
 
 ### Implementation: Playwright Script over CDP
 
@@ -99,20 +111,23 @@ The bot doesn't manage Chrome's lifecycle. Chrome is assumed to be running. If C
 
 ### Bot Commands (Tier 1)
 
-The existing `/browse <url>` command is enhanced:
-- If `chrome_cdp_enabled` is true and Chrome CDP is available, use Chrome CDP (authenticated session)
-- Otherwise, fall back to dev-browser (current behavior)
+`/browse <url>` keeps its current behavior: isolated bundled browser, no authenticated Chrome session.
 
-New command:
+CDP access is explicit:
+
 | Command | Action |
 |---------|--------|
 | `/chrome_pages` | List open Chrome tabs (title + URL) |
+| `/chrome_browse <url>` | Open URL in a dedicated Claw-controlled Chrome tab and return page snapshot |
+| `/chrome_shot [page selector]` | Screenshot the selected Chrome tab |
 
 ### Approval Gate for Browser
 
 The same sensitive URL pattern list applies. For Tier 1:
-- **Read actions** (navigate, snapshot, screenshot) → autonomous
-- **Write actions** (click, fill, submit) on sensitive URLs → send screenshot + action description to Telegram, wait for `/approve`
+- **Read actions** (`chrome_pages`, navigate, snapshot, screenshot) → autonomous
+- **Write actions** (`click`, `fill`, `press`, `check`, `select`, `submit`) against the user's real Chrome session → require explicit approval by default
+- **Sensitive URL matches** raise the action risk to `high_risk` and always require approval
+- **Submit/confirm/payment-like actions** always require approval, regardless of URL
 
 ## Tier 2: Computer Use
 
@@ -178,8 +193,9 @@ Shared between Tier 1 and Tier 2. Classifies actions:
 - key with navigation keys (arrows, escape, tab)
 
 **Needs approval (pause):**
-- click/fill/submit/type when URL matches sensitive pattern
-- key with destructive combos on sensitive sites
+- Tier 1: all write actions in Browser CDP (`click`, `fill`, `press`, `check`, `uncheck`, `select`, `submit`)
+- Tier 2: any state-changing desktop action without a trustworthy browser URL context (`click`, `double_click`, `middle_click`, `right_click`, `left_click_drag`, `type`, `hotkey`, `enter`)
+- key with destructive combos on sensitive sites or in desktop context
 
 **Sensitive URL patterns (configurable):**
 ```python
@@ -195,7 +211,13 @@ DEFAULT_SENSITIVE_URLS = [
 
 When paused:
 1. Bot sends screenshot + action description to Telegram as photo
-2. User sends `/approve` or `/abort`
+2. Bot creates an action-scoped approval via `ApprovalManager`
+3. User sends `/action_approve <approval_id> <token>` or `/action_abort <approval_id>`
+
+The gate is context-aware:
+- Browser CDP may use the real page URL
+- Computer Use may use the current URL when Chrome is frontmost
+- If URL is missing or stale, Tier 2 defaults to the stricter desktop-write policy
 
 ### ComputerSession — Session State
 
@@ -220,8 +242,9 @@ In-memory only. If the bot restarts mid-session, the session is lost — fail-sa
 |---------|--------|
 | `/computer <instruction>` | Start Computer Use session |
 | `/screen` | Take desktop screenshot, send to Telegram |
-| `/approve` | Approve pending destructive action (shared with Tier 1) |
-| `/abort` | Cancel active Computer Use session |
+| `/action_approve <approval_id> <token>` | Approve pending Browser CDP or Computer Use action |
+| `/action_abort <approval_id>` | Reject/cancel a pending Browser CDP or Computer Use action |
+| `/computer_abort` | Cancel the active Computer Use session for the current chat |
 
 ## Config
 
@@ -248,32 +271,38 @@ sensitive_urls: list[str]       # env: SENSITIVE_URLS, default: "ads.google.com:
 | `claw_v2/browser.py` | Add CDP connection methods: `connect_to_chrome`, `chrome_navigate`, `chrome_interact`, `chrome_screenshot` |
 | `claw_v2/computer.py` | **New** — `ComputerUseService`, `ComputerSession`, screenshot/action/agent loop |
 | `claw_v2/computer_gate.py` | **New** — `ActionGate`, URL pattern matching, action classification (shared by both tiers) |
-| `claw_v2/bot.py` | Add `/computer`, `/screen`, `/approve`, `/abort`, `/chrome_pages` commands; enhance `/browse` to prefer CDP |
+| `claw_v2/bot.py` | Add `/computer`, `/screen`, `/chrome_pages`, `/chrome_browse`, `/chrome_shot`, `/action_approve`, `/action_abort`, `/computer_abort`; keep `/browse` isolated |
 | `claw_v2/telegram.py` | Add photo sending capability for screenshots |
 | `claw_v2/config.py` | Add CDP and Computer Use config fields |
 | `claw_v2/main.py` | Wire `ComputerUseService` in `build_runtime()` |
 | `claw_v2/SOUL.md` | Document both tiers |
+| `claw_v2/approval.py` | Add reject/cancel support for action-scoped approvals |
 | `tests/test_computer.py` | **New** — Computer Use service tests |
 | `tests/test_computer_gate.py` | **New** — Action gate tests |
 | `tests/test_browser.py` | CDP connection tests |
+| `tests/test_bot.py` | Command routing and approval command tests |
+| `tests/test_telegram.py` | Photo delivery tests for approval screenshots |
 | `tests/helpers.py` | Add new config fields to `make_config()` |
 | `pyproject.toml` | Add `anthropic`, `pyautogui` dependencies |
 
 ## Testing Strategy
 
 - **Action gate:** Pure function tests — all action types × sensitive/non-sensitive URLs
+- **Desktop gate fallback:** Verify that missing/unknown URL in Tier 2 still blocks state-changing actions
 - **Browser CDP:** Mock Playwright CDP connection, verify navigate/interact/screenshot
+- **Page selection:** Verify explicit selector matching and that the service creates a dedicated tab instead of reusing an arbitrary existing tab
 - **Computer Use screenshot:** Mock `subprocess.run` for `screencapture`, verify resize + base64
 - **Computer Use actions:** Mock `pyautogui`, verify coordinate scaling
 - **Agent loop:** Mock `anthropic.Anthropic().beta.messages.create`, simulate multi-step flow
-- **Bot commands:** Mock services, verify `/browse` prefers CDP, `/computer` starts session, `/approve`/`/abort` work
+- **Bot commands:** Mock services, verify `/browse` stays isolated, `/chrome_browse` uses CDP, `/computer` starts session, `/action_approve`/`/action_abort` work
 - **Gate integration:** Full flow with mocked API, verify pause on sensitive URL
+- **Restart safety:** Verify that no pending Computer Use action is resumed after process restart
 
 ## Security
 
-- Browser CDP accesses the user's real Chrome with all cookies/auth. Treat as Tier 3 (ask first) for write actions on sensitive sites.
+- Browser CDP accesses the user's real Chrome with all cookies/auth. Treat all write actions as approval-gated by default; sensitive-site writes are always `high_risk`.
 - Computer Use runs on the real Mac desktop. All actions visible and affect real apps.
-- Approval gate shared between both tiers — same sensitive URL list.
+- Approval gate shared between both tiers, but Tier 2 defaults to stricter behavior when there is no trustworthy URL context.
 - Max iterations (30) prevents runaway Computer Use loops.
 - Screenshots stored in `/tmp/`, cleaned up after session.
 - CDP connection is localhost only — no remote access.
