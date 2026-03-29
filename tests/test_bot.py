@@ -5,7 +5,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from claw_v2.adapters.base import LLMRequest
 from claw_v2.agents import AgentDefinition, ExperimentRecord
@@ -25,6 +25,109 @@ def fake_anthropic(request: LLMRequest) -> LLMResponse:
 
 
 class BotTests(unittest.TestCase):
+    def test_terminal_commands_delegate_to_bridge(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                bridge = MagicMock()
+                bridge.list_sessions.return_value = [{"session_id": "sess-1", "status": "running"}]
+                bridge.open.return_value = {"session_id": "sess-1", "tool": "codex"}
+                bridge.status.return_value = {"session_id": "sess-1", "status": "running"}
+                bridge.read.return_value = {"session_id": "sess-1", "offset": 12, "next_offset": 16, "output": "pong"}
+                bridge.send.return_value = {"session_id": "sess-1", "bytes_written": 12}
+                bridge.close.return_value = {"session_id": "sess-1", "status": "closing"}
+                runtime.bot.terminal_bridge = bridge
+
+                sessions = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/terminal_list"))
+                self.assertEqual(sessions["sessions"][0]["session_id"], "sess-1")
+
+                opened = json.loads(
+                    runtime.bot.handle_text(
+                        user_id="123",
+                        session_id="s1",
+                        text="/terminal_open codex /tmp/work dir",
+                    )
+                )
+                self.assertEqual(opened["tool"], "codex")
+                bridge.open.assert_called_once_with("codex", cwd="/tmp/work dir")
+
+                status = json.loads(
+                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/terminal_status sess-1")
+                )
+                self.assertEqual(status["status"], "running")
+                bridge.status.assert_called_once_with("sess-1")
+
+                read = json.loads(
+                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/terminal_read sess-1 12")
+                )
+                self.assertEqual(read["output"], "pong")
+                bridge.read.assert_called_once_with("sess-1", offset=12, limit=3000)
+
+                sent = json.loads(
+                    runtime.bot.handle_text(
+                        user_id="123",
+                        session_id="s1",
+                        text="/terminal_send sess-1 hola codex",
+                    )
+                )
+                self.assertEqual(sent["bytes_written"], 12)
+                bridge.send.assert_called_once_with("sess-1", "hola codex")
+
+                closed = json.loads(
+                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/terminal_close sess-1")
+                )
+                self.assertEqual(closed["status"], "closing")
+                bridge.close.assert_called_once_with("sess-1")
+
+    def test_terminal_command_usage_and_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.terminal_bridge = MagicMock()
+
+                self.assertEqual(
+                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/terminal_open"),
+                    "usage: /terminal_open <claude|codex> [cwd]",
+                )
+                self.assertEqual(
+                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/terminal_status"),
+                    "usage: /terminal_status <session_id>",
+                )
+                self.assertEqual(
+                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/terminal_read"),
+                    "usage: /terminal_read <session_id> [offset]",
+                )
+                self.assertEqual(
+                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/terminal_send"),
+                    "usage: /terminal_send <session_id> <text>",
+                )
+                self.assertEqual(
+                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/terminal_close"),
+                    "usage: /terminal_close <session_id>",
+                )
+                self.assertEqual(
+                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/terminal_read sess-1 -1"),
+                    "offset must be greater than or equal to 0",
+                )
+
     def test_agent_create_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -413,6 +516,106 @@ class BotTests(unittest.TestCase):
                 self.assertEqual(payload["pull_request_number"], 7)
                 self.assertEqual(payload["pull_request_url"], "https://github.com/acme/repo/pull/7")
                 self.assertTrue(payload["pull_request_draft"])
+
+
+    def test_chrome_pages_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.browser = MagicMock()
+                runtime.bot.browser.connect_to_chrome.return_value = [
+                    {"url": "https://ads.google.com", "title": "Google Ads", "index": 0},
+                ]
+                result = runtime.bot.handle_text(user_id="123", session_id="s1", text="/chrome_pages")
+                parsed = json.loads(result)
+                self.assertEqual(parsed["pages"][0]["url"], "https://ads.google.com")
+
+    def test_chrome_browse_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                from claw_v2.browser import BrowseResult
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.browser = MagicMock()
+                runtime.bot.browser.chrome_navigate.return_value = BrowseResult(
+                    url="https://ads.google.com/campaigns",
+                    title="Google Ads",
+                    content="campaign data...",
+                )
+                result = runtime.bot.handle_text(user_id="123", session_id="s1", text="/chrome_browse https://ads.google.com")
+                self.assertIn("Google Ads", result)
+                self.assertIn("campaign data", result)
+
+    def test_screen_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.computer = MagicMock()
+                runtime.bot.computer.capture_screenshot.return_value = {"data": "abc123base64data", "media_type": "image/png"}
+                result = runtime.bot.handle_text(user_id="123", session_id="s1", text="/screen")
+                parsed = json.loads(result)
+                self.assertIn("screenshot_data", parsed)
+
+    def test_action_approve_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                pending = runtime.bot.approvals.create(action="click", summary="test")
+                result = runtime.bot.handle_text(user_id="123", session_id="s1", text=f"/action_approve {pending.approval_id} {pending.token}")
+                self.assertEqual(result, "approved")
+
+    def test_action_abort_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                pending = runtime.bot.approvals.create(action="click", summary="test")
+                result = runtime.bot.handle_text(user_id="123", session_id="s1", text=f"/action_abort {pending.approval_id}")
+                self.assertEqual(result, "action rejected")
+                self.assertEqual(runtime.bot.approvals.status(pending.approval_id), "rejected")
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ import json
 import logging
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,8 @@ class BotService:
         social_publisher: SocialPublisher | None = None,
         config: object | None = None,
         browser: object | None = None,
+        terminal_bridge: object | None = None,
+        computer: object | None = None,
     ) -> None:
         self.brain = brain
         self.auto_research = auto_research
@@ -44,6 +47,8 @@ class BotService:
         self.social_publisher = social_publisher
         self.config = config
         self.browser = browser
+        self.terminal_bridge = terminal_bridge
+        self.computer = computer
 
     def handle_text(self, *, user_id: str, session_id: str, text: str) -> str:
         if self.allowed_user_id is None:
@@ -74,6 +79,83 @@ class BotService:
             if len(parts) != 2:
                 return "usage: /browse <url>"
             return self._browse_response(parts[1])
+        if stripped == "/terminal_list":
+            return self._terminal_list_response()
+        if stripped == "/terminal_open":
+            return "usage: /terminal_open <claude|codex> [cwd]"
+        if stripped.startswith("/terminal_open "):
+            parts = stripped.split(maxsplit=2)
+            if len(parts) not in {2, 3}:
+                return "usage: /terminal_open <claude|codex> [cwd]"
+            cwd = parts[2] if len(parts) == 3 else None
+            return self._terminal_open_response(parts[1], cwd=cwd)
+        if stripped == "/terminal_status":
+            return "usage: /terminal_status <session_id>"
+        if stripped.startswith("/terminal_status "):
+            parts = stripped.split(maxsplit=1)
+            if len(parts) != 2:
+                return "usage: /terminal_status <session_id>"
+            return self._terminal_status_response(parts[1])
+        if stripped == "/terminal_read":
+            return "usage: /terminal_read <session_id> [offset]"
+        if stripped.startswith("/terminal_read "):
+            parts = stripped.split(maxsplit=2)
+            if len(parts) == 2:
+                offset = 0
+            elif len(parts) == 3:
+                try:
+                    offset = _parse_non_negative_int(parts[2], field_name="offset")
+                except ValueError as exc:
+                    return str(exc)
+            else:
+                return "usage: /terminal_read <session_id> [offset]"
+            return self._terminal_read_response(parts[1], offset=offset)
+        if stripped == "/terminal_send":
+            return "usage: /terminal_send <session_id> <text>"
+        if stripped.startswith("/terminal_send "):
+            parts = stripped.split(maxsplit=2)
+            if len(parts) != 3:
+                return "usage: /terminal_send <session_id> <text>"
+            return self._terminal_send_response(parts[1], parts[2])
+        if stripped == "/terminal_close":
+            return "usage: /terminal_close <session_id>"
+        if stripped.startswith("/terminal_close "):
+            parts = stripped.split(maxsplit=1)
+            if len(parts) != 2:
+                return "usage: /terminal_close <session_id>"
+            return self._terminal_close_response(parts[1])
+        if stripped == "/chrome_pages":
+            return self._chrome_pages_response()
+        if stripped == "/chrome_browse":
+            return "usage: /chrome_browse <url>"
+        if stripped.startswith("/chrome_browse "):
+            parts = stripped.split(maxsplit=1)
+            if len(parts) != 2:
+                return "usage: /chrome_browse <url>"
+            return self._chrome_browse_response(parts[1])
+        if stripped.startswith("/chrome_shot"):
+            return self._chrome_shot_response(stripped)
+        if stripped == "/screen":
+            return self._screen_response()
+        if stripped == "/computer":
+            return "usage: /computer <instruction>"
+        if stripped.startswith("/computer_abort"):
+            return self._computer_abort_response(session_id)
+        if stripped.startswith("/computer "):
+            parts = stripped.split(maxsplit=1)
+            if len(parts) != 2:
+                return "usage: /computer <instruction>"
+            return self._computer_response(parts[1], session_id)
+        if stripped.startswith("/action_approve "):
+            parts = stripped.split()
+            if len(parts) != 3:
+                return "usage: /action_approve <approval_id> <token>"
+            return self._action_approve_response(parts[1], parts[2])
+        if stripped.startswith("/action_abort "):
+            parts = stripped.split(maxsplit=1)
+            if len(parts) != 2:
+                return "usage: /action_abort <approval_id>"
+            return self._action_abort_response(parts[1])
         if stripped == "/agents":
             return json.dumps(self._list_agents_payload(), indent=2, sort_keys=True)
         if stripped.startswith("/agent_create "):
@@ -264,6 +346,24 @@ class BotService:
                 logger.exception("social_publish error for %s", account)
                 return "error publishing — check logs"
         return self.brain.handle_message(session_id, stripped).content
+
+    def handle_multimodal(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        content_blocks: list[dict[str, Any]],
+        memory_text: str,
+    ) -> str:
+        if self.allowed_user_id is None:
+            raise PermissionError("TELEGRAM_ALLOWED_USER_ID must be configured")
+        if user_id != self.allowed_user_id:
+            raise PermissionError("user is not allowed to access this bot")
+        return self.brain.handle_message(
+            session_id,
+            content_blocks,
+            memory_text=memory_text,
+        ).content
 
     def _list_agents_payload(self) -> list[dict]:
         payload: list[dict] = []
@@ -475,6 +575,126 @@ class BotService:
             "recommendation": recommendation,
         }, indent=2, sort_keys=True)
 
+    def _terminal_list_response(self) -> str:
+        if self.terminal_bridge is None:
+            return "terminal bridge unavailable"
+        try:
+            sessions = self.terminal_bridge.list_sessions()
+        except Exception as exc:
+            return f"terminal list error: {exc}"
+        return json.dumps({"sessions": sessions}, indent=2, sort_keys=True)
+
+    def _terminal_open_response(self, tool: str, *, cwd: str | None) -> str:
+        if self.terminal_bridge is None:
+            return "terminal bridge unavailable"
+        try:
+            result = self.terminal_bridge.open(tool, cwd=cwd)
+        except Exception as exc:
+            return f"terminal open error: {exc}"
+        return json.dumps(result, indent=2, sort_keys=True)
+
+    def _terminal_status_response(self, session_id: str) -> str:
+        if self.terminal_bridge is None:
+            return "terminal bridge unavailable"
+        try:
+            result = self.terminal_bridge.status(session_id)
+        except Exception as exc:
+            return f"terminal status error: {exc}"
+        return json.dumps(result, indent=2, sort_keys=True)
+
+    def _terminal_read_response(self, session_id: str, *, offset: int) -> str:
+        if self.terminal_bridge is None:
+            return "terminal bridge unavailable"
+        try:
+            result = self.terminal_bridge.read(session_id, offset=offset, limit=3000)
+        except Exception as exc:
+            return f"terminal read error: {exc}"
+        return json.dumps(result, indent=2, sort_keys=True)
+
+    def _terminal_send_response(self, session_id: str, text: str) -> str:
+        if self.terminal_bridge is None:
+            return "terminal bridge unavailable"
+        try:
+            result = self.terminal_bridge.send(session_id, text)
+        except Exception as exc:
+            return f"terminal send error: {exc}"
+        return json.dumps(result, indent=2, sort_keys=True)
+
+    def _terminal_close_response(self, session_id: str) -> str:
+        if self.terminal_bridge is None:
+            return "terminal bridge unavailable"
+        try:
+            result = self.terminal_bridge.close(session_id)
+        except Exception as exc:
+            return f"terminal close error: {exc}"
+        return json.dumps(result, indent=2, sort_keys=True)
+
+    def _chrome_pages_response(self) -> str:
+        if self.browser is None:
+            return "browser unavailable"
+        try:
+            pages = self.browser.connect_to_chrome()
+        except Exception as exc:
+            return f"chrome CDP error: {exc}"
+        return json.dumps({"pages": pages}, indent=2, sort_keys=True)
+
+    def _chrome_browse_response(self, url: str) -> str:
+        if self.browser is None:
+            return "browser unavailable"
+        try:
+            result = self.browser.chrome_navigate(url)
+        except Exception as exc:
+            return f"chrome browse error: {exc}"
+        return f"**{result.title}** ({result.url})\n\n{result.content[:3000]}"
+
+    def _chrome_shot_response(self, command: str) -> str:
+        if self.browser is None:
+            return "browser unavailable"
+        try:
+            result = self.browser.chrome_screenshot()
+        except Exception as exc:
+            return f"chrome screenshot error: {exc}"
+        return json.dumps({
+            "url": result.url,
+            "title": result.title,
+            "screenshot_path": result.screenshot_path,
+        }, indent=2)
+
+    def _screen_response(self) -> str:
+        if self.computer is None:
+            return "computer use unavailable"
+        try:
+            screenshot = self.computer.capture_screenshot()
+        except Exception as exc:
+            return f"screenshot error: {exc}"
+        return json.dumps({"screenshot_data": screenshot["data"][:100] + "...", "media_type": screenshot["media_type"]})
+
+    def _computer_response(self, instruction: str, session_id: str) -> str:
+        if self.computer is None:
+            return "computer use unavailable"
+        return f"Computer Use session started: {instruction}"
+
+    def _action_approve_response(self, approval_id: str, token: str) -> str:
+        if self.approvals is None:
+            return "approvals unavailable"
+        try:
+            valid = self.approvals.approve(approval_id, token)
+        except FileNotFoundError:
+            return f"approval {approval_id} not found"
+        return "approved" if valid else "invalid token"
+
+    def _action_abort_response(self, approval_id: str) -> str:
+        if self.approvals is None:
+            return "approvals unavailable"
+        try:
+            self.approvals.reject(approval_id)
+        except FileNotFoundError:
+            return f"approval {approval_id} not found"
+        return "action rejected"
+
+    def _computer_abort_response(self, session_id: str) -> str:
+        return "no active computer session"
+
 
 def _parse_toggle(value: str) -> bool:
     normalized = value.strip().lower()
@@ -483,6 +703,16 @@ def _parse_toggle(value: str) -> bool:
     if normalized in {"off", "false", "0", "no"}:
         return False
     raise ValueError("toggle must be one of: on, off")
+
+
+def _parse_non_negative_int(value: str, *, field_name: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be an integer") from exc
+    if parsed < 0:
+        raise ValueError(f"{field_name} must be greater than or equal to 0")
+    return parsed
 
 
 def _parse_positive_int(value: str, *, field_name: str) -> int:
