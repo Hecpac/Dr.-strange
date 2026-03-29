@@ -104,7 +104,7 @@ class AgentLoopTests(unittest.TestCase):
     def test_agent_loop_runs_screenshot_then_click_then_completes(self) -> None:
         svc = ComputerUseService(display_width=1280, display_height=800)
         gate = ActionGate(sensitive_urls=[])
-        session = ComputerSession(task="click the button")
+        session = ComputerSession(task="click the button", current_url="https://docs.google.com")
 
         call_count = [0]
 
