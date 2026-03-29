@@ -44,6 +44,12 @@ class ApprovalManager:
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return valid
 
+    def reject(self, approval_id: str) -> None:
+        path = self._path_for(approval_id)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["status"] = "rejected"
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
     def status(self, approval_id: str) -> str:
         return json.loads(self._path_for(approval_id).read_text(encoding="utf-8"))["status"]
 
