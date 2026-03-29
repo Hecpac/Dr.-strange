@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -647,6 +648,81 @@ class BotTests(unittest.TestCase):
                 self.assertIn("Docs", result)
                 runtime.bot.browser.browse.assert_called_once_with("https://example.com/docs")
 
+    def test_natural_language_review_request_uses_computer_read(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.computer = MagicMock()
+                runtime.bot.computer.capture_screenshot.return_value = {
+                    "data": "abc123",
+                    "media_type": "image/png",
+                }
+                with patch.object(
+                    type(runtime.bot.brain),
+                    "handle_message",
+                    return_value=LLMResponse(
+                        content="Veo Google Ads en la pantalla.",
+                        lane="brain",
+                        provider="anthropic",
+                        model="claude-opus-4-6",
+                    ),
+                ) as mock_handle_message:
+                    result = runtime.bot.handle_text(
+                        user_id="123",
+                        session_id="s1",
+                        text="Revisa la pagina actual y dime que ves",
+                    )
+
+                self.assertEqual(result, "Veo Google Ads en la pantalla.")
+                runtime.bot.computer.capture_screenshot.assert_called_once_with()
+                mock_handle_message.assert_called_once()
+
+    def test_natural_language_click_request_uses_computer_action(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.computer = MagicMock()
+                runtime.bot.computer_client_factory = lambda: object()
+                runtime.bot.computer_gate = MagicMock()
+
+                def fake_run_agent_loop(*, session, **kwargs):
+                    session.status = "awaiting_approval"
+                    session.pending_action = {
+                        "tool_use_id": "tool-1",
+                        "action": "left_click",
+                        "coordinate": [500, 300],
+                    }
+                    return "Action needs approval: left_click — waiting for /action_approve"
+
+                runtime.bot.computer.run_agent_loop.side_effect = fake_run_agent_loop
+
+                result = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="Haz clic en Revisar tu configuración",
+                )
+
+                self.assertIn("/action_approve", result)
+                runtime.bot.computer.run_agent_loop.assert_called_once()
+
     def test_browse_command_normalizes_bare_domain(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -742,6 +818,188 @@ class BotTests(unittest.TestCase):
                 result = runtime.bot.handle_text(user_id="123", session_id="s1", text="/screen")
                 parsed = json.loads(result)
                 self.assertIn("screenshot_data", parsed)
+
+    def test_computer_command_uses_screenshot_and_multimodal_brain(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.computer = MagicMock()
+                runtime.bot.computer.capture_screenshot.return_value = {
+                    "data": "abc123",
+                    "media_type": "image/png",
+                }
+                with patch.object(
+                    type(runtime.bot.brain),
+                    "handle_message",
+                    return_value=LLMResponse(
+                        content="Veo una pagina con metricas.",
+                        lane="brain",
+                        provider="anthropic",
+                        model="claude-opus-4-6",
+                    ),
+                ) as mock_handle_message:
+                    result = runtime.bot.handle_text(
+                        user_id="123",
+                        session_id="s1",
+                        text="/computer revisa la pagina actual y dime que ves",
+                    )
+
+                self.assertEqual(result, "Veo una pagina con metricas.")
+                runtime.bot.computer.capture_screenshot.assert_called_once_with()
+                mock_handle_message.assert_called_once()
+                args, kwargs = mock_handle_message.call_args
+                self.assertEqual(args[0], "s1")
+                self.assertEqual(args[1][0]["type"], "text")
+                self.assertEqual(args[1][1]["type"], "image")
+                self.assertEqual(args[1][1]["source"]["media_type"], "image/png")
+                self.assertEqual(kwargs["memory_text"], "[Screenshot de escritorio]\nrevisa la pagina actual y dime que ves")
+
+    def test_computer_action_command_creates_pending_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.computer = MagicMock()
+                runtime.bot.computer_client_factory = lambda: object()
+                runtime.bot.computer_gate = MagicMock()
+
+                def fake_run_agent_loop(*, session, **kwargs):
+                    session.status = "awaiting_approval"
+                    session.pending_action = {
+                        "tool_use_id": "tool-1",
+                        "action": "left_click",
+                        "coordinate": [500, 300],
+                    }
+                    return "Action needs approval: left_click — waiting for /action_approve"
+
+                runtime.bot.computer.run_agent_loop.side_effect = fake_run_agent_loop
+
+                result = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="/computer haz click en Revisar tu configuracion",
+                )
+
+                self.assertIn("/action_approve", result)
+                self.assertIn("/action_abort", result)
+                pending = runtime.approvals.list_pending()
+                self.assertEqual(len(pending), 1)
+                self.assertEqual(pending[0]["metadata"]["kind"], "computer_use")
+                self.assertEqual(pending[0]["metadata"]["session_id"], "s1")
+
+    def test_action_approve_resumes_pending_computer_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.computer = MagicMock()
+                runtime.bot.computer_client_factory = lambda: object()
+                runtime.bot.computer_gate = MagicMock()
+                call_count = {"value": 0}
+
+                def fake_run_agent_loop(*, session, **kwargs):
+                    call_count["value"] += 1
+                    if call_count["value"] == 1:
+                        session.status = "awaiting_approval"
+                        session.pending_action = {
+                            "tool_use_id": "tool-1",
+                            "action": "left_click",
+                            "coordinate": [500, 300],
+                        }
+                        return "Action needs approval: left_click — waiting for /action_approve"
+                    self.assertEqual(session.pending_action["tool_use_id"], "tool-1")
+                    session.status = "done"
+                    return "Hecho. Ya hice click y revise la nueva pantalla."
+
+                runtime.bot.computer.run_agent_loop.side_effect = fake_run_agent_loop
+
+                first = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="/computer haz click en Revisar tu configuracion",
+                )
+                match = re.search(r"/action_approve ([^ ]+) ([^`\n ]+)", first)
+                self.assertIsNotNone(match)
+                approval_id, token = match.group(1), match.group(2)
+
+                second = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text=f"/action_approve {approval_id} {token}",
+                )
+
+                self.assertEqual(second, "Hecho. Ya hice click y revise la nueva pantalla.")
+                self.assertEqual(call_count["value"], 2)
+
+    def test_computer_abort_cancels_active_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot._computer_sessions["s1"] = MagicMock(status="running")
+
+                result = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="/computer_abort",
+                )
+
+                self.assertEqual(result, "computer session aborted")
+
+    def test_get_computer_client_falls_back_to_zsh_env(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                with patch("claw_v2.bot._read_env_var_from_zsh", return_value="zsh-test-key") as mock_read:
+                    with patch("anthropic.Anthropic") as mock_anthropic:
+                        client = runtime.bot._get_computer_client()
+
+                mock_read.assert_called_once_with("ANTHROPIC_API_KEY")
+                mock_anthropic.assert_called_once_with(api_key="zsh-test-key")
+                self.assertIs(client, mock_anthropic.return_value)
+                self.assertEqual(os.environ["ANTHROPIC_API_KEY"], "zsh-test-key")
 
     def test_action_approve_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

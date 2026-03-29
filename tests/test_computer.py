@@ -202,6 +202,39 @@ class AgentLoopTests(unittest.TestCase):
         self.assertIsNotNone(session.pending_action)
         self.assertIn("approval", result.lower())
 
+    def test_agent_loop_resumes_pending_action_before_next_model_turn(self) -> None:
+        svc = ComputerUseService(display_width=1280, display_height=800)
+        gate = ActionGate(sensitive_urls=[])
+        session = ComputerSession(
+            task="click continue",
+            messages=[{"role": "assistant", "content": []}],
+            pending_action={"tool_use_id": "tool_1", "action": "left_click", "coordinate": [500, 300]},
+            status="running",
+        )
+
+        mock_client = MagicMock()
+        mock_client.beta.messages.create.return_value = MagicMock(
+            content=[MagicMock(type="text", text="Done after approval.")],
+            stop_reason="end_turn",
+        )
+
+        with patch.object(svc, "execute_action", return_value={"data": "fake", "media_type": "image/png"}) as mock_exec:
+            result = svc.run_agent_loop(
+                session=session,
+                client=mock_client,
+                gate=gate,
+                model="claude-opus-4-6",
+            )
+
+        self.assertEqual(result, "Done after approval.")
+        self.assertIsNone(session.pending_action)
+        self.assertEqual(session.status, "done")
+        mock_exec.assert_called_once()
+        self.assertEqual(session.messages[-2]["role"], "user")
+        tool_result = session.messages[-2]["content"][0]
+        self.assertEqual(tool_result["type"], "tool_result")
+        self.assertEqual(tool_result["tool_use_id"], "tool_1")
+
 
 if __name__ == "__main__":
     unittest.main()

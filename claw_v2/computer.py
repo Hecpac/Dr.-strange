@@ -124,6 +124,11 @@ class ComputerUseService:
                     ],
                 }
             ]
+        elif session.pending_action is not None:
+            tool_result = self._execute_pending_action(session.pending_action)
+            session.messages.append({"role": "user", "content": [tool_result]})
+            session.pending_action = None
+            session.status = "running"
 
         while session.iteration < session.max_iterations:
             session.iteration += 1
@@ -163,15 +168,7 @@ class ComputerUseService:
                     session.pending_action = {"tool_use_id": block.id, **action}
                     return f"Action needs approval: {action.get('action')} — waiting for /action_approve"
 
-                result = self.execute_action(action)
-                if result is None:
-                    result = self.capture_screenshot()
-
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": [{"type": "image", "source": {"type": "base64", **result}}],
-                })
+                tool_results.append(self._execute_pending_action({"tool_use_id": block.id, **action}))
 
             session.messages.append({"role": "user", "content": tool_results})
 
@@ -182,6 +179,16 @@ class ComputerUseService:
         x = int(coordinate[0] * self.scale_factor)
         y = int(coordinate[1] * self.scale_factor)
         return x, y
+
+    def _execute_pending_action(self, action: dict[str, Any]) -> dict[str, Any]:
+        result = self.execute_action(action)
+        if result is None:
+            result = self.capture_screenshot()
+        return {
+            "type": "tool_result",
+            "tool_use_id": action["tool_use_id"],
+            "content": [{"type": "image", "source": {"type": "base64", **result}}],
+        }
 
 
 def _resize_image(raw: bytes, width: int, height: int) -> bytes:

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import subprocess
 import unicodedata
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
@@ -37,10 +39,48 @@ _BROWSE_SHORTCUT_TOKENS = (
     "navega",
     "browse",
 )
+_COMPUTER_ACTION_TOKENS = (
+    "click",
+    "clic",
+    "scroll",
+    "desplaza",
+    "desplazate",
+    "desplazarse",
+    "sube",
+    "baja",
+    "escribe",
+    "type",
+    "press",
+    "presiona",
+    "selecciona",
+    "drag",
+    "arrastra",
+    "abre el menu",
+    "open the menu",
+)
+_COMPUTER_READ_TOKENS = (
+    "revisa la pagina actual",
+    "revisa la pantalla",
+    "revisa esta pagina",
+    "revisa la campana",
+    "revisa la campaña",
+    "que ves",
+    "que hay en la pantalla",
+    "dime que ves",
+    "describe la pantalla",
+)
 _SCHEME_URL_RE = re.compile(r"(?P<url>https?://[^\s<>()]+)", re.IGNORECASE)
 _HOST_URL_RE = re.compile(
     r"(?P<url>(?<!@)(?:localhost(?::\d+)?|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}(?::\d+)?)(?:/[^\s<>()]*)?)",
     re.IGNORECASE,
+)
+_DEFAULT_COMPUTER_MODEL = "claude-opus-4-6"
+_COMPUTER_SYSTEM_PROMPT = (
+    "You control the user's Mac via the computer-use tool. "
+    "Be careful, explicit, and incremental. "
+    "Prefer reading the current screen before acting. "
+    "When searching for a visible UI element, move/scroll as needed, then click only when confident. "
+    "Stop and explain what you see when the task is complete."
 )
 
 
@@ -61,6 +101,10 @@ class BotService:
         browser: object | None = None,
         terminal_bridge: object | None = None,
         computer: object | None = None,
+        computer_gate: object | None = None,
+        computer_client_factory: Callable[[], Any] | None = None,
+        computer_model: str = _DEFAULT_COMPUTER_MODEL,
+        computer_system_prompt: str | None = None,
     ) -> None:
         self.brain = brain
         self.auto_research = auto_research
@@ -75,6 +119,12 @@ class BotService:
         self.browser = browser
         self.terminal_bridge = terminal_bridge
         self.computer = computer
+        self.computer_gate = computer_gate
+        self.computer_client_factory = computer_client_factory
+        self.computer_model = computer_model
+        self.computer_system_prompt = computer_system_prompt or _COMPUTER_SYSTEM_PROMPT
+        self._computer_sessions: dict[str, Any] = {}
+        self._computer_client: Any | None = None
 
     def handle_text(self, *, user_id: str, session_id: str, text: str) -> str:
         if self.allowed_user_id is None:
@@ -182,7 +232,7 @@ class BotService:
             if len(parts) != 2:
                 return "usage: /action_abort <approval_id>"
             return self._action_abort_response(parts[1])
-        shortcut_response = self._maybe_handle_shortcut(stripped)
+        shortcut_response = self._maybe_handle_shortcut(stripped, session_id=session_id)
         if shortcut_response is not None:
             return shortcut_response
         if stripped == "/agents":
@@ -709,7 +759,106 @@ class BotService:
     def _computer_response(self, instruction: str, session_id: str) -> str:
         if self.computer is None:
             return "computer use unavailable"
-        return f"Computer Use session started: {instruction}"
+        if _computer_instruction_requires_actions(instruction):
+            return self._computer_action_response(instruction, session_id)
+        try:
+            screenshot = self.computer.capture_screenshot()
+        except Exception as exc:
+            return f"computer screenshot error: {exc}"
+
+        content_blocks = [
+            {"type": "text", "text": instruction},
+            {"type": "image", "source": {"type": "base64", **screenshot}},
+        ]
+        memory_text = f"[Screenshot de escritorio]\n{instruction.strip()}"
+        return self.brain.handle_message(
+            session_id,
+            content_blocks,
+            memory_text=memory_text,
+        ).content
+
+    def _computer_action_response(self, instruction: str, session_id: str) -> str:
+        from claw_v2.computer import ComputerSession
+
+        active = self._computer_sessions.get(session_id)
+        if active is not None:
+            active.status = "aborted"
+
+        session = ComputerSession(task=instruction)
+        self._computer_sessions[session_id] = session
+        return self._run_computer_session(session_id)
+
+    def _run_computer_session(self, session_id: str) -> str:
+        session = self._computer_sessions.get(session_id)
+        if session is None:
+            return "no active computer session"
+        try:
+            client = self._get_computer_client()
+            gate = self._get_computer_gate()
+            result = self.computer.run_agent_loop(
+                session=session,
+                client=client,
+                gate=gate,
+                model=self.computer_model,
+                system_prompt=self.computer_system_prompt,
+            )
+        except Exception as exc:
+            self._computer_sessions.pop(session_id, None)
+            logger.exception("computer use failed for %s", session_id)
+            return f"computer use error: {exc}"
+
+        if session.status == "awaiting_approval":
+            pending = dict(session.pending_action or {})
+            pending_approval = self.approvals.create(
+                action=pending.get("action", "computer_action"),
+                summary=_format_computer_pending_summary(session.task, pending),
+                metadata={
+                    "kind": "computer_use",
+                    "session_id": session_id,
+                    "task": session.task,
+                    "pending_action": pending,
+                },
+            )
+            session.pending_action = {
+                **pending,
+                "approval_id": pending_approval.approval_id,
+                "approval_token": pending_approval.token,
+            }
+            return (
+                f"{result}\n\n"
+                f"Approve via: `/action_approve {pending_approval.approval_id} {pending_approval.token}`\n"
+                f"Abort via: `/action_abort {pending_approval.approval_id}`"
+            )
+
+        if session.status in {"done", "aborted"}:
+            self._computer_sessions.pop(session_id, None)
+        return result
+
+    def _get_computer_client(self) -> Any:
+        if self._computer_client is not None:
+            return self._computer_client
+        if self.computer_client_factory is not None:
+            self._computer_client = self.computer_client_factory()
+            return self._computer_client
+        try:
+            from anthropic import Anthropic
+        except ImportError as exc:  # pragma: no cover - dependency is installed in runtime
+            raise RuntimeError("anthropic SDK is not installed") from exc
+        api_key = os.getenv("ANTHROPIC_API_KEY") or _read_env_var_from_zsh("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise RuntimeError("ANTHROPIC_API_KEY is not configured")
+        os.environ.setdefault("ANTHROPIC_API_KEY", api_key)
+        self._computer_client = Anthropic(api_key=api_key)
+        return self._computer_client
+
+    def _get_computer_gate(self) -> Any:
+        if self.computer_gate is not None:
+            return self.computer_gate
+        from claw_v2.computer_gate import ActionGate
+
+        sensitive_urls = getattr(self.config, "sensitive_urls", []) if self.config is not None else []
+        self.computer_gate = ActionGate(sensitive_urls=sensitive_urls)
+        return self.computer_gate
 
     def _action_approve_response(self, approval_id: str, token: str) -> str:
         if self.approvals is None:
@@ -718,21 +867,49 @@ class BotService:
             valid = self.approvals.approve(approval_id, token)
         except FileNotFoundError:
             return f"approval {approval_id} not found"
-        return "approved" if valid else "invalid token"
+        if not valid:
+            return "invalid token"
+        payload = self.approvals.read(approval_id)
+        metadata = payload.get("metadata", {})
+        if metadata.get("kind") != "computer_use":
+            return "approved"
+        session_id = metadata.get("session_id")
+        if not isinstance(session_id, str):
+            return "approved, but no computer session metadata was found"
+        session = self._computer_sessions.get(session_id)
+        if session is None:
+            return "approved, but the computer session is no longer active"
+        if session.pending_action is not None and session.pending_action.get("approval_id") != approval_id:
+            return "approved, but no matching pending computer action was found"
+        session.status = "running"
+        return self._run_computer_session(session_id)
 
     def _action_abort_response(self, approval_id: str) -> str:
         if self.approvals is None:
             return "approvals unavailable"
         try:
+            payload = self.approvals.read(approval_id)
             self.approvals.reject(approval_id)
         except FileNotFoundError:
             return f"approval {approval_id} not found"
+        metadata = payload.get("metadata", {})
+        if metadata.get("kind") == "computer_use":
+            session_id = metadata.get("session_id")
+            if isinstance(session_id, str):
+                session = self._computer_sessions.pop(session_id, None)
+                if session is not None:
+                    session.status = "aborted"
+            return "computer action rejected"
         return "action rejected"
 
     def _computer_abort_response(self, session_id: str) -> str:
-        return "no active computer session"
+        session = self._computer_sessions.pop(session_id, None)
+        if session is None:
+            return "no active computer session"
+        session.status = "aborted"
+        return "computer session aborted"
 
-    def _maybe_handle_shortcut(self, text: str) -> str | None:
+    def _maybe_handle_shortcut(self, text: str, *, session_id: str) -> str | None:
         if not text or text.startswith("/"):
             return None
 
@@ -744,6 +921,12 @@ class BotService:
                 return self._chrome_browse_response(extracted_url)
             if any(token in normalized for token in _BROWSE_SHORTCUT_TOKENS) or _looks_like_standalone_url(text, extracted_url):
                 return self._browse_response(extracted_url)
+
+        if _computer_instruction_requires_actions(text):
+            return self._computer_action_response(text, session_id)
+
+        if _looks_like_computer_read_request(normalized):
+            return self._computer_response(text, session_id)
 
         if any(token in normalized for token in ("abre", "abrir", "open", "inicia", "iniciar", "run", "corre")):
             if "terminal" in normalized and "claude" in normalized:
@@ -770,6 +953,61 @@ def _parse_toggle(value: str) -> bool:
 def _normalize_command_text(text: str) -> str:
     folded = unicodedata.normalize("NFKD", text)
     return "".join(ch for ch in folded if not unicodedata.combining(ch)).lower()
+
+
+def _read_env_var_from_zsh(name: str) -> str | None:
+    direct = _read_env_var_from_shell_files(name)
+    if direct:
+        return direct
+    try:
+        result = subprocess.run(
+            ["/bin/zsh", "-ic", f"printf %s \"${name}\""],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except Exception:
+        return None
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if not lines:
+        return None
+    value = lines[-1]
+    if "=" in value and not value.startswith("sk-"):
+        value = value.split("=", 1)[1].strip()
+    value = value.strip().strip("\"'")
+    return value or None
+
+
+def _read_env_var_from_shell_files(name: str) -> str | None:
+    pattern = re.compile(rf"^\s*(?:export\s+)?{re.escape(name)}=(?P<value>.+?)\s*$")
+    for path in (
+        Path.home() / ".zshrc",
+        Path.home() / ".zprofile",
+        Path.home() / ".zshenv",
+        Path.home() / ".profile",
+    ):
+        try:
+            lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except FileNotFoundError:
+            continue
+        for line in reversed(lines):
+            match = pattern.match(line)
+            if match is None:
+                continue
+            value = match.group("value").strip().strip("\"'")
+            if value:
+                return value
+    return None
+
+
+def _computer_instruction_requires_actions(text: str) -> bool:
+    normalized = _normalize_command_text(text)
+    return any(token in normalized for token in _COMPUTER_ACTION_TOKENS)
+
+
+def _looks_like_computer_read_request(normalized: str) -> bool:
+    return any(token in normalized for token in _COMPUTER_READ_TOKENS)
 
 
 def _extract_url_candidate(text: str) -> str | None:
@@ -806,6 +1044,15 @@ def _normalize_url(value: str) -> str:
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError("invalid url")
     return candidate
+
+
+def _format_computer_pending_summary(task: str, pending_action: dict[str, Any]) -> str:
+    action = pending_action.get("action", "unknown")
+    if "coordinate" in pending_action:
+        return f"{task} — {action} at {pending_action['coordinate']}"
+    if "text" in pending_action:
+        return f"{task} — {action} {pending_action['text']!r}"
+    return f"{task} — {action}"
 
 
 def _format_chrome_cdp_error(exc: Exception, *, prefix: str) -> str:
