@@ -97,5 +97,111 @@ class ComputerSessionTests(unittest.TestCase):
         self.assertIsNone(session.current_url)
 
 
+from claw_v2.computer_gate import ActionGate
+
+
+class AgentLoopTests(unittest.TestCase):
+    def test_agent_loop_runs_screenshot_then_click_then_completes(self) -> None:
+        svc = ComputerUseService(display_width=1280, display_height=800)
+        gate = ActionGate(sensitive_urls=[])
+        session = ComputerSession(task="click the button")
+
+        call_count = [0]
+
+        def fake_create(**kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return MagicMock(
+                    content=[MagicMock(
+                        type="tool_use",
+                        name="computer",
+                        input={"action": "left_click", "coordinate": [500, 300]},
+                        id="tool_1",
+                    )],
+                    stop_reason="tool_use",
+                )
+            return MagicMock(
+                content=[MagicMock(type="text", text="Done! I clicked the button.")],
+                stop_reason="end_turn",
+            )
+
+        mock_client = MagicMock()
+        mock_client.beta.messages.create.side_effect = fake_create
+
+        with patch("claw_v2.computer.pyautogui"):
+            with patch.object(svc, "capture_screenshot", return_value={"data": "fake", "media_type": "image/png"}):
+                result = svc.run_agent_loop(
+                    session=session,
+                    client=mock_client,
+                    gate=gate,
+                    model="claude-opus-4-6",
+                )
+
+        self.assertEqual(result, "Done! I clicked the button.")
+        self.assertEqual(session.status, "done")
+        self.assertEqual(session.iteration, 2)
+
+    def test_agent_loop_stops_at_max_iterations(self) -> None:
+        svc = ComputerUseService(display_width=1280, display_height=800)
+        gate = ActionGate(sensitive_urls=[])
+        session = ComputerSession(task="infinite task", max_iterations=2)
+
+        def always_tool_use(**kwargs):
+            return MagicMock(
+                content=[MagicMock(
+                    type="tool_use",
+                    name="computer",
+                    input={"action": "screenshot"},
+                    id="tool_x",
+                )],
+                stop_reason="tool_use",
+            )
+
+        mock_client = MagicMock()
+        mock_client.beta.messages.create.side_effect = always_tool_use
+
+        with patch.object(svc, "capture_screenshot", return_value={"data": "fake", "media_type": "image/png"}):
+            result = svc.run_agent_loop(
+                session=session,
+                client=mock_client,
+                gate=gate,
+                model="claude-opus-4-6",
+            )
+
+        self.assertIn("limit", result.lower())
+        self.assertEqual(session.iteration, 2)
+
+    def test_agent_loop_pauses_when_gate_needs_approval(self) -> None:
+        svc = ComputerUseService(display_width=1280, display_height=800)
+        gate = ActionGate(sensitive_urls=["ads.google.com"])
+        session = ComputerSession(task="click buy", current_url="https://ads.google.com")
+
+        def fake_create(**kwargs):
+            return MagicMock(
+                content=[MagicMock(
+                    type="tool_use",
+                    name="computer",
+                    input={"action": "left_click", "coordinate": [500, 300]},
+                    id="tool_1",
+                )],
+                stop_reason="tool_use",
+            )
+
+        mock_client = MagicMock()
+        mock_client.beta.messages.create.side_effect = fake_create
+
+        with patch.object(svc, "capture_screenshot", return_value={"data": "fake", "media_type": "image/png"}):
+            result = svc.run_agent_loop(
+                session=session,
+                client=mock_client,
+                gate=gate,
+                model="claude-opus-4-6",
+            )
+
+        self.assertEqual(session.status, "awaiting_approval")
+        self.assertIsNotNone(session.pending_action)
+        self.assertIn("approval", result.lower())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -45,7 +45,8 @@ class ActionGate:
                 return ActionVerdict.SAFE
             return ActionVerdict.NEEDS_APPROVAL
         # State-changing actions without trustworthy URL → needs approval
-        if url is None:
+        # (only block when sensitive URLs are configured; empty gate = permissive)
+        if url is None and self.sensitive_urls:
             return ActionVerdict.NEEDS_APPROVAL
         if self.is_sensitive_url(url):
             return ActionVerdict.NEEDS_APPROVAL

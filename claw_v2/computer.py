@@ -104,6 +104,80 @@ class ComputerUseService:
         time.sleep(self.action_delay)
         return None
 
+    def run_agent_loop(
+        self,
+        *,
+        session: ComputerSession,
+        client: Any,
+        gate: Any,
+        model: str = "claude-opus-4-6",
+        system_prompt: str | None = None,
+    ) -> str:
+        if not session.messages:
+            screenshot = self.capture_screenshot()
+            session.messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": session.task},
+                        {"type": "image", "source": {"type": "base64", **screenshot}},
+                    ],
+                }
+            ]
+
+        while session.iteration < session.max_iterations:
+            session.iteration += 1
+            kwargs: dict[str, Any] = {
+                "model": model,
+                "max_tokens": 4096,
+                "tools": [{
+                    "type": "computer_20251124",
+                    "name": "computer",
+                    "display_width_px": self.display_width,
+                    "display_height_px": self.display_height,
+                }],
+                "messages": session.messages,
+                "betas": ["computer-use-2025-11-24"],
+            }
+            if system_prompt:
+                kwargs["system"] = system_prompt
+
+            response = client.beta.messages.create(**kwargs)
+
+            response_content = response.content
+            session.messages.append({"role": "assistant", "content": response_content})
+
+            tool_uses = [b for b in response_content if b.type == "tool_use"]
+            if not tool_uses:
+                session.status = "done"
+                text_blocks = [b for b in response_content if b.type == "text"]
+                return text_blocks[0].text if text_blocks else "(no response)"
+
+            tool_results = []
+            for block in tool_uses:
+                action = block.input
+                verdict = gate.classify_desktop_action(action, url=session.current_url)
+
+                if verdict.value == "needs_approval":
+                    session.status = "awaiting_approval"
+                    session.pending_action = {"tool_use_id": block.id, **action}
+                    return f"Action needs approval: {action.get('action')} — waiting for /action_approve"
+
+                result = self.execute_action(action)
+                if result is None:
+                    result = self.capture_screenshot()
+
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": [{"type": "image", "source": {"type": "base64", **result}}],
+                })
+
+            session.messages.append({"role": "user", "content": tool_results})
+
+        session.status = "done"
+        return "Computer Use iteration limit reached."
+
     def _scale_coords(self, coordinate: list[int]) -> tuple[int, int]:
         x = int(coordinate[0] * self.scale_factor)
         y = int(coordinate[1] * self.scale_factor)
