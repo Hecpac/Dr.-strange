@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import unittest.mock as mock
 import unittest
 
+from claw_v2 import browser_cli
 from claw_v2.browser import BrowserError, BrowseResult, DevBrowserService, ScriptResult, _js_escape
 
 
@@ -81,3 +83,158 @@ class TestDevBrowserService(unittest.TestCase):
         svc = DevBrowserService(headless=False, command_runner=runner)
         svc.run_script("console.log('hi')")
         self.assertNotIn("--headless", calls[0]["cmd"])
+
+    def test_interact_runs_structured_actions(self) -> None:
+        payload = json.dumps({
+            "url": "https://example.com/login",
+            "title": "Login",
+            "content": "form snapshot",
+            "screenshot_path": "/tmp/form.png",
+        })
+        runner, calls = _make_runner(stdout=payload)
+        svc = DevBrowserService(command_runner=runner)
+        result = svc.interact(
+            "https://example.com/login",
+            actions=[
+                {"type": "fill", "label": "Email", "value": "hector@example.com"},
+                {"type": "click", "role": "button", "name": "Continue"},
+                {"type": "screenshot", "name": "login.png"},
+            ],
+        )
+        self.assertEqual(result.url, "https://example.com/login")
+        self.assertEqual(result.screenshot_path, "/tmp/form.png")
+        self.assertEqual(len(calls), 1)
+        script = calls[0]["stdin"]
+        self.assertIn('const actions = JSON.parse(', script)
+        self.assertIn('\\"type\\": \\"fill\\"', script)
+        self.assertIn('\\"label\\": \\"Email\\"', script)
+        self.assertIn('\\"type\\": \\"click\\"', script)
+        self.assertIn('\\"type\\": \\"screenshot\\"', script)
+
+
+class TestBrowserCli(unittest.TestCase):
+    def test_main_reads_json_payload_and_prints_result(self) -> None:
+        with mock.patch("claw_v2.browser_cli.DevBrowserService") as mock_service_cls:
+            mock_service = mock_service_cls.return_value
+            mock_service.interact.return_value = BrowseResult(
+                url="https://example.com/form",
+                title="Example",
+                content="snapshot",
+                screenshot_path="/tmp/example.png",
+            )
+            with mock.patch("sys.stdout.write") as mock_stdout:
+                exit_code = browser_cli.main([
+                    json.dumps({
+                        "url": "https://example.com/form",
+                        "actions": [{"type": "click", "selector": "button"}],
+                    })
+                ])
+        self.assertEqual(exit_code, 0)
+        mock_service.interact.assert_called_once()
+        written = "".join(call.args[0] for call in mock_stdout.call_args_list)
+        self.assertIn('"url": "https://example.com/form"', written)
+
+
+class TestChromeCDP(unittest.TestCase):
+    def test_connect_to_chrome_returns_page_list(self) -> None:
+        mock_page_1 = mock.MagicMock()
+        mock_page_1.url = "https://ads.google.com/campaigns"
+        mock_page_1.title.return_value = "Google Ads"
+        mock_page_2 = mock.MagicMock()
+        mock_page_2.url = "https://example.com"
+        mock_page_2.title.return_value = "Example"
+
+        mock_context = mock.MagicMock()
+        mock_context.pages = [mock_page_1, mock_page_2]
+
+        mock_browser = mock.MagicMock()
+        mock_browser.contexts = [mock_context]
+
+        with mock.patch("claw_v2.browser.sync_playwright") as mock_pw:
+            mock_pw.return_value.__enter__ = mock.MagicMock(return_value=mock_pw.return_value)
+            mock_pw.return_value.__exit__ = mock.MagicMock(return_value=False)
+            mock_pw.return_value.chromium.connect_over_cdp.return_value = mock_browser
+
+            svc = DevBrowserService()
+            pages = svc.connect_to_chrome(cdp_url="http://localhost:9222")
+
+        self.assertEqual(len(pages), 2)
+        self.assertEqual(pages[0]["url"], "https://ads.google.com/campaigns")
+        self.assertEqual(pages[0]["title"], "Google Ads")
+        self.assertEqual(pages[1]["url"], "https://example.com")
+
+    def test_chrome_navigate_opens_url_in_new_tab(self) -> None:
+        mock_new_page = mock.MagicMock()
+        mock_new_page.url = "https://ads.google.com/campaigns"
+        mock_new_page.title.return_value = "Google Ads"
+        mock_new_page.content.return_value = "Campaign overview: ..."
+
+        mock_context = mock.MagicMock()
+        mock_context.pages = []
+        mock_context.new_page.return_value = mock_new_page
+
+        mock_browser = mock.MagicMock()
+        mock_browser.contexts = [mock_context]
+
+        with mock.patch("claw_v2.browser.sync_playwright") as mock_pw:
+            mock_pw.return_value.__enter__ = mock.MagicMock(return_value=mock_pw.return_value)
+            mock_pw.return_value.__exit__ = mock.MagicMock(return_value=False)
+            mock_pw.return_value.chromium.connect_over_cdp.return_value = mock_browser
+
+            svc = DevBrowserService()
+            result = svc.chrome_navigate("https://ads.google.com", cdp_url="http://localhost:9222")
+
+        self.assertEqual(result.url, "https://ads.google.com/campaigns")
+        self.assertEqual(result.title, "Google Ads")
+        mock_new_page.goto.assert_called_once_with("https://ads.google.com")
+
+    def test_chrome_navigate_matches_existing_tab_by_url_pattern(self) -> None:
+        mock_existing = mock.MagicMock()
+        mock_existing.url = "https://ads.google.com/campaigns"
+        mock_existing.title.return_value = "Google Ads"
+        mock_existing.content.return_value = "campaigns data"
+
+        mock_context = mock.MagicMock()
+        mock_context.pages = [mock_existing]
+
+        mock_browser = mock.MagicMock()
+        mock_browser.contexts = [mock_context]
+
+        with mock.patch("claw_v2.browser.sync_playwright") as mock_pw:
+            mock_pw.return_value.__enter__ = mock.MagicMock(return_value=mock_pw.return_value)
+            mock_pw.return_value.__exit__ = mock.MagicMock(return_value=False)
+            mock_pw.return_value.chromium.connect_over_cdp.return_value = mock_browser
+
+            svc = DevBrowserService()
+            result = svc.chrome_navigate(
+                "https://ads.google.com",
+                cdp_url="http://localhost:9222",
+                page_url_pattern="ads.google.com",
+            )
+
+        self.assertEqual(result.url, "https://ads.google.com/campaigns")
+        mock_existing.goto.assert_called_once_with("https://ads.google.com")
+
+    def test_chrome_screenshot_returns_path(self) -> None:
+        mock_page = mock.MagicMock()
+        mock_page.url = "https://example.com"
+        mock_page.title.return_value = "Example"
+        mock_page.content.return_value = "page content"
+
+        mock_context = mock.MagicMock()
+        mock_context.pages = [mock_page]
+
+        mock_browser = mock.MagicMock()
+        mock_browser.contexts = [mock_context]
+
+        with mock.patch("claw_v2.browser.sync_playwright") as mock_pw:
+            mock_pw.return_value.__enter__ = mock.MagicMock(return_value=mock_pw.return_value)
+            mock_pw.return_value.__exit__ = mock.MagicMock(return_value=False)
+            mock_pw.return_value.chromium.connect_over_cdp.return_value = mock_browser
+
+            svc = DevBrowserService()
+            result = svc.chrome_screenshot(cdp_url="http://localhost:9222", page_index=0)
+
+        self.assertEqual(result.url, "https://example.com")
+        self.assertIsNotNone(result.screenshot_path)
+        mock_page.screenshot.assert_called_once()

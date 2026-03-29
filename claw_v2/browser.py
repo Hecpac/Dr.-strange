@@ -4,7 +4,9 @@ import json
 import os
 import subprocess
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable
+
+from playwright.sync_api import sync_playwright
 
 
 class BrowserError(Exception):
@@ -74,6 +76,168 @@ class DevBrowserService:
         env = {"PLAYWRIGHT_BROWSERS_PATH": self._browsers_path}
         return self._runner(cmd, script, env, t + 5)
 
+    def interact(
+        self,
+        url: str | None = None,
+        *,
+        actions: list[dict[str, Any]] | None = None,
+        page_name: str = "main",
+        browser_name: str = "default",
+    ) -> BrowseResult:
+        safe_page = _js_escape(page_name)
+        safe_url = _js_escape(url or "")
+        actions_json = _js_escape(json.dumps(actions or []))
+        script = f"""
+const page = await browser.getPage("{safe_page}");
+const initialUrl = "{safe_url}";
+const actions = JSON.parse("{actions_json}");
+let screenshotPath = null;
+
+async function resolveLocator(action) {{
+  if (action.selector) return page.locator(action.selector).first();
+  if (action.role) {{
+    const options = {{}};
+    if (action.name !== undefined) options.name = action.name;
+    if (action.exact !== undefined) options.exact = !!action.exact;
+    return page.getByRole(action.role, options).first();
+  }}
+  if (action.label) return page.getByLabel(action.label, {{ exact: !!action.exact }}).first();
+  if (action.placeholder) return page.getByPlaceholder(action.placeholder, {{ exact: !!action.exact }}).first();
+  if (action.text) return page.getByText(action.text, {{ exact: !!action.exact }}).first();
+  throw new Error(`Action ${{action.type}} requires a selector, role, label, placeholder, or text target`);
+}}
+
+if (initialUrl) {{
+  await page.goto(initialUrl);
+}}
+
+for (const action of actions) {{
+  switch (action.type) {{
+    case "goto":
+      if (!action.url) throw new Error("goto action requires url");
+      await page.goto(action.url);
+      break;
+    case "click":
+      await (await resolveLocator(action)).click();
+      break;
+    case "fill":
+      await (await resolveLocator(action)).fill(action.value ?? "");
+      break;
+    case "press":
+      if (!action.key) throw new Error("press action requires key");
+      await (await resolveLocator(action)).press(action.key);
+      break;
+    case "check":
+      await (await resolveLocator(action)).check();
+      break;
+    case "uncheck":
+      await (await resolveLocator(action)).uncheck();
+      break;
+    case "select":
+      if (action.value === undefined) throw new Error("select action requires value");
+      await (await resolveLocator(action)).selectOption(action.value);
+      break;
+    case "submit": {{
+      const locator = await resolveLocator(action);
+      const tagName = await locator.evaluate((el) => el.tagName.toLowerCase());
+      if (tagName === "form") {{
+        await locator.evaluate((form) => form.requestSubmit());
+      }} else {{
+        await locator.click();
+      }}
+      break;
+    }}
+    case "wait_for":
+      if (action.ms !== undefined) {{
+        await page.waitForTimeout(action.ms);
+        break;
+      }}
+      if (action.url) {{
+        await page.waitForURL(action.url, {{ timeout: action.timeout_ms ?? action.timeoutMs }});
+        break;
+      }}
+      await (await resolveLocator(action)).waitFor({{
+        state: action.state ?? "visible",
+        timeout: action.timeout_ms ?? action.timeoutMs,
+      }});
+      break;
+    case "screenshot": {{
+      const buf = await page.screenshot();
+      screenshotPath = await saveScreenshot(buf, action.name || "browser-action.png");
+      break;
+    }}
+    default:
+      throw new Error(`Unsupported browser action: ${{action.type}}`);
+  }}
+}}
+
+const snapshot = await page.snapshotForAI();
+console.log(JSON.stringify({{
+  url: page.url(),
+  title: await page.title(),
+  content: snapshot.full,
+  screenshot_path: screenshotPath
+}}));
+"""
+        result = self.run_script(script, browser_name=browser_name)
+        return _parse_browse_result(result, action_name="interact")
+
+    def connect_to_chrome(self, *, cdp_url: str = "http://localhost:9222") -> list[dict[str, str]]:
+        with sync_playwright() as pw:
+            browser = pw.chromium.connect_over_cdp(cdp_url)
+            context = browser.contexts[0] if browser.contexts else None
+            if context is None:
+                browser.close()
+                return []
+            pages = [
+                {"url": page.url, "title": page.title(), "index": i}
+                for i, page in enumerate(context.pages)
+            ]
+            browser.close()
+        return pages
+
+    def chrome_navigate(
+        self,
+        url: str,
+        *,
+        cdp_url: str = "http://localhost:9222",
+        page_index: int | None = None,
+        page_title: str | None = None,
+        page_url_pattern: str | None = None,
+    ) -> BrowseResult:
+        with sync_playwright() as pw:
+            browser = pw.chromium.connect_over_cdp(cdp_url)
+            context = browser.contexts[0]
+            page = _select_cdp_page(context, page_index=page_index, page_title=page_title, page_url_pattern=page_url_pattern)
+            page.goto(url)
+            result = BrowseResult(url=page.url, title=page.title(), content=page.content()[:4000])
+            browser.close()
+        return result
+
+    def chrome_screenshot(
+        self,
+        *,
+        cdp_url: str = "http://localhost:9222",
+        page_index: int | None = None,
+        page_title: str | None = None,
+        page_url_pattern: str | None = None,
+        name: str = "chrome.png",
+    ) -> BrowseResult:
+        with sync_playwright() as pw:
+            browser = pw.chromium.connect_over_cdp(cdp_url)
+            context = browser.contexts[0]
+            page = _select_cdp_page(context, page_index=page_index, page_title=page_title, page_url_pattern=page_url_pattern)
+            screenshot_path = f"/tmp/claw-{name}"
+            page.screenshot(path=screenshot_path)
+            result = BrowseResult(
+                url=page.url,
+                title=page.title(),
+                content=page.content()[:4000],
+                screenshot_path=screenshot_path,
+            )
+            browser.close()
+        return result
+
     def browse(self, url: str, *, page_name: str = "main") -> BrowseResult:
         safe_url = _js_escape(url)
         safe_page = _js_escape(page_name)
@@ -88,13 +252,7 @@ console.log(JSON.stringify({{
 }}));
 """
         result = self.run_script(script)
-        if result.return_code != 0:
-            raise BrowserError(f"browse failed (exit {result.return_code}): {result.stderr}")
-        try:
-            data = json.loads(result.stdout)
-        except json.JSONDecodeError as exc:
-            raise BrowserError(f"invalid JSON from browser: {result.stdout[:200]}") from exc
-        return BrowseResult(url=data["url"], title=data["title"], content=data["content"])
+        return _parse_browse_result(result, action_name="browse")
 
     def screenshot(self, url: str, *, name: str = "screenshot.png", page_name: str = "main") -> BrowseResult:
         safe_url = _js_escape(url)
@@ -114,13 +272,33 @@ console.log(JSON.stringify({{
 }}));
 """
         result = self.run_script(script)
-        if result.return_code != 0:
-            raise BrowserError(f"screenshot failed (exit {result.return_code}): {result.stderr}")
-        try:
-            data = json.loads(result.stdout)
-        except json.JSONDecodeError as exc:
-            raise BrowserError(f"invalid JSON from browser: {result.stdout[:200]}") from exc
-        return BrowseResult(
-            url=data["url"], title=data["title"], content=data["content"],
-            screenshot_path=data.get("screenshot_path"),
-        )
+        return _parse_browse_result(result, action_name="screenshot")
+
+
+def _select_cdp_page(context, *, page_index=None, page_title=None, page_url_pattern=None):
+    if page_index is not None and 0 <= page_index < len(context.pages):
+        return context.pages[page_index]
+    if page_url_pattern is not None:
+        for page in context.pages:
+            if page_url_pattern in page.url:
+                return page
+    if page_title is not None:
+        for page in context.pages:
+            if page_title.lower() in page.title().lower():
+                return page
+    return context.new_page()
+
+
+def _parse_browse_result(result: ScriptResult, *, action_name: str) -> BrowseResult:
+    if result.return_code != 0:
+        raise BrowserError(f"{action_name} failed (exit {result.return_code}): {result.stderr}")
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise BrowserError(f"invalid JSON from browser: {result.stdout[:200]}") from exc
+    return BrowseResult(
+        url=data["url"],
+        title=data["title"],
+        content=data["content"],
+        screenshot_path=data.get("screenshot_path"),
+    )
