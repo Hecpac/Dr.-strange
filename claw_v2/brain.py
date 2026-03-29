@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from claw_v2.adapters.base import UserContentBlock, UserPrompt
 from claw_v2.approval import ApprovalManager
 from claw_v2.llm import LLMRouter
 from claw_v2.memory import MemoryStore
@@ -40,11 +41,26 @@ class BrainService:
     approvals: ApprovalManager | None = None
     observe: ObserveStream | None = None
 
-    def handle_message(self, session_id: str, message: str) -> LLMResponse:
-        context = self.memory.build_context(session_id, message)
+    def handle_message(
+        self,
+        session_id: str,
+        message: UserPrompt,
+        *,
+        memory_text: str | None = None,
+    ) -> LLMResponse:
+        stored_user_message = memory_text or _summarize_user_prompt(message)
         provider_session_id = self.memory.get_provider_session(session_id, "anthropic")
+        # When resuming a provider session, skip message history — the SDK already has it.
+        # Including both causes Claude to re-summarize the entire conversation each time.
+        resuming = provider_session_id is not None
+        prompt = self._build_prompt(
+            session_id=session_id,
+            message=message,
+            stored_user_message=stored_user_message,
+            include_history=not resuming,
+        )
         response = self.router.ask(
-            context,
+            prompt,
             system_prompt=self.system_prompt,
             lane="brain",
             session_id=provider_session_id,
@@ -55,9 +71,32 @@ class BrainService:
         provider_session_artifact = response.artifacts.get("session_id")
         if isinstance(provider_session_artifact, str) and provider_session_artifact:
             self.memory.link_provider_session(session_id, response.provider, provider_session_artifact)
-        self.memory.store_message(session_id, "user", message)
+        self.memory.store_message(session_id, "user", stored_user_message)
         self.memory.store_message(session_id, "assistant", response.content)
         return response
+
+    def _build_prompt(
+        self,
+        *,
+        session_id: str,
+        message: UserPrompt,
+        stored_user_message: str,
+        include_history: bool,
+    ) -> UserPrompt:
+        if isinstance(message, str):
+            if not include_history:
+                return message
+            return self.memory.build_context(session_id, stored_user_message, include_history=True)
+
+        if not include_history:
+            return message
+
+        context = self.memory.build_context(session_id, include_history=True).strip()
+        blocks: list[UserContentBlock] = []
+        if context:
+            blocks.append({"type": "text", "text": f"{context}\n# Current input"})
+        blocks.extend(message)
+        return blocks
 
     def verify_critical_action(
         self,
@@ -388,3 +427,28 @@ def _clamp_confidence(value: object) -> float:
     if numeric > 1.0:
         return 1.0
     return numeric
+
+
+def _summarize_user_prompt(message: UserPrompt) -> str:
+    if isinstance(message, str):
+        return message
+
+    text_parts: list[str] = []
+    image_count = 0
+    for block in message:
+        block_type = block.get("type")
+        if block_type == "text":
+            text = str(block.get("text", "")).strip()
+            if text:
+                text_parts.append(text)
+            continue
+        if block_type == "image":
+            image_count += 1
+
+    summary_parts: list[str] = []
+    if image_count == 1:
+        summary_parts.append("[Imagen adjunta]")
+    elif image_count > 1:
+        summary_parts.append(f"[{image_count} imagenes adjuntas]")
+    summary_parts.extend(text_parts)
+    return "\n".join(summary_parts) if summary_parts else "[Mensaje multimodal]"

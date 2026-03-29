@@ -161,14 +161,23 @@ class MemoryStore:
         ).fetchall()
         return [dict(row) for row in rows]
 
-    def build_context(self, session_id: str, message: str, budget: int = 16000) -> str:
-        recent = self.get_recent_messages(session_id, limit=20)
+    def build_context(
+        self,
+        session_id: str,
+        message: str | None = None,
+        budget: int = 16000,
+        include_history: bool = True,
+    ) -> str:
         facts = self.get_profile_facts()[:10]
-        recent_lines = [f"{row['role']}: {row['content']}" for row in recent]
         fact_lines = [f"{row['key']}={row['value']}" for row in facts]
-        context = "\n".join(
-            ["# Profile facts", *fact_lines, "# Recent messages", *recent_lines, "# Current input", message]
-        )
+        sections = ["# Profile facts", *fact_lines]
+        if include_history:
+            recent = self.get_recent_messages(session_id, limit=20)
+            recent_lines = [f"{row['role']}: {row['content']}" for row in recent]
+            sections.extend(["# Recent messages", *recent_lines])
+        if message is not None:
+            sections.extend(["# Current input", message])
+        context = "\n".join(sections)
         return context[:budget]
 
     def get_provider_session(self, app_session_id: str, provider: str) -> str | None:

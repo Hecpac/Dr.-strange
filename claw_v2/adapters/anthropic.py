@@ -5,7 +5,7 @@ import os
 from contextlib import contextmanager
 from importlib import import_module
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, AsyncIterator, Callable
 
 from claw_v2.adapters.base import (
     ADVISORY_LANES,
@@ -67,10 +67,14 @@ class ClaudeSDKExecutor:
         total_cost = 0.0
         usage: dict[str, Any] = {}
         model_name = request.model
+        query_session_id = request.session_id or "default"
 
         try:
             async with sdk.ClaudeSDKClient(options=options) as client:
-                await client.query(effective_input)
+                if isinstance(effective_input, str):
+                    await client.query(effective_input, session_id=query_session_id)
+                else:
+                    await client.query(_stream_user_content(effective_input), session_id=query_session_id)
                 async for message in client.receive_response():
                     if isinstance(message, sdk.AssistantMessage):
                         assistant_text_chunks.extend(_extract_assistant_text(message.content))
@@ -165,8 +169,6 @@ class ClaudeSDKExecutor:
             can_use_tool=can_use_tool,
             effort=request.effort,
         )
-        if request.cache_ttl is not None:
-            options_kwargs["cache_prefix_ttl"] = request.cache_ttl
         return sdk.ClaudeAgentOptions(**options_kwargs)
 
     def _build_agents(self, sdk: Any, request: LLMRequest) -> dict[str, Any] | None:
@@ -328,10 +330,11 @@ class ClaudeSDKExecutor:
     def _policy_for_request(self, request: LLMRequest) -> SandboxPolicy:
         workspace_root = Path(request.cwd) if request.cwd else self.config.workspace_root
         read_paths = getattr(self.config, "allowed_read_paths", [])
+        extra_roots = getattr(self.config, "extra_workspace_roots", [])
         return SandboxPolicy(
             workspace_root=workspace_root,
-            allowed_paths=[workspace_root, *read_paths],
-            writable_paths=[workspace_root, Path("/private/tmp"), Path.home() / ".claw"],
+            allowed_paths=[workspace_root, *read_paths, *extra_roots],
+            writable_paths=[workspace_root, Path("/private/tmp"), Path.home() / ".claw", *extra_roots],
             network_policy="allow",
             credential_scope="external",
         )
@@ -384,6 +387,14 @@ def _extract_assistant_text(blocks: list[Any]) -> list[str]:
         if isinstance(text, str) and text:
             chunks.append(text)
     return chunks
+
+
+async def _stream_user_content(content: list[dict[str, Any]]) -> AsyncIterator[dict[str, Any]]:
+    yield {
+        "type": "user",
+        "message": {"role": "user", "content": content},
+        "parent_tool_use_id": None,
+    }
 
 
 def _coalesce_content(assistant_text_chunks: list[str], result_text: str | None) -> str:
