@@ -1,82 +1,129 @@
-# Claude Computer Use Integration — Design Spec
+# Computer Autonomy — Design Spec
 
 **Date:** 2026-03-28
-**Status:** Approved
+**Status:** Approved (revised)
 **Branch:** feat/pending-items
 
 ## Goal
 
-Give the bot full autonomy to see and control the user's Mac — browse authenticated sites via the active Chrome session, interact with any app, and automate multi-app flows. Uses Claude Computer Use API (self-hosted, beta) with an approval gate for destructive actions on financial sites.
+Give the bot full autonomy to browse authenticated sites and control the user's Mac. Two tiers: Browser CDP for web (90% of use cases), Computer Use for desktop apps (10%).
 
-## Approach
+## Two-Tier Architecture
 
-Add a second LLM mode alongside the existing Brain (Claude Agent SDK). Computer Use runs via the Anthropic API directly (`client.beta.messages.create`) with tool type `computer_20251124` and beta header `computer-use-2025-11-24`. The bot captures screenshots with macOS `screencapture`, executes mouse/keyboard with `pyautogui`, and runs the agent loop until the task completes.
+| Tier | When | How | Speed/Cost |
+|------|------|-----|------------|
+| **Browser CDP** | Any website (Google Ads, Polymarket, dashboards) | Playwright `connect_over_cdp()` to user's Chrome | Fast, cheap (no screenshots to API) |
+| **Computer Use** | Desktop apps, multi-app flows (Figma, Finder, etc.) | Anthropic API + `screencapture` + `pyautogui` | Slower, more expensive (screenshots per iteration) |
 
-## Architecture
+### Why Browser CDP First
 
-### Two LLM Modes
+The existing `browser.py` uses Playwright with a bundled dev-browser. By connecting to the user's real Chrome via CDP instead, we get:
+- Access to all authenticated sessions (Google Ads, analytics, trading)
+- DOM-level interaction (click by selector/role, fill by label) — more reliable than pixel coordinates
+- Page snapshots (accessibility tree) without sending screenshots to the API
+- The existing `/browse` command and brain integration already work
 
-| Mode | When | API Surface |
-|------|------|-------------|
-| **Brain** (existing) | Chat, commands, code tools | Claude Agent SDK (CLI wrapper) |
-| **Computer Use** (new) | Screen control, UI automation | Anthropic API direct (`anthropic` package) |
+Computer Use is reserved for when the task genuinely needs desktop scope: non-browser apps, multi-app copy/paste, or controlling UI that isn't web-based.
 
-### Agent Loop Flow
+## Tier 1: Browser CDP
 
-```
-User: "/computer abre Google Ads y dame el resumen"
-  → Bot creates ComputerSession
-  → Takes initial screenshot
-  → Sends to Claude with computer_20251124 tool
-  → Claude returns tool_use (e.g., left_click at [x,y])
-  → ActionGate classifies: safe → execute, needs_approval → pause
-  → Execute action via pyautogui
-  → Take new screenshot
-  → Send result back to Claude
-  → Repeat until end_turn or max_iterations
-  → Send final response to Telegram
+### How It Works
+
+Chrome must be running with remote debugging enabled:
+```bash
+# User adds this to Chrome launch (or bot does it via osascript)
+open -a "Google Chrome" --args --remote-debugging-port=9222
 ```
 
-### Chrome Session Integration
-
-For authenticated sites (Google Ads, etc.):
-- Activate Chrome window: `osascript -e 'tell app "Google Chrome" to activate'`
-- Open URL: `open -a "Google Chrome" "https://ads.google.com"`
-- Screenshot captures the live, already-authenticated session
-- No login automation needed for sites the user is already logged into
-
-For fresh logins:
-- The agent loop navigates normally: opens Chrome, goes to URL, fills forms
-- Credentials via `~/.claw/credentials/` config or provided by user on demand
-
-## Components
-
-### `claw_v2/computer.py` — ComputerUseService
-
-Three responsibilities:
-
-**1. Screenshot capture:**
+Playwright connects to the running Chrome:
 ```python
-# macOS native — no Docker/Xvfb needed
-subprocess.run(["screencapture", "-x", path])
+browser = await playwright.chromium.connect_over_cdp("http://localhost:9222")
+context = browser.contexts[0]  # user's existing browser context with all cookies/auth
+page = context.pages[0]        # or find by URL
 ```
-- Resizes to `display_width x display_height` (default 1280x800) for the API
-- Computes scale factor for coordinate mapping (Retina displays)
-- Returns base64-encoded PNG
 
-**2. Action executor:**
+### Changes to `claw_v2/browser.py`
+
+Extend `DevBrowserService` with a new mode: `connect_to_chrome()`.
+
 ```python
-# pyautogui for mouse/keyboard
-pyautogui.click(x, y)
-pyautogui.typewrite("text", interval=0.02)
-pyautogui.hotkey("cmd", "t")  # new tab
-pyautogui.scroll(amount)
-```
-- Maps all Computer Use actions: screenshot, left_click, right_click, double_click, middle_click, type, key, mouse_move, scroll, left_click_drag
-- Scales coordinates from API space to screen space using scale factor
-- Adds configurable delay between actions (default 0.3s)
+class DevBrowserService:
+    # Existing: run_script(), browse(), screenshot(), interact()
 
-**3. Agent loop:**
+    # New: connect to user's real Chrome
+    def connect_to_chrome(self, *, cdp_url: str = "http://localhost:9222") -> BrowseResult:
+        """Connect to Chrome via CDP. Returns list of open pages."""
+
+    def chrome_navigate(self, url: str, *, page_index: int = 0) -> BrowseResult:
+        """Navigate a Chrome tab to URL, return page snapshot."""
+
+    def chrome_interact(self, *, actions: list[dict], page_index: int = 0) -> BrowseResult:
+        """Run structured actions on a Chrome tab (same action format as interact())."""
+
+    def chrome_screenshot(self, *, page_index: int = 0, name: str = "chrome.png") -> BrowseResult:
+        """Screenshot a Chrome tab, return path."""
+```
+
+These methods use the same `BrowseResult` dataclass and action format as the existing `interact()` method. The difference is the browser instance: CDP-connected Chrome vs. bundled dev-browser.
+
+### Implementation: Playwright Script over CDP
+
+The existing `run_script()` method spawns `dev-browser` with a JS script. For Chrome CDP, we need a different runner that connects to Chrome instead. Two options:
+
+**Option A (recommended): New script runner using Playwright Python directly**
+
+```python
+def _run_cdp_script(self, script_fn: Callable, cdp_url: str, timeout: int) -> ScriptResult:
+    """Run a Playwright Python function against Chrome CDP."""
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        browser = p.chromium.connect_over_cdp(cdp_url)
+        context = browser.contexts[0]
+        result = script_fn(context)
+        browser.close()
+        return result
+```
+
+**Option B: Reuse dev-browser with CDP flag**
+
+If dev-browser supports CDP connection, pass the URL as a flag. Less likely given the current implementation.
+
+Going with Option A. This means `playwright` Python package is needed (already likely installed as a dep of dev-browser, but confirm).
+
+### Chrome Lifecycle
+
+The bot doesn't manage Chrome's lifecycle. Chrome is assumed to be running. If CDP connection fails:
+1. Bot tries `osascript -e 'tell app "Google Chrome" to activate'` to ensure Chrome is running
+2. If Chrome isn't running with `--remote-debugging-port`, bot tells the user: "Chrome no está corriendo con debug port. Ejecuta: `open -a 'Google Chrome' --args --remote-debugging-port=9222`"
+3. Config option `chrome_cdp_url` (default `http://localhost:9222`) for custom port
+
+### Bot Commands (Tier 1)
+
+The existing `/browse <url>` command is enhanced:
+- If `chrome_cdp_enabled` is true and Chrome CDP is available, use Chrome CDP (authenticated session)
+- Otherwise, fall back to dev-browser (current behavior)
+
+New command:
+| Command | Action |
+|---------|--------|
+| `/chrome_pages` | List open Chrome tabs (title + URL) |
+
+### Approval Gate for Browser
+
+The same sensitive URL pattern list applies. For Tier 1:
+- **Read actions** (navigate, snapshot, screenshot) → autonomous
+- **Write actions** (click, fill, submit) on sensitive URLs → send screenshot + action description to Telegram, wait for `/approve`
+
+## Tier 2: Computer Use
+
+### When to Use
+
+Computer Use is invoked explicitly via `/computer <instruction>`. It is NOT auto-triggered by the brain. The user decides when desktop control is needed.
+
+### How It Works
+
+Uses Anthropic API directly (not Claude Agent SDK):
+
 ```python
 client = anthropic.Anthropic()
 response = client.beta.messages.create(
@@ -92,25 +139,47 @@ response = client.beta.messages.create(
     betas=["computer-use-2025-11-24"],
 )
 ```
-- Iterates until `stop_reason != "tool_use"` or `max_iterations` reached
+
+Agent loop: screenshot → Claude decides action → execute via pyautogui → screenshot → repeat.
+
+### `claw_v2/computer.py` — ComputerUseService
+
+**Screenshot capture:**
+```python
+subprocess.run(["screencapture", "-x", path])  # macOS native
+```
+- Resizes to configured display dimensions for the API
+- Computes scale factor for coordinate mapping (Retina)
+- Returns base64-encoded PNG
+
+**Action executor:**
+```python
+pyautogui.click(x, y)
+pyautogui.typewrite("text", interval=0.02)
+pyautogui.hotkey("cmd", "t")
+pyautogui.scroll(amount)
+```
+- Maps all Computer Use actions: screenshot, left_click, right_click, double_click, middle_click, type, key, mouse_move, scroll, left_click_drag
+- Scales coordinates from API space to screen space
+- Configurable delay between actions (default 0.3s)
+
+**Agent loop:**
+- Iterates until `stop_reason != "tool_use"` or `max_iterations` (30) reached
 - Each iteration: extract tool_use → gate check → execute → screenshot → append result
 - Returns final text response
 
 ### `claw_v2/computer_gate.py` — ActionGate
 
-Classifies each Computer Use action before execution:
+Shared between Tier 1 and Tier 2. Classifies actions:
 
 **Safe (auto-execute):**
-- `screenshot`
-- `mouse_move`
-- `scroll`
-- `key` with navigation keys (arrows, escape, tab, enter for non-financial)
-- `zoom`
+- screenshot, mouse_move, scroll, zoom
+- navigate/goto (browser)
+- key with navigation keys (arrows, escape, tab)
 
-**Needs approval (pause and ask via Telegram):**
-- `left_click` when current URL matches a sensitive pattern
-- `type` when current URL matches a sensitive pattern
-- `key` with destructive combos (cmd+delete, etc.) on sensitive sites
+**Needs approval (pause):**
+- click/fill/submit/type when URL matches sensitive pattern
+- key with destructive combos on sensitive sites
 
 **Sensitive URL patterns (configurable):**
 ```python
@@ -124,97 +193,95 @@ DEFAULT_SENSITIVE_URLS = [
 ]
 ```
 
-The gate receives the action dict and the current page URL (extracted from the last screenshot metadata or Chrome AppleScript query). When an action needs approval:
-1. Bot sends the current screenshot + action description to Telegram
-2. Session status changes to `awaiting_approval`
-3. User sends `/approve` or `/abort`
-4. Session resumes or cancels
+When paused:
+1. Bot sends screenshot + action description to Telegram as photo
+2. User sends `/approve` or `/abort`
 
-### `ComputerSession` — Session State
+### ComputerSession — Session State
 
 ```python
 @dataclass
 class ComputerSession:
-    task: str                    # original instruction
-    messages: list[dict]         # agent loop history
+    task: str
+    messages: list[dict]
     status: str                  # "running" | "awaiting_approval" | "done" | "aborted"
-    pending_action: dict | None  # action awaiting approval
-    screenshot_path: str | None  # latest screenshot file path
-    max_iterations: int = 30     # safety limit
+    pending_action: dict | None
+    screenshot_path: str | None
+    max_iterations: int = 30
     iteration: int = 0
-    current_url: str | None = None  # last known URL for gate classification
+    current_url: str | None = None
 ```
 
-One active session per Telegram chat. `/computer` while a session is running returns "session already active, use /abort to cancel".
+In-memory only. If the bot restarts mid-session, the session is lost — fail-safe (no pending action executes). Sessions are short-lived (~2-5 min max). One active session per Telegram chat.
 
-### Bot Commands
+### Bot Commands (Tier 2)
 
 | Command | Action |
 |---------|--------|
 | `/computer <instruction>` | Start Computer Use session |
-| `/screen` | Take screenshot, send to Telegram as photo |
-| `/approve` | Approve pending destructive action |
+| `/screen` | Take desktop screenshot, send to Telegram |
+| `/approve` | Approve pending destructive action (shared with Tier 1) |
 | `/abort` | Cancel active Computer Use session |
 
-### Telegram Photo Sending
-
-`telegram.py` needs a method to send screenshot images as Telegram photos (not just text). Uses `update.message.reply_photo(photo=open(path, "rb"))` or `context.bot.send_photo(chat_id, photo=...)`.
-
-### Config
+## Config
 
 New fields in `AppConfig`:
 
 ```python
-computer_use_enabled: bool          # env: COMPUTER_USE_ENABLED, default: True
-computer_sensitive_urls: list[str]  # env: COMPUTER_SENSITIVE_URLS, default: "ads.google.com:polymarket.com:..."
-computer_display_width: int         # env: COMPUTER_DISPLAY_WIDTH, default: 1280
-computer_display_height: int        # env: COMPUTER_DISPLAY_HEIGHT, default: 800
-```
+# Tier 1: Browser CDP
+chrome_cdp_enabled: bool        # env: CHROME_CDP_ENABLED, default: True
+chrome_cdp_url: str             # env: CHROME_CDP_URL, default: "http://localhost:9222"
 
-### Wiring in main.py
+# Tier 2: Computer Use
+computer_use_enabled: bool      # env: COMPUTER_USE_ENABLED, default: True
+computer_display_width: int     # env: COMPUTER_DISPLAY_WIDTH, default: 1280
+computer_display_height: int    # env: COMPUTER_DISPLAY_HEIGHT, default: 800
 
-```python
-computer = ComputerUseService(config=config, observe=observe)
-bot = BotService(..., computer=computer)
+# Shared
+sensitive_urls: list[str]       # env: SENSITIVE_URLS, default: "ads.google.com:polymarket.com:..."
 ```
 
 ## Files Changed
 
 | File | Change |
 |------|--------|
-| `claw_v2/computer.py` | **New** — `ComputerUseService`, `ComputerSession`, screenshot/action/loop |
-| `claw_v2/computer_gate.py` | **New** — `ActionGate`, URL pattern matching, action classification |
-| `claw_v2/bot.py` | Add `/computer`, `/screen`, `/approve`, `/abort` commands |
-| `claw_v2/telegram.py` | Add `send_photo` capability for screenshots |
-| `claw_v2/config.py` | Add `computer_use_enabled`, `computer_sensitive_urls`, display dimensions |
+| `claw_v2/browser.py` | Add CDP connection methods: `connect_to_chrome`, `chrome_navigate`, `chrome_interact`, `chrome_screenshot` |
+| `claw_v2/computer.py` | **New** — `ComputerUseService`, `ComputerSession`, screenshot/action/agent loop |
+| `claw_v2/computer_gate.py` | **New** — `ActionGate`, URL pattern matching, action classification (shared by both tiers) |
+| `claw_v2/bot.py` | Add `/computer`, `/screen`, `/approve`, `/abort`, `/chrome_pages` commands; enhance `/browse` to prefer CDP |
+| `claw_v2/telegram.py` | Add photo sending capability for screenshots |
+| `claw_v2/config.py` | Add CDP and Computer Use config fields |
 | `claw_v2/main.py` | Wire `ComputerUseService` in `build_runtime()` |
-| `claw_v2/SOUL.md` | Document Computer Use capability |
-| `tests/test_computer.py` | **New** — unit tests for service |
-| `tests/test_computer_gate.py` | **New** — unit tests for action gate |
-| `tests/helpers.py` | Add computer config fields to `make_config()` |
+| `claw_v2/SOUL.md` | Document both tiers |
+| `tests/test_computer.py` | **New** — Computer Use service tests |
+| `tests/test_computer_gate.py` | **New** — Action gate tests |
+| `tests/test_browser.py` | CDP connection tests |
+| `tests/helpers.py` | Add new config fields to `make_config()` |
 | `pyproject.toml` | Add `anthropic`, `pyautogui` dependencies |
 
 ## Testing Strategy
 
-- **Action gate:** Test classification of all action types against sensitive/non-sensitive URLs. Pure function, no mocking needed.
-- **Screenshot:** Mock `subprocess.run` for `screencapture`, verify base64 encoding and resize logic.
-- **Action executor:** Mock `pyautogui` calls, verify coordinate scaling.
-- **Agent loop:** Mock `anthropic.Anthropic().beta.messages.create`, simulate multi-step tool_use → end_turn flow.
-- **Bot commands:** Mock `ComputerUseService`, verify `/computer` starts session, `/approve` resumes, `/abort` cancels.
-- **Integration:** Full loop with mocked API and mocked pyautogui, verify gate pauses on sensitive URL.
+- **Action gate:** Pure function tests — all action types × sensitive/non-sensitive URLs
+- **Browser CDP:** Mock Playwright CDP connection, verify navigate/interact/screenshot
+- **Computer Use screenshot:** Mock `subprocess.run` for `screencapture`, verify resize + base64
+- **Computer Use actions:** Mock `pyautogui`, verify coordinate scaling
+- **Agent loop:** Mock `anthropic.Anthropic().beta.messages.create`, simulate multi-step flow
+- **Bot commands:** Mock services, verify `/browse` prefers CDP, `/computer` starts session, `/approve`/`/abort` work
+- **Gate integration:** Full flow with mocked API, verify pause on sensitive URL
 
 ## Security
 
-- Computer Use runs on the user's real Mac, not a sandbox. All actions are visible and affect real apps.
-- The approval gate prevents automated clicks/typing on financial sites without explicit user consent.
-- `COMPUTER_SENSITIVE_URLS` is configurable — the user can add/remove patterns.
-- Max iterations (30) prevents runaway loops.
-- Screenshots are stored in `/tmp/` and cleaned up after each session.
-- No credentials are stored in code — `~/.claw/credentials/` or user-provided via Telegram.
+- Browser CDP accesses the user's real Chrome with all cookies/auth. Treat as Tier 3 (ask first) for write actions on sensitive sites.
+- Computer Use runs on the real Mac desktop. All actions visible and affect real apps.
+- Approval gate shared between both tiers — same sensitive URL list.
+- Max iterations (30) prevents runaway Computer Use loops.
+- Screenshots stored in `/tmp/`, cleaned up after session.
+- CDP connection is localhost only — no remote access.
 
 ## Out of Scope
 
-- MCP connector for Google Ads API (programmatic access without UI)
+- MCP connector for Google Ads API (programmatic access)
 - Session recording/replay
 - Multi-display support
-- Docker/Xvfb virtual display (uses real Mac screen)
+- Docker/Xvfb virtual display
+- Auto-launching Chrome with debug port (user responsibility, documented in setup)
