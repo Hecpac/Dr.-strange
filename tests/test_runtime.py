@@ -180,5 +180,25 @@ class RuntimeTests(unittest.TestCase):
                 self.assertEqual(response2.provider, "none")
 
 
+    def test_computer_service_wired_and_screen_command_works(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                self.assertIsNotNone(runtime.bot.computer)
+                # Mock the screenshot since we can't run screencapture in tests
+                runtime.bot.computer.capture_screenshot = lambda: {"data": "test_data", "media_type": "image/png"}
+                result = runtime.bot.handle_text(user_id="123", session_id="s1", text="/screen")
+                self.assertIn("screenshot_data", result)
+
+
 if __name__ == "__main__":
     unittest.main()

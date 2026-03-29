@@ -28,6 +28,7 @@ from claw_v2.memory import MemoryStore
 from claw_v2.metrics import MetricsTracker
 from claw_v2.observe import ObserveStream
 from claw_v2.pipeline import PipelineService
+from claw_v2.computer import ComputerUseService
 from claw_v2.terminal_bridge import TerminalBridgeService
 from claw_v2.types import LLMResponse
 
@@ -114,7 +115,7 @@ def build_runtime(
     if anthropic_executor is None:
         anthropic_executor = create_claude_sdk_executor(config, observe=observe, approvals=approvals)
 
-    pre_hooks = [make_daily_cost_gate(observe, config.daily_cost_limit)]
+    pre_hooks = [make_daily_cost_gate(observe, config.daily_cost_limit)] if config.daily_cost_limit > 0 else []
     post_hooks = [make_decision_logger(observe)]
 
     router = LLMRouter.default(
@@ -256,6 +257,10 @@ def build_runtime(
         timeout=config.dev_browser_timeout,
     )
     terminal_bridge = TerminalBridgeService()
+    computer = ComputerUseService(
+        display_width=config.computer_display_width,
+        display_height=config.computer_display_height,
+    )
     bot = BotService(
         brain=brain,
         auto_research=auto_research,
@@ -266,6 +271,7 @@ def build_runtime(
         config=config,
         browser=browser,
         terminal_bridge=terminal_bridge,
+        computer=computer,
     )
     if config.linear_api_key:
         from claw_v2.linear import build_linear_api_caller
