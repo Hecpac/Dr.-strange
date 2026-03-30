@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from os import environ
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -121,16 +122,64 @@ class AnthropicExecutorTests(unittest.IsolatedAsyncioTestCase):
                 cwd=str(config.workspace_root),
             )
 
-            with patch("claw_v2.adapters.anthropic._load_sdk", return_value=fake_sdk):
-                with patch("claw_v2.adapters.anthropic._load_sdk_types", return_value=fake_sdk_types):
-                    response = await executor._run(request)
+            with patch.dict(environ, {"ANTHROPIC_API_KEY": "sk-test"}, clear=False):
+                with patch("claw_v2.adapters.anthropic._load_sdk", return_value=fake_sdk):
+                    with patch("claw_v2.adapters.anthropic._load_sdk_types", return_value=fake_sdk_types):
+                        response = await executor._run(request)
 
             self.assertEqual(response.content, "ok")
+            self.assertEqual(recorded["options"].kwargs["setting_sources"], ["project", "local"])
+            self.assertEqual(recorded["options"].kwargs["extra_args"], {})
+            self.assertTrue(callable(recorded["options"].kwargs["stderr"]))
+            self.assertEqual(recorded["options"].kwargs["env"], {})
             self.assertEqual(recorded["prompt_type"], "stream")
             self.assertEqual(recorded["session_id"], "resume-123")
             streamed = recorded["streamed"]
             self.assertEqual(len(streamed), 1)
             self.assertEqual(streamed[0]["message"]["content"][1]["type"], "image")
+
+    async def test_api_key_mode_passes_key_and_uses_bare_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            config.claude_auth_mode = "api_key"
+            executor = ClaudeSDKExecutor(config)
+
+            class FakeHookMatcher:
+                def __init__(self, *, hooks) -> None:
+                    self.hooks = hooks
+
+            class FakeClaudeAgentOptions:
+                def __init__(self, **kwargs) -> None:
+                    self.kwargs = kwargs
+
+            fake_sdk = SimpleNamespace(
+                ClaudeAgentOptions=FakeClaudeAgentOptions,
+                HookMatcher=FakeHookMatcher,
+                AgentDefinition=lambda **kwargs: kwargs,
+            )
+
+            request = LLMRequest(
+                prompt="hello",
+                system_prompt="You are Claw.",
+                lane="brain",
+                provider="anthropic",
+                model="claude-opus-4-6",
+                effort="high",
+                session_id=None,
+                max_budget=0.5,
+                evidence_pack={"app_session_id": "tg-1"},
+                allowed_tools=None,
+                agents=None,
+                hooks=None,
+                timeout=30.0,
+                cwd=str(config.workspace_root),
+            )
+
+            with patch.dict(environ, {"ANTHROPIC_API_KEY": "sk-test"}, clear=False):
+                options = executor._build_options(fake_sdk, request)
+
+            self.assertEqual(options.kwargs["extra_args"], {"bare": None})
+            self.assertEqual(options.kwargs["env"]["ANTHROPIC_API_KEY"], "sk-test")
 
 
 if __name__ == "__main__":

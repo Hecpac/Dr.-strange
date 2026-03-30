@@ -169,6 +169,8 @@ class TelegramTransport:
                     )
                 except Exception:
                     response = "Error procesando tu mensaje. Intenta de nuevo."
+            elif "Claude SDK execution failed" in err_str or "Control request timeout: initialize" in err_str:
+                response = "El runtime de Claude falló al iniciar esta solicitud. Intenta de nuevo en unos segundos."
             elif "API Error" in err_str or "invalid_request" in err_str:
                 response = "Error con la API. Intenta de nuevo en unos segundos."
             else:

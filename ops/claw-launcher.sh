@@ -5,6 +5,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 set -a
 source "$HOME/.claw/env" 2>/dev/null || true
 set +a
+export WORKSPACE_ROOT="${WORKSPACE_ROOT:-$REPO_ROOT}"
 if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
   for shell_rc in "$HOME/.zshrc" "$HOME/.zprofile" "$HOME/.zshenv" "$HOME/.profile"; do
     if [[ -f "$shell_rc" ]]; then

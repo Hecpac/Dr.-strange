@@ -74,6 +74,11 @@ class AppConfig:
     @classmethod
     def from_env(cls) -> "AppConfig":
         home = Path.home()
+        cwd = Path.cwd().resolve()
+        default_allowed_read_paths = [
+            home,
+            Path("/private/tmp"),
+        ]
         return cls(
             telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN"),
             telegram_allowed_user_id=os.getenv("TELEGRAM_ALLOWED_USER_ID"),
@@ -99,7 +104,7 @@ class AppConfig:
             db_path=Path(os.getenv("DB_PATH", "data/claw.db")),
             heartbeat_interval=int(os.getenv("HEARTBEAT_INTERVAL", "1800")),
             daily_token_budget=float(os.getenv("DAILY_TOKEN_BUDGET", "10.00")),
-            workspace_root=Path(os.getenv("WORKSPACE_ROOT", str(home / "claw_workspace"))),
+            workspace_root=Path(os.getenv("WORKSPACE_ROOT", str(cwd))),
             agent_state_root=Path(os.getenv("AGENT_STATE_ROOT", str(home / ".claw" / "agents"))),
             eval_artifacts_root=Path(os.getenv("EVAL_ARTIFACTS_ROOT", str(home / ".claw" / "evals"))),
             eval_on_self_improve=_env_bool("EVAL_ON_SELF_IMPROVE", True),
@@ -112,7 +117,14 @@ class AppConfig:
             pipeline_state_root=Path(os.getenv("PIPELINE_STATE_ROOT", str(home / ".claw" / "pipeline"))),
             social_accounts_root=Path(os.getenv("SOCIAL_ACCOUNTS_ROOT", str(Path(__file__).parent / "agents" / "social" / "accounts"))),
             social_keychain_prefix=os.getenv("SOCIAL_KEYCHAIN_PREFIX", "com.pachano.claw.social"),
-            allowed_read_paths=[Path(p) for p in os.getenv("ALLOWED_READ_PATHS", ":".join([str(home / "Projects"), "/private/tmp", str(home / ".claude"), str(home / ".claw")])).split(":")],
+            allowed_read_paths=[
+                Path(p)
+                for p in os.getenv(
+                    "ALLOWED_READ_PATHS",
+                    ":".join(str(path) for path in default_allowed_read_paths),
+                ).split(":")
+                if p.strip()
+            ],
             extra_workspace_roots=[Path(p) for p in os.getenv("EXTRA_WORKSPACE_ROOTS", "").split(":") if p.strip()],
             brain_context_window=int(os.getenv("BRAIN_CONTEXT_WINDOW", "1000000")),
             brain_max_output=int(os.getenv("BRAIN_MAX_OUTPUT", "128000")),

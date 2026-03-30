@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
+import re
 from contextlib import contextmanager
 from importlib import import_module
 from pathlib import Path
@@ -23,6 +25,8 @@ from claw_v2.network_proxy import DomainAllowlistEnforcer
 from claw_v2.observe import ObserveStream
 from claw_v2.sandbox import SandboxPolicy, sandbox_hook
 from claw_v2.types import LLMResponse
+
+logger = logging.getLogger(__name__)
 
 
 class AnthropicAgentAdapter(ProviderAdapter):
@@ -59,7 +63,14 @@ class ClaudeSDKExecutor:
 
     async def _run(self, request: LLMRequest) -> LLMResponse:
         sdk = _load_sdk()
-        options = self._build_options(sdk, request)
+        stderr_lines: list[str] = []
+
+        def _capture_stderr(line: str) -> None:
+            stderr_lines.append(line)
+            if len(stderr_lines) > 40:
+                del stderr_lines[0]
+
+        options = self._build_options(sdk, request, stderr_callback=_capture_stderr)
         effective_input = build_effective_input(request)
         assistant_text_chunks: list[str] = []
         result_text: str | None = None
@@ -93,6 +104,10 @@ class ClaudeSDKExecutor:
                 ) from exc
             if isinstance(exc, AdapterError):
                 raise
+            stderr_excerpt = " | ".join(stderr_lines[-5:]).strip()
+            if stderr_excerpt:
+                logger.error("Claude CLI stderr before failure: %s", stderr_excerpt)
+                raise AdapterError(f"Claude SDK execution failed: {exc}. Claude stderr: {stderr_excerpt}") from exc
             raise AdapterError(f"Claude SDK execution failed: {exc}") from exc
 
         content = _coalesce_content(assistant_text_chunks, result_text)
@@ -133,7 +148,13 @@ class ClaudeSDKExecutor:
             artifacts=artifacts,
         )
 
-    def _build_options(self, sdk: Any, request: LLMRequest) -> Any:
+    def _build_options(
+        self,
+        sdk: Any,
+        request: LLMRequest,
+        *,
+        stderr_callback: Callable[[str], None] | None = None,
+    ) -> Any:
         tools: Any
         system_prompt: Any
         can_use_tool = None
@@ -153,6 +174,12 @@ class ClaudeSDKExecutor:
             can_use_tool = self._build_can_use_tool(sdk, request)
 
         sdk_agents = self._build_agents(sdk, request)
+        sdk_env: dict[str, str] = {}
+        extra_args: dict[str, str | None] = {}
+        if self._should_use_api_key_auth():
+            if api_key := _resolve_anthropic_api_key():
+                sdk_env["ANTHROPIC_API_KEY"] = api_key
+            extra_args["bare"] = None
         options_kwargs: dict[str, Any] = dict(
             tools=tools,
             allowed_tools=list(request.allowed_tools or []),
@@ -163,7 +190,13 @@ class ClaudeSDKExecutor:
             model=request.model,
             cli_path=self.config.claude_cli_path,
             cwd=Path(request.cwd) if request.cwd else self.config.workspace_root,
-            setting_sources=["user", "project"],
+            # Isolate the bot from user-level Claude Code hooks/plugins.
+            # The user's personal ~/.claude/settings.json can run heavy SessionStart
+            # hooks or custom callbacks that break SDK initialization.
+            setting_sources=["project", "local"],
+            stderr=stderr_callback,
+            extra_args=extra_args,
+            env=sdk_env,
             hooks=hooks,
             agents=sdk_agents,
             can_use_tool=can_use_tool,
@@ -341,7 +374,7 @@ class ClaudeSDKExecutor:
 
     @contextmanager
     def _auth_environment(self):
-        if self.config.claude_auth_mode != "subscription":
+        if self.config.claude_auth_mode != "subscription" or self._should_use_api_key_auth():
             yield
             return
         original_api_key = os.environ.pop("ANTHROPIC_API_KEY", None)
@@ -350,6 +383,13 @@ class ClaudeSDKExecutor:
         finally:
             if original_api_key is not None:
                 os.environ["ANTHROPIC_API_KEY"] = original_api_key
+
+    def _should_use_api_key_auth(self) -> bool:
+        if self.config.claude_auth_mode == "api_key":
+            return True
+        if self.config.claude_auth_mode == "auto":
+            return _resolve_anthropic_api_key() is not None
+        return False
 
 
 def create_claude_sdk_executor(
@@ -406,3 +446,27 @@ def _coalesce_content(assistant_text_chunks: list[str], result_text: str | None)
     if result_text:
         return result_text.strip()
     return ""
+
+
+def _resolve_anthropic_api_key() -> str | None:
+    if value := os.getenv("ANTHROPIC_API_KEY"):
+        return value.strip() or None
+    pattern = re.compile(r"^\s*(?:export\s+)?ANTHROPIC_API_KEY=(?P<value>.+?)\s*$")
+    for path in (
+        Path.home() / ".zshrc",
+        Path.home() / ".zprofile",
+        Path.home() / ".zshenv",
+        Path.home() / ".profile",
+    ):
+        try:
+            lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except FileNotFoundError:
+            continue
+        for line in reversed(lines):
+            match = pattern.match(line)
+            if match is None:
+                continue
+            value = match.group("value").strip().strip("\"'")
+            if value:
+                return value
+    return None

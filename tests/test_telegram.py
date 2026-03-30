@@ -78,6 +78,27 @@ class HandleTextTests(unittest.IsolatedAsyncioTestCase):
 
         update.message.reply_text.assert_awaited()
 
+    async def test_claude_sdk_failures_return_specific_message(self) -> None:
+        transport = TelegramTransport(
+            bot_service=MagicMock(), token="t", allowed_user_id="123",
+        )
+        update = MagicMock()
+        update.effective_user.id = 123
+        update.effective_chat.id = 1
+        update.message.text = "hello"
+        update.message.reply_text = AsyncMock()
+        update.message.chat.send_action = AsyncMock()
+
+        with patch("claw_v2.telegram.asyncio") as mock_asyncio:
+            mock_asyncio.to_thread = AsyncMock(
+                side_effect=RuntimeError("Claude SDK execution failed: Control request timeout: initialize")
+            )
+            await transport._handle_text(update, MagicMock())
+
+        update.message.reply_text.assert_awaited_once_with(
+            "El runtime de Claude falló al iniciar esta solicitud. Intenta de nuevo en unos segundos."
+        )
+
 
 class HandleVoiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_voice_message_transcribed_and_handled(self) -> None:
