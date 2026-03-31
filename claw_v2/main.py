@@ -22,7 +22,7 @@ from claw_v2.cron import CronScheduler, ScheduledJob
 from claw_v2.daemon import ClawDaemon
 from claw_v2.github import GitHubPullRequestService
 from claw_v2.heartbeat import HeartbeatService
-from claw_v2.hooks import make_daily_cost_gate, make_decision_logger
+from claw_v2.hooks import make_anti_distillation_hook, make_daily_cost_gate, make_decision_logger
 from claw_v2.linear import LinearService
 from claw_v2.llm import LLMRouter
 from claw_v2.memory import MemoryStore
@@ -30,6 +30,9 @@ from claw_v2.metrics import MetricsTracker
 from claw_v2.observe import ObserveStream
 from claw_v2.pipeline import PipelineService
 from claw_v2.computer import ComputerUseService, BrowserUseService
+from claw_v2.coordinator import CoordinatorService
+from claw_v2.dream import AutoDreamService
+from claw_v2.kairos import KairosService
 from claw_v2.terminal_bridge import TerminalBridgeService
 from claw_v2.types import LLMResponse
 
@@ -46,6 +49,8 @@ class ClawRuntime:
     brain: BrainService
     auto_research: AutoResearchAgentService
     sub_agents: SubAgentService
+    coordinator: CoordinatorService
+    kairos: KairosService
     heartbeat: HeartbeatService
     scheduler: CronScheduler
     daemon: ClawDaemon
@@ -117,7 +122,8 @@ def build_runtime(
     if anthropic_executor is None:
         anthropic_executor = create_claude_sdk_executor(config, observe=observe, approvals=approvals)
 
-    pre_hooks = [make_daily_cost_gate(observe, config.daily_cost_limit)] if config.daily_cost_limit > 0 else []
+    pre_hooks: list = [make_daily_cost_gate(observe, config.daily_cost_limit)] if config.daily_cost_limit > 0 else []
+    pre_hooks.append(make_anti_distillation_hook())
     post_hooks = [make_decision_logger(observe)]
 
     router = LLMRouter.default(
@@ -150,7 +156,13 @@ def build_runtime(
     discovered = sub_agents.discover()
     if discovered:
         observe.emit("sub_agents_discovered", payload={"agents": discovered})
+    coordinator = CoordinatorService(
+        router=router,
+        observe=observe,
+        scratch_root=config.agent_state_root / "_scratch",
+    )
     heartbeat = HeartbeatService(metrics=metrics, approvals=approvals, agent_store=agent_store, observe=observe)
+    kairos = KairosService(router=router, heartbeat=heartbeat, observe=observe)
 
     def _self_improve_handler() -> None:
         """Daily self-improvement: run tests, then AutoResearch loop on all active agents."""
@@ -256,10 +268,13 @@ def build_runtime(
 
     scheduler = CronScheduler(persistence=memory)
     scheduler.register(ScheduledJob(name="heartbeat", interval_seconds=config.heartbeat_interval, handler=heartbeat.emit))
+    scheduler.register(ScheduledJob(name="kairos_tick", interval_seconds=1800, handler=kairos.tick))
     if config.eval_on_self_improve:
         scheduler.register(ScheduledJob(name="self_improve", interval_seconds=86400, handler=_self_improve_handler))
     scheduler.register(ScheduledJob(name="morning_brief", interval_seconds=86400, handler=_morning_brief_handler))
     scheduler.register(ScheduledJob(name="daily_metrics", interval_seconds=86400, handler=_daily_metrics_handler))
+    dream = AutoDreamService(memory=memory, observe=observe, router=router)
+    scheduler.register(ScheduledJob(name="auto_dream", interval_seconds=86400, handler=dream.run))
     daemon = ClawDaemon(scheduler=scheduler, heartbeat=heartbeat, observe=observe)
     browser = DevBrowserService(
         dev_browser_path=config.dev_browser_path,
@@ -348,6 +363,8 @@ def build_runtime(
         brain=brain,
         auto_research=auto_research,
         sub_agents=sub_agents,
+        coordinator=coordinator,
+        kairos=kairos,
         heartbeat=heartbeat,
         scheduler=scheduler,
         daemon=daemon,

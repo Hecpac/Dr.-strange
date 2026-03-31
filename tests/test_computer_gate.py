@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from claw_v2.computer_gate import ActionGate, ActionVerdict
+from claw_v2.computer_gate import ActionGate, ActionVerdict, RiskLevel, verdict_for_risk
 
 
 class ActionGateTests(unittest.TestCase):
@@ -90,6 +90,94 @@ class ActionGateTests(unittest.TestCase):
 
     def test_none_url_is_not_sensitive(self) -> None:
         self.assertFalse(self.gate.is_sensitive_url(None))
+
+
+class RiskLevelTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.gate = ActionGate(sensitive_urls=["ads.google.com", "polymarket.com"])
+
+    # --- verdict_for_risk ---
+
+    def test_low_risk_is_safe(self) -> None:
+        self.assertEqual(verdict_for_risk(RiskLevel.LOW), ActionVerdict.SAFE)
+
+    def test_medium_risk_is_safe(self) -> None:
+        self.assertEqual(verdict_for_risk(RiskLevel.MEDIUM), ActionVerdict.SAFE)
+
+    def test_high_risk_needs_approval(self) -> None:
+        self.assertEqual(verdict_for_risk(RiskLevel.HIGH), ActionVerdict.NEEDS_APPROVAL)
+
+    # --- CDP risk ---
+
+    def test_cdp_screenshot_is_low(self) -> None:
+        risk = self.gate.risk_cdp({"type": "screenshot"}, url="https://ads.google.com")
+        self.assertEqual(risk, RiskLevel.LOW)
+
+    def test_cdp_goto_is_low(self) -> None:
+        risk = self.gate.risk_cdp({"type": "goto"}, url=None)
+        self.assertEqual(risk, RiskLevel.LOW)
+
+    def test_cdp_submit_is_high(self) -> None:
+        risk = self.gate.risk_cdp({"type": "submit"}, url="https://example.com")
+        self.assertEqual(risk, RiskLevel.HIGH)
+
+    def test_cdp_click_sensitive_is_high(self) -> None:
+        risk = self.gate.risk_cdp({"type": "click"}, url="https://ads.google.com/x")
+        self.assertEqual(risk, RiskLevel.HIGH)
+
+    def test_cdp_click_non_sensitive_is_medium(self) -> None:
+        risk = self.gate.risk_cdp({"type": "click"}, url="https://example.com")
+        self.assertEqual(risk, RiskLevel.MEDIUM)
+
+    def test_cdp_fill_sensitive_is_high(self) -> None:
+        risk = self.gate.risk_cdp({"type": "fill"}, url="https://polymarket.com/trade")
+        self.assertEqual(risk, RiskLevel.HIGH)
+
+    # --- Desktop risk ---
+
+    def test_desktop_screenshot_is_low(self) -> None:
+        risk = self.gate.risk_desktop({"action": "screenshot"}, url=None)
+        self.assertEqual(risk, RiskLevel.LOW)
+
+    def test_desktop_scroll_is_low(self) -> None:
+        risk = self.gate.risk_desktop({"action": "scroll"}, url=None)
+        self.assertEqual(risk, RiskLevel.LOW)
+
+    def test_desktop_click_no_url_is_medium(self) -> None:
+        risk = self.gate.risk_desktop({"action": "left_click"}, url=None)
+        self.assertEqual(risk, RiskLevel.MEDIUM)
+
+    def test_desktop_click_safe_url_is_low(self) -> None:
+        risk = self.gate.risk_desktop({"action": "left_click"}, url="https://docs.google.com")
+        self.assertEqual(risk, RiskLevel.LOW)
+
+    def test_desktop_click_sensitive_url_is_high(self) -> None:
+        risk = self.gate.risk_desktop({"action": "left_click"}, url="https://ads.google.com")
+        self.assertEqual(risk, RiskLevel.HIGH)
+
+    def test_desktop_type_no_url_is_high(self) -> None:
+        risk = self.gate.risk_desktop({"action": "type", "text": "hello"}, url=None)
+        self.assertEqual(risk, RiskLevel.HIGH)
+
+    def test_desktop_type_safe_url_is_medium(self) -> None:
+        risk = self.gate.risk_desktop({"action": "type", "text": "hello"}, url="https://docs.google.com")
+        self.assertEqual(risk, RiskLevel.MEDIUM)
+
+    def test_desktop_type_sensitive_url_is_high(self) -> None:
+        risk = self.gate.risk_desktop({"action": "type", "text": "100"}, url="https://polymarket.com")
+        self.assertEqual(risk, RiskLevel.HIGH)
+
+    def test_desktop_nav_key_is_low(self) -> None:
+        risk = self.gate.risk_desktop({"action": "key", "text": "Escape"}, url=None)
+        self.assertEqual(risk, RiskLevel.LOW)
+
+    def test_desktop_hotkey_is_high(self) -> None:
+        risk = self.gate.risk_desktop({"action": "key", "text": "super+Delete"}, url=None)
+        self.assertEqual(risk, RiskLevel.HIGH)
+
+    def test_desktop_hotkey_on_sensitive_is_high(self) -> None:
+        risk = self.gate.risk_desktop({"action": "key", "text": "ctrl+a"}, url="https://ads.google.com")
+        self.assertEqual(risk, RiskLevel.HIGH)
 
 
 import tempfile

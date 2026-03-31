@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from claw_v2.adapters.base import LLMRequest, PreLLMHook, PostLLMHook
-from claw_v2.hooks import make_daily_cost_gate, make_decision_logger
+from claw_v2.hooks import make_anti_distillation_hook, make_daily_cost_gate, make_decision_logger, _select_decoys, _DECOY_POOL
 from claw_v2.llm import LLMRouter
 from claw_v2.observe import ObserveStream
 from claw_v2.types import LLMResponse
@@ -285,6 +285,78 @@ class DecisionLoggerTests(unittest.TestCase):
             payload = decision_events[0]["payload"]
             self.assertEqual(payload["prompt_length"], 2)
             self.assertTrue(payload["has_evidence_pack"])
+
+
+class AntiDistillationTests(unittest.TestCase):
+    def _make_request(self, *, lane: str = "brain", session_id: str | None = None, system_prompt: str | None = None) -> LLMRequest:
+        return LLMRequest(
+            prompt="test",
+            system_prompt=system_prompt,
+            lane=lane,
+            provider="anthropic",
+            model="claude-opus-4-6",
+            effort="high",
+            session_id=session_id,
+            max_budget=0.5,
+            evidence_pack=None,
+            allowed_tools=None,
+            agents=None,
+            hooks=None,
+            timeout=30.0,
+        )
+
+    def test_injects_decoys_on_brain_lane(self) -> None:
+        hook = make_anti_distillation_hook()
+        request = self._make_request(system_prompt="You are Claw.")
+        result = hook(request)
+        self.assertIsNotNone(result)
+        self.assertIn("You are Claw.", result.system_prompt)
+        # Should contain at least one decoy tool mention
+        has_decoy = any(decoy in result.system_prompt for decoy in _DECOY_POOL)
+        self.assertTrue(has_decoy)
+
+    def test_skips_advisory_lanes(self) -> None:
+        hook = make_anti_distillation_hook()
+        for lane in ("research", "verifier", "judge"):
+            request = self._make_request(lane=lane, system_prompt="base")
+            result = hook(request)
+            self.assertEqual(result.system_prompt, "base")
+
+    def test_disabled_hook_passes_through(self) -> None:
+        hook = make_anti_distillation_hook(enabled=False)
+        request = self._make_request(system_prompt="base")
+        result = hook(request)
+        self.assertEqual(result.system_prompt, "base")
+
+    def test_handles_none_system_prompt(self) -> None:
+        hook = make_anti_distillation_hook()
+        request = self._make_request(system_prompt=None)
+        result = hook(request)
+        self.assertIsNotNone(result.system_prompt)
+        has_decoy = any(decoy in result.system_prompt for decoy in _DECOY_POOL)
+        self.assertTrue(has_decoy)
+
+    def test_decoys_rotate_by_session(self) -> None:
+        d1 = _select_decoys("session-aaa")
+        d2 = _select_decoys("session-zzz")
+        # Different sessions should (usually) pick different decoys
+        # Not guaranteed but extremely likely with sha256
+        self.assertEqual(len(d1), 2)
+        self.assertEqual(len(d2), 2)
+        # Both should be from the pool
+        for d in d1 + d2:
+            self.assertIn(d, _DECOY_POOL)
+
+    def test_select_decoys_deterministic(self) -> None:
+        d1 = _select_decoys("fixed-session")
+        d2 = _select_decoys("fixed-session")
+        self.assertEqual(d1, d2)
+
+    def test_select_decoys_returns_requested_count(self) -> None:
+        d = _select_decoys("test", count=3)
+        self.assertEqual(len(d), 3)
+        # All unique
+        self.assertEqual(len(set(id(x) for x in d)), 3)
 
 
 if __name__ == "__main__":
