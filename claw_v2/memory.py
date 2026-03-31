@@ -43,6 +43,12 @@ CREATE TABLE IF NOT EXISTS fact_embeddings (
     fact_id INTEGER PRIMARY KEY REFERENCES facts(id),
     embedding TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS cron_state (
+    job_name TEXT PRIMARY KEY,
+    last_run_at REAL NOT NULL DEFAULT 0.0,
+    runs INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
@@ -203,6 +209,33 @@ class MemoryStore:
                 DO UPDATE SET provider_session_id = excluded.provider_session_id, updated_at = CURRENT_TIMESTAMP
                 """,
                 (app_session_id, provider, provider_session_id),
+            )
+            self._conn.commit()
+
+    def clear_provider_session(self, app_session_id: str, provider: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM provider_sessions WHERE app_session_id = ? AND provider = ?",
+                (app_session_id, provider),
+            )
+            self._conn.commit()
+
+    # --- Cron state ---
+
+    def load_cron_state(self) -> dict[str, tuple[float, int]]:
+        rows = self._conn.execute("SELECT job_name, last_run_at, runs FROM cron_state").fetchall()
+        return {row["job_name"]: (row["last_run_at"], row["runs"]) for row in rows}
+
+    def save_cron_job(self, job_name: str, last_run_at: float, runs: int) -> None:
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO cron_state (job_name, last_run_at, runs)
+                VALUES (?, ?, ?)
+                ON CONFLICT(job_name)
+                DO UPDATE SET last_run_at = excluded.last_run_at, runs = excluded.runs
+                """,
+                (job_name, last_run_at, runs),
             )
             self._conn.commit()
 

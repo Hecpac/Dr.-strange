@@ -101,6 +101,7 @@ class BotService:
         browser: object | None = None,
         terminal_bridge: object | None = None,
         computer: object | None = None,
+        browser_use: object | None = None,
         computer_gate: object | None = None,
         computer_client_factory: Callable[[], Any] | None = None,
         computer_model: str = _DEFAULT_COMPUTER_MODEL,
@@ -119,6 +120,7 @@ class BotService:
         self.browser = browser
         self.terminal_bridge = terminal_bridge
         self.computer = computer
+        self.browser_use = browser_use
         self.computer_gate = computer_gate
         self.computer_client_factory = computer_client_factory
         self.computer_model = computer_model

@@ -33,6 +33,7 @@ def make_config(root: Path) -> AppConfig:
         daily_token_budget=10.0,
         workspace_root=root / "workspace",
         agent_state_root=root / "agents",
+        agent_definitions_root=root / "agent_definitions",
         eval_artifacts_root=root / "evals",
         eval_on_self_improve=True,
         use_compaction=False,

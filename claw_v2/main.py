@@ -11,6 +11,7 @@ from claw_v2.agents import (
     FileAgentStore,
     GitBranchPromotionExecutor,
     GitWorktreeExperimentRunner,
+    SubAgentService,
 )
 from claw_v2.approval import ApprovalManager
 from claw_v2.brain import BrainService
@@ -28,7 +29,7 @@ from claw_v2.memory import MemoryStore
 from claw_v2.metrics import MetricsTracker
 from claw_v2.observe import ObserveStream
 from claw_v2.pipeline import PipelineService
-from claw_v2.computer import ComputerUseService
+from claw_v2.computer import ComputerUseService, BrowserUseService
 from claw_v2.terminal_bridge import TerminalBridgeService
 from claw_v2.types import LLMResponse
 
@@ -44,6 +45,7 @@ class ClawRuntime:
     router: LLMRouter
     brain: BrainService
     auto_research: AutoResearchAgentService
+    sub_agents: SubAgentService
     heartbeat: HeartbeatService
     scheduler: CronScheduler
     daemon: ClawDaemon
@@ -144,6 +146,10 @@ def build_runtime(
             promotion_executor=GitBranchPromotionExecutor(config.workspace_root),
         )
     auto_research = AutoResearchAgentService(router=router, store=agent_store, experiment_runner=experiment_runner)
+    sub_agents = SubAgentService(config.agent_definitions_root, router, agent_store)
+    discovered = sub_agents.discover()
+    if discovered:
+        observe.emit("sub_agents_discovered", payload={"agents": discovered})
     heartbeat = HeartbeatService(metrics=metrics, approvals=approvals, agent_store=agent_store, observe=observe)
 
     def _self_improve_handler() -> None:
@@ -155,7 +161,7 @@ def build_runtime(
 
         observe.emit("self_improve_start", payload={})
         # Gate: run tests first
-        repo_root = config.pipeline_repo_root or config.workspace_root.parent
+        repo_root = config.pipeline_repo_root or config.workspace_root
         pytest_bin = str(repo_root / ".venv" / "bin" / "pytest")
         from pathlib import Path as _Path
         if not _sh.which(pytest_bin) and not _Path(pytest_bin).exists():
@@ -187,7 +193,11 @@ def build_runtime(
                     ),
                     lane="worker",
                 ),
-                state={"promote_on_improvement": True, "commit_on_promotion": True},
+                state={
+                    "promote_on_improvement": True,
+                    "commit_on_promotion": True,
+                    "metric_command": f"PYTHONPATH=. {_sys.executable} -m pytest tests/ -x -q --tb=no 2>&1 | tail -1 | awk '{{print $1}}'",
+                },
             )
         # Run loop on all non-paused agents
         agents = auto_research.list_agents()
@@ -244,7 +254,7 @@ def build_runtime(
             except FileNotFoundError:
                 continue
 
-    scheduler = CronScheduler()
+    scheduler = CronScheduler(persistence=memory)
     scheduler.register(ScheduledJob(name="heartbeat", interval_seconds=config.heartbeat_interval, handler=heartbeat.emit))
     if config.eval_on_self_improve:
         scheduler.register(ScheduledJob(name="self_improve", interval_seconds=86400, handler=_self_improve_handler))
@@ -261,6 +271,7 @@ def build_runtime(
         display_width=config.computer_display_width,
         display_height=config.computer_display_height,
     )
+    browser_use = BrowserUseService(cdp_url=config.chrome_cdp_url)
     bot = BotService(
         brain=brain,
         auto_research=auto_research,
@@ -272,6 +283,7 @@ def build_runtime(
         browser=browser,
         terminal_bridge=terminal_bridge,
         computer=computer,
+        browser_use=browser_use,
     )
     if config.linear_api_key:
         from claw_v2.linear import build_linear_api_caller
@@ -289,9 +301,36 @@ def build_runtime(
         state_root=config.pipeline_state_root,
     )
     bot.pipeline = pipeline
+    bot.sub_agents = sub_agents
     scheduler.register(
         ScheduledJob(name="pipeline_poll", interval_seconds=300, handler=pipeline.poll_actionable)
     )
+    # Sub-agent scheduled jobs
+    def _sub_agent_handler(agent: str, skill: str) -> None:
+        result = sub_agents.run_skill(agent, skill, lane="worker")
+        observe.emit("sub_agent_skill", payload={"agent": agent, "skill": skill, "result": result})
+
+    if sub_agents.get_agent("alma"):
+        scheduler.register(ScheduledJob(
+            name="alma_morning_brief", interval_seconds=86400,
+            handler=lambda: _sub_agent_handler("alma", "daily-brief"),
+        ))
+    if sub_agents.get_agent("lux"):
+        scheduler.register(ScheduledJob(
+            name="lux_content_radar", interval_seconds=43200,
+            handler=lambda: _sub_agent_handler("lux", "content-radar"),
+        ))
+    if sub_agents.get_agent("hex"):
+        scheduler.register(ScheduledJob(
+            name="hex_bug_triage", interval_seconds=86400,
+            handler=lambda: _sub_agent_handler("hex", "bug-triage"),
+        ))
+    if sub_agents.get_agent("rook"):
+        scheduler.register(ScheduledJob(
+            name="rook_health_audit", interval_seconds=21600,
+            handler=lambda: _sub_agent_handler("rook", "health-audit"),
+        ))
+    scheduler.restore()
     from claw_v2.content import ContentEngine
     from claw_v2.social import SocialPublisher
 
@@ -308,6 +347,7 @@ def build_runtime(
         router=router,
         brain=brain,
         auto_research=auto_research,
+        sub_agents=sub_agents,
         heartbeat=heartbeat,
         scheduler=scheduler,
         daemon=daemon,

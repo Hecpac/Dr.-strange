@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Callable, Protocol
 
 
 JobHandler = Callable[[], object]
+
+
+class CronPersistence(Protocol):
+    def load_cron_state(self) -> dict[str, tuple[float, int]]: ...
+    def save_cron_job(self, job_name: str, last_run_at: float, runs: int) -> None: ...
 
 
 @dataclass(slots=True)
@@ -19,11 +24,21 @@ class ScheduledJob:
 
 
 class CronScheduler:
-    def __init__(self) -> None:
+    def __init__(self, persistence: CronPersistence | None = None) -> None:
         self._jobs: dict[str, ScheduledJob] = {}
+        self._persistence = persistence
 
     def register(self, job: ScheduledJob) -> None:
         self._jobs[job.name] = job
+
+    def restore(self) -> None:
+        """Load persisted run state into registered jobs."""
+        if self._persistence is None:
+            return
+        saved = self._persistence.load_cron_state()
+        for name, job in self._jobs.items():
+            if name in saved:
+                job.last_run_at, job.runs = saved[name]
 
     def list_jobs(self) -> list[ScheduledJob]:
         return list(self._jobs.values())
@@ -38,4 +53,6 @@ class CronScheduler:
             job.last_run_at = current
             job.runs += 1
             executed.append(job.name)
+            if self._persistence is not None:
+                self._persistence.save_cron_job(job.name, job.last_run_at, job.runs)
         return executed

@@ -39,7 +39,7 @@ class ClawDaemon:
     async def run_loop(self, shutdown: asyncio.Event, interval: float = 60.0) -> None:
         while not shutdown.is_set():
             try:
-                self.tick()
+                await asyncio.to_thread(self.tick)
             except Exception as exc:
                 if self.observe is not None:
                     self.observe.emit("daemon_tick_error", payload={"error": str(exc)})

@@ -16,7 +16,8 @@ class ScreenshotTests(unittest.TestCase):
         fake_png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
 
         def fake_run(cmd, **kwargs):
-            Path(cmd[-1]).write_bytes(fake_png)
+            if cmd[0] == "screencapture":
+                Path(cmd[-1]).write_bytes(fake_png)
             return MagicMock(returncode=0)
 
         with patch("claw_v2.computer.subprocess.run", side_effect=fake_run) as mock_run:
@@ -25,8 +26,8 @@ class ScreenshotTests(unittest.TestCase):
 
         self.assertTrue(len(result["data"]) > 0)
         self.assertEqual(result["media_type"], "image/png")
-        mock_run.assert_called_once()
-        self.assertIn("screencapture", mock_run.call_args[0][0])
+        screencapture_calls = [c for c in mock_run.call_args_list if c[0][0][0] == "screencapture"]
+        self.assertEqual(len(screencapture_calls), 1)
 
 
 class ActionExecutorTests(unittest.TestCase):
@@ -234,6 +235,20 @@ class AgentLoopTests(unittest.TestCase):
         tool_result = session.messages[-2]["content"][0]
         self.assertEqual(tool_result["type"], "tool_result")
         self.assertEqual(tool_result["tool_use_id"], "tool_1")
+
+
+class BrowserUseServiceTests(unittest.TestCase):
+    def test_init_defaults(self) -> None:
+        from claw_v2.computer import BrowserUseService
+        svc = BrowserUseService()
+        self.assertEqual(svc.cdp_url, "http://localhost:9222")
+        self.assertTrue(svc.headless)
+
+    def test_init_custom(self) -> None:
+        from claw_v2.computer import BrowserUseService
+        svc = BrowserUseService(cdp_url="http://localhost:9333", headless=False)
+        self.assertEqual(svc.cdp_url, "http://localhost:9333")
+        self.assertFalse(svc.headless)
 
 
 if __name__ == "__main__":

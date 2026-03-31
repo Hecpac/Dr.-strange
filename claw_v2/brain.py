@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from claw_v2.adapters.base import UserContentBlock, UserPrompt
+from claw_v2.adapters.base import AdapterError, UserContentBlock, UserPrompt
 from claw_v2.approval import ApprovalManager
 from claw_v2.llm import LLMRouter
 from claw_v2.memory import MemoryStore
 from claw_v2.observe import ObserveStream
 from claw_v2.types import CriticalActionExecution, CriticalActionVerification, LLMResponse
+
+logger = logging.getLogger(__name__)
 
 
 VERIFIER_PROMPT = """Review the proposed critical action using only the evidence pack.
@@ -59,15 +62,44 @@ class BrainService:
             stored_user_message=stored_user_message,
             include_history=not resuming,
         )
-        response = self.router.ask(
-            prompt,
-            system_prompt=self.system_prompt,
-            lane="brain",
-            session_id=provider_session_id,
-            evidence_pack={"app_session_id": session_id},
-            max_budget=2.0,
-            timeout=300.0,
-        )
+        try:
+            response = self.router.ask(
+                prompt,
+                system_prompt=self.system_prompt,
+                lane="brain",
+                session_id=provider_session_id,
+                evidence_pack={"app_session_id": session_id},
+                max_budget=2.0,
+                timeout=300.0,
+            )
+        except AdapterError:
+            if not resuming:
+                raise
+            # Session may be corrupted/too large — retry with a fresh session.
+            logger.warning("Session resume failed for %s, retrying with fresh session", session_id)
+            if self.observe is not None:
+                self.observe.emit(
+                    "session_resume_failed",
+                    lane="brain",
+                    provider="anthropic",
+                    payload={"app_session_id": session_id, "stale_session": provider_session_id},
+                )
+            self.memory.clear_provider_session(session_id, "anthropic")
+            prompt = self._build_prompt(
+                session_id=session_id,
+                message=message,
+                stored_user_message=stored_user_message,
+                include_history=True,
+            )
+            response = self.router.ask(
+                prompt,
+                system_prompt=self.system_prompt,
+                lane="brain",
+                session_id=None,
+                evidence_pack={"app_session_id": session_id},
+                max_budget=2.0,
+                timeout=300.0,
+            )
         provider_session_artifact = response.artifacts.get("session_id")
         if isinstance(provider_session_artifact, str) and provider_session_artifact:
             self.memory.link_provider_session(session_id, response.provider, provider_session_artifact)

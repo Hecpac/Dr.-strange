@@ -115,7 +115,11 @@ class FileAgentStore:
         return self.root / agent_name / "results.tsv"
 
     def list_agents(self) -> list[str]:
-        return sorted(path.name for path in self.root.iterdir() if path.is_dir())
+        return sorted(
+            path.name
+            for path in self.root.iterdir()
+            if path.is_dir() and not path.name.startswith("_")
+        )
 
     def load_state(self, agent_name: str) -> dict:
         path = self.state_path(agent_name)
@@ -874,6 +878,175 @@ def _should_ignore_path(path: Path) -> bool:
 def _validate_agent_name(name: str) -> None:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", name):
         raise ValueError("agent_name must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+
+
+@dataclass(slots=True)
+class SubAgentDefinition:
+    name: str
+    display_name: str
+    provider: str
+    model: str
+    soul: str
+    heartbeat_config: str
+    user_context: str
+    skills: dict[str, str] = field(default_factory=dict)
+
+
+class SubAgentService:
+    """Manages named sub-agents (Alma, Hex, Lux, Rook) loaded from definition files."""
+
+    def __init__(
+        self,
+        definitions_root: Path | str,
+        router: LLMRouter,
+        store: FileAgentStore,
+    ) -> None:
+        self.definitions_root = Path(definitions_root)
+        self.router = router
+        self.store = store
+        self._agents: dict[str, SubAgentDefinition] = {}
+
+    # -- loading ----------------------------------------------------------
+
+    def discover(self) -> list[str]:
+        """Scan definitions_root for agent folders containing SOUL.md."""
+        found: list[str] = []
+        if not self.definitions_root.is_dir():
+            return found
+        for child in sorted(self.definitions_root.iterdir()):
+            if child.is_dir() and (child / "SOUL.md").exists():
+                defn = self._load_definition(child)
+                self._agents[defn.name] = defn
+                found.append(defn.name)
+        return found
+
+    def _load_definition(self, agent_dir: Path) -> SubAgentDefinition:
+        soul = (agent_dir / "SOUL.md").read_text(encoding="utf-8")
+        heartbeat = ""
+        hb_path = agent_dir / "HEARTBEAT.md"
+        if hb_path.exists():
+            heartbeat = hb_path.read_text(encoding="utf-8")
+        user_ctx = ""
+        user_path = agent_dir / "USER.md"
+        if user_path.exists():
+            user_ctx = user_path.read_text(encoding="utf-8")
+        skills = self._load_skills(agent_dir / "skills")
+        provider, model = self._parse_model_from_soul(soul)
+        display_name = self._parse_display_name(soul)
+        return SubAgentDefinition(
+            name=agent_dir.name,
+            display_name=display_name,
+            provider=provider,
+            model=model,
+            soul=soul,
+            heartbeat_config=heartbeat,
+            user_context=user_ctx,
+            skills=skills,
+        )
+
+    @staticmethod
+    def _load_skills(skills_dir: Path) -> dict[str, str]:
+        skills: dict[str, str] = {}
+        if not skills_dir.is_dir():
+            return skills
+        for child in sorted(skills_dir.iterdir()):
+            skill_file = child / "SKILL.md"
+            if child.is_dir() and skill_file.exists():
+                skills[child.name] = skill_file.read_text(encoding="utf-8")
+        return skills
+
+    @staticmethod
+    def _parse_model_from_soul(soul: str) -> tuple[str, str]:
+        text = soul.lower()
+        if "claude opus" in text:
+            return ("anthropic", "claude-opus-4-6")
+        if "claude sonnet" in text:
+            return ("anthropic", "claude-sonnet-4-6")
+        if "gemini" in text:
+            return ("google", "gemini-2.5-pro")
+        if "gpt" in text or "codex" in text:
+            return ("openai", "gpt-4.1")
+        return ("anthropic", "claude-sonnet-4-6")
+
+    @staticmethod
+    def _parse_display_name(soul: str) -> str:
+        for line in soul.splitlines():
+            if line.strip().startswith("- **Name:**"):
+                return line.split("**Name:**")[-1].strip()
+        return "Agent"
+
+    # -- dispatch ---------------------------------------------------------
+
+    def dispatch(self, agent_name: str, instruction: str, *, lane: str = "research") -> str:
+        """Send an instruction to a sub-agent and return its response.
+
+        Uses ``lane="research"`` by default (no tools required).  Pass
+        ``lane="worker"`` or ``lane="brain"`` when the sub-agent needs
+        tool access through a capable provider adapter.
+        """
+        defn = self._agents.get(agent_name)
+        if defn is None:
+            raise KeyError(f"unknown sub-agent: {agent_name}")
+        system_prompt = self._build_system_prompt(defn)
+        try:
+            response = self.router.ask(
+                instruction,
+                system_prompt=system_prompt,
+                lane=lane,
+                provider=defn.provider,
+                model=defn.model,
+                evidence_pack={"sub_agent": defn.name, "display_name": defn.display_name},
+            )
+        except (ValueError, Exception):
+            # Fallback to default provider when the preferred one is unavailable.
+            response = self.router.ask(
+                instruction,
+                system_prompt=system_prompt,
+                lane=lane,
+                evidence_pack={"sub_agent": defn.name, "display_name": defn.display_name},
+            )
+        return response.content
+
+    def run_skill(self, agent_name: str, skill_name: str, context: str = "", *, lane: str = "research") -> str:
+        """Execute a named skill for a sub-agent."""
+        defn = self._agents.get(agent_name)
+        if defn is None:
+            raise KeyError(f"unknown sub-agent: {agent_name}")
+        skill_prompt = defn.skills.get(skill_name)
+        if skill_prompt is None:
+            raise KeyError(f"unknown skill '{skill_name}' for agent '{agent_name}'")
+        instruction = f"Execute skill: {skill_name}\n\n{skill_prompt}"
+        if context:
+            instruction += f"\n\nAdditional context:\n{context}"
+        return self.dispatch(agent_name, instruction, lane=lane)
+
+    def heartbeat(self, agent_name: str) -> str:
+        """Run a heartbeat check for a sub-agent."""
+        defn = self._agents.get(agent_name)
+        if defn is None:
+            raise KeyError(f"unknown sub-agent: {agent_name}")
+        if not defn.heartbeat_config:
+            return "HEARTBEAT_OK"
+        return self.dispatch(agent_name, defn.heartbeat_config)
+
+    def list_agents(self) -> list[str]:
+        return list(self._agents.keys())
+
+    def get_agent(self, name: str) -> SubAgentDefinition | None:
+        return self._agents.get(name)
+
+    def list_skills(self, agent_name: str) -> list[str]:
+        defn = self._agents.get(agent_name)
+        if defn is None:
+            return []
+        return list(defn.skills.keys())
+
+    @staticmethod
+    def _build_system_prompt(defn: SubAgentDefinition) -> str:
+        parts = [defn.soul]
+        if defn.user_context:
+            parts.append(f"\n\n## User Context\n\n{defn.user_context}")
+        return "\n".join(parts)
 
 
 def _validate_branch_name(name: str) -> None:
