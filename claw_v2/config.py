@@ -107,7 +107,7 @@ class AppConfig:
             daily_token_budget=float(os.getenv("DAILY_TOKEN_BUDGET", "10.00")),
             workspace_root=Path(os.getenv("WORKSPACE_ROOT", str(cwd))),
             agent_state_root=Path(os.getenv("AGENT_STATE_ROOT", str(home / ".claw" / "agents"))),
-            agent_definitions_root=Path(os.getenv("AGENT_DEFINITIONS_ROOT", str(Path(__file__).resolve().parent.parent / "agents"))),
+            agent_definitions_root=Path(os.getenv("AGENT_DEFINITIONS_ROOT", str(cwd / "agents"))),
             eval_artifacts_root=Path(os.getenv("EVAL_ARTIFACTS_ROOT", str(home / ".claw" / "evals"))),
             eval_on_self_improve=_env_bool("EVAL_ON_SELF_IMPROVE", True),
             use_compaction=_env_bool("USE_COMPACTION", True),

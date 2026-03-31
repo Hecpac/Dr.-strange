@@ -53,7 +53,6 @@ def _computer_use_lock():
     finally:
         try:
             fcntl.flock(f, fcntl.LOCK_UN)
-            LOCK_PATH.unlink(missing_ok=True)
         finally:
             f.close()
 
@@ -81,10 +80,13 @@ def _hide_terminal_windows() -> list[str]:
             ["osascript", "-e", script],
             capture_output=True, text=True, timeout=5,
         )
+        if result.returncode != 0:
+            raise RuntimeError(f"osascript failed (exit {result.returncode}): {result.stderr.strip()}")
         return [a.strip() for a in result.stdout.strip().split(",") if a.strip()]
-    except Exception:
-        logger.warning("Failed to hide terminal windows")
-        return []
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"Failed to hide terminal windows: {exc}") from exc
 
 
 def _restore_terminal_windows(app_names: list[str]) -> None:
