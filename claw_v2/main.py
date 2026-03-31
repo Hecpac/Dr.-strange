@@ -32,6 +32,7 @@ from claw_v2.pipeline import PipelineService
 from claw_v2.computer import ComputerUseService, BrowserUseService
 from claw_v2.coordinator import CoordinatorService
 from claw_v2.dream import AutoDreamService
+from claw_v2.buddy import BuddyService
 from claw_v2.kairos import KairosService
 from claw_v2.terminal_bridge import TerminalBridgeService
 from claw_v2.types import LLMResponse
@@ -51,6 +52,7 @@ class ClawRuntime:
     sub_agents: SubAgentService
     coordinator: CoordinatorService
     kairos: KairosService
+    buddy: BuddyService
     heartbeat: HeartbeatService
     scheduler: CronScheduler
     daemon: ClawDaemon
@@ -163,6 +165,7 @@ def build_runtime(
     )
     heartbeat = HeartbeatService(metrics=metrics, approvals=approvals, agent_store=agent_store, observe=observe)
     kairos = KairosService(router=router, heartbeat=heartbeat, observe=observe)
+    buddy = BuddyService(config.db_path.parent / "buddy.db")
 
     def _self_improve_handler() -> None:
         """Daily self-improvement: run tests, then AutoResearch loop on all active agents."""
@@ -269,6 +272,7 @@ def build_runtime(
     scheduler = CronScheduler(persistence=memory)
     scheduler.register(ScheduledJob(name="heartbeat", interval_seconds=config.heartbeat_interval, handler=heartbeat.emit))
     scheduler.register(ScheduledJob(name="kairos_tick", interval_seconds=1800, handler=kairos.tick))
+    scheduler.register(ScheduledJob(name="buddy_tick", interval_seconds=600, handler=lambda: buddy.tick(observe)))
     if config.eval_on_self_improve:
         scheduler.register(ScheduledJob(name="self_improve", interval_seconds=86400, handler=_self_improve_handler))
     scheduler.register(ScheduledJob(name="morning_brief", interval_seconds=86400, handler=_morning_brief_handler))
@@ -317,6 +321,7 @@ def build_runtime(
     )
     bot.pipeline = pipeline
     bot.sub_agents = sub_agents
+    bot.buddy = buddy
     scheduler.register(
         ScheduledJob(name="pipeline_poll", interval_seconds=300, handler=pipeline.poll_actionable)
     )
@@ -365,6 +370,7 @@ def build_runtime(
         sub_agents=sub_agents,
         coordinator=coordinator,
         kairos=kairos,
+        buddy=buddy,
         heartbeat=heartbeat,
         scheduler=scheduler,
         daemon=daemon,

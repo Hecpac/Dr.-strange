@@ -234,6 +234,17 @@ class BotService:
             if len(parts) != 2:
                 return "usage: /action_abort <approval_id>"
             return self._action_abort_response(parts[1])
+        if stripped == "/buddy hatch":
+            return self._buddy_hatch_response(user_id)
+        if stripped == "/buddy stats":
+            return self._buddy_stats_response(user_id)
+        if stripped.startswith("/buddy rename "):
+            parts = stripped.split(maxsplit=2)
+            if len(parts) != 3:
+                return "usage: /buddy rename <name>"
+            return self._buddy_rename_response(user_id, parts[2])
+        if stripped == "/buddy" or stripped == "/buddy card":
+            return self._buddy_card_response(user_id)
         shortcut_response = self._maybe_handle_shortcut(stripped, session_id=session_id)
         if shortcut_response is not None:
             return shortcut_response
@@ -903,6 +914,29 @@ class BotService:
                     session.status = "aborted"
             return "computer action rejected"
         return "action rejected"
+
+    # -- Buddy handlers --------------------------------------------------------
+
+    def _buddy_hatch_response(self, user_id: str) -> str:
+        if not hasattr(self, "buddy") or self.buddy is None:
+            return "buddy service not available"
+        state = self.buddy.hatch(user_id)
+        return f"{state.species_emoji} Hatched **{state.species_name}** ({state.rarity})!\n{self.buddy.show_card(user_id)}"
+
+    def _buddy_card_response(self, user_id: str) -> str:
+        if not hasattr(self, "buddy") or self.buddy is None:
+            return "buddy service not available"
+        return self.buddy.show_card(user_id)
+
+    def _buddy_stats_response(self, user_id: str) -> str:
+        if not hasattr(self, "buddy") or self.buddy is None:
+            return "buddy service not available"
+        return self.buddy.show_stats(user_id)
+
+    def _buddy_rename_response(self, user_id: str, new_name: str) -> str:
+        if not hasattr(self, "buddy") or self.buddy is None:
+            return "buddy service not available"
+        return self.buddy.rename(user_id, new_name)
 
     def _computer_abort_response(self, session_id: str) -> str:
         session = self._computer_sessions.pop(session_id, None)
