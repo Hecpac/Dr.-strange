@@ -623,17 +623,37 @@ class BotService:
             normalized_url = _normalize_url(url)
         except ValueError as exc:
             return str(exc)
-        if self.browser is None:
-            return "browser service unavailable"
+        # Strategy 1: Playwright (headless browser)
+        if self.browser is not None:
+            try:
+                result = self.browser.browse(normalized_url)
+                return json.dumps({
+                    "url": result.url,
+                    "title": result.title,
+                    "content": result.content[:4000],
+                }, indent=2)
+            except Exception:
+                pass  # fall through to next strategy
+        # Strategy 2: Firecrawl CLI (handles JS-rendered pages)
         try:
-            result = self.browser.browse(normalized_url)
-            return json.dumps({
-                "url": result.url,
-                "title": result.title,
-                "content": result.content[:4000],
-            }, indent=2)
-        except Exception as exc:
-            return f"browse error: {exc}"
+            import subprocess as _sp
+            fc = _sp.run(
+                ["firecrawl", "scrape", normalized_url],
+                capture_output=True, text=True, timeout=30, check=False,
+            )
+            if fc.returncode == 0 and fc.stdout.strip() and "do not support" not in fc.stdout:
+                content = fc.stdout.strip()[:4000]
+                return json.dumps({"url": normalized_url, "title": "(firecrawl)", "content": content}, indent=2)
+        except (FileNotFoundError, _sp.TimeoutExpired):
+            pass
+        # Strategy 3: Chrome CDP (user's real browser session)
+        if self.browser is not None:
+            try:
+                result = self.browser.chrome_navigate(normalized_url)
+                return f"**{result.title}** ({result.url})\n\n{result.content[:4000]}"
+            except Exception:
+                pass
+        return f"browse error: all strategies failed for {normalized_url}"
 
     def _tokens_info_response(self, session_id: str) -> str:
         message_count = self.brain.memory.count_messages(session_id)
