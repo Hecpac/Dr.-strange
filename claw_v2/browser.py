@@ -210,7 +210,8 @@ console.log(JSON.stringify({{
             context = browser.contexts[0]
             page = _select_cdp_page(context, page_index=page_index, page_title=page_title, page_url_pattern=page_url_pattern)
             page.goto(url)
-            result = BrowseResult(url=page.url, title=page.title(), content=page.content()[:4000])
+            text = page.inner_text("body")[:4000] if page.query_selector("body") else ""
+            result = BrowseResult(url=page.url, title=page.title(), content=text)
             browser.close()
         return result
 
@@ -229,10 +230,11 @@ console.log(JSON.stringify({{
             page = _select_cdp_page(context, page_index=page_index, page_title=page_title, page_url_pattern=page_url_pattern)
             screenshot_path = f"/tmp/claw-{name}"
             page.screenshot(path=screenshot_path)
+            text = page.inner_text("body")[:4000] if page.query_selector("body") else ""
             result = BrowseResult(
                 url=page.url,
                 title=page.title(),
-                content=page.content()[:4000],
+                content=text,
                 screenshot_path=screenshot_path,
             )
             browser.close()
