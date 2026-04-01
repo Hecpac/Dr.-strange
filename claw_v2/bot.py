@@ -106,6 +106,7 @@ class BotService:
         computer_client_factory: Callable[[], Any] | None = None,
         computer_model: str = _DEFAULT_COMPUTER_MODEL,
         computer_system_prompt: str | None = None,
+        observe: object | None = None,
     ) -> None:
         self.brain = brain
         self.auto_research = auto_research
@@ -125,6 +126,7 @@ class BotService:
         self.computer_client_factory = computer_client_factory
         self.computer_model = computer_model
         self.computer_system_prompt = computer_system_prompt or _COMPUTER_SYSTEM_PROMPT
+        self.observe = observe
         self._computer_sessions: dict[str, Any] = {}
         self._computer_client: Any | None = None
 
@@ -849,6 +851,8 @@ class BotService:
         except Exception as exc:
             self._computer_sessions.pop(session_id, None)
             logger.exception("computer use failed for %s", session_id)
+            if self.observe is not None:
+                self.observe.emit("error", payload={"source": "computer_use", "error": str(exc)[:200]})
             return f"computer use error: {exc}"
 
         if session.status == "awaiting_approval":

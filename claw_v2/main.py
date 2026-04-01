@@ -271,7 +271,7 @@ def build_runtime(
 
     scheduler = CronScheduler(persistence=memory)
     scheduler.register(ScheduledJob(name="heartbeat", interval_seconds=config.heartbeat_interval, handler=heartbeat.emit))
-    scheduler.register(ScheduledJob(name="kairos_tick", interval_seconds=1800, handler=kairos.tick))
+    scheduler.register(ScheduledJob(name="kairos_tick", interval_seconds=600, handler=kairos.tick))
     scheduler.register(ScheduledJob(name="buddy_tick", interval_seconds=600, handler=lambda: buddy.tick(observe)))
     if config.eval_on_self_improve:
         scheduler.register(ScheduledJob(name="self_improve", interval_seconds=86400, handler=_self_improve_handler))
@@ -303,6 +303,7 @@ def build_runtime(
         terminal_bridge=terminal_bridge,
         computer=computer,
         browser_use=browser_use,
+        observe=observe,
     )
     if config.linear_api_key:
         from claw_v2.linear import build_linear_api_caller
