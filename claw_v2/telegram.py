@@ -105,6 +105,20 @@ class TelegramTransport:
         await self._app.start()
         await self._app.updater.start_polling()
         await self._set_commands()
+        await self._notify_startup()
+
+    async def _notify_startup(self) -> None:
+        if self._allowed_user_id is None or self._app is None:
+            return
+        try:
+            from datetime import datetime
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            await self._app.bot.send_message(
+                chat_id=int(self._allowed_user_id),
+                text=f"Claw online. {now}",
+            )
+        except Exception:
+            pass
 
     async def stop(self) -> None:
         if self._app is None:
