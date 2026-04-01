@@ -627,11 +627,13 @@ class BotService:
         if self.browser is not None:
             try:
                 result = self.browser.browse(normalized_url)
-                return json.dumps({
-                    "url": result.url,
-                    "title": result.title,
-                    "content": result.content[:4000],
-                }, indent=2)
+                content = result.content[:4000] if result.content else ""
+                if not _is_login_wall(content):
+                    return json.dumps({
+                        "url": result.url,
+                        "title": result.title,
+                        "content": content,
+                    }, indent=2)
             except Exception:
                 pass  # fall through to next strategy
         # Strategy 2: Firecrawl CLI (handles JS-rendered pages)
@@ -1088,6 +1090,24 @@ def _looks_like_standalone_url(text: str, url: str) -> bool:
     remainder = text.replace(url, " ", 1)
     remainder = re.sub(r"[\s`\"'“”‘’<>()\[\]{}.,;:!?-]+", "", remainder)
     return remainder == ""
+
+
+_LOGIN_WALL_SIGNALS = [
+    "log in\nsign up",
+    "sign in\nsign up",
+    "create an account",
+    "don't miss what's happening",
+    "join today",
+    "this page is not available",
+]
+
+
+def _is_login_wall(content: str) -> bool:
+    """Detect pages that returned a login/signup wall instead of real content."""
+    if not content or len(content.strip()) < 80:
+        return True
+    lower = content.lower()
+    return any(signal in lower for signal in _LOGIN_WALL_SIGNALS)
 
 
 def _normalize_url(value: str) -> str:
