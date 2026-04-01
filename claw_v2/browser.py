@@ -244,11 +244,11 @@ console.log(JSON.stringify({{
         script = f"""
 const page = await browser.getPage("{safe_page}");
 await page.goto("{safe_url}");
-const snapshot = await page.snapshotForAI();
+const text = await page.innerText("body").catch(() => "");
 console.log(JSON.stringify({{
   url: page.url(),
   title: await page.title(),
-  content: snapshot.full
+  content: text.substring(0, 4000)
 }}));
 """
         result = self.run_script(script)
