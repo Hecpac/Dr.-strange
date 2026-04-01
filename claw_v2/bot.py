@@ -813,6 +813,15 @@ class BotService:
         ).content
 
     def _computer_action_response(self, instruction: str, session_id: str) -> str:
+        # Try browser_use (OpenAI) first — no Anthropic API credits needed
+        if self.browser_use is not None:
+            try:
+                import asyncio
+                result = asyncio.run(self.browser_use.run_task(instruction))
+                return result
+            except Exception as exc:
+                logger.warning("browser_use fallback failed: %s", exc)
+
         from claw_v2.computer import ComputerSession
 
         active = self._computer_sessions.get(session_id)
