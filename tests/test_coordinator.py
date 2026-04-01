@@ -165,5 +165,52 @@ class WorkerTaskTests(unittest.TestCase):
         self.assertEqual(task.lane, "worker")
 
 
+class AgentAwareTests(unittest.TestCase):
+    def test_worker_task_accepts_assigned_agent(self) -> None:
+        task = WorkerTask(name="t1", instruction="fix bug", assigned_agent="hex")
+        self.assertEqual(task.assigned_agent, "hex")
+
+    def test_worker_task_default_no_agent(self) -> None:
+        task = WorkerTask(name="t1", instruction="fix bug")
+        self.assertIsNone(task.assigned_agent)
+
+    def test_execute_worker_uses_agent_provider_and_model(self) -> None:
+        registry = {
+            "hex": {"provider": "openai", "model": "gpt-5.3-codex", "soul_text": "You are Hex.", "domains": [], "skills": []},
+        }
+        svc, router, _, _ = _make_service(agent_registry=registry)
+        router.ask.return_value = MagicMock(content="fixed")
+        task = WorkerTask(name="fix", instruction="fix the bug", assigned_agent="hex")
+        result = svc._execute_worker(task)
+        self.assertEqual(result.content, "fixed")
+        call_kwargs = router.ask.call_args
+        self.assertEqual(call_kwargs.kwargs.get("provider"), "openai")
+        self.assertEqual(call_kwargs.kwargs.get("model"), "gpt-5.3-codex")
+        self.assertEqual(call_kwargs.kwargs.get("system_prompt"), "You are Hex.")
+
+    def test_execute_worker_without_agent_uses_defaults(self) -> None:
+        registry = {"hex": {"provider": "openai", "model": "gpt-5.3-codex", "domains": [], "skills": []}}
+        svc, router, _, _ = _make_service(agent_registry=registry)
+        router.ask.return_value = MagicMock(content="ok")
+        task = WorkerTask(name="t1", instruction="do something")
+        svc._execute_worker(task)
+        call_kwargs = router.ask.call_args
+        self.assertNotIn("provider", call_kwargs.kwargs)
+        self.assertNotIn("model", call_kwargs.kwargs)
+
+    def test_synthesize_includes_agent_context(self) -> None:
+        registry = {
+            "hex": {"provider": "openai", "model": "gpt-5.3-codex", "domains": ["code"], "skills": ["bug-triage"]},
+        }
+        svc, router, _, _ = _make_service(agent_registry=registry)
+        router.ask.return_value = MagicMock(content="plan here")
+        from claw_v2.coordinator import WorkerResult
+        findings = [WorkerResult(task_name="r1", content="found bug", duration_seconds=1.0)]
+        result = svc._synthesize("fix bugs", findings)
+        prompt_arg = router.ask.call_args.args[0]
+        self.assertIn("hex", prompt_arg)
+        self.assertIn("code", prompt_arg)
+
+
 if __name__ == "__main__":
     unittest.main()

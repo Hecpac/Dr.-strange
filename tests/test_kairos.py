@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import json
+import tempfile
 import time
 import unittest
 from dataclasses import dataclass
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from claw_v2.bus import AgentBus, _new_message
 from claw_v2.kairos import KairosService, TickDecision, KairosState
 
 
@@ -190,6 +194,62 @@ class StateTests(unittest.TestCase):
         before = time.time()
         svc.tick()
         self.assertGreaterEqual(svc.state.last_tick_at, before)
+
+
+class ExecuteActionTests(unittest.TestCase):
+    def test_dispatch_to_agent_sends_bus_message(self) -> None:
+        tmpdir = Path(tempfile.mkdtemp())
+        bus = AgentBus(bus_root=tmpdir)
+        svc, router, heartbeat, observe = _make_service(bus=bus, approvals=MagicMock())
+        decision = TickDecision(
+            action="dispatch_to_agent",
+            reason="test failure detected",
+            detail=json.dumps({"to_agent": "hex", "topic": "test_failure", "payload": {"file": "bot.py"}}),
+        )
+        result = svc._execute(decision, budget=10.0)
+        self.assertEqual(result.action, "dispatch_to_agent")
+        self.assertEqual(result.error, "")
+        self.assertEqual(bus.pending_count("hex"), 1)
+
+    def test_pause_agent_emits_event(self) -> None:
+        svc, _, _, observe = _make_service(bus=MagicMock(), approvals=MagicMock())
+        decision = TickDecision(
+            action="pause_agent",
+            reason="budget exceeded",
+            detail=json.dumps({"agent_name": "lux", "reason": "cost limit"}),
+        )
+        result = svc._execute(decision, budget=10.0)
+        self.assertEqual(result.action, "pause_agent")
+        observe.emit.assert_any_call("agent_paused", payload={"agent_name": "lux", "reason": "cost limit"})
+
+    def test_unknown_action_returns_error(self) -> None:
+        svc, _, _, observe = _make_service(bus=MagicMock(), approvals=MagicMock())
+        decision = TickDecision(action="unknown_thing", reason="test")
+        result = svc._execute(decision, budget=10.0)
+        self.assertEqual(result.action, "unknown_thing")
+        self.assertIn("unknown", result.error)
+
+
+class EnhancedContextTests(unittest.TestCase):
+    def test_context_includes_urgent_bus_messages(self) -> None:
+        tmpdir = Path(tempfile.mkdtemp())
+        bus = AgentBus(bus_root=tmpdir)
+        msg = _new_message(from_agent="rook", to_agent="hex", intent="escalate", topic="fire", payload={}, priority="urgent")
+        bus.send(msg)
+        svc, _, _, _ = _make_service(bus=bus)
+        ctx = svc._gather_context()
+        self.assertIn("Urgent bus messages: 1", ctx)
+        self.assertIn("fire", ctx)
+
+    def test_context_includes_expired_requests(self) -> None:
+        tmpdir = Path(tempfile.mkdtemp())
+        bus = AgentBus(bus_root=tmpdir)
+        msg = _new_message(from_agent="rook", to_agent="hex", intent="request", topic="help", payload={}, ttl_seconds=1)
+        msg.created_at = time.time() - 10
+        bus.send(msg)
+        svc, _, _, _ = _make_service(bus=bus)
+        ctx = svc._gather_context()
+        self.assertIn("Expired requests: 1", ctx)
 
 
 if __name__ == "__main__":

@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS facts (
     valid_from TEXT,
     valid_until TEXT,
     conflict_flag INTEGER NOT NULL DEFAULT 0,
+    agent_name TEXT NOT NULL DEFAULT 'system',
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -70,6 +71,11 @@ def _simple_embedding(text: str, dim: int = 128) -> list[float]:
     return [x / norm for x in vec]
 
 
+_MIGRATION_ADD_AGENT_NAME = """
+ALTER TABLE facts ADD COLUMN agent_name TEXT NOT NULL DEFAULT 'system';
+"""
+
+
 class MemoryStore:
     def __init__(self, db_path: Path | str) -> None:
         self.db_path = Path(db_path)
@@ -77,7 +83,18 @@ class MemoryStore:
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(SCHEMA)
+        self._migrate()
         self._lock = threading.Lock()
+
+    def _migrate(self) -> None:
+        cursor = self._conn.execute("PRAGMA table_info(facts)")
+        columns = {row[1] for row in cursor.fetchall()}
+        if "agent_name" not in columns:
+            try:
+                self._conn.execute(_MIGRATION_ADD_AGENT_NAME)
+                self._conn.commit()
+            except sqlite3.OperationalError:
+                pass
 
     def store_message(self, session_id: str, role: str, content: str) -> None:
         with self._lock:
@@ -122,13 +139,14 @@ class MemoryStore:
         entity_tags: Iterable[str] = (),
         valid_from: str | None = None,
         valid_until: str | None = None,
+        agent_name: str = "system",
     ) -> None:
         with self._lock:
             self._conn.execute(
                 """
                 INSERT INTO facts (
-                    key, value, source, source_trust, confidence, entity_tags, valid_from, valid_until
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    key, value, source, source_trust, confidence, entity_tags, valid_from, valid_until, agent_name
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     key,
@@ -139,21 +157,34 @@ class MemoryStore:
                     json.dumps(list(entity_tags)),
                     valid_from,
                     valid_until,
+                    agent_name,
                 ),
             )
             self._conn.commit()
 
-    def search_facts(self, query: str, limit: int = 10) -> list[dict]:
-        rows = self._conn.execute(
-            """
-            SELECT key, value, source, source_trust, confidence, entity_tags
-            FROM facts
-            WHERE key LIKE ? OR value LIKE ?
-            ORDER BY confidence DESC, id DESC
-            LIMIT ?
-            """,
-            (f"%{query}%", f"%{query}%", limit),
-        ).fetchall()
+    def search_facts(self, query: str, limit: int = 10, agent_name: str | None = None) -> list[dict]:
+        if agent_name:
+            rows = self._conn.execute(
+                """
+                SELECT key, value, source, source_trust, confidence, entity_tags, agent_name
+                FROM facts
+                WHERE (key LIKE ? OR value LIKE ?) AND agent_name = ?
+                ORDER BY confidence DESC, id DESC
+                LIMIT ?
+                """,
+                (f"%{query}%", f"%{query}%", agent_name, limit),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                """
+                SELECT key, value, source, source_trust, confidence, entity_tags, agent_name
+                FROM facts
+                WHERE key LIKE ? OR value LIKE ?
+                ORDER BY confidence DESC, id DESC
+                LIMIT ?
+                """,
+                (f"%{query}%", f"%{query}%", limit),
+            ).fetchall()
         return [dict(row) for row in rows]
 
     def get_profile_facts(self) -> list[dict]:

@@ -52,12 +52,16 @@ class KairosService:
         router: Any,
         heartbeat: Any,
         observe: Any,
+        bus: Any | None = None,
+        approvals: Any | None = None,
         action_budget: float = DEFAULT_ACTION_BUDGET,
         brief: bool = True,
     ) -> None:
         self.router = router
         self.heartbeat = heartbeat
         self.observe = observe
+        self.bus = bus
+        self.approvals = approvals
         self.action_budget = action_budget
         self.brief = brief
         self.state = KairosState()
@@ -143,6 +147,31 @@ class KairosService:
         except Exception:
             parts.append("Recent events: unavailable")
 
+        # Bus: urgent messages and expired requests
+        if self.bus is not None:
+            try:
+                urgent = self.bus.pending_urgent()
+                if urgent:
+                    parts.append(f"Urgent bus messages: {len(urgent)}")
+                    for msg in urgent[:3]:
+                        parts.append(f"  [{msg.from_agent}->{msg.to_agent}] {msg.topic}: {str(msg.payload)[:100]}")
+                expired = self.bus.scan_expired_requests()
+                if expired:
+                    parts.append(f"Expired requests: {len(expired)}")
+                    for msg in expired[:3]:
+                        parts.append(f"  [{msg.from_agent}->{msg.to_agent}] {msg.topic}")
+            except Exception:
+                parts.append("Bus: unavailable")
+
+        # Cost per agent
+        try:
+            costs = self.observe.cost_per_agent_today()
+            if costs:
+                cost_lines = [f"  {name}: ${cost:.2f}" for name, cost in costs.items()]
+                parts.append("Cost today:\n" + "\n".join(cost_lines))
+        except Exception:
+            pass
+
         parts.append(f"Ticks so far: {self.state.ticks}, actions taken: {self.state.actions_taken}")
         return "\n".join(parts)
 
@@ -193,17 +222,68 @@ class KairosService:
             return TickDecision(action="none")
 
     def _execute(self, decision: TickDecision, *, budget: float) -> TickDecision:
-        """Execute the decided action within the remaining budget.
-
-        Currently logs the decision. Subclasses or future versions
-        can dispatch to tools (notifications, PR subscriptions, etc.).
-        """
+        """Execute the decided action within the remaining budget."""
         start = time.time()
-        # For now, KAIROS actions are advisory — logged and emitted.
-        # Future: dispatch to actual tool handlers based on decision.action
-        logger.info(
-            "KAIROS action=%s reason=%s detail=%s",
-            decision.action, decision.reason, decision.detail,
-        )
+        handlers = {
+            "notify_user": self._handle_notify_user,
+            "dispatch_to_agent": self._handle_dispatch_to_agent,
+            "approve_pending": self._handle_approve_pending,
+            "run_skill": self._handle_run_skill,
+            "pause_agent": self._handle_pause_agent,
+            "escalate_to_human": self._handle_escalate_to_human,
+        }
+        handler = handlers.get(decision.action)
+        if handler is None:
+            decision.error = f"unknown action: {decision.action}"
+            logger.warning("KAIROS unknown action: %s", decision.action)
+        else:
+            try:
+                handler(decision)
+            except Exception as exc:
+                decision.error = str(exc)
+                logger.exception("KAIROS action %s failed", decision.action)
         decision.duration_seconds = time.time() - start
         return decision
+
+    def _handle_notify_user(self, decision: TickDecision) -> None:
+        logger.info("KAIROS notify_user: %s", decision.detail)
+        self.observe.emit("kairos_notify_user", payload={"message": decision.detail})
+
+    def _handle_dispatch_to_agent(self, decision: TickDecision) -> None:
+        if self.bus is None:
+            raise RuntimeError("Bus not configured")
+        from claw_v2.bus import _new_message
+        data = json.loads(decision.detail)
+        msg = _new_message(
+            from_agent="kairos",
+            to_agent=data["to_agent"],
+            intent="notify",
+            topic=data["topic"],
+            payload=data.get("payload", {}),
+            priority="normal",
+        )
+        self.bus.send(msg)
+
+    def _handle_approve_pending(self, decision: TickDecision) -> None:
+        if self.approvals is None:
+            raise RuntimeError("Approvals not configured")
+        data = json.loads(decision.detail)
+        approval_id = data["approval_id"]
+        self.approvals.approve(approval_id)
+        self.observe.emit("kairos_auto_approved", payload={"approval_id": approval_id})
+
+    def _handle_run_skill(self, decision: TickDecision) -> None:
+        data = json.loads(decision.detail)
+        logger.info("KAIROS run_skill: agent=%s skill=%s", data["agent"], data["skill"])
+        self.observe.emit("kairos_run_skill", payload=data)
+
+    def _handle_pause_agent(self, decision: TickDecision) -> None:
+        data = json.loads(decision.detail)
+        agent_name = data["agent_name"]
+        reason = data["reason"]
+        self.observe.emit("agent_paused", payload={"agent_name": agent_name, "reason": reason})
+        logger.info("KAIROS paused agent %s: %s", agent_name, reason)
+
+    def _handle_escalate_to_human(self, decision: TickDecision) -> None:
+        logger.info("KAIROS escalate: %s", decision.detail)
+        self.observe.emit("kairos_escalate", payload={"message": decision.detail})

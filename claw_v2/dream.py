@@ -34,6 +34,9 @@ class AutoDreamService:
         memory: Any,
         observe: Any,
         router: Any,
+        agent_name: str = "system",
+        shared_memory_root: Path | None = None,
+        import_tags: list[str] | None = None,
         min_hours_between_dreams: float = 24.0,
         min_sessions_between_dreams: int = 5,
         max_facts: int = 200,
@@ -42,6 +45,9 @@ class AutoDreamService:
         self.memory = memory
         self.observe = observe
         self.router = router
+        self.agent_name = agent_name
+        self.shared_memory_root = shared_memory_root or Path.home() / ".claw" / "shared-memory"
+        self.import_tags = import_tags or []
         self.min_hours_between_dreams = min_hours_between_dreams
         self.min_sessions_between_dreams = min_sessions_between_dreams
         self.max_facts = max_facts
@@ -63,7 +69,7 @@ class AutoDreamService:
         return False, ""
 
     def run(self) -> DreamResult:
-        """Execute the full dream cycle: orient → gather → consolidate → prune."""
+        """Execute the full dream cycle: import → orient → gather → consolidate → export → prune."""
         should, reason = self.should_dream()
         if not should:
             return DreamResult(pruned=0, consolidated=0, duration_seconds=0, skipped=True, reason="conditions_not_met")
@@ -73,9 +79,12 @@ class AutoDreamService:
 
         start = time.time()
         try:
+            cross_agent_facts = self._import_shared()
             existing_facts = self._orient()
+            existing_facts.extend(cross_agent_facts)
             new_signals = self._gather_signal()
             consolidated = self._consolidate(existing_facts, new_signals)
+            self._export_shared(existing_facts[:20])
             pruned = self._prune()
 
             self._last_dream_at = time.time()
@@ -87,8 +96,10 @@ class AutoDreamService:
                 duration_seconds=time.time() - start,
             )
             self.observe.emit("auto_dream_complete", payload={
+                "agent_name": self.agent_name,
                 "pruned": result.pruned,
                 "consolidated": result.consolidated,
+                "imported": len(cross_agent_facts),
                 "duration": result.duration_seconds,
             })
             return result
@@ -97,6 +108,54 @@ class AutoDreamService:
             return DreamResult(pruned=0, consolidated=0, duration_seconds=time.time() - start, skipped=True, reason="error")
         finally:
             _release_lock()
+
+    def _export_shared(self, facts: list[dict]) -> int:
+        """Post-consolidation: write high-confidence facts to shared-memory exports."""
+        import json as _json
+        self.shared_memory_root.mkdir(parents=True, exist_ok=True)
+        export_path = self.shared_memory_root / f"{self.agent_name}_exports.jsonl"
+        count = 0
+        with export_path.open("a", encoding="utf-8") as f:
+            for fact in facts:
+                if fact.get("confidence", 0) >= 0.6:
+                    entry = {
+                        "key": fact.get("key", ""),
+                        "value": fact.get("value", ""),
+                        "source_agent": self.agent_name,
+                        "confidence": fact.get("confidence", 0),
+                        "timestamp": time.time(),
+                        "tags": list(fact.get("entity_tags", [])) if isinstance(fact.get("entity_tags"), (list, tuple)) else [],
+                    }
+                    f.write(_json.dumps(entry, ensure_ascii=False) + "\n")
+                    count += 1
+        return count
+
+    def _import_shared(self) -> list[dict]:
+        """Pre-orient: read exports from other agents, filtered by tags."""
+        import json as _json
+        if not self.shared_memory_root.exists():
+            return []
+        imported: list[dict] = []
+        existing_keys = {f.get("key") for f in self.memory.search_facts("", limit=self.max_facts * 2, agent_name=self.agent_name)}
+        for export_file in self.shared_memory_root.glob("*_exports.jsonl"):
+            if export_file.stem.replace("_exports", "") == self.agent_name:
+                continue
+            for line in export_file.read_text(encoding="utf-8").strip().split("\n"):
+                if not line.strip():
+                    continue
+                try:
+                    entry = _json.loads(line)
+                except (ValueError, _json.JSONDecodeError):
+                    continue
+                tags = set(entry.get("tags", []))
+                if "personal" in tags and self.agent_name != "alma":
+                    continue
+                if self.import_tags and not tags.intersection(self.import_tags):
+                    continue
+                if entry.get("key") in existing_keys:
+                    continue
+                imported.append(entry)
+        return imported
 
     def _orient(self) -> list[dict]:
         """Phase 1: Read existing memory, list all facts."""

@@ -69,3 +69,7 @@ If you change this file, tell Hector — it's your soul, and he should know.
 ---
 
 _This file is yours to evolve. As you learn who you are, update it._
+
+## Bus Topics
+- **Publishes:** `health_critical`, `cron_failure`, `security_alert`, `deploy_complete`
+- **Subscribes:** `pr_ready`, `context_bridge`

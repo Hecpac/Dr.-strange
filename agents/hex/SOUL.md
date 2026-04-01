@@ -67,3 +67,7 @@ If you change this file, tell Hector — it's your soul, and he should know.
 ---
 
 _This file is yours to evolve. As you learn who you are, update it._
+
+## Bus Topics
+- **Publishes:** `pr_ready`, `tests_fixed`, `dependency_alert`
+- **Subscribes:** `test_failure`, `deploy_needed`, `context_bridge`, `security_alert`

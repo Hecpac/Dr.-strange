@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from claw_v2.dream import AutoDreamService, DreamResult
@@ -185,6 +186,87 @@ class RunTests(unittest.TestCase):
 
         svc.run()
         self.assertEqual(svc._sessions_since_dream, 0)
+
+
+class ExportSharedTests(unittest.TestCase):
+    def test_exports_high_confidence_facts(self) -> None:
+        import json
+        import tempfile
+        svc, memory, observe, _ = _make_service()
+        svc.agent_name = "rook"
+        svc.shared_memory_root = Path(tempfile.mkdtemp())
+        facts = [
+            {"key": "cron.conflict", "value": "SEO vs health", "confidence": 0.8, "source": "rook"},
+            {"key": "low.fact", "value": "meh", "confidence": 0.3, "source": "rook"},
+        ]
+        count = svc._export_shared(facts)
+        self.assertEqual(count, 1)
+        export_file = svc.shared_memory_root / "rook_exports.jsonl"
+        self.assertTrue(export_file.exists())
+        lines = export_file.read_text().strip().split("\n")
+        self.assertEqual(len(lines), 1)
+        data = json.loads(lines[0])
+        self.assertEqual(data["key"], "cron.conflict")
+        self.assertEqual(data["source_agent"], "rook")
+
+
+class ImportSharedTests(unittest.TestCase):
+    def test_imports_matching_tags(self) -> None:
+        import json
+        import tempfile
+        shared_root = Path(tempfile.mkdtemp())
+        export = {"key": "cron.issue", "value": "conflict", "source_agent": "rook", "confidence": 0.8, "timestamp": 1000, "tags": ["infra", "cron"]}
+        (shared_root / "rook_exports.jsonl").write_text(json.dumps(export) + "\n")
+        svc, memory, _, _ = _make_service()
+        svc.agent_name = "hex"
+        svc.shared_memory_root = shared_root
+        svc.import_tags = ["infra", "cron", "code"]
+        memory.search_facts.return_value = []
+        imported = svc._import_shared()
+        self.assertEqual(len(imported), 1)
+        self.assertEqual(imported[0]["key"], "cron.issue")
+
+    def test_skips_personal_tags_for_non_alma(self) -> None:
+        import json
+        import tempfile
+        shared_root = Path(tempfile.mkdtemp())
+        export = {"key": "personal.pref", "value": "morning meetings", "source_agent": "alma", "confidence": 0.9, "timestamp": 1000, "tags": ["personal"]}
+        (shared_root / "alma_exports.jsonl").write_text(json.dumps(export) + "\n")
+        svc, memory, _, _ = _make_service()
+        svc.agent_name = "hex"
+        svc.shared_memory_root = shared_root
+        svc.import_tags = ["personal", "code"]
+        memory.search_facts.return_value = []
+        imported = svc._import_shared()
+        self.assertEqual(len(imported), 0)
+
+    def test_alma_can_import_personal(self) -> None:
+        import json
+        import tempfile
+        shared_root = Path(tempfile.mkdtemp())
+        export = {"key": "personal.pref", "value": "morning meetings", "source_agent": "rook", "confidence": 0.9, "timestamp": 1000, "tags": ["personal"]}
+        (shared_root / "rook_exports.jsonl").write_text(json.dumps(export) + "\n")
+        svc, memory, _, _ = _make_service()
+        svc.agent_name = "alma"
+        svc.shared_memory_root = shared_root
+        svc.import_tags = ["personal"]
+        memory.search_facts.return_value = []
+        imported = svc._import_shared()
+        self.assertEqual(len(imported), 1)
+
+    def test_skips_own_exports(self) -> None:
+        import json
+        import tempfile
+        shared_root = Path(tempfile.mkdtemp())
+        export = {"key": "self.fact", "value": "mine", "source_agent": "hex", "confidence": 0.9, "timestamp": 1000, "tags": ["code"]}
+        (shared_root / "hex_exports.jsonl").write_text(json.dumps(export) + "\n")
+        svc, memory, _, _ = _make_service()
+        svc.agent_name = "hex"
+        svc.shared_memory_root = shared_root
+        svc.import_tags = ["code"]
+        memory.search_facts.return_value = []
+        imported = svc._import_shared()
+        self.assertEqual(len(imported), 0)
 
 
 if __name__ == "__main__":

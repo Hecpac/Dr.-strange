@@ -18,6 +18,7 @@ class WorkerTask:
     name: str
     instruction: str
     lane: str = "research"
+    assigned_agent: str | None = None
 
 
 @dataclass(slots=True)
@@ -55,11 +56,13 @@ class CoordinatorService:
         observe: Any,
         scratch_root: Path | str = Path.home() / ".claw" / "scratch",
         max_workers: int = 4,
+        agent_registry: dict | None = None,
     ) -> None:
         self.router = router
         self.observe = observe
         self.scratch_root = Path(scratch_root)
         self.max_workers = max_workers
+        self.agent_registry = agent_registry or {}
 
     def run(
         self,
@@ -148,11 +151,13 @@ class CoordinatorService:
         """Execute a single worker task via the LLM router."""
         start = time.time()
         try:
-            response = self.router.ask(
-                task.instruction,
-                lane=task.lane,
-                evidence_pack={"coordinator_task": task.name},
-            )
+            kwargs: dict[str, Any] = {"lane": task.lane, "evidence_pack": {"coordinator_task": task.name}}
+            if task.assigned_agent and task.assigned_agent in self.agent_registry:
+                agent = self.agent_registry[task.assigned_agent]
+                kwargs["provider"] = agent["provider"]
+                kwargs["model"] = agent["model"]
+                kwargs["system_prompt"] = agent.get("soul_text", "")
+            response = self.router.ask(task.instruction, **kwargs)
             return WorkerResult(
                 task_name=task.name,
                 content=response.content,
@@ -174,13 +179,22 @@ class CoordinatorService:
             for r in research_results
         )
 
+        agent_context = ""
+        if self.agent_registry:
+            agent_lines = "\n".join(
+                f"- {name}: domains={caps.get('domains', [])}, model={caps.get('model', '?')}, skills={caps.get('skills', [])}"
+                for name, caps in self.agent_registry.items()
+            )
+            agent_context = f"\n\n## Available Agents\n{agent_lines}"
+
         prompt = (
             "You are a coordinator agent. Synthesize the research findings below "
             "into a clear, actionable plan.\n\n"
-            f"## Objective\n{objective}\n\n"
+            f"## Objective\n{objective}{agent_context}\n\n"
             f"## Research Findings\n{findings}\n\n"
             "Output a structured plan with numbered steps. "
-            "Flag any contradictions or gaps in the research."
+            "For each step, assign it to the most appropriate agent based on their domains and skills. "
+            "Use the format: **Step N [agent_name]:** description"
         )
 
         try:

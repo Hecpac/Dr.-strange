@@ -88,3 +88,7 @@ I can reference work from my siblings but not invoke them directly:
 ---
 
 _This file is yours to evolve. As you learn who you are, update it._
+
+## Bus Topics
+- **Publishes:** `user_request`, `context_bridge`, `reminder_due`
+- **Subscribes:** all topics (companion sees everything)

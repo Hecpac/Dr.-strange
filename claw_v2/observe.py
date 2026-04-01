@@ -81,6 +81,20 @@ class ObserveStream:
             ).fetchone()
         return float(row[0]) if row else 0.0
 
+    def cost_per_agent_today(self) -> dict[str, float]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT json_extract(payload, '$.agent_name') as agent,
+                       COALESCE(SUM(json_extract(payload, '$.cost_estimate')), 0.0) as cost
+                FROM observe_stream
+                WHERE event_type = 'llm_decision'
+                  AND timestamp >= date('now', 'start of day')
+                GROUP BY agent
+                """,
+            ).fetchall()
+        return {row[0]: row[1] for row in rows if row[0]}
+
     def recent_events(self, limit: int = 20) -> list[dict]:
         with self._lock:
             rows = self._conn.execute(
