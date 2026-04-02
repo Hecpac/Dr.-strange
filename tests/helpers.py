@@ -27,6 +27,7 @@ def make_config(root: Path) -> AppConfig:
         judge_model="gpt-5.4-mini",
         worker_effort="medium",
         brain_effort="high",
+        judge_effort="medium",
         max_budget_usd=0.5,
         db_path=root / "claw.db",
         heartbeat_interval=30,

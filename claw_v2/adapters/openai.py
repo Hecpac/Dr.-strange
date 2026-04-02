@@ -34,12 +34,15 @@ class OpenAIAdapter(ProviderAdapter):
         sdk = self._load_sdk()
         client = sdk.OpenAI(api_key=self._api_key) if self._api_key else sdk.OpenAI()
         try:
-            response = client.responses.create(
+            kwargs: dict = dict(
                 model=request.model,
                 input=build_effective_input(request),
                 instructions=build_effective_system_prompt(request),
                 previous_response_id=request.session_id,
             )
+            if request.effort and _supports_reasoning(request.model):
+                kwargs["reasoning"] = {"effort": request.effort}
+            response = client.responses.create(**kwargs)
         except Exception as exc:  # pragma: no cover - live SDK path
             raise AdapterError(f"OpenAI Responses request failed: {exc}") from exc
         return LLMResponse(
@@ -63,3 +66,10 @@ class OpenAIAdapter(ProviderAdapter):
             raise AdapterUnavailableError(
                 "openai is not installed. Install the 'openai' Python package to enable OpenAI provider support."
             ) from exc
+
+
+_REASONING_MODELS = {"o3", "o3-mini", "o4-mini", "gpt-5.4", "gpt-5.4-mini"}
+
+
+def _supports_reasoning(model: str) -> bool:
+    return any(model.startswith(prefix) for prefix in _REASONING_MODELS)
