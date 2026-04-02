@@ -217,10 +217,12 @@ class MemoryStore:
         context = "\n".join(sections)
         return context[:budget]
 
-    def get_provider_session(self, app_session_id: str, provider: str) -> str | None:
+    def get_provider_session(
+        self, app_session_id: str, provider: str, *, max_age_seconds: int = 7200,
+    ) -> str | None:
         row = self._conn.execute(
             """
-            SELECT provider_session_id
+            SELECT provider_session_id, updated_at
             FROM provider_sessions
             WHERE app_session_id = ? AND provider = ?
             """,
@@ -228,6 +230,17 @@ class MemoryStore:
         ).fetchone()
         if row is None:
             return None
+        # Expire sessions older than max_age_seconds to avoid stale resume failures.
+        if row["updated_at"] is not None:
+            from datetime import datetime, timezone
+            try:
+                updated = datetime.fromisoformat(row["updated_at"]).replace(tzinfo=timezone.utc)
+                age = (datetime.now(timezone.utc) - updated).total_seconds()
+                if age > max_age_seconds:
+                    self.clear_provider_session(app_session_id, provider)
+                    return None
+            except (ValueError, TypeError):
+                pass
         return row["provider_session_id"]
 
     def link_provider_session(self, app_session_id: str, provider: str, provider_session_id: str) -> None:

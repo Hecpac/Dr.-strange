@@ -4,7 +4,6 @@ import json
 import logging
 import os
 import re
-import subprocess
 import unicodedata
 from dataclasses import asdict
 from pathlib import Path
@@ -74,7 +73,7 @@ _HOST_URL_RE = re.compile(
     r"(?P<url>(?<!@)(?:localhost(?::\d+)?|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}(?::\d+)?)(?:/[^\s<>()]*)?)",
     re.IGNORECASE,
 )
-_DEFAULT_COMPUTER_MODEL = "claude-opus-4-6"
+_DEFAULT_COMPUTER_MODEL = "computer-use-preview"
 _COMPUTER_SYSTEM_PROMPT = (
     "You control the user's Mac via the computer-use tool. "
     "Be careful, explicit, and incremental. "
@@ -889,14 +888,13 @@ class BotService:
             self._computer_client = self.computer_client_factory()
             return self._computer_client
         try:
-            from anthropic import Anthropic
+            from openai import OpenAI
         except ImportError as exc:  # pragma: no cover - dependency is installed in runtime
-            raise RuntimeError("anthropic SDK is not installed") from exc
-        api_key = os.getenv("ANTHROPIC_API_KEY") or _read_env_var_from_zsh("ANTHROPIC_API_KEY")
+            raise RuntimeError("openai SDK is not installed") from exc
+        api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
-            raise RuntimeError("ANTHROPIC_API_KEY is not configured")
-        os.environ.setdefault("ANTHROPIC_API_KEY", api_key)
-        self._computer_client = Anthropic(api_key=api_key)
+            raise RuntimeError("OPENAI_API_KEY is not configured for computer use")
+        self._computer_client = OpenAI(api_key=api_key)
         return self._computer_client
 
     def _get_computer_gate(self) -> Any:
@@ -1026,28 +1024,15 @@ def _normalize_command_text(text: str) -> str:
     return "".join(ch for ch in folded if not unicodedata.combining(ch)).lower()
 
 
-def _read_env_var_from_zsh(name: str) -> str | None:
-    direct = _read_env_var_from_shell_files(name)
-    if direct:
-        return direct
-    try:
-        result = subprocess.run(
-            ["/bin/zsh", "-ic", f"printf %s \"${name}\""],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    except Exception:
-        return None
-    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-    if not lines:
-        return None
-    value = lines[-1]
+def _looks_like_api_key(value: str) -> bool:
+    """Reject values that look like env dumps or contain newlines."""
+    if "\n" in value or "\r" in value:
+        return False
     if "=" in value and not value.startswith("sk-"):
-        value = value.split("=", 1)[1].strip()
-    value = value.strip().strip("\"'")
-    return value or None
+        return False
+    if len(value) > 300:
+        return False
+    return True
 
 
 def _read_env_var_from_shell_files(name: str) -> str | None:

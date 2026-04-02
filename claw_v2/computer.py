@@ -171,44 +171,65 @@ class ComputerUseService:
                 _restore_terminal_windows(hidden)
 
     def execute_action(self, action: dict[str, Any]) -> dict[str, str] | None:
-        action_type = action.get("action", "")
+        action_type = action.get("action") or action.get("type", "")
         if action_type == "screenshot":
             return self.capture_screenshot()
-        if action_type == "left_click":
+        # OpenAI format: click with button field
+        if action_type == "click":
+            x, y = self._scale_coords([action.get("x", 0), action.get("y", 0)])
+            button = action.get("button", "left")
+            if button == "right":
+                pyautogui.rightClick(x, y)
+            elif button == "middle":
+                pyautogui.middleClick(x, y)
+            else:
+                pyautogui.click(x, y)
+        elif action_type == "double_click":
+            coord = action.get("coordinate") or [action.get("x", 0), action.get("y", 0)]
+            x, y = self._scale_coords(coord)
+            pyautogui.doubleClick(x, y)
+        # Anthropic format: left_click with coordinate
+        elif action_type == "left_click":
             x, y = self._scale_coords(action["coordinate"])
             pyautogui.click(x, y)
         elif action_type == "right_click":
             x, y = self._scale_coords(action["coordinate"])
             pyautogui.rightClick(x, y)
-        elif action_type == "double_click":
-            x, y = self._scale_coords(action["coordinate"])
-            pyautogui.doubleClick(x, y)
         elif action_type == "middle_click":
             x, y = self._scale_coords(action["coordinate"])
             pyautogui.middleClick(x, y)
         elif action_type == "type":
-            pyautogui.typewrite(action["text"], interval=0.02)
-        elif action_type == "key":
-            keys = action["text"].split("+")
-            if len(keys) > 1:
-                pyautogui.hotkey(*keys)
+            pyautogui.typewrite(action.get("text", ""), interval=0.02)
+        elif action_type in ("key", "keypress"):
+            keys = action.get("text") or action.get("keys", "")
+            key_list = keys.split("+") if isinstance(keys, str) else keys
+            if len(key_list) > 1:
+                pyautogui.hotkey(*key_list)
             else:
-                pyautogui.press(keys[0])
-        elif action_type == "mouse_move":
-            x, y = self._scale_coords(action["coordinate"])
+                pyautogui.press(key_list[0])
+        elif action_type in ("mouse_move", "move"):
+            x, y = self._scale_coords(
+                action.get("coordinate") or [action.get("x", 0), action.get("y", 0)]
+            )
             pyautogui.moveTo(x, y)
         elif action_type == "scroll":
-            x, y = self._scale_coords(action.get("coordinate", [0, 0]))
+            coord = action.get("coordinate") or [action.get("x", 0), action.get("y", 0)]
+            x, y = self._scale_coords(coord)
             pyautogui.moveTo(x, y)
-            direction = action.get("scroll_direction", "down")
-            amount = action.get("scroll_amount", 3)
+            direction = action.get("scroll_direction", action.get("direction", "down"))
+            amount = action.get("scroll_amount", action.get("amount", 3))
             scroll_val = -amount if direction == "down" else amount
             pyautogui.scroll(scroll_val)
-        elif action_type == "left_click_drag":
-            start = self._scale_coords(action["start_coordinate"])
-            end = self._scale_coords(action["coordinate"])
-            pyautogui.moveTo(start[0], start[1])
-            pyautogui.drag(end[0] - start[0], end[1] - start[1])
+        elif action_type in ("left_click_drag", "drag"):
+            start = action.get("start_coordinate") or [action.get("start_x", 0), action.get("start_y", 0)]
+            end = action.get("coordinate") or [action.get("x", 0), action.get("y", 0)]
+            sx, sy = self._scale_coords(start)
+            ex, ey = self._scale_coords(end)
+            pyautogui.moveTo(sx, sy)
+            pyautogui.drag(ex - sx, ey - sy)
+        elif action_type == "wait":
+            time.sleep(action.get("ms", 1000) / 1000.0)
+            return None
         else:
             logger.warning("Unknown action type: %s", action_type)
         time.sleep(self.action_delay)
@@ -220,7 +241,7 @@ class ComputerUseService:
         session: ComputerSession,
         client: Any,
         gate: Any,
-        model: str = "claude-opus-4-6",
+        model: str = "computer-use-preview",
         system_prompt: str | None = None,
     ) -> str:
         esc_listener = _EscListener(session)
@@ -244,22 +265,31 @@ class ComputerUseService:
         model: str,
         system_prompt: str | None,
     ) -> str:
+        tools = [{
+            "type": "computer_use_preview",
+            "display_width": self.display_width,
+            "display_height": self.display_height,
+            "environment": "mac",
+        }]
+
+        # Build initial input with screenshot
         if not session.messages:
             screenshot = self.capture_screenshot()
+            screenshot_url = f"data:{screenshot['media_type']};base64,{screenshot['data']}"
             session.messages = [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": session.task},
-                        {"type": "image", "source": {"type": "base64", **screenshot}},
-                    ],
-                }
+                {"role": "user", "content": [
+                    {"type": "input_text", "text": session.task},
+                    {"type": "input_image", "image_url": screenshot_url},
+                ]},
             ]
         elif session.pending_action is not None:
-            tool_result = self._execute_pending_action(session.pending_action)
-            session.messages.append({"role": "user", "content": [tool_result]})
+            # Resume after approval — send the tool output
+            call_output = self._build_call_output(session.pending_action)
+            session.messages.append(call_output)
             session.pending_action = None
             session.status = "running"
+
+        previous_response_id = None
 
         while session.iteration < session.max_iterations:
             if session._cancelled:
@@ -269,50 +299,75 @@ class ComputerUseService:
             session.iteration += 1
             kwargs: dict[str, Any] = {
                 "model": model,
-                "max_tokens": 4096,
-                "tools": [{
-                    "type": "computer_20251124",
-                    "name": "computer",
-                    "display_width_px": self.display_width,
-                    "display_height_px": self.display_height,
-                }],
-                "messages": session.messages,
-                "betas": ["computer-use-2025-11-24"],
+                "tools": tools,
+                "input": session.messages,
+                "truncation": "auto",
             }
             if system_prompt:
-                kwargs["system"] = system_prompt
+                kwargs["instructions"] = system_prompt
+            if previous_response_id:
+                kwargs["previous_response_id"] = previous_response_id
+                kwargs["input"] = session.messages[-1:] if session.messages else []
 
-            response = client.beta.messages.create(**kwargs)
+            response = client.responses.create(**kwargs)
+            previous_response_id = response.id
 
-            response_content = response.content
-            session.messages.append({"role": "assistant", "content": response_content})
+            # Extract computer_call items and text from output
+            computer_calls = [item for item in response.output if item.type == "computer_call"]
+            text_items = [item for item in response.output if item.type == "text"]
 
-            tool_uses = [b for b in response_content if b.type == "tool_use"]
-            if not tool_uses:
+            if not computer_calls:
                 session.status = "done"
-                text_blocks = [b for b in response_content if b.type == "text"]
-                return text_blocks[0].text if text_blocks else "(no response)"
+                return text_items[0].text if text_items else "(no response)"
 
-            tool_results = []
-            for block in tool_uses:
+            for call in computer_calls:
                 if session._cancelled:
                     session.status = "cancelled"
                     return "Session cancelled by Esc key."
 
-                action = block.input
-                verdict = gate.classify_desktop_action(action, url=session.current_url)
+                action = call.action
+                action_dict = action.model_dump() if hasattr(action, "model_dump") else dict(action)
+                verdict = gate.classify_desktop_action(action_dict, url=session.current_url)
 
                 if verdict.value == "needs_approval":
                     session.status = "awaiting_approval"
-                    session.pending_action = {"tool_use_id": block.id, **action}
-                    return f"Action needs approval: {action.get('action')} — waiting for /action_approve"
+                    session.pending_action = {"call_id": call.call_id, **action_dict}
+                    action_type = action_dict.get("type", "unknown")
+                    return f"Action needs approval: {action_type} — waiting for /action_approve"
 
-                tool_results.append(self._execute_pending_action({"tool_use_id": block.id, **action}))
-
-            session.messages.append({"role": "user", "content": tool_results})
+                # Execute the action
+                self.execute_action(action_dict)
+                # Capture new screenshot after action
+                screenshot = self.capture_screenshot()
+                screenshot_url = f"data:{screenshot['media_type']};base64,{screenshot['data']}"
+                call_output = {
+                    "type": "computer_call_output",
+                    "call_id": call.call_id,
+                    "output": {
+                        "type": "computer_screenshot",
+                        "image_url": screenshot_url,
+                    },
+                }
+                session.messages.append(call_output)
 
         session.status = "done"
         return "Computer Use iteration limit reached."
+
+    def _build_call_output(self, pending: dict[str, Any]) -> dict[str, Any]:
+        """Execute a pending action and build OpenAI computer_call_output."""
+        call_id = pending.pop("call_id", pending.pop("tool_use_id", "unknown"))
+        result = self.execute_action(pending)
+        if result is None:
+            result = self.capture_screenshot()
+        screenshot_url = f"data:{result['media_type']};base64,{result['data']}"
+        return {
+            "type": "computer_call_output",
+            "call_id": call_id,
+            "output": {
+                "type": "computer_screenshot",
+                "image_url": screenshot_url,
+            },
+        }
 
     def _scale_coords(self, coordinate: list[int]) -> tuple[int, int]:
         x = int(coordinate[0] * self.scale_factor)
@@ -320,14 +375,8 @@ class ComputerUseService:
         return x, y
 
     def _execute_pending_action(self, action: dict[str, Any]) -> dict[str, Any]:
-        result = self.execute_action(action)
-        if result is None:
-            result = self.capture_screenshot()
-        return {
-            "type": "tool_result",
-            "tool_use_id": action["tool_use_id"],
-            "content": [{"type": "image", "source": {"type": "base64", **result}}],
-        }
+        """Legacy Anthropic format — kept for compatibility with approval resume."""
+        return self._build_call_output(action)
 
 
 class BrowserUseService:

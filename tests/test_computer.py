@@ -101,6 +101,19 @@ class ComputerSessionTests(unittest.TestCase):
 from claw_v2.computer_gate import ActionGate
 
 
+def _mock_openai_response(*, computer_calls=None, text=None, response_id="resp_1"):
+    """Build a mock OpenAI Responses API response."""
+    output = []
+    if computer_calls:
+        for call in computer_calls:
+            action_mock = MagicMock()
+            action_mock.model_dump.return_value = call["action"]
+            output.append(MagicMock(type="computer_call", call_id=call["call_id"], action=action_mock))
+    if text:
+        output.append(MagicMock(type="text", text=text))
+    return MagicMock(id=response_id, output=output)
+
+
 class AgentLoopTests(unittest.TestCase):
     def test_agent_loop_runs_screenshot_then_click_then_completes(self) -> None:
         svc = ComputerUseService(display_width=1280, display_height=800)
@@ -112,22 +125,14 @@ class AgentLoopTests(unittest.TestCase):
         def fake_create(**kwargs):
             call_count[0] += 1
             if call_count[0] == 1:
-                return MagicMock(
-                    content=[MagicMock(
-                        type="tool_use",
-                        name="computer",
-                        input={"action": "left_click", "coordinate": [500, 300]},
-                        id="tool_1",
-                    )],
-                    stop_reason="tool_use",
+                return _mock_openai_response(
+                    computer_calls=[{"call_id": "call_1", "action": {"type": "click", "x": 500, "y": 300, "button": "left"}}],
+                    response_id="resp_1",
                 )
-            return MagicMock(
-                content=[MagicMock(type="text", text="Done! I clicked the button.")],
-                stop_reason="end_turn",
-            )
+            return _mock_openai_response(text="Done! I clicked the button.", response_id="resp_2")
 
         mock_client = MagicMock()
-        mock_client.beta.messages.create.side_effect = fake_create
+        mock_client.responses.create.side_effect = fake_create
 
         with patch("claw_v2.computer.pyautogui"):
             with patch.object(svc, "capture_screenshot", return_value={"data": "fake", "media_type": "image/png"}):
@@ -135,7 +140,7 @@ class AgentLoopTests(unittest.TestCase):
                     session=session,
                     client=mock_client,
                     gate=gate,
-                    model="claude-opus-4-6",
+                    model="computer-use-preview",
                 )
 
         self.assertEqual(result, "Done! I clicked the button.")
@@ -145,28 +150,22 @@ class AgentLoopTests(unittest.TestCase):
     def test_agent_loop_stops_at_max_iterations(self) -> None:
         svc = ComputerUseService(display_width=1280, display_height=800)
         gate = ActionGate(sensitive_urls=[])
-        session = ComputerSession(task="infinite task", max_iterations=2)
+        session = ComputerSession(task="infinite task", max_iterations=2, current_url="https://example.com")
 
-        def always_tool_use(**kwargs):
-            return MagicMock(
-                content=[MagicMock(
-                    type="tool_use",
-                    name="computer",
-                    input={"action": "screenshot"},
-                    id="tool_x",
-                )],
-                stop_reason="tool_use",
+        def always_computer_call(**kwargs):
+            return _mock_openai_response(
+                computer_calls=[{"call_id": "call_x", "action": {"type": "screenshot"}}],
             )
 
         mock_client = MagicMock()
-        mock_client.beta.messages.create.side_effect = always_tool_use
+        mock_client.responses.create.side_effect = always_computer_call
 
         with patch.object(svc, "capture_screenshot", return_value={"data": "fake", "media_type": "image/png"}):
             result = svc.run_agent_loop(
                 session=session,
                 client=mock_client,
                 gate=gate,
-                model="claude-opus-4-6",
+                model="computer-use-preview",
             )
 
         self.assertIn("limit", result.lower())
@@ -178,25 +177,19 @@ class AgentLoopTests(unittest.TestCase):
         session = ComputerSession(task="click buy", current_url="https://ads.google.com")
 
         def fake_create(**kwargs):
-            return MagicMock(
-                content=[MagicMock(
-                    type="tool_use",
-                    name="computer",
-                    input={"action": "left_click", "coordinate": [500, 300]},
-                    id="tool_1",
-                )],
-                stop_reason="tool_use",
+            return _mock_openai_response(
+                computer_calls=[{"call_id": "call_1", "action": {"type": "click", "x": 500, "y": 300, "button": "left"}}],
             )
 
         mock_client = MagicMock()
-        mock_client.beta.messages.create.side_effect = fake_create
+        mock_client.responses.create.side_effect = fake_create
 
         with patch.object(svc, "capture_screenshot", return_value={"data": "fake", "media_type": "image/png"}):
             result = svc.run_agent_loop(
                 session=session,
                 client=mock_client,
                 gate=gate,
-                model="claude-opus-4-6",
+                model="computer-use-preview",
             )
 
         self.assertEqual(session.status, "awaiting_approval")
@@ -208,33 +201,33 @@ class AgentLoopTests(unittest.TestCase):
         gate = ActionGate(sensitive_urls=[])
         session = ComputerSession(
             task="click continue",
-            messages=[{"role": "assistant", "content": []}],
-            pending_action={"tool_use_id": "tool_1", "action": "left_click", "coordinate": [500, 300]},
+            messages=[{"role": "user", "content": [{"type": "input_text", "text": "click continue"}]}],
+            pending_action={"call_id": "call_1", "type": "click", "x": 500, "y": 300, "button": "left"},
             status="running",
         )
 
         mock_client = MagicMock()
-        mock_client.beta.messages.create.return_value = MagicMock(
-            content=[MagicMock(type="text", text="Done after approval.")],
-            stop_reason="end_turn",
+        mock_client.responses.create.return_value = _mock_openai_response(
+            text="Done after approval.", response_id="resp_2",
         )
 
         with patch.object(svc, "execute_action", return_value={"data": "fake", "media_type": "image/png"}) as mock_exec:
-            result = svc.run_agent_loop(
-                session=session,
-                client=mock_client,
-                gate=gate,
-                model="claude-opus-4-6",
-            )
+            with patch.object(svc, "capture_screenshot", return_value={"data": "fake", "media_type": "image/png"}):
+                result = svc.run_agent_loop(
+                    session=session,
+                    client=mock_client,
+                    gate=gate,
+                    model="computer-use-preview",
+                )
 
         self.assertEqual(result, "Done after approval.")
         self.assertIsNone(session.pending_action)
         self.assertEqual(session.status, "done")
         mock_exec.assert_called_once()
-        self.assertEqual(session.messages[-2]["role"], "user")
-        tool_result = session.messages[-2]["content"][0]
-        self.assertEqual(tool_result["type"], "tool_result")
-        self.assertEqual(tool_result["tool_use_id"], "tool_1")
+        # Check the call_output was appended
+        call_output = session.messages[-1]
+        self.assertEqual(call_output["type"], "computer_call_output")
+        self.assertEqual(call_output["call_id"], "call_1")
 
 
 class BrowserUseServiceTests(unittest.TestCase):

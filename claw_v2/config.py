@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -36,6 +37,7 @@ class AppConfig:
     judge_model: str | None
     worker_effort: str
     brain_effort: str
+    judge_effort: str
     max_budget_usd: float
     db_path: Path
     heartbeat_interval: int
@@ -86,7 +88,7 @@ class AppConfig:
             openai_api_key=os.getenv("OPENAI_API_KEY"),
             linear_api_key=os.getenv("LINEAR_API_KEY"),
             google_api_key=os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"),
-            claude_cli_path=os.getenv("CLAUDE_CLI_PATH", "claude"),
+            claude_cli_path=os.getenv("CLAUDE_CLI_PATH") or shutil.which("claude") or "claude",
             claude_auth_mode=os.getenv("CLAUDE_AUTH_MODE", "subscription"),
             approval_secret=os.getenv("APPROVAL_SECRET", "local-dev-secret"),
             brain_provider=os.getenv("BRAIN_PROVIDER", "anthropic"),
@@ -99,8 +101,9 @@ class AppConfig:
             research_model=os.getenv("RESEARCH_MODEL"),
             judge_provider=os.getenv("JUDGE_PROVIDER"),
             judge_model=os.getenv("JUDGE_MODEL"),
-            worker_effort=os.getenv("WORKER_EFFORT", "medium"),
+            worker_effort=os.getenv("WORKER_EFFORT", "high"),
             brain_effort=os.getenv("BRAIN_EFFORT", "high"),
+            judge_effort=os.getenv("JUDGE_EFFORT", "medium"),
             max_budget_usd=float(os.getenv("MAX_BUDGET_USD", "0.50")),
             db_path=Path(os.getenv("DB_PATH", "data/claw.db")),
             heartbeat_interval=int(os.getenv("HEARTBEAT_INTERVAL", "1800")),
@@ -195,6 +198,8 @@ class AppConfig:
             return self.brain_effort
         if lane == "worker":
             return self.worker_effort
+        if lane in ("judge", "verifier", "research"):
+            return self.judge_effort
         return "low"
 
     def context_window_for_lane(self, lane: Lane) -> int:

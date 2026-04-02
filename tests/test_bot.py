@@ -979,7 +979,27 @@ class BotTests(unittest.TestCase):
 
                 self.assertEqual(result, "computer session aborted")
 
-    def test_get_computer_client_falls_back_to_zsh_env(self) -> None:
+    def test_get_computer_client_uses_openai(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+                "OPENAI_API_KEY": "sk-proj-test-key",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                with patch("openai.OpenAI") as mock_openai:
+                    client = runtime.bot._get_computer_client()
+
+                mock_openai.assert_called_once_with(api_key="sk-proj-test-key")
+                self.assertIs(client, mock_openai.return_value)
+
+    def test_get_computer_client_fails_without_openai_key(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             env = {
@@ -992,14 +1012,8 @@ class BotTests(unittest.TestCase):
             }
             with patch.dict(os.environ, env, clear=True):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
-                with patch("claw_v2.bot._read_env_var_from_zsh", return_value="zsh-test-key") as mock_read:
-                    with patch("anthropic.Anthropic") as mock_anthropic:
-                        client = runtime.bot._get_computer_client()
-
-                mock_read.assert_called_once_with("ANTHROPIC_API_KEY")
-                mock_anthropic.assert_called_once_with(api_key="zsh-test-key")
-                self.assertIs(client, mock_anthropic.return_value)
-                self.assertEqual(os.environ["ANTHROPIC_API_KEY"], "zsh-test-key")
+                with self.assertRaises(RuntimeError, msg="OPENAI_API_KEY"):
+                    runtime.bot._get_computer_client()
 
     def test_action_approve_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

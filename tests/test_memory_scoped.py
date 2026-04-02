@@ -42,3 +42,43 @@ class AgentScopedFactsTests(unittest.TestCase):
         store2.store_fact("test", "val", source="test", agent_name="alma")
         facts = store2.search_facts("test", agent_name="alma")
         self.assertEqual(len(facts), 1)
+
+
+class ProviderSessionTTLTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.db_path = Path(tempfile.mkdtemp()) / "test.db"
+        self.store = MemoryStore(self.db_path)
+
+    def test_fresh_session_is_returned(self) -> None:
+        self.store.link_provider_session("app-1", "anthropic", "sdk-abc")
+        result = self.store.get_provider_session("app-1", "anthropic")
+        self.assertEqual(result, "sdk-abc")
+
+    def test_stale_session_is_expired(self) -> None:
+        self.store.link_provider_session("app-1", "anthropic", "sdk-old")
+        # Backdate the updated_at to 3 hours ago
+        self.store._conn.execute(
+            "UPDATE provider_sessions SET updated_at = datetime('now', '-3 hours') WHERE app_session_id = 'app-1'"
+        )
+        self.store._conn.commit()
+        result = self.store.get_provider_session("app-1", "anthropic", max_age_seconds=7200)
+        self.assertIsNone(result)
+        # Confirm the row was cleaned up
+        row = self.store._conn.execute(
+            "SELECT * FROM provider_sessions WHERE app_session_id = 'app-1'"
+        ).fetchone()
+        self.assertIsNone(row)
+
+    def test_custom_ttl_is_respected(self) -> None:
+        self.store.link_provider_session("app-1", "anthropic", "sdk-recent")
+        # 10 minutes old
+        self.store._conn.execute(
+            "UPDATE provider_sessions SET updated_at = datetime('now', '-10 minutes') WHERE app_session_id = 'app-1'"
+        )
+        self.store._conn.commit()
+        # With 1-hour TTL, should still be valid
+        result = self.store.get_provider_session("app-1", "anthropic", max_age_seconds=3600)
+        self.assertEqual(result, "sdk-recent")
+        # With 5-minute TTL, should be expired
+        result = self.store.get_provider_session("app-1", "anthropic", max_age_seconds=300)
+        self.assertIsNone(result)
