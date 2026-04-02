@@ -258,6 +258,7 @@ Pydantic Settings loading from `.env`:
 | JUDGE_MODEL | optional | **[Multi-LLM]** Cheap judge/classifier model |
 | WORKER_EFFORT | `medium` | **[SDK]** Default effort level for worker agents |
 | BRAIN_EFFORT | `high` | **[SDK]** Default effort level for brain orchestration |
+| JUDGE_EFFORT | `medium` | **[SDK]** Default effort level for judge, verifier, and research lanes |
 | MAX_BUDGET_USD | 0.50 | Per-call budget cap |
 | DB_PATH | data/claw.db | SQLite path |
 | HEARTBEAT_INTERVAL | 1800 | Seconds between heartbeats |
