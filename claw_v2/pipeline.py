@@ -14,7 +14,7 @@ from claw_v2.linear import LinearIssue, LinearService
 from claw_v2.llm import LLMRouter
 from claw_v2.observe import ObserveStream
 
-TERMINAL_STATUSES = frozenset({"pr_created", "done", "failed"})
+TERMINAL_STATUSES = frozenset({"done", "failed"})
 
 
 @dataclass(slots=True)
@@ -126,6 +126,49 @@ class PipelineService:
         self._save_run(run)
         return run
 
+    def merge_and_close(self, issue_id: str) -> PipelineRun:
+        """Merge the PR for a pipeline run and close the Linear issue."""
+        run = self._load_run(issue_id)
+        if run.status != "pr_created":
+            return run
+        if not run.pr_url:
+            run.status = "failed"
+            self._save_run(run)
+            return run
+        pr_number = _parse_pr_number_from_url(run.pr_url)
+        if pr_number is None:
+            run.status = "failed"
+            self._save_run(run)
+            return run
+        self.pull_requests.merge_pull_request(pr_number)
+        run.status = "merged"
+        self._save_run(run)
+        self.linear.update_status(issue_id, "Done")
+        self.linear.post_comment(issue_id, f"PR merged and issue closed by Claw pipeline.\n\nPR: {run.pr_url}")
+        run.status = "done"
+        self._save_run(run)
+        if self.observe:
+            self.observe.emit("pipeline_done", payload={"issue": issue_id, "pr_url": run.pr_url})
+        return run
+
+    def poll_merges(self) -> list[PipelineRun]:
+        """Check all pr_created runs and close those whose PRs have been merged externally."""
+        closed: list[PipelineRun] = []
+        for path in sorted(self.state_root.glob("*.json")):
+            run = self._load_run_from_path(path)
+            if run.status != "pr_created" or not run.pr_url:
+                continue
+            pr_number = _parse_pr_number_from_url(run.pr_url)
+            if pr_number is None:
+                continue
+            state = self.pull_requests.get_pr_state(pr_number)
+            if state == "MERGED":
+                run.status = "done"
+                self.linear.update_status(run.issue_id, "Done")
+                self._save_run(run)
+                closed.append(run)
+        return closed
+
     def poll_actionable(self) -> list[PipelineRun]:
         issues = self.linear.list_actionable()
         runs: list[PipelineRun] = []
@@ -215,3 +258,8 @@ def _commit_worktree(wt_path: Path, message: str) -> None:
 
 def _push_branch(repo: Path, branch: str) -> None:
     subprocess.run(["git", "-C", str(repo), "push", "-u", "origin", branch], capture_output=True, text=True, check=True)
+
+
+def _parse_pr_number_from_url(url: str) -> int | None:
+    match = re.search(r"/pull/(\d+)", url)
+    return int(match.group(1)) if match else None

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 from dataclasses import dataclass
@@ -74,6 +75,31 @@ class GitHubPullRequestService:
             draft=draft,
         )
 
+    def merge_pull_request(self, pr_number: int) -> str:
+        """Merge a PR by number. Returns merge status string."""
+        output = self.command_runner([
+            self.gh_path, "pr", "merge", str(pr_number),
+            "--merge", "--repo", self._repo_nwo(),
+        ])
+        return output
+
+    def get_pr_state(self, pr_number: int) -> str:
+        """Return PR state: 'OPEN', 'CLOSED', or 'MERGED'."""
+        output = self.command_runner([
+            self.gh_path, "pr", "view", str(pr_number),
+            "--json", "state", "--repo", self._repo_nwo(),
+        ])
+        data = json.loads(output)
+        return data.get("state", "UNKNOWN")
+
+    def _repo_nwo(self) -> str:
+        """Get owner/repo from git remote."""
+        output = self.command_runner([
+            self.git_path, "-C", str(self.repo_root),
+            "remote", "get-url", self.remote_name,
+        ])
+        return _parse_nwo(output)
+
     @staticmethod
     def _run_command(command: Sequence[str]) -> str:
         completed = subprocess.run(
@@ -90,3 +116,12 @@ def _parse_pr_number(url: str) -> int | None:
     if match is None:
         return None
     return int(match.group(1))
+
+
+def _parse_nwo(remote_url: str) -> str:
+    """Extract owner/repo from a git remote URL."""
+    remote_url = remote_url.strip().rstrip(".git")
+    match = re.search(r"[/:]([^/:]+/[^/:]+)$", remote_url)
+    if match:
+        return match.group(1)
+    return remote_url

@@ -166,14 +166,106 @@ class StatePersistenceTests(unittest.TestCase):
                 pull_requests=MagicMock(), observe=None,
                 default_repo_root=Path("/tmp"), state_root=state_root,
             )
-            for status in ["awaiting_approval", "pr_created", "failed"]:
+            for status in ["awaiting_approval", "pr_created", "done", "failed"]:
                 run = PipelineRun(issue_id=f"HEC-{status}", branch_name="b", repo_root="/tmp", status=status)
                 svc._save_run(run)
             active = svc.list_active()
             ids = [r.issue_id for r in active]
             self.assertIn("HEC-awaiting_approval", ids)
-            self.assertNotIn("HEC-pr_created", ids)
+            self.assertIn("HEC-pr_created", ids)
+            self.assertNotIn("HEC-done", ids)
             self.assertNotIn("HEC-failed", ids)
+
+
+class MergeAndCloseTests(unittest.TestCase):
+    def test_merge_and_close_happy_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_root = Path(tmpdir) / "pipeline"
+            state_root.mkdir(parents=True)
+            root = Path(tmpdir)
+
+            run_data = {
+                "issue_id": "HEC-1", "branch_name": "feat/hec-1", "repo_root": str(root),
+                "status": "pr_created", "pr_url": "https://github.com/owner/repo/pull/42",
+                "diff": "some diff", "test_output": "5 passed",
+            }
+            (state_root / "HEC-1.json").write_text(json.dumps(run_data))
+
+            linear = MagicMock(spec=LinearService)
+            pr_svc = MagicMock()
+            pr_svc.merge_pull_request.return_value = "merged"
+            svc = PipelineService(
+                linear=linear, router=MagicMock(), approvals=MagicMock(),
+                pull_requests=pr_svc, observe=None,
+                default_repo_root=root, state_root=state_root,
+            )
+            result = svc.merge_and_close("HEC-1")
+            self.assertEqual(result.status, "done")
+            pr_svc.merge_pull_request.assert_called_once_with(42)
+            linear.update_status.assert_called_with("HEC-1", "Done")
+            linear.post_comment.assert_called_once()
+
+    def test_merge_skips_non_pr_created(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_root = Path(tmpdir) / "pipeline"
+            state_root.mkdir(parents=True)
+            run_data = {
+                "issue_id": "HEC-2", "branch_name": "feat/hec-2",
+                "repo_root": str(tmpdir), "status": "awaiting_approval",
+            }
+            (state_root / "HEC-2.json").write_text(json.dumps(run_data))
+            svc = PipelineService(
+                linear=MagicMock(), router=MagicMock(), approvals=MagicMock(),
+                pull_requests=MagicMock(), observe=None,
+                default_repo_root=Path(tmpdir), state_root=state_root,
+            )
+            result = svc.merge_and_close("HEC-2")
+            self.assertEqual(result.status, "awaiting_approval")
+
+
+class PollMergesTests(unittest.TestCase):
+    def test_detects_externally_merged_pr(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_root = Path(tmpdir) / "pipeline"
+            state_root.mkdir(parents=True)
+            run_data = {
+                "issue_id": "HEC-3", "branch_name": "feat/hec-3",
+                "repo_root": str(tmpdir), "status": "pr_created",
+                "pr_url": "https://github.com/owner/repo/pull/99",
+            }
+            (state_root / "HEC-3.json").write_text(json.dumps(run_data))
+            linear = MagicMock(spec=LinearService)
+            pr_svc = MagicMock()
+            pr_svc.get_pr_state.return_value = "MERGED"
+            svc = PipelineService(
+                linear=linear, router=MagicMock(), approvals=MagicMock(),
+                pull_requests=pr_svc, observe=None,
+                default_repo_root=Path(tmpdir), state_root=state_root,
+            )
+            closed = svc.poll_merges()
+            self.assertEqual(len(closed), 1)
+            self.assertEqual(closed[0].status, "done")
+            linear.update_status.assert_called_with("HEC-3", "Done")
+
+    def test_ignores_open_pr(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_root = Path(tmpdir) / "pipeline"
+            state_root.mkdir(parents=True)
+            run_data = {
+                "issue_id": "HEC-4", "branch_name": "feat/hec-4",
+                "repo_root": str(tmpdir), "status": "pr_created",
+                "pr_url": "https://github.com/owner/repo/pull/100",
+            }
+            (state_root / "HEC-4.json").write_text(json.dumps(run_data))
+            pr_svc = MagicMock()
+            pr_svc.get_pr_state.return_value = "OPEN"
+            svc = PipelineService(
+                linear=MagicMock(), router=MagicMock(), approvals=MagicMock(),
+                pull_requests=pr_svc, observe=None,
+                default_repo_root=Path(tmpdir), state_root=state_root,
+            )
+            closed = svc.poll_merges()
+            self.assertEqual(len(closed), 0)
 
 
 if __name__ == "__main__":

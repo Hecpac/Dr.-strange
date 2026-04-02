@@ -386,6 +386,17 @@ class BotService:
                     result = self.pipeline.complete_pipeline(run.issue_id)
                     return json.dumps({"status": result.status, "pr_url": result.pr_url}, indent=2)
             return "approval recorded but no matching pipeline run found"
+        if stripped.startswith("/pipeline_merge "):
+            if self.pipeline is None:
+                return "pipeline service unavailable"
+            parts = stripped.split(maxsplit=1)
+            issue_id = parts[1].strip()
+            try:
+                run = self.pipeline.merge_and_close(issue_id)
+                return json.dumps({"issue": run.issue_id, "status": run.status, "pr_url": run.pr_url}, indent=2)
+            except Exception:
+                logger.exception("pipeline merge error for %s", issue_id)
+                return "merge error — check logs for details"
         if stripped == "/pipeline_status":
             if self.pipeline is None:
                 return "pipeline service unavailable"
@@ -405,7 +416,7 @@ class BotService:
             except Exception:
                 logger.exception("pipeline error for %s", issue_id)
                 return "pipeline error — check logs for details"
-        if stripped in ("/pipeline", "/pipeline_approve", "/social_preview", "/social_publish"):
+        if stripped in ("/pipeline", "/pipeline_approve", "/pipeline_merge", "/social_preview", "/social_publish"):
             return f"usage: {stripped} <argument>"
         if stripped == "/social_status":
             if self.content_engine is None:

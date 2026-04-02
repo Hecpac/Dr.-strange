@@ -326,6 +326,9 @@ def build_runtime(
     scheduler.register(
         ScheduledJob(name="pipeline_poll", interval_seconds=300, handler=pipeline.poll_actionable)
     )
+    scheduler.register(
+        ScheduledJob(name="pipeline_poll_merges", interval_seconds=300, handler=pipeline.poll_merges)
+    )
     # Sub-agent scheduled jobs
     def _sub_agent_handler(agent: str, skill: str) -> None:
         result = sub_agents.run_skill(agent, skill, lane="worker")
