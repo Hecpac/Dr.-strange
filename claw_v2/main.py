@@ -137,12 +137,15 @@ def build_runtime(
         pre_hooks=pre_hooks,
         post_hooks=post_hooks,
     )
+    from claw_v2.learning import LearningLoop
+    learning = LearningLoop(memory=memory, router=router)
     brain = BrainService(
         router=router,
         memory=memory,
         system_prompt=system_prompt,
         approvals=approvals,
         observe=observe,
+        learning=learning,
     )
     experiment_runner = _noop_experiment_runner
     if _is_git_repo(str(config.workspace_root)):
@@ -279,6 +282,7 @@ def build_runtime(
     scheduler.register(ScheduledJob(name="daily_metrics", interval_seconds=86400, handler=_daily_metrics_handler))
     dream = AutoDreamService(memory=memory, observe=observe, router=router)
     scheduler.register(ScheduledJob(name="auto_dream", interval_seconds=86400, handler=dream.run))
+    scheduler.register(ScheduledJob(name="learning_consolidate", interval_seconds=86400, handler=learning.consolidate))
     daemon = ClawDaemon(scheduler=scheduler, heartbeat=heartbeat, observe=observe)
     browser = DevBrowserService(
         dev_browser_path=config.dev_browser_path,
@@ -319,8 +323,11 @@ def build_runtime(
         default_repo_root=config.pipeline_repo_root or config.workspace_root,
         max_retries=config.pipeline_max_retries,
         state_root=config.pipeline_state_root,
+        memory=memory,
+        learning=learning,
     )
     bot.pipeline = pipeline
+    bot.learning = learning
     bot.sub_agents = sub_agents
     bot.buddy = buddy
     scheduler.register(

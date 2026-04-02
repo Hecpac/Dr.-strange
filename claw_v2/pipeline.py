@@ -12,6 +12,8 @@ from claw_v2.approval import ApprovalManager
 from claw_v2.github import GitHubPullRequestService
 from claw_v2.linear import LinearIssue, LinearService
 from claw_v2.llm import LLMRouter
+from claw_v2.learning import LearningLoop
+from claw_v2.memory import MemoryStore
 from claw_v2.observe import ObserveStream
 
 TERMINAL_STATUSES = frozenset({"done", "failed"})
@@ -43,6 +45,8 @@ class PipelineService:
         default_repo_root: Path,
         max_retries: int = 3,
         state_root: Path | None = None,
+        memory: MemoryStore | None = None,
+        learning: LearningLoop | None = None,
     ) -> None:
         self.linear = linear
         self.router = router
@@ -53,6 +57,8 @@ class PipelineService:
         self.max_retries = max_retries
         self.state_root = state_root or (Path.home() / ".claw" / "pipeline")
         self.state_root.mkdir(parents=True, exist_ok=True)
+        self.memory = memory
+        self.learning = learning
 
     def process_issue(self, issue_id: str, *, repo_root: Path | None = None) -> PipelineRun:
         repo = repo_root or self.default_repo_root
@@ -63,9 +69,10 @@ class PipelineService:
         _create_branch(repo, branch)
         wt_path = _create_worktree(repo, branch)
         run.worktree_path = str(wt_path)
+        past_lessons = self.learning.retrieve_lessons(issue.description, task_type="pipeline") if self.learning else _retrieve_lessons(self.memory, issue.description) if self.memory else ""
         try:
             for attempt in range(self.max_retries + 1):
-                prompt = _build_code_prompt(issue, run)
+                prompt = _build_code_prompt(issue, run, past_lessons=past_lessons)
                 response = self.router.ask(
                     prompt, lane="worker", system_prompt="You are a coding agent. Implement the requested change.",
                     evidence_pack={"issue": issue.id, "description": issue.description},
@@ -76,10 +83,12 @@ class PipelineService:
                 run.test_output = output
                 if passed:
                     run.status = "awaiting_approval"
+                    self._record(issue, run, "success")
                     break
                 run.retries += 1
                 if run.retries >= self.max_retries:
                     run.status = "failed"
+                    self._record(issue, run, "failure")
                     self.linear.post_comment(issue_id, f"Pipeline failed after {self.max_retries} retries.\n\n```\n{output[:1000]}\n```")
                     self._save_run(run)
                     return run
@@ -126,6 +135,21 @@ class PipelineService:
         self._save_run(run)
         return run
 
+    def _record(self, issue: LinearIssue, run: PipelineRun, outcome: str) -> None:
+        """Record task outcome via LearningLoop (preferred) or legacy helper."""
+        if self.learning:
+            self.learning.record(
+                task_type="pipeline",
+                task_id=run.issue_id,
+                description=f"{issue.title}: {issue.description[:200]}",
+                approach=f"branch={run.branch_name}, diff_size={len(run.diff or '')} chars",
+                outcome=outcome,
+                error_snippet=(run.test_output or "")[:500] if outcome != "success" else None,
+                retries=run.retries,
+            )
+        else:
+            _record_outcome(self.memory, issue, run, outcome)
+
     def merge_and_close(self, issue_id: str) -> PipelineRun:
         """Merge the PR for a pipeline run and close the Linear issue."""
         run = self._load_run(issue_id)
@@ -147,6 +171,15 @@ class PipelineService:
         self.linear.post_comment(issue_id, f"PR merged and issue closed by Claw pipeline.\n\nPR: {run.pr_url}")
         run.status = "done"
         self._save_run(run)
+        if self.learning:
+            self.learning.record(
+                task_type="pipeline",
+                task_id=issue_id,
+                description=f"Merged PR {run.pr_url}",
+                approach=f"branch={run.branch_name}",
+                outcome="success",
+                lesson="Full cycle completed: issue → code → tests → PR → merge → done.",
+            )
         if self.observe:
             self.observe.emit("pipeline_done", payload={"issue": issue_id, "pr_url": run.pr_url})
         return run
@@ -213,8 +246,10 @@ def _slugify_branch(issue_id: str, title: str) -> str:
     return f"feat/{issue_id.lower()}-{slug}"
 
 
-def _build_code_prompt(issue: LinearIssue, run: PipelineRun) -> str:
+def _build_code_prompt(issue: LinearIssue, run: PipelineRun, *, past_lessons: str = "") -> str:
     parts = [f"Implement the following issue: {issue.id} — {issue.title}", "", issue.description]
+    if past_lessons:
+        parts.extend(["", "# Lessons from similar past tasks", past_lessons])
     if run.retries > 0 and run.test_output:
         parts.extend(["", f"Previous attempt failed. Test output:", f"```\n{run.test_output[:2000]}\n```", "Fix the failing tests."])
     return "\n".join(parts)
@@ -263,3 +298,58 @@ def _push_branch(repo: Path, branch: str) -> None:
 def _parse_pr_number_from_url(url: str) -> int | None:
     match = re.search(r"/pull/(\d+)", url)
     return int(match.group(1)) if match else None
+
+
+def _retrieve_lessons(memory: MemoryStore | None, description: str) -> str:
+    if not memory:
+        return ""
+    keywords = " ".join(description.split()[:20])
+    outcomes = memory.search_past_outcomes(keywords, task_type="pipeline", limit=3)
+    if not outcomes:
+        failures = memory.recent_failures(task_type="pipeline", limit=3)
+        outcomes = failures
+    if not outcomes:
+        return ""
+    lines: list[str] = []
+    for o in outcomes:
+        status = "SUCCESS" if o["outcome"] == "success" else "FAILED"
+        lines.append(f"- [{status}] {o['description'][:80]}")
+        lines.append(f"  Lesson: {o['lesson']}")
+        if o.get("error_snippet"):
+            lines.append(f"  Error: {o['error_snippet'][:200]}")
+    return "\n".join(lines)
+
+
+def _record_outcome(
+    memory: MemoryStore | None, issue: LinearIssue, run: PipelineRun, outcome: str,
+) -> None:
+    if not memory:
+        return
+    lesson = _derive_lesson(run, outcome)
+    memory.store_task_outcome(
+        task_type="pipeline",
+        task_id=run.issue_id,
+        description=f"{issue.title}: {issue.description[:200]}",
+        approach=f"branch={run.branch_name}, diff_size={len(run.diff or '')} chars",
+        outcome=outcome,
+        lesson=lesson,
+        error_snippet=(run.test_output or "")[:500] if outcome == "failure" else None,
+        retries=run.retries,
+    )
+
+
+def _derive_lesson(run: PipelineRun, outcome: str) -> str:
+    if outcome == "success":
+        if run.retries == 0:
+            return "Resolved on first attempt."
+        return f"Resolved after {run.retries} retries. Test failures guided the fix."
+    output = (run.test_output or "").lower()
+    if "import" in output and "error" in output:
+        return "Import errors — check module paths and dependencies."
+    if "assert" in output:
+        return "Assertion failures — verify expected values match implementation."
+    if "timeout" in output:
+        return "Test timeouts — check for infinite loops or slow operations."
+    if "permission" in output:
+        return "Permission errors — check file/directory access rights."
+    return f"Failed after {run.retries} retries. Review test output for root cause."
