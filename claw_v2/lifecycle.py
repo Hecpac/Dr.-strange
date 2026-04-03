@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from claw_v2.main import build_runtime
+from claw_v2.notebooklm import NotebookLMService
 from claw_v2.telegram import TelegramTransport
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,23 @@ async def run() -> int:
         )
 
         await transport.start()
+
+        # Wire NotebookLM with Telegram notify callback
+        _loop = asyncio.get_running_loop()
+
+        def _nlm_notify(message: str) -> None:
+            if runtime.config.telegram_allowed_user_id and transport._app:
+                asyncio.run_coroutine_threadsafe(
+                    transport._app.bot.send_message(
+                        chat_id=int(runtime.config.telegram_allowed_user_id),
+                        text=message,
+                    ),
+                    _loop,
+                )
+
+        nlm_service = NotebookLMService(notify=_nlm_notify, observe=runtime.observe)
+        runtime.bot.notebooklm = nlm_service
+
         try:
             await runtime.daemon.run_loop(shutdown)
         finally:

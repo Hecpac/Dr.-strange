@@ -154,6 +154,13 @@ class TelegramTransport:
             BotCommand("social_status", "Ver cuentas sociales"),
             BotCommand("social_preview", "Preview de posts — /social_preview <cuenta>"),
             BotCommand("approvals", "Ver aprobaciones pendientes"),
+            BotCommand("nlm_list", "Listar notebooks de NotebookLM"),
+            BotCommand("nlm_create", "Crear notebook — /nlm_create <titulo>"),
+            BotCommand("nlm_status", "Estado de notebook — /nlm_status <id>"),
+            BotCommand("nlm_sources", "Agregar fuentes — /nlm_sources <id> <urls>"),
+            BotCommand("nlm_research", "Deep Research — /nlm_research <id> <query>"),
+            BotCommand("nlm_podcast", "Generar podcast — /nlm_podcast <id>"),
+            BotCommand("nlm_chat", "Chat con notebook — /nlm_chat <id> <pregunta>"),
         ]
         try:
             await self._app.bot.set_my_commands(commands)
