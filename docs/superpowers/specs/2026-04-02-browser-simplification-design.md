@@ -161,13 +161,13 @@ Both commands call `managed_chrome.stop()` then `managed_chrome.start(headless=T
 | `tests/test_chrome.py` | **New** — ManagedChrome tests |
 | `tests/test_bot.py` | Update CDP error message test |
 
-## Open Clarifications
+## Resolved Clarifications
 
-1. **`/browse` when `chrome_cdp_enabled=False`:**
-   The spec says auth domains (`x.com`, `twitter.com`) must go through CDP and return an error if CDP fails, with no Jina fallback. It also says that when `chrome_cdp_enabled=False`, `/browse` falls back to Jina-only. These rules conflict for auth domains and for public URLs whose Jina validation fails while CDP is disabled. The implementation should define one deterministic behavior for both cases.
+1. **`/browse` when `chrome_cdp_enabled=False` or ManagedChrome is None:**
+   All URLs go through Jina regardless of domain. Auth domain distinction is skipped entirely — Jina is best-effort. If Jina returns a login wall for x.com, return what we got with a note: "Contenido parcial (CDP no disponible)." No silent failure, no error — just degraded content.
 
 2. **ManagedChrome startup failure policy:**
-   `lifecycle.py` starts ManagedChrome eagerly after transport startup. The spec defines runtime error messaging for CDP failures, but not lifecycle behavior if Chrome is missing, the configured port is occupied by a non-Chrome process, or `/json/version` never comes up. The implementation should explicitly choose whether bot startup degrades without CDP or fails fast before announcing the bot as online.
+   Degrade gracefully. If Chrome is missing, port occupied by non-Chrome, or `/json/version` never responds: log a warning, set `managed_chrome = None`, bot continues without CDP. This matches how other optional services work (pipeline=None when no Linear key, social_publisher with empty adapters). The bot announces online regardless. CDP features return "Chrome no disponible" when invoked.
 
 ## Out of Scope
 
