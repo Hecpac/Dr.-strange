@@ -157,3 +157,94 @@ class NotebookLMService:
     def _emit(self, event_type: str, **payload: Any) -> None:
         if self._observe is not None:
             self._observe.emit(event_type, payload=payload)
+
+    # --- Background research & podcast ---
+
+    def start_research(self, notebook_id: str, query: str, mode: str = "deep") -> str:
+        full_id = self._resolve_notebook_id(notebook_id)
+        if full_id in self._running and self._running[full_id].is_alive():
+            return f"Ya hay una operación en curso para este notebook ({full_id[:8]}...)."
+        title = self._get_notebook_title(full_id)
+        self._emit("nlm_research_started", notebook_id=full_id, query=query, mode=mode)
+
+        def _worker():
+            try:
+                result = self._run_async(self._async_research(full_id, query, mode))
+                self._emit("nlm_research_completed", notebook_id=full_id, sources_count=result)
+                self._notify(
+                    f"Deep Research completado en notebook {title}\n"
+                    f"{result} fuentes importadas\n"
+                    f"https://notebooklm.google.com/notebook/{full_id}"
+                )
+            except Exception as exc:
+                logger.exception("Background research failed for %s", full_id)
+                self._emit("nlm_error", notebook_id=full_id, operation="research", error=str(exc))
+                self._notify(f"Error en research: {exc}")
+            finally:
+                self._running.pop(full_id, None)
+
+        thread = threading.Thread(target=_worker, daemon=True)
+        self._running[full_id] = thread
+        thread.start()
+        return f"Deep Research iniciado para '{query}' en notebook {title}..."
+
+    async def _async_research(self, notebook_id: str, query: str, mode: str) -> int:
+        async with self._client_ctx() as client:
+            task = await client.research.start(notebook_id, query, source="web", mode=mode)
+            if task is None:
+                raise RuntimeError("Research start returned no task")
+            task_id = task["task_id"]
+            import time as _time
+            deadline = _time.monotonic() + 600
+            while _time.monotonic() < deadline:
+                poll = await client.research.poll(notebook_id)
+                if poll.get("status") == "completed":
+                    sources = poll.get("sources", [])
+                    if sources:
+                        imported = await client.research.import_sources(notebook_id, task_id, sources)
+                        return len(imported)
+                    return 0
+                await asyncio.sleep(15)
+            raise TimeoutError("Research did not complete within 10 minutes")
+
+    def start_podcast(self, notebook_id: str) -> str:
+        full_id = self._resolve_notebook_id(notebook_id)
+        if full_id in self._running and self._running[full_id].is_alive():
+            return f"Ya hay una operación en curso para este notebook ({full_id[:8]}...)."
+        title = self._get_notebook_title(full_id)
+        self._emit("nlm_podcast_started", notebook_id=full_id)
+
+        def _worker():
+            try:
+                self._run_async(self._async_podcast(full_id))
+                self._emit("nlm_podcast_completed", notebook_id=full_id)
+                self._notify(
+                    f"Podcast generado para notebook {title}\n"
+                    f"https://notebooklm.google.com/notebook/{full_id}"
+                )
+            except Exception as exc:
+                logger.exception("Background podcast failed for %s", full_id)
+                self._emit("nlm_error", notebook_id=full_id, operation="podcast", error=str(exc))
+                self._notify(f"Error en podcast: {exc}")
+            finally:
+                self._running.pop(full_id, None)
+
+        thread = threading.Thread(target=_worker, daemon=True)
+        self._running[full_id] = thread
+        thread.start()
+        return f"Generando podcast para notebook {title}..."
+
+    async def _async_podcast(self, notebook_id: str) -> None:
+        async with self._client_ctx() as client:
+            status = await client.artifacts.generate_audio(notebook_id)
+            await client.artifacts.wait_for_completion(notebook_id, status.task_id, timeout=1200)
+
+    def _get_notebook_title(self, full_id: str) -> str:
+        try:
+            notebooks = self.list_notebooks()
+            for nb in notebooks:
+                if nb["id"] == full_id:
+                    return nb["title"]
+        except Exception:
+            pass
+        return full_id[:8]

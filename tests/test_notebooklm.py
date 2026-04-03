@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -133,6 +134,82 @@ class SyncMethodTests(unittest.TestCase):
         svc = self._make_service(client)
         result = svc.chat("abc", "resume las fuentes")
         self.assertEqual(result, "Here is the summary of your sources.")
+
+
+class BackgroundTests(unittest.TestCase):
+    def _make_service(self, client_mock: AsyncMock) -> NotebookLMService:
+        notify = MagicMock()
+        svc = NotebookLMService(notify=notify)
+        svc._client_factory = lambda: client_mock
+        return svc
+
+    def test_research_starts_thread_and_notifies(self) -> None:
+        client = AsyncMock()
+        client.notebooks.list.return_value = [_mock_notebook("abc-full", "Research NB")]
+        client.research.start.return_value = {"task_id": "t1", "report_id": "r1"}
+        client.research.poll.return_value = {
+            "status": "completed",
+            "sources": [{"url": "https://a.com", "title": "A", "result_type": 1}],
+            "task_id": "t1",
+        }
+        client.research.import_sources.return_value = [{"id": "s1", "title": "A"}]
+        svc = self._make_service(client)
+        result = svc.start_research("abc", "AI trends")
+        self.assertIn("Deep Research iniciado", result)
+        # Wait for background thread to complete
+        for _ in range(50):
+            if "abc-full" not in svc._running:
+                break
+            time.sleep(0.1)
+        svc._notify.assert_called_once()
+        call_msg = svc._notify.call_args[0][0]
+        self.assertIn("completado", call_msg.lower())
+
+    def test_podcast_notifies_on_completion(self) -> None:
+        client = AsyncMock()
+        client.notebooks.list.return_value = [_mock_notebook("abc-full", "Pod NB")]
+        status_obj = MagicMock()
+        status_obj.task_id = "task-1"
+        client.artifacts.generate_audio.return_value = status_obj
+        client.artifacts.wait_for_completion.return_value = MagicMock()
+        svc = self._make_service(client)
+        result = svc.start_podcast("abc")
+        self.assertIn("Generando podcast", result)
+        for _ in range(50):
+            if "abc-full" not in svc._running:
+                break
+            time.sleep(0.1)
+        svc._notify.assert_called_once()
+        call_msg = svc._notify.call_args[0][0]
+        self.assertIn("podcast", call_msg.lower())
+
+    def test_background_error_notifies(self) -> None:
+        client = AsyncMock()
+        client.notebooks.list.return_value = [_mock_notebook("abc-full", "Err NB")]
+        client.research.start.side_effect = RuntimeError("API down")
+        svc = self._make_service(client)
+        result = svc.start_research("abc", "query")
+        self.assertIn("Deep Research iniciado", result)
+        for _ in range(50):
+            if "abc-full" not in svc._running:
+                break
+            time.sleep(0.1)
+        svc._notify.assert_called_once()
+        call_msg = svc._notify.call_args[0][0]
+        self.assertIn("error", call_msg.lower())
+
+    def test_one_operation_per_notebook(self) -> None:
+        client = AsyncMock()
+        client.notebooks.list.return_value = [_mock_notebook("abc-full", "NB")]
+        # Make research hang
+        async def slow_start(*a, **kw):
+            await asyncio.sleep(10)
+            return {"task_id": "t1"}
+        client.research.start = slow_start
+        svc = self._make_service(client)
+        svc.start_research("abc", "query 1")
+        result = svc.start_research("abc", "query 2")
+        self.assertIn("ya hay una operación", result.lower())
 
 
 if __name__ == "__main__":
