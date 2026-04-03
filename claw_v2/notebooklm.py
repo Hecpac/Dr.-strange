@@ -152,7 +152,7 @@ class NotebookLMService:
         full_id = await self._async_resolve_notebook_id(notebook_id)
         async with self._client_ctx() as client:
             result = await client.chat.ask(full_id, question)
-            return result.text
+            return result.answer
 
     def chat(self, notebook_id: str, question: str) -> str:
         return self._run_async(self._async_chat(notebook_id, question))
