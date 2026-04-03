@@ -90,6 +90,7 @@ def build_runtime(
     anthropic_executor: Callable[[LLMRequest], LLMResponse] | None = None,
     openai_transport: Callable[[LLMRequest], LLMResponse] | None = None,
     google_transport: Callable[[LLMRequest], LLMResponse] | None = None,
+    ollama_transport: Callable[[LLMRequest], LLMResponse] | None = None,
 ) -> ClawRuntime:
     config = AppConfig.from_env()
     config.validate()
@@ -133,6 +134,7 @@ def build_runtime(
         anthropic_executor=anthropic_executor,
         openai_transport=openai_transport,
         google_transport=google_transport,
+        ollama_transport=ollama_transport,
         audit_sink=audit_sink,
         pre_hooks=pre_hooks,
         post_hooks=post_hooks,

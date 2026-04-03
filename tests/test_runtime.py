@@ -24,6 +24,34 @@ def fake_anthropic(request: LLMRequest) -> LLMResponse:
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_build_runtime_wires_ollama_transport_for_secondary_lanes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "JUDGE_PROVIDER": "ollama",
+            }
+
+            def ollama_transport(request: LLMRequest) -> LLMResponse:
+                self.assertEqual(request.lane, "judge")
+                self.assertEqual(request.model, "gemma4")
+                return LLMResponse(
+                    content="ollama:ok",
+                    lane=request.lane,
+                    provider="ollama",
+                    model=request.model,
+                )
+
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic, ollama_transport=ollama_transport)
+                response = runtime.router.ask("classify", lane="judge", evidence_pack={"data": "x"})
+                self.assertEqual(response.provider, "ollama")
+                self.assertEqual(response.model, "gemma4")
+
     def test_build_runtime_and_status_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

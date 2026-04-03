@@ -6,6 +6,7 @@ from typing import Callable
 from claw_v2.adapters.anthropic import AnthropicAgentAdapter
 from claw_v2.adapters.base import AdapterError, LLMRequest, PostLLMHook, PreLLMHook, ProviderAdapter, UserPrompt
 from claw_v2.adapters.google import GoogleAdapter
+from claw_v2.adapters.ollama import OllamaAdapter
 from claw_v2.adapters.openai import OpenAIAdapter
 from claw_v2.config import AppConfig
 from claw_v2.types import Lane, LLMResponse
@@ -94,7 +95,11 @@ class LLMRouter:
         except AdapterError as exc:
             if lane in self.NON_TOOL_LANES and selected_provider != "anthropic":
                 fallback_request = LLMRequest(
-                    **{**asdict(request), "provider": "anthropic", "model": self.config.model_for_lane(lane)}
+                    **{
+                        **asdict(request),
+                        "provider": "anthropic",
+                        "model": self.config.advisory_model_for_provider("anthropic"),
+                    }
                 )
                 response = self._adapter_for("anthropic").complete(fallback_request)
                 response.degraded_mode = True
@@ -139,6 +144,7 @@ class LLMRouter:
         anthropic_executor: Callable[[LLMRequest], LLMResponse] | None = None,
         openai_transport: Callable[[LLMRequest], LLMResponse] | None = None,
         google_transport: Callable[[LLMRequest], LLMResponse] | None = None,
+        ollama_transport: Callable[[LLMRequest], LLMResponse] | None = None,
         audit_sink: Callable[[dict], None] | None = None,
         pre_hooks: list[PreLLMHook] | None = None,
         post_hooks: list[PostLLMHook] | None = None,
@@ -149,6 +155,7 @@ class LLMRouter:
                 "anthropic": AnthropicAgentAdapter(executor=anthropic_executor),
                 "openai": OpenAIAdapter(transport=openai_transport, api_key=config.openai_api_key),
                 "google": GoogleAdapter(transport=google_transport, api_key=config.google_api_key),
+                "ollama": OllamaAdapter(transport=ollama_transport, host=config.ollama_host),
             },
             audit_sink=audit_sink,
             pre_hooks=pre_hooks,

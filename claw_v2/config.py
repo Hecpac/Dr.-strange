@@ -15,6 +15,13 @@ def _env_bool(name: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+_SECONDARY_PROVIDER_DEFAULT_MODELS: dict[str, str] = {
+    "openai": "gpt-5.4-mini",
+    "google": "gemini-2.5-pro",
+    "ollama": "gemma4",
+}
+
+
 @dataclass(slots=True)
 class AppConfig:
     telegram_bot_token: str | None
@@ -186,14 +193,23 @@ class AppConfig:
         return mapping[lane]
 
     def model_for_lane(self, lane: Lane) -> str:
-        mapping = {
-            "brain": self.brain_model,
-            "worker": self.worker_model,
-            "verifier": self.verifier_model or self.worker_model,
-            "research": self.research_model or self.worker_model,
-            "judge": self.judge_model or self.worker_model,
-        }
-        return mapping[lane]
+        if lane == "brain":
+            return self.brain_model
+        if lane == "worker":
+            return self.worker_model
+        explicit = {
+            "verifier": self.verifier_model,
+            "research": self.research_model,
+            "judge": self.judge_model,
+        }[lane]
+        if explicit:
+            return explicit
+        return self.advisory_model_for_provider(self.provider_for_lane(lane))
+
+    def advisory_model_for_provider(self, provider: str) -> str:
+        if provider == "anthropic":
+            return self.worker_model
+        return _SECONDARY_PROVIDER_DEFAULT_MODELS.get(provider, self.worker_model)
 
     def effort_for_lane(self, lane: Lane) -> str:
         if lane == "brain":
