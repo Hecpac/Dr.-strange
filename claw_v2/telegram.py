@@ -125,7 +125,7 @@ class TelegramTransport:
                 text=f"Claw online. {now}",
             )
         except Exception:
-            pass
+            logger.warning("Could not send startup notification", exc_info=True)
 
     async def stop(self) -> None:
         if self._app is None:
@@ -375,7 +375,13 @@ class TelegramTransport:
     async def send_photo(self, *, chat_id: int, photo_path: str, caption: str | None = None) -> None:
         if self._app is None:
             return
-        with open(photo_path, "rb") as photo:
+        import tempfile
+        resolved = Path(photo_path).resolve()
+        allowed_roots = (Path(tempfile.gettempdir()).resolve(), Path("/tmp"), Path("/private/tmp"), Path.home())
+        if not any(resolved.is_relative_to(root) for root in allowed_roots):
+            logger.error("send_photo blocked: %s is outside allowed directories", resolved)
+            return
+        with open(resolved, "rb") as photo:
             await self._app.bot.send_photo(chat_id=chat_id, photo=photo, caption=caption)
 
     async def _handle_text_content(self, update: Update, text: str) -> None:

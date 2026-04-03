@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -49,7 +51,13 @@ def _default_runner(cmd: list[str], stdin: str, env: dict[str, str], timeout: in
 
 
 def _js_escape(s: str) -> str:
-    return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r")
+    """Return *s* safely escaped for embedding inside a JS double-quoted string.
+
+    Uses json.dumps to handle all special characters (backslash, quotes,
+    newlines, unicode) then strips the outer quotes so the caller can
+    embed the result inside its own ``"..."`` delimiters.
+    """
+    return json.dumps(s)[1:-1]
 
 
 class DevBrowserService:
@@ -68,7 +76,11 @@ class DevBrowserService:
         self._headless = headless
         self._runner = command_runner or _default_runner
 
+    _SAFE_BROWSER_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+
     def run_script(self, script: str, *, timeout: int | None = None, browser_name: str = "default") -> ScriptResult:
+        if not self._SAFE_BROWSER_RE.match(browser_name):
+            raise BrowserError(f"Unsupported browser name: {browser_name!r}")
         t = timeout or self._timeout
         cmd = [self._path, "--browser", browser_name, "--timeout", str(t)]
         if self._headless:
@@ -226,13 +238,16 @@ console.log(JSON.stringify({{
         page_url_pattern: str | None = None,
         name: str = "chrome.png",
     ) -> BrowseResult:
+        safe_name = Path(name).name  # strip directory components
+        if not safe_name:
+            safe_name = "chrome.png"
         with sync_playwright() as pw:
             browser = _cdp_connect(pw, cdp_url)
             context = browser.contexts[0]
             page = _select_cdp_page(context, page_index=page_index, page_title=page_title, page_url_pattern=page_url_pattern)
             page.set_viewport_size({"width": 1280, "height": 900})
             _wait_for_dynamic_content(page, page.url)
-            screenshot_path = f"/tmp/claw-{name}"
+            screenshot_path = f"/tmp/claw-{safe_name}"
             page.screenshot(path=screenshot_path)
             text = _extract_page_text(page)
             result = BrowseResult(

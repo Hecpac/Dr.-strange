@@ -127,7 +127,12 @@ class OllamaAdapter(ProviderAdapter):
 
     @staticmethod
     def _encode_image(path: str) -> str | None:
-        p = Path(path)
+        p = Path(path).resolve()
+        # Only allow images under /tmp or the user home directory
+        import tempfile
+        allowed_roots = (Path(tempfile.gettempdir()).resolve(), Path("/tmp"), Path("/private/tmp"), Path.home())
+        if not any(p.is_relative_to(root) for root in allowed_roots):
+            return None
         if p.exists():
             return base64.b64encode(p.read_bytes()).decode()
         return None
