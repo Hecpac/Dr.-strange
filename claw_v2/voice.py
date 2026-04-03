@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import tempfile
 from pathlib import Path
 
@@ -26,6 +27,21 @@ async def transcribe(audio_path: Path, *, api_key: str | None = None) -> str:
             file=audio_file,
         )
     return response.text
+
+
+async def extract_audio(video_path: Path) -> Path:
+    """Extract audio from video file to OGG using ffmpeg. Caller cleans up."""
+    out = video_path.with_suffix(".ogg")
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg", "-y", "-i", str(video_path),
+        "-vn", "-acodec", "libopus", str(out),
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    await proc.wait()
+    if proc.returncode != 0 or not out.exists():
+        raise RuntimeError(f"ffmpeg failed to extract audio from {video_path}")
+    return out
 
 
 async def synthesize(

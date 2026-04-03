@@ -11,7 +11,7 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 
 from claw_v2.bot import BotService
-from claw_v2.voice import VoiceUnavailableError, transcribe
+from claw_v2.voice import VoiceUnavailableError, extract_audio, transcribe
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +101,8 @@ class TelegramTransport:
         self._app.add_handler(MessageHandler(filters.PHOTO, self._handle_photo))
         self._app.add_handler(MessageHandler(filters.Document.IMAGE, self._handle_image_document))
         self._app.add_handler(MessageHandler(filters.VOICE, self._handle_voice))
+        self._app.add_handler(MessageHandler(filters.AUDIO, self._handle_audio))
+        self._app.add_handler(MessageHandler(filters.VIDEO | filters.VIDEO_NOTE, self._handle_video))
         await self._app.initialize()
         await self._app.start()
         await self._app.updater.start_polling()
@@ -214,6 +216,53 @@ class TelegramTransport:
         finally:
             tmp_path.unlink(missing_ok=True)
         await self._handle_text_content(update, text)
+
+    async def _handle_audio(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_authorized(update):
+            return
+        audio = update.message.audio
+        file = await context.bot.get_file(audio.file_id)
+        suffix = Path(audio.file_name).suffix if audio.file_name else ".mp3"
+        tmp_path = Path(f"/tmp/claw-audio-{audio.file_unique_id}{suffix}")
+        await file.download_to_drive(str(tmp_path))
+        try:
+            text = await transcribe(tmp_path, api_key=self._voice_api_key)
+        except VoiceUnavailableError:
+            await update.message.reply_text("Voice not available — OPENAI_API_KEY not configured.")
+            return
+        finally:
+            tmp_path.unlink(missing_ok=True)
+        caption = update.message.caption or ""
+        prefix = f"{caption}\n[Audio transcrito]: " if caption else "[Audio transcrito]: "
+        await self._handle_text_content(update, prefix + text)
+
+    async def _handle_video(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_authorized(update):
+            return
+        video = update.message.video or update.message.video_note
+        if video is None:
+            return
+        await update.message.chat.send_action("typing")
+        file = await context.bot.get_file(video.file_id)
+        tmp_video = Path(f"/tmp/claw-video-{video.file_unique_id}.mp4")
+        await file.download_to_drive(str(tmp_video))
+        tmp_audio: Path | None = None
+        try:
+            tmp_audio = await extract_audio(tmp_video)
+            text = await transcribe(tmp_audio, api_key=self._voice_api_key)
+        except VoiceUnavailableError:
+            await update.message.reply_text("Voice not available — OPENAI_API_KEY not configured.")
+            return
+        except RuntimeError:
+            await update.message.reply_text("No pude extraer audio del video.")
+            return
+        finally:
+            tmp_video.unlink(missing_ok=True)
+            if tmp_audio:
+                tmp_audio.unlink(missing_ok=True)
+        caption = update.message.caption or ""
+        prefix = f"{caption}\n[Video transcrito]: " if caption else "[Video transcrito]: "
+        await self._handle_text_content(update, prefix + text)
 
     async def _handle_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_authorized(update):
