@@ -68,10 +68,11 @@ class AppConfig:
     sdk_bypass_permissions: bool
     daily_cost_limit: float
     chrome_cdp_enabled: bool
-    chrome_cdp_url: str
+    claw_chrome_port: int
     computer_use_enabled: bool
     computer_display_width: int
     computer_display_height: int
+    ollama_host: str
     sensitive_urls: list[str]
 
     @classmethod
@@ -141,10 +142,11 @@ class AppConfig:
             sdk_bypass_permissions=_env_bool("SDK_BYPASS_PERMISSIONS", False),
             daily_cost_limit=float(os.getenv("DAILY_COST_LIMIT", "0")),
             chrome_cdp_enabled=_env_bool("CHROME_CDP_ENABLED", True),
-            chrome_cdp_url=os.getenv("CHROME_CDP_URL", "http://localhost:9222"),
+            claw_chrome_port=int(os.getenv("CLAW_CHROME_PORT", "9250")),
             computer_use_enabled=_env_bool("COMPUTER_USE_ENABLED", True),
             computer_display_width=int(os.getenv("COMPUTER_DISPLAY_WIDTH", "1280")),
             computer_display_height=int(os.getenv("COMPUTER_DISPLAY_HEIGHT", "800")),
+            ollama_host=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
             sensitive_urls=[u for u in os.getenv("SENSITIVE_URLS", "ads.google.com:polymarket.com:robinhood.com:binance.com:stripe.com:paypal.com").split(":") if u.strip()],
         )
 
@@ -163,7 +165,7 @@ class AppConfig:
             raise ValueError("worker_provider must be 'anthropic' in the current runtime design.")
         if self.claude_auth_mode not in {"subscription", "api_key", "auto"}:
             raise ValueError("claude_auth_mode must be one of: subscription, api_key, auto.")
-        supported = {"anthropic", "openai", "google"}
+        supported = {"anthropic", "openai", "google", "ollama"}
         secondary = {
             "verifier_provider": self.verifier_provider,
             "research_provider": self.research_provider,

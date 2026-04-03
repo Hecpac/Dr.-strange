@@ -58,10 +58,11 @@ def make_config(root: Path) -> AppConfig:
         sdk_bypass_permissions=False,
         daily_cost_limit=10.0,
         chrome_cdp_enabled=False,
-        chrome_cdp_url="http://localhost:9222",
+        claw_chrome_port=9250,
         computer_use_enabled=False,
         computer_display_width=1280,
         computer_display_height=800,
+        ollama_host="http://localhost:11434",
         sensitive_urls=["ads.google.com", "polymarket.com"],
     )
     config.validate()

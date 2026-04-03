@@ -294,7 +294,7 @@ def build_runtime(
         display_width=config.computer_display_width,
         display_height=config.computer_display_height,
     )
-    browser_use = BrowserUseService(cdp_url=config.chrome_cdp_url)
+    browser_use = BrowserUseService(cdp_url=f"http://localhost:{config.claw_chrome_port}")
     bot = BotService(
         brain=brain,
         auto_research=auto_research,
