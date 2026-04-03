@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 from claw_v2.adapters.base import AdapterError, UserContentBlock, UserPrompt
 from claw_v2.approval import ApprovalManager
+from claw_v2.learning import LearningLoop
 from claw_v2.llm import LLMRouter
 from claw_v2.memory import MemoryStore
 from claw_v2.observe import ObserveStream
@@ -43,6 +44,7 @@ class BrainService:
     system_prompt: str
     approvals: ApprovalManager | None = None
     observe: ObserveStream | None = None
+    learning: LearningLoop | None = None
 
     def handle_message(
         self,
@@ -115,18 +117,25 @@ class BrainService:
         stored_user_message: str,
         include_history: bool,
     ) -> UserPrompt:
+        lessons = ""
+        if self.learning:
+            lessons = self.learning.retrieve_lessons(stored_user_message)
         if isinstance(message, str):
             if not include_history:
-                return message
-            return self.memory.build_context(session_id, stored_user_message, include_history=True)
+                return f"{lessons}\n{message}" if lessons else message
+            ctx = self.memory.build_context(session_id, stored_user_message, include_history=True)
+            return f"{lessons}\n{ctx}" if lessons else ctx
 
         if not include_history:
+            if lessons:
+                return [{"type": "text", "text": lessons}, *message]
             return message
 
         context = self.memory.build_context(session_id, include_history=True).strip()
         blocks: list[UserContentBlock] = []
-        if context:
-            blocks.append({"type": "text", "text": f"{context}\n# Current input"})
+        preamble = f"{lessons}\n{context}" if lessons else context
+        if preamble:
+            blocks.append({"type": "text", "text": f"{preamble}\n# Current input"})
         blocks.extend(message)
         return blocks
 

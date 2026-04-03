@@ -9,7 +9,8 @@ from unittest.mock import MagicMock, patch
 
 from claw_v2.approval import ApprovalManager
 from claw_v2.linear import LinearIssue, LinearService
-from claw_v2.pipeline import PipelineRun, PipelineService
+from claw_v2.memory import MemoryStore
+from claw_v2.pipeline import PipelineRun, PipelineService, _derive_lesson, _record_outcome, _retrieve_lessons
 
 
 def _make_issue(issue_id: str = "HEC-1", title: str = "Fix bug") -> LinearIssue:
@@ -266,6 +267,101 @@ class PollMergesTests(unittest.TestCase):
             )
             closed = svc.poll_merges()
             self.assertEqual(len(closed), 0)
+
+
+class LearningLoopTests(unittest.TestCase):
+    def test_record_and_retrieve_outcome(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mem = MemoryStore(Path(tmpdir) / "test.db")
+            issue = _make_issue()
+            run = PipelineRun(
+                issue_id="HEC-1", branch_name="feat/hec-1",
+                repo_root="/tmp", status="failed",
+                test_output="AssertionError: expected 5 got 3", retries=3,
+            )
+            _record_outcome(mem, issue, run, "failure")
+            results = mem.search_past_outcomes("login", task_type="pipeline")
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0]["outcome"], "failure")
+            self.assertIn("Assertion", results[0]["lesson"])
+
+    def test_retrieve_lessons_formats_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mem = MemoryStore(Path(tmpdir) / "test.db")
+            mem.store_task_outcome(
+                task_type="pipeline", task_id="HEC-0",
+                description="Fix login bug",
+                approach="branch=feat/hec-0", outcome="failure",
+                lesson="Check auth middleware first.",
+                error_snippet="401 Unauthorized",
+            )
+            lessons = _retrieve_lessons(mem, "Fix the login bug")
+            self.assertIn("FAILED", lessons)
+            self.assertIn("Check auth middleware", lessons)
+            self.assertIn("401", lessons)
+
+    def test_retrieve_lessons_empty_when_no_memory(self) -> None:
+        self.assertEqual(_retrieve_lessons(None, "anything"), "")
+
+    def test_derive_lesson_success_first_try(self) -> None:
+        run = PipelineRun(issue_id="X", branch_name="b", repo_root="/tmp", status="done", retries=0)
+        self.assertIn("first attempt", _derive_lesson(run, "success"))
+
+    def test_derive_lesson_import_error(self) -> None:
+        run = PipelineRun(
+            issue_id="X", branch_name="b", repo_root="/tmp", status="failed",
+            test_output="ModuleNotFoundError: No module named 'foo'\nimport error", retries=2,
+        )
+        self.assertIn("Import", _derive_lesson(run, "failure"))
+
+    def test_recent_failures_returns_only_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mem = MemoryStore(Path(tmpdir) / "test.db")
+            mem.store_task_outcome(
+                task_type="pipeline", task_id="A", description="d", approach="a",
+                outcome="success", lesson="ok",
+            )
+            mem.store_task_outcome(
+                task_type="pipeline", task_id="B", description="d", approach="a",
+                outcome="failure", lesson="bad", error_snippet="err",
+            )
+            failures = mem.recent_failures(task_type="pipeline")
+            self.assertEqual(len(failures), 1)
+            self.assertEqual(failures[0]["task_id"], "B")
+
+    def test_pipeline_injects_lessons(self) -> None:
+        """Integration: process_issue should pass past lessons to the LLM prompt."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / ".git").mkdir()
+            mem = MemoryStore(root / "test.db")
+            mem.store_task_outcome(
+                task_type="pipeline", task_id="HEC-0",
+                description="Fix the login bug",
+                approach="branch=feat/hec-0", outcome="failure",
+                lesson="Always validate JWT before checking permissions.",
+                error_snippet="401 Unauthorized",
+            )
+            linear = MagicMock(spec=LinearService)
+            linear.get_issue.return_value = _make_issue()
+            router = MagicMock()
+            router.ask.return_value = MagicMock(content="fix", cost_estimate=0.01)
+            approvals = ApprovalManager(root / "approvals", "secret")
+            svc = PipelineService(
+                linear=linear, router=router, approvals=approvals,
+                pull_requests=MagicMock(), observe=None,
+                default_repo_root=root, max_retries=3,
+                state_root=root / "pipeline", memory=mem,
+            )
+            with patch("claw_v2.pipeline._run_tests", return_value=(True, "5 passed")):
+                with patch("claw_v2.pipeline._create_branch"):
+                    with patch("claw_v2.pipeline._create_worktree", return_value=root / "wt"):
+                        with patch("claw_v2.pipeline._collect_diff", return_value="diff"):
+                            with patch("claw_v2.pipeline._remove_worktree"):
+                                svc.process_issue("HEC-1")
+            prompt_sent = router.ask.call_args[0][0]
+            self.assertIn("Lessons from similar past tasks", prompt_sent)
+            self.assertIn("JWT", prompt_sent)
 
 
 if __name__ == "__main__":

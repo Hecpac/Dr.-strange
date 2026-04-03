@@ -50,6 +50,19 @@ CREATE TABLE IF NOT EXISTS cron_state (
     last_run_at REAL NOT NULL DEFAULT 0.0,
     runs INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS task_outcomes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_type TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    description TEXT NOT NULL,
+    approach TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK(outcome IN ('success', 'failure', 'partial')),
+    lesson TEXT NOT NULL,
+    error_snippet TEXT,
+    retries INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 
@@ -75,6 +88,14 @@ _MIGRATION_ADD_AGENT_NAME = """
 ALTER TABLE facts ADD COLUMN agent_name TEXT NOT NULL DEFAULT 'system';
 """
 
+_MIGRATION_ADD_OUTCOME_FEEDBACK = """
+ALTER TABLE task_outcomes ADD COLUMN feedback TEXT;
+"""
+
+_MIGRATION_ADD_OUTCOME_TAGS = """
+ALTER TABLE task_outcomes ADD COLUMN tags TEXT NOT NULL DEFAULT '[]';
+"""
+
 
 class MemoryStore:
     def __init__(self, db_path: Path | str) -> None:
@@ -95,6 +116,15 @@ class MemoryStore:
                 self._conn.commit()
             except sqlite3.OperationalError:
                 pass
+        cursor = self._conn.execute("PRAGMA table_info(task_outcomes)")
+        outcome_cols = {row[1] for row in cursor.fetchall()}
+        for col, sql in [("feedback", _MIGRATION_ADD_OUTCOME_FEEDBACK), ("tags", _MIGRATION_ADD_OUTCOME_TAGS)]:
+            if col not in outcome_cols:
+                try:
+                    self._conn.execute(sql)
+                    self._conn.commit()
+                except sqlite3.OperationalError:
+                    pass
 
     def store_message(self, session_id: str, role: str, content: str) -> None:
         with self._lock:
@@ -357,3 +387,108 @@ class MemoryStore:
                 )
             self._conn.commit()
         return len(rows)
+
+    # --- Learning loop ---
+
+    def store_task_outcome(
+        self,
+        *,
+        task_type: str,
+        task_id: str,
+        description: str,
+        approach: str,
+        outcome: str,
+        lesson: str,
+        error_snippet: str | None = None,
+        retries: int = 0,
+    ) -> int:
+        with self._lock:
+            cursor = self._conn.execute(
+                """
+                INSERT INTO task_outcomes
+                    (task_type, task_id, description, approach, outcome, lesson, error_snippet, retries)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (task_type, task_id, description, approach, outcome, lesson, error_snippet, retries),
+            )
+            self._conn.commit()
+        return cursor.lastrowid  # type: ignore[return-value]
+
+    def search_past_outcomes(
+        self, query: str, *, task_type: str | None = None, limit: int = 5,
+    ) -> list[dict]:
+        if task_type:
+            rows = self._conn.execute(
+                """
+                SELECT task_type, task_id, description, approach, outcome, lesson, error_snippet, retries, created_at
+                FROM task_outcomes
+                WHERE task_type = ? AND (description LIKE ? OR lesson LIKE ? OR approach LIKE ?)
+                ORDER BY id DESC LIMIT ?
+                """,
+                (task_type, f"%{query}%", f"%{query}%", f"%{query}%", limit),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                """
+                SELECT task_type, task_id, description, approach, outcome, lesson, error_snippet, retries, created_at
+                FROM task_outcomes
+                WHERE description LIKE ? OR lesson LIKE ? OR approach LIKE ?
+                ORDER BY id DESC LIMIT ?
+                """,
+                (f"%{query}%", f"%{query}%", f"%{query}%", limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def recent_failures(self, *, task_type: str | None = None, limit: int = 5) -> list[dict]:
+        if task_type:
+            rows = self._conn.execute(
+                """
+                SELECT task_type, task_id, description, approach, outcome, lesson, error_snippet, retries, created_at
+                FROM task_outcomes WHERE outcome = 'failure' AND task_type = ?
+                ORDER BY id DESC LIMIT ?
+                """,
+                (task_type, limit),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                """
+                SELECT task_type, task_id, description, approach, outcome, lesson, error_snippet, retries, created_at
+                FROM task_outcomes WHERE outcome = 'failure'
+                ORDER BY id DESC LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    # --- Learning loop: feedback & retrieval helpers ---
+
+    def get_outcome(self, outcome_id: int) -> dict | None:
+        row = self._conn.execute(
+            "SELECT * FROM task_outcomes WHERE id = ?", (outcome_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def update_outcome_feedback(self, outcome_id: int, feedback: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE task_outcomes SET feedback = ? WHERE id = ?",
+                (feedback, outcome_id),
+            )
+            self._conn.commit()
+
+    def last_outcome_id(self) -> int | None:
+        row = self._conn.execute(
+            "SELECT id FROM task_outcomes ORDER BY id DESC LIMIT 1",
+        ).fetchone()
+        return row["id"] if row else None
+
+    def outcomes_without_feedback(self, *, limit: int = 10) -> list[dict]:
+        rows = self._conn.execute(
+            """
+            SELECT id, task_type, task_id, description, outcome, lesson, created_at
+            FROM task_outcomes WHERE feedback IS NULL
+            ORDER BY id DESC LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [dict(row) for row in rows]
