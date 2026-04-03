@@ -9,6 +9,8 @@ from claw_v2.types import AgentClass, SanitizedContent
 
 SUSPICIOUS_PATTERNS = (
     "ignore previous instructions",
+    "ignore all instructions",
+    "disregard previous",
     "system prompt",
     "developer message",
     "<tool",
@@ -16,6 +18,7 @@ SUSPICIOUS_PATTERNS = (
     "sudo ",
     "rm -rf",
     "role: system",
+    "role:system",
 )
 
 

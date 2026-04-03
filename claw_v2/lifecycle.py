@@ -31,15 +31,21 @@ class PidLock:
 
     def acquire(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        if self.path.exists():
+        try:
+            fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode())
+            os.close(fd)
+        except FileExistsError:
             try:
                 existing_pid = int(self.path.read_text().strip())
                 os.kill(existing_pid, 0)
                 print(f"Claw is already running (pid {existing_pid}).", file=sys.stderr)
                 raise SystemExit(1)
             except (ValueError, ProcessLookupError, PermissionError):
-                pass
-        self.path.write_text(str(os.getpid()))
+                self.path.unlink(missing_ok=True)
+                fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(fd, str(os.getpid()).encode())
+                os.close(fd)
 
     def release(self) -> None:
         self.path.unlink(missing_ok=True)

@@ -515,8 +515,10 @@ class GitWorktreeExperimentRunner:
             except subprocess.TimeoutExpired:
                 return ExperimentEvaluation(metric_value=baseline, status="metric_failed", output="Docker timeout exceeded.")
         else:
+            import shlex
             completed = subprocess.run(
-                command, shell=True, cwd=worktree_path,
+                shlex.split(command) if isinstance(command, str) else command,
+                cwd=worktree_path,
                 capture_output=True, text=True, check=False, timeout=300,
             )
         output = (completed.stdout or "") + (completed.stderr or "")

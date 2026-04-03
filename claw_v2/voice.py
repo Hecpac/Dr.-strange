@@ -38,7 +38,11 @@ async def extract_audio(video_path: Path) -> Path:
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,
     )
-    await proc.wait()
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=120)
+    except asyncio.TimeoutError:
+        proc.kill()
+        raise RuntimeError(f"ffmpeg timed out processing {video_path}")
     if proc.returncode != 0 or not out.exists():
         raise RuntimeError(f"ffmpeg failed to extract audio from {video_path}")
     return out

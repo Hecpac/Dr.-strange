@@ -4,6 +4,7 @@ import asyncio
 import base64
 import logging
 import mimetypes
+import time
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,7 @@ from claw_v2.voice import VoiceUnavailableError, extract_audio, transcribe
 logger = logging.getLogger(__name__)
 
 MAX_TELEGRAM_LEN = 4096
+MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024  # 20 MB
 DEFAULT_IMAGE_PROMPT = "El usuario envio esta imagen por Telegram. Analizala y responde de forma util."
 
 
@@ -91,6 +93,9 @@ class TelegramTransport:
         self._allowed_user_id = allowed_user_id
         self._voice_api_key = voice_api_key
         self._app = None
+        self._rate_limits: dict[str, list[float]] = {}
+        self._rate_max = 10  # max requests per window
+        self._rate_window = 60.0  # seconds
 
     async def start(self) -> None:
         if self._token is None:
@@ -171,6 +176,9 @@ class TelegramTransport:
         if not self._is_authorized(update):
             return
         user_id = str(update.effective_user.id)
+        if self._is_rate_limited(user_id):
+            await update.message.reply_text("Demasiados mensajes. Espera un momento.")
+            return
         session_id = f"tg-{update.effective_chat.id}"
         text = update.message.text or ""
         await update.message.chat.send_action("typing")
@@ -204,7 +212,13 @@ class TelegramTransport:
     async def _handle_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_authorized(update):
             return
+        if self._is_rate_limited(str(update.effective_user.id)):
+            await update.message.reply_text("Demasiados mensajes. Espera un momento.")
+            return
         voice = update.message.voice
+        if voice.file_size and voice.file_size > MAX_DOWNLOAD_BYTES:
+            await update.message.reply_text("Archivo de audio demasiado grande (máx 20 MB).")
+            return
         file = await context.bot.get_file(voice.file_id)
         tmp_path = Path(f"/tmp/claw-voice-{voice.file_unique_id}.ogg")
         await file.download_to_drive(str(tmp_path))
@@ -220,7 +234,13 @@ class TelegramTransport:
     async def _handle_audio(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_authorized(update):
             return
+        if self._is_rate_limited(str(update.effective_user.id)):
+            await update.message.reply_text("Demasiados mensajes. Espera un momento.")
+            return
         audio = update.message.audio
+        if audio.file_size and audio.file_size > MAX_DOWNLOAD_BYTES:
+            await update.message.reply_text("Archivo de audio demasiado grande (máx 20 MB).")
+            return
         file = await context.bot.get_file(audio.file_id)
         suffix = Path(audio.file_name).suffix if audio.file_name else ".mp3"
         tmp_path = Path(f"/tmp/claw-audio-{audio.file_unique_id}{suffix}")
@@ -239,8 +259,14 @@ class TelegramTransport:
     async def _handle_video(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_authorized(update):
             return
+        if self._is_rate_limited(str(update.effective_user.id)):
+            await update.message.reply_text("Demasiados mensajes. Espera un momento.")
+            return
         video = update.message.video or update.message.video_note
         if video is None:
+            return
+        if hasattr(video, "file_size") and video.file_size and video.file_size > MAX_DOWNLOAD_BYTES:
+            await update.message.reply_text("Video demasiado grande (máx 20 MB).")
             return
         await update.message.chat.send_action("typing")
         file = await context.bot.get_file(video.file_id)
@@ -267,9 +293,15 @@ class TelegramTransport:
     async def _handle_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_authorized(update):
             return
+        if self._is_rate_limited(str(update.effective_user.id)):
+            await update.message.reply_text("Demasiados mensajes. Espera un momento.")
+            return
         if not update.message.photo:
             return
         photo = update.message.photo[-1]
+        if hasattr(photo, "file_size") and photo.file_size and photo.file_size > MAX_DOWNLOAD_BYTES:
+            await update.message.reply_text("Imagen demasiado grande (máx 20 MB).")
+            return
         await self._handle_image_content(
             update,
             context,
@@ -281,8 +313,14 @@ class TelegramTransport:
     async def _handle_image_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_authorized(update):
             return
+        if self._is_rate_limited(str(update.effective_user.id)):
+            await update.message.reply_text("Demasiados mensajes. Espera un momento.")
+            return
         document = update.message.document
         if document is None:
+            return
+        if hasattr(document, "file_size") and document.file_size and document.file_size > MAX_DOWNLOAD_BYTES:
+            await update.message.reply_text("Documento demasiado grande (máx 20 MB).")
             return
         await self._handle_image_content(
             update,
@@ -357,3 +395,14 @@ class TelegramTransport:
         if self._allowed_user_id is None:
             return True
         return str(update.effective_user.id) == self._allowed_user_id
+
+    def _is_rate_limited(self, user_id: str) -> bool:
+        now = time.monotonic()
+        timestamps = self._rate_limits.get(user_id, [])
+        timestamps = [t for t in timestamps if now - t < self._rate_window]
+        if len(timestamps) >= self._rate_max:
+            self._rate_limits[user_id] = timestamps
+            return True
+        timestamps.append(now)
+        self._rate_limits[user_id] = timestamps
+        return False

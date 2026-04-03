@@ -4,8 +4,11 @@ import hashlib
 import hmac
 import json
 import secrets
+import time
 from dataclasses import dataclass
 from pathlib import Path
+
+APPROVAL_TTL_SECONDS = 900  # 15 minutes
 
 
 @dataclass(slots=True)
@@ -32,6 +35,7 @@ class ApprovalManager:
             "metadata": metadata or {},
             "token_hash": self._digest(token),
             "status": "pending",
+            "created_at": time.time(),
         }
         self._path_for(approval_id).write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return PendingApproval(approval_id=approval_id, action=action, summary=summary, token=token)
@@ -39,6 +43,11 @@ class ApprovalManager:
     def approve(self, approval_id: str, token: str) -> bool:
         path = self._path_for(approval_id)
         payload = json.loads(path.read_text(encoding="utf-8"))
+        created = payload.get("created_at", 0)
+        if time.time() - created > APPROVAL_TTL_SECONDS:
+            payload["status"] = "expired"
+            path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            return False
         valid = hmac.compare_digest(payload["token_hash"], self._digest(token))
         payload["status"] = "approved" if valid else "rejected"
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")

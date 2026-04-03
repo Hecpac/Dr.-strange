@@ -170,7 +170,7 @@ class KairosService:
                 cost_lines = [f"  {name}: ${cost:.2f}" for name, cost in costs.items()]
                 parts.append("Cost today:\n" + "\n".join(cost_lines))
         except Exception:
-            pass
+            logger.debug("Failed to retrieve cost data", exc_info=True)
 
         parts.append(f"Ticks so far: {self.state.ticks}, actions taken: {self.state.actions_taken}")
         return "\n".join(parts)

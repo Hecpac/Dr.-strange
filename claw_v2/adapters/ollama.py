@@ -70,7 +70,7 @@ class OllamaAdapter(ProviderAdapter):
             raise AdapterError(f"Ollama request failed: {exc}") from exc
 
         content = self._extract_content(response)
-        thinking = self._extract_thinking(content)
+        thinking = self._extract_thinking(content, response)
         if thinking:
             content = _THINK_RE.sub("", content).strip()
 
@@ -134,17 +134,124 @@ class OllamaAdapter(ProviderAdapter):
 
     # --- Tool / function calling ---
 
-    @staticmethod
-    def _build_tools(allowed_tools: list[str]) -> list[dict[str, Any]]:
+    _KNOWN_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
+        "Read": {
+            "description": "Read a file from disk",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Absolute path to the file"},
+                },
+                "required": ["path"],
+            },
+        },
+        "Write": {
+            "description": "Write content to a file",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Absolute path to the file"},
+                    "content": {"type": "string", "description": "Content to write"},
+                },
+                "required": ["path", "content"],
+            },
+        },
+        "Edit": {
+            "description": "Replace a string in a file",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Absolute path to the file"},
+                    "old_string": {"type": "string", "description": "Text to find"},
+                    "new_string": {"type": "string", "description": "Replacement text"},
+                },
+                "required": ["path", "old_string", "new_string"],
+            },
+        },
+        "Glob": {
+            "description": "Find files matching a glob pattern",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "Glob pattern (e.g. **/*.py)"},
+                },
+                "required": ["pattern"],
+            },
+        },
+        "Grep": {
+            "description": "Search file contents with a regex pattern",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "Regex pattern to search for"},
+                    "path": {"type": "string", "description": "Directory or file to search in"},
+                },
+                "required": ["pattern"],
+            },
+        },
+        "Bash": {
+            "description": "Execute a shell command",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "Shell command to run"},
+                },
+                "required": ["command"],
+            },
+        },
+        "WebSearch": {
+            "description": "Search the web for information",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"},
+                },
+                "required": ["query"],
+            },
+        },
+        "WebFetch": {
+            "description": "Fetch content from a URL",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL to fetch"},
+                },
+                "required": ["url"],
+            },
+        },
+        "SearchMemory": {
+            "description": "Search the memory store for relevant context",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"},
+                },
+                "required": ["query"],
+            },
+        },
+    }
+
+    @classmethod
+    def _build_tools(cls, allowed_tools: list[str]) -> list[dict[str, Any]]:
         """Convert tool names to Ollama tool format.
 
         If items are already dicts (full tool schemas), pass them through.
-        Otherwise create minimal function stubs.
+        Known tools get proper parameter schemas; unknown tools get a minimal stub.
         """
         tools = []
         for tool in allowed_tools:
             if isinstance(tool, dict):
                 tools.append(tool)
+            elif tool in cls._KNOWN_TOOL_SCHEMAS:
+                schema = cls._KNOWN_TOOL_SCHEMAS[tool]
+                tools.append({
+                    "type": "function",
+                    "function": {
+                        "name": tool,
+                        "description": schema["description"],
+                        "parameters": schema["parameters"],
+                    },
+                })
             else:
                 tools.append({
                     "type": "function",
@@ -166,7 +273,17 @@ class OllamaAdapter(ProviderAdapter):
         return getattr(msg, "content", "") if msg else ""
 
     @staticmethod
-    def _extract_thinking(content: str) -> str | None:
+    def _extract_thinking(content: str, response: Any = None) -> str | None:
+        # Ollama SDK with think=True returns thinking in message.thinking
+        if response is not None:
+            if isinstance(response, dict):
+                thinking = response.get("message", {}).get("thinking", "")
+            else:
+                msg = getattr(response, "message", None)
+                thinking = getattr(msg, "thinking", "") if msg else ""
+            if thinking and thinking.strip():
+                return thinking.strip()
+        # Fallback: parse from content tags
         match = _THINK_RE.search(content)
         return match.group(1).strip() if match else None
 

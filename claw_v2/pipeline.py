@@ -222,7 +222,8 @@ class PipelineService:
         return active
 
     def _save_run(self, run: PipelineRun) -> None:
-        path = self.state_root / f"{run.issue_id}.json"
+        safe_id = Path(run.issue_id).name
+        path = self.state_root / f"{safe_id}.json"
         path.write_text(json.dumps(asdict(run), indent=2), encoding="utf-8")
 
     def _load_run(self, issue_id: str) -> PipelineRun:

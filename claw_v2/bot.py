@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import threading
 import unicodedata
 from dataclasses import asdict
 from pathlib import Path
@@ -148,6 +149,7 @@ class BotService:
         self.computer_system_prompt = computer_system_prompt or _COMPUTER_SYSTEM_PROMPT
         self.observe = observe
         self.learning: Any | None = None
+        self._state_lock = threading.Lock()
         self._computer_sessions: dict[str, Any] = {}
         self._computer_client: Any | None = None
         self.notebooklm: Any | None = None
@@ -728,7 +730,7 @@ class BotService:
                 if _is_usable_browse_content(normalized_url, result.content):
                     return f"**{result.title}** ({result.url})\n\n{result.content[:6000]}"
             except Exception:
-                pass
+                logger.debug("CDP browse failed for %s, falling back", normalized_url, exc_info=True)
 
         return f"browse error: no se pudo leer {normalized_url}"
 
@@ -924,19 +926,28 @@ class BotService:
         if self.browser_use is not None:
             try:
                 import asyncio
-                result = asyncio.run(self.browser_use.run_task(instruction))
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None
+                if loop and loop.is_running():
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                        result = pool.submit(asyncio.run, self.browser_use.run_task(instruction)).result(timeout=120)
+                else:
+                    result = asyncio.run(self.browser_use.run_task(instruction))
                 return result
             except Exception as exc:
                 logger.warning("browser_use fallback failed: %s", exc)
 
         from claw_v2.computer import ComputerSession
 
-        active = self._computer_sessions.get(session_id)
-        if active is not None:
-            active.status = "aborted"
-
-        session = ComputerSession(task=instruction)
-        self._computer_sessions[session_id] = session
+        with self._state_lock:
+            active = self._computer_sessions.get(session_id)
+            if active is not None:
+                active.status = "aborted"
+            session = ComputerSession(task=instruction)
+            self._computer_sessions[session_id] = session
         return self._run_computer_session(session_id)
 
     def _run_computer_session(self, session_id: str) -> str:
@@ -1403,7 +1414,7 @@ def _needs_real_browser(url: str) -> bool:
 
     try:
         host = urlparse(url).netloc.lower()
-    except Exception:
+    except (ValueError, AttributeError):
         return False
     return any(host == d or host.endswith(f".{d}") for d in _AUTH_DOMAINS)
 

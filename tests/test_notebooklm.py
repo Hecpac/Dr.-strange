@@ -128,7 +128,7 @@ class SyncMethodTests(unittest.TestCase):
         client = AsyncMock()
         client.notebooks.list.return_value = [_mock_notebook("abc-full", "NB")]
         chat_result = MagicMock()
-        chat_result.text = "Here is the summary of your sources."
+        chat_result.answer = "Here is the summary of your sources."
         chat_result.citations = []
         client.chat.ask.return_value = chat_result
         svc = self._make_service(client)

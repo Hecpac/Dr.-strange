@@ -113,6 +113,7 @@ class HandleVoiceTests(unittest.IsolatedAsyncioTestCase):
         update.effective_chat.id = 1
         update.message.voice.file_id = "file123"
         update.message.voice.file_unique_id = "uniq123"
+        update.message.voice.file_size = 1024
         update.message.reply_text = AsyncMock()
 
         mock_file = AsyncMock()
@@ -136,6 +137,7 @@ class HandleVoiceTests(unittest.IsolatedAsyncioTestCase):
         update.effective_user.id = 123
         update.message.voice.file_id = "file123"
         update.message.voice.file_unique_id = "uniq123"
+        update.message.voice.file_size = 1024
         update.message.reply_text = AsyncMock()
 
         mock_file = AsyncMock()
@@ -165,8 +167,8 @@ class HandleImageTests(unittest.IsolatedAsyncioTestCase):
         update.effective_chat.id = 1
         update.message.caption = "revisa esta foto"
         update.message.photo = [
-            MagicMock(file_id="small", file_unique_id="uniq1"),
-            MagicMock(file_id="large", file_unique_id="uniq1"),
+            MagicMock(file_id="small", file_unique_id="uniq1", file_size=512),
+            MagicMock(file_id="large", file_unique_id="uniq1", file_size=4096),
         ]
         update.message.reply_text = AsyncMock()
         update.message.chat.send_action = AsyncMock()
@@ -208,6 +210,7 @@ class HandleImageTests(unittest.IsolatedAsyncioTestCase):
         update.message.document.file_id = "doc1"
         update.message.document.file_unique_id = "uniq-doc"
         update.message.document.mime_type = "image/jpeg"
+        update.message.document.file_size = 2048
         update.message.reply_text = AsyncMock()
         update.message.chat.send_action = AsyncMock()
 

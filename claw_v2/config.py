@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -98,7 +99,7 @@ class AppConfig:
             google_api_key=os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"),
             claude_cli_path=os.getenv("CLAUDE_CLI_PATH") or shutil.which("claude") or "claude",
             claude_auth_mode=os.getenv("CLAUDE_AUTH_MODE", "subscription"),
-            approval_secret=os.getenv("APPROVAL_SECRET", "local-dev-secret"),
+            approval_secret=os.getenv("APPROVAL_SECRET") or secrets.token_urlsafe(32),
             brain_provider=os.getenv("BRAIN_PROVIDER", "anthropic"),
             brain_model=os.getenv("BRAIN_MODEL", "claude-opus-4-6"),
             worker_provider=os.getenv("WORKER_PROVIDER", "anthropic"),
