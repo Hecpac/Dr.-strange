@@ -157,6 +157,8 @@ class TelegramTransport:
             BotCommand("nlm_list", "Listar cuadernos de NotebookLM"),
             BotCommand("nlm_create", "Crear cuaderno + Deep Research — /nlm_create <tema>"),
             BotCommand("nlm_podcast", "Generar podcast del cuaderno activo"),
+            BotCommand("chrome_login", "Chrome visible para login — /chrome_login"),
+            BotCommand("chrome_headless", "Volver a Chrome headless — /chrome_headless"),
         ]
         try:
             await self._app.bot.set_my_commands(commands)

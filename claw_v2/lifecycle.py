@@ -7,6 +7,7 @@ import signal
 import sys
 from pathlib import Path
 
+from claw_v2.chrome import ManagedChrome
 from claw_v2.main import build_runtime
 from claw_v2.notebooklm import NotebookLMService
 from claw_v2.telegram import TelegramTransport
@@ -80,9 +81,27 @@ async def run() -> int:
         nlm_service = NotebookLMService(notify=_nlm_notify, observe=runtime.observe)
         runtime.bot.notebooklm = nlm_service
 
+        # Wire ManagedChrome
+        managed_chrome = None
+        if runtime.config.chrome_cdp_enabled:
+            try:
+                managed_chrome = ManagedChrome(port=runtime.config.claw_chrome_port)
+                managed_chrome.start()
+            except Exception:
+                logger.warning("ManagedChrome failed to start, CDP features disabled", exc_info=True)
+                managed_chrome = None
+        runtime.bot.managed_chrome = managed_chrome
+
+        # Re-wire BrowserUseService with managed CDP URL
+        if managed_chrome is not None:
+            from claw_v2.browser_use import BrowserUseService
+            runtime.bot.browser_use = BrowserUseService(cdp_url=managed_chrome.cdp_url)
+
         try:
             await runtime.daemon.run_loop(shutdown)
         finally:
+            if managed_chrome is not None:
+                managed_chrome.stop()
             await transport.stop()
     finally:
         pid_lock.release()
