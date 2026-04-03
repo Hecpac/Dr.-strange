@@ -182,7 +182,7 @@ console.log(JSON.stringify({{
         result = self.run_script(script, browser_name=browser_name)
         return _parse_browse_result(result, action_name="interact")
 
-    def connect_to_chrome(self, *, cdp_url: str = "http://localhost:9222") -> list[dict[str, str]]:
+    def connect_to_chrome(self, *, cdp_url: str = "http://localhost:9250") -> list[dict[str, str]]:
         with sync_playwright() as pw:
             browser = _cdp_connect(pw, cdp_url)
             context = browser.contexts[0] if browser.contexts else None
@@ -200,7 +200,7 @@ console.log(JSON.stringify({{
         self,
         url: str,
         *,
-        cdp_url: str = "http://localhost:9222",
+        cdp_url: str = "http://localhost:9250",
         page_index: int | None = None,
         page_title: str | None = None,
         page_url_pattern: str | None = None,
@@ -220,7 +220,7 @@ console.log(JSON.stringify({{
     def chrome_screenshot(
         self,
         *,
-        cdp_url: str = "http://localhost:9222",
+        cdp_url: str = "http://localhost:9250",
         page_index: int | None = None,
         page_title: str | None = None,
         page_url_pattern: str | None = None,
