@@ -533,6 +533,8 @@ class BotTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 runtime.bot.browser = MagicMock()
+                runtime.bot.managed_chrome = MagicMock()
+                runtime.bot.managed_chrome.cdp_url = "http://localhost:9250"
                 runtime.bot.browser.connect_to_chrome.return_value = [
                     {"url": "https://ads.google.com", "title": "Google Ads", "index": 0},
                 ]
@@ -555,6 +557,8 @@ class BotTests(unittest.TestCase):
                 from claw_v2.browser import BrowseResult
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 runtime.bot.browser = MagicMock()
+                runtime.bot.managed_chrome = MagicMock()
+                runtime.bot.managed_chrome.cdp_url = "http://localhost:9250"
                 runtime.bot.browser.chrome_navigate.return_value = BrowseResult(
                     url="https://ads.google.com/campaigns",
                     title="Google Ads",
@@ -579,6 +583,8 @@ class BotTests(unittest.TestCase):
                 from claw_v2.browser import BrowseResult
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 runtime.bot.browser = MagicMock()
+                runtime.bot.managed_chrome = MagicMock()
+                runtime.bot.managed_chrome.cdp_url = "http://localhost:9250"
                 runtime.bot.browser.chrome_navigate.return_value = BrowseResult(
                     url="https://ads.google.com/campaigns",
                     title="Google Ads",
@@ -590,7 +596,11 @@ class BotTests(unittest.TestCase):
                     text="Ya chrome esta abierto en Google Ads revisalo",
                 )
                 self.assertIn("Google Ads", result)
-                runtime.bot.browser.chrome_navigate.assert_called_once_with("https://ads.google.com", page_url_pattern="ads.google.com")
+                runtime.bot.browser.chrome_navigate.assert_called_once_with(
+                    "https://ads.google.com",
+                    cdp_url="http://localhost:9250",
+                    page_url_pattern="ads.google.com",
+                )
 
     @patch("claw_v2.bot._jina_read")
     def test_natural_language_url_uses_isolated_browse(self, mock_jina) -> None:
@@ -774,16 +784,16 @@ class BotTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 runtime.bot.browser = MagicMock()
-                runtime.bot.browser.chrome_navigate.side_effect = RuntimeError("connect ECONNREFUSED 127.0.0.1:9222")
+                runtime.bot.managed_chrome = MagicMock()
+                runtime.bot.managed_chrome.cdp_url = "http://localhost:9250"
+                runtime.bot.browser.chrome_navigate.side_effect = RuntimeError("connect ECONNREFUSED 127.0.0.1:9250")
                 result = runtime.bot.handle_text(
                     user_id="123",
                     session_id="s1",
                     text="/chrome_browse https://ads.google.com",
                 )
-                self.assertIn("Chrome no esta exponiendo CDP", result)
-                self.assertIn("remote-debugging-port=9222", result)
-                self.assertIn("user-data-dir", result)
-                self.assertIn("/computer", result)
+                self.assertIn("Chrome del bot no responde", result)
+                self.assertIn("Reinicia el bot", result)
 
     def test_screen_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -239,6 +239,10 @@ class BotService:
             return self._chrome_browse_response(parts[1])
         if stripped.startswith("/chrome_shot"):
             return self._chrome_shot_response(stripped)
+        if stripped == "/chrome_login":
+            return self._chrome_login_response()
+        if stripped == "/chrome_headless":
+            return self._chrome_headless_response()
         if stripped == "/screen":
             return self._screen_response()
         if stripped == "/computer":
@@ -810,10 +814,10 @@ class BotService:
         return json.dumps(result, indent=2, sort_keys=True)
 
     def _chrome_pages_response(self) -> str:
-        if self.browser is None:
-            return "browser unavailable"
+        if self.browser is None or self.managed_chrome is None:
+            return "Chrome no disponible."
         try:
-            pages = self.browser.connect_to_chrome()
+            pages = self.browser.connect_to_chrome(cdp_url=self.managed_chrome.cdp_url)
         except Exception as exc:
             return _format_chrome_cdp_error(exc, prefix="chrome CDP error")
         return json.dumps({"pages": pages}, indent=2, sort_keys=True)
@@ -823,13 +827,14 @@ class BotService:
             normalized_url = _normalize_url(url)
         except ValueError as exc:
             return str(exc)
-        if self.browser is None:
-            return "browser unavailable"
+        if self.browser is None or self.managed_chrome is None:
+            return "Chrome no disponible."
         try:
             from urllib.parse import urlparse
             host = urlparse(normalized_url).netloc.lower()
             result = self.browser.chrome_navigate(
                 normalized_url,
+                cdp_url=self.managed_chrome.cdp_url,
                 page_url_pattern=host,
             )
         except Exception as exc:
@@ -837,10 +842,10 @@ class BotService:
         return f"**{result.title}** ({result.url})\n\n{result.content[:6000]}"
 
     def _chrome_shot_response(self, command: str) -> str:
-        if self.browser is None:
-            return "browser unavailable"
+        if self.browser is None or self.managed_chrome is None:
+            return "Chrome no disponible."
         try:
-            result = self.browser.chrome_screenshot()
+            result = self.browser.chrome_screenshot(cdp_url=self.managed_chrome.cdp_url)
         except Exception as exc:
             return _format_chrome_cdp_error(exc, prefix="chrome screenshot error")
         return json.dumps({
@@ -848,6 +853,26 @@ class BotService:
             "title": result.title,
             "screenshot_path": result.screenshot_path,
         }, indent=2)
+
+    def _chrome_login_response(self) -> str:
+        if self.managed_chrome is None:
+            return "Chrome no disponible."
+        try:
+            self.managed_chrome.stop()
+            self.managed_chrome.start(headless=False)
+            return "Chrome reiniciado en modo visible. Haz login en los sitios que necesites. Cuando termines: /chrome_headless"
+        except Exception as exc:
+            return f"Error reiniciando Chrome: {exc}"
+
+    def _chrome_headless_response(self) -> str:
+        if self.managed_chrome is None:
+            return "Chrome no disponible."
+        try:
+            self.managed_chrome.stop()
+            self.managed_chrome.start(headless=True)
+            return "Chrome reiniciado en modo headless."
+        except Exception as exc:
+            return f"Error reiniciando Chrome: {exc}"
 
     def _screen_response(self) -> str:
         if self.computer is None:
@@ -1416,19 +1441,9 @@ def _jina_read(url: str, *, timeout: float = 10) -> str:
 def _format_chrome_cdp_error(exc: Exception, *, prefix: str) -> str:
     message = str(exc)
     lowered = message.lower()
-    if any(token in lowered for token in ("9222", "econnrefused", "connection refused", "connect_over_cdp", "browser_type.connect_over_cdp")):
-        return (
-            "Chrome no esta exponiendo CDP en `9222`.\n\n"
-            "En Chrome 136+ la bandera `--remote-debugging-port` se ignora sobre el perfil normal si no pasas tambien `--user-data-dir`.\n\n"
-            "Si quieres CDP, cierra Chrome completamente y abrelo desde Terminal con un perfil aparte:\n\n"
-            "```bash\n"
-            "/Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome \\\n"
-            "  --remote-debugging-port=9222 \\\n"
-            "  --user-data-dir=/tmp/chrome-cdp-profile\n"
-            "```\n\n"
-            "Ese perfil NO reutiliza tu sesion autenticada actual. Si necesitas controlar tu Chrome ya logueado, usa `/computer`."
-        )
-    return f"{prefix}: {exc}"
+    if any(token in lowered for token in ("econnrefused", "connection refused", "connect_over_cdp", "browser_type.connect_over_cdp")):
+        return "Chrome del bot no responde. Reinicia el bot o verifica que Chrome esté instalado."
+    return f"{prefix}: {message}"
 
 
 def _parse_non_negative_int(value: str, *, field_name: str) -> int:
