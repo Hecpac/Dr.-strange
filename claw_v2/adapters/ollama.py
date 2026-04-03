@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import json
 import re
+import subprocess
+import tempfile
 from importlib import import_module
 from pathlib import Path
 from typing import Any, Callable
@@ -112,6 +114,13 @@ class OllamaAdapter(ProviderAdapter):
                         img_b64 = self._encode_image(block["path"])
                         if img_b64:
                             images.append(img_b64)
+                    elif btype == "video" and "path" in block:
+                        frames = self._extract_video_frames(
+                            block["path"],
+                            max_frames=block.get("max_frames", 4),
+                            fps=block.get("fps", 1),
+                        )
+                        images.extend(frames)
                     elif btype == "image_url":
                         url = block.get("image_url", {}).get("url", "")
                         if url.startswith("data:"):
@@ -125,17 +134,43 @@ class OllamaAdapter(ProviderAdapter):
             return msg
         return {"role": "user", "content": str(user_content)}
 
-    @staticmethod
-    def _encode_image(path: str) -> str | None:
+    _ALLOWED_MEDIA_ROOTS = (Path("/tmp"), Path("/private/tmp"))
+
+    @classmethod
+    def _is_safe_path(cls, p: Path) -> bool:
+        resolved = p.resolve()
+        roots = (*cls._ALLOWED_MEDIA_ROOTS, Path(tempfile.gettempdir()).resolve(), Path.home())
+        return any(resolved.is_relative_to(root) for root in roots)
+
+    @classmethod
+    def _encode_image(cls, path: str) -> str | None:
         p = Path(path).resolve()
-        # Only allow images under /tmp or the user home directory
-        import tempfile
-        allowed_roots = (Path(tempfile.gettempdir()).resolve(), Path("/tmp"), Path("/private/tmp"), Path.home())
-        if not any(p.is_relative_to(root) for root in allowed_roots):
+        if not cls._is_safe_path(p) or not p.exists():
             return None
-        if p.exists():
-            return base64.b64encode(p.read_bytes()).decode()
-        return None
+        return base64.b64encode(p.read_bytes()).decode()
+
+    @classmethod
+    def _extract_video_frames(cls, path: str, *, max_frames: int = 4, fps: int = 1) -> list[str]:
+        """Extract frames from a video file via ffmpeg and return as base64 strings."""
+        p = Path(path).resolve()
+        if not cls._is_safe_path(p) or not p.exists():
+            return []
+        with tempfile.TemporaryDirectory(prefix="claw-video-") as tmp:
+            out_pattern = str(Path(tmp) / "frame-%03d.png")
+            cmd = [
+                "ffmpeg", "-i", str(p),
+                "-vf", f"fps={fps}",
+                "-frames:v", str(max_frames),
+                out_pattern, "-y",
+            ]
+            try:
+                subprocess.run(cmd, capture_output=True, timeout=30, check=False)
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                return []
+            frames: list[str] = []
+            for frame_path in sorted(Path(tmp).glob("frame-*.png")):
+                frames.append(base64.b64encode(frame_path.read_bytes()).decode())
+        return frames
 
     # --- Tool / function calling ---
 
