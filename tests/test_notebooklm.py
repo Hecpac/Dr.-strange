@@ -183,6 +183,24 @@ class BackgroundTests(unittest.TestCase):
         call_msg = svc._notify.call_args[0][0]
         self.assertIn("podcast", call_msg.lower())
 
+    def test_infographic_notifies_on_completion(self) -> None:
+        client = AsyncMock()
+        client.notebooks.list.return_value = [_mock_notebook("abc-full", "Info NB")]
+        status_obj = MagicMock()
+        status_obj.task_id = "task-2"
+        client.artifacts.generate_infographic.return_value = status_obj
+        client.artifacts.wait_for_completion.return_value = MagicMock()
+        svc = self._make_service(client)
+        result = svc.start_artifact("abc", "infographic")
+        self.assertIn("infografia", result.lower())
+        for _ in range(50):
+            if "abc-full" not in svc._running:
+                break
+            time.sleep(0.1)
+        svc._notify.assert_called_once()
+        call_msg = svc._notify.call_args[0][0]
+        self.assertIn("infografia", call_msg.lower())
+
     def test_background_error_notifies(self) -> None:
         client = AsyncMock()
         client.notebooks.list.return_value = [_mock_notebook("abc-full", "Err NB")]
@@ -248,14 +266,18 @@ class BotCommandTests(unittest.TestCase):
         result = bot.handle_text(user_id="123", session_id="s1", text="/nlm_list")
         self.assertIn("abc123", result)
         self.assertIn("Test NB", result)
+        self.assertIn("2026-04-02", result)
 
     def test_nlm_create(self) -> None:
         nlm = MagicMock(spec=NotebookLMService)
         nlm.create_notebook.return_value = {"id": "new-id", "title": "Noticias AI"}
+        nlm.start_research.return_value = "Deep Research iniciado..."
         bot = _make_bot_with_nlm(nlm)
         result = bot.handle_text(user_id="123", session_id="s1", text="/nlm_create Noticias AI")
         nlm.create_notebook.assert_called_once_with("Noticias AI")
+        nlm.start_research.assert_called_once_with("new-id", "Noticias AI")
         self.assertIn("new-id", result)
+        self.assertIn("cuaderno activo", result.lower())
 
     def test_nlm_research(self) -> None:
         nlm = MagicMock(spec=NotebookLMService)
@@ -282,6 +304,87 @@ class BotCommandTests(unittest.TestCase):
         )
         result = bot.handle_text(user_id="123", session_id="s1", text="/nlm_list")
         self.assertIn("no disponible", result.lower())
+
+    def test_plain_language_create_notebook_starts_research(self) -> None:
+        nlm = MagicMock(spec=NotebookLMService)
+        nlm.create_notebook.return_value = {"id": "nb-full-id", "title": "Tendencias IA"}
+        nlm.start_research.return_value = "Deep Research iniciado..."
+        bot = _make_bot_with_nlm(nlm)
+        result = bot.handle_text(
+            user_id="123",
+            session_id="s1",
+            text="Créame un cuaderno sobre Tendencias IA",
+        )
+        nlm.create_notebook.assert_called_once_with("Tendencias IA")
+        nlm.start_research.assert_called_once_with("nb-full-id", "Tendencias IA")
+        self.assertIn("Deep Research iniciado", result)
+
+    def test_plain_language_podcast_uses_active_notebook(self) -> None:
+        nlm = MagicMock(spec=NotebookLMService)
+        nlm.create_notebook.return_value = {"id": "nb-full-id", "title": "Tendencias IA"}
+        nlm.start_research.return_value = "Deep Research iniciado..."
+        nlm.start_artifact.return_value = "Generando podcast..."
+        bot = _make_bot_with_nlm(nlm)
+        bot.handle_text(
+            user_id="123",
+            session_id="s1",
+            text="creame un cuaderno sobre Tendencias IA",
+        )
+        result = bot.handle_text(
+            user_id="123",
+            session_id="s1",
+            text="hazme un podcast",
+        )
+        nlm.start_artifact.assert_called_once_with("nb-full-id", "podcast")
+        self.assertIn("Generando podcast", result)
+
+    def test_plain_language_infographic_uses_active_notebook(self) -> None:
+        nlm = MagicMock(spec=NotebookLMService)
+        nlm.create_notebook.return_value = {"id": "nb-full-id", "title": "Tendencias IA"}
+        nlm.start_research.return_value = "Deep Research iniciado..."
+        nlm.start_artifact.return_value = "Generando infografia..."
+        bot = _make_bot_with_nlm(nlm)
+        bot.handle_text(
+            user_id="123",
+            session_id="s1",
+            text="creame un cuaderno sobre Tendencias IA",
+        )
+        result = bot.handle_text(
+            user_id="123",
+            session_id="s1",
+            text="generame una infografia",
+        )
+        nlm.start_artifact.assert_called_once_with("nb-full-id", "infographic")
+        self.assertIn("infografia", result.lower())
+
+    def test_nlm_podcast_without_id_uses_active_notebook(self) -> None:
+        nlm = MagicMock(spec=NotebookLMService)
+        nlm.create_notebook.return_value = {"id": "nb-full-id", "title": "Tendencias IA"}
+        nlm.start_research.return_value = "Deep Research iniciado..."
+        nlm.start_podcast.return_value = "Generando podcast..."
+        bot = _make_bot_with_nlm(nlm)
+        bot.handle_text(
+            user_id="123",
+            session_id="s1",
+            text="/nlm_create Tendencias IA",
+        )
+        result = bot.handle_text(
+            user_id="123",
+            session_id="s1",
+            text="/nlm_podcast",
+        )
+        nlm.start_podcast.assert_called_once_with("nb-full-id")
+        self.assertIn("Generando podcast", result)
+
+    def test_nlm_text_rejects_empty_title_or_content(self) -> None:
+        nlm = MagicMock(spec=NotebookLMService)
+        bot = _make_bot_with_nlm(nlm)
+        result = bot.handle_text(
+            user_id="123",
+            session_id="s1",
+            text="/nlm_text abc | contenido",
+        )
+        self.assertIn("usage:", result)
 
 
 if __name__ == "__main__":

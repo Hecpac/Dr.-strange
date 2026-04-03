@@ -35,6 +35,12 @@ class NotebookLMService:
         self._running: dict[str, threading.Thread] = {}
         self._client_factory: Callable[[], Any] | None = None
 
+    _ARTIFACT_LABELS = {
+        "podcast": "podcast",
+        "infographic": "infografia",
+        "video": "video",
+    }
+
     def _run_async(self, coro):
         """Run an async coroutine synchronously."""
         loop = asyncio.new_event_loop()
@@ -208,36 +214,78 @@ class NotebookLMService:
             raise TimeoutError("Research did not complete within 10 minutes")
 
     def start_podcast(self, notebook_id: str) -> str:
+        return self.start_artifact(notebook_id, "podcast")
+
+    def start_artifact(self, notebook_id: str, kind: str) -> str:
+        normalized_kind = kind.strip().lower()
+        if normalized_kind not in self._ARTIFACT_LABELS:
+            raise ValueError(f"Tipo de artefacto no soportado: {kind}")
         full_id = self._resolve_notebook_id(notebook_id)
         if full_id in self._running and self._running[full_id].is_alive():
             return f"Ya hay una operación en curso para este notebook ({full_id[:8]}...)."
+        self._ensure_artifact_supported(normalized_kind)
         title = self._get_notebook_title(full_id)
-        self._emit("nlm_podcast_started", notebook_id=full_id)
+        self._emit(f"nlm_{normalized_kind}_started", notebook_id=full_id)
 
         def _worker():
             try:
-                self._run_async(self._async_podcast(full_id))
-                self._emit("nlm_podcast_completed", notebook_id=full_id)
+                self._run_async(self._async_generate_artifact(full_id, normalized_kind))
+                self._emit(f"nlm_{normalized_kind}_completed", notebook_id=full_id)
                 self._notify(
-                    f"Podcast generado para notebook {title}\n"
+                    f"{self._artifact_name(normalized_kind)} generado para notebook {title}\n"
                     f"https://notebooklm.google.com/notebook/{full_id}"
                 )
             except Exception as exc:
-                logger.exception("Background podcast failed for %s", full_id)
-                self._emit("nlm_error", notebook_id=full_id, operation="podcast", error=str(exc))
-                self._notify(f"Error en podcast: {exc}")
+                logger.exception("Background %s failed for %s", normalized_kind, full_id)
+                self._emit("nlm_error", notebook_id=full_id, operation=normalized_kind, error=str(exc))
+                self._notify(f"Error en {self._artifact_name(normalized_kind)}: {exc}")
             finally:
                 self._running.pop(full_id, None)
 
         thread = threading.Thread(target=_worker, daemon=True)
         self._running[full_id] = thread
         thread.start()
-        return f"Generando podcast para notebook {title}..."
+        return f"Generando {self._artifact_name(normalized_kind)} para notebook {title}..."
 
-    async def _async_podcast(self, notebook_id: str) -> None:
+    async def _async_generate_artifact(self, notebook_id: str, kind: str) -> None:
         async with self._client_ctx() as client:
-            status = await client.artifacts.generate_audio(notebook_id)
-            await client.artifacts.wait_for_completion(notebook_id, status.task_id, timeout=1200)
+            method_name = self._artifact_method_name(client.artifacts, kind)
+            generator = getattr(client.artifacts, method_name)
+            status = await generator(notebook_id)
+            task_id = self._artifact_task_id(status)
+            waiter = getattr(client.artifacts, "wait_for_completion", None)
+            if waiter is not None and task_id:
+                await waiter(notebook_id, task_id, timeout=1200)
+
+    def _ensure_artifact_supported(self, kind: str) -> None:
+        self._run_async(self._async_ensure_artifact_supported(kind))
+
+    async def _async_ensure_artifact_supported(self, kind: str) -> None:
+        async with self._client_ctx() as client:
+            self._artifact_method_name(client.artifacts, kind)
+
+    def _artifact_method_name(self, artifacts: Any, kind: str) -> str:
+        candidates = {
+            "podcast": ("generate_audio",),
+            "infographic": ("generate_infographic", "generate_infographic_overview"),
+            "video": ("generate_video", "generate_video_overview"),
+        }[kind]
+        for name in candidates:
+            if hasattr(artifacts, name):
+                return name
+        raise RuntimeError(
+            f"Este runtime de NotebookLM no soporta generar {self._artifact_name(kind)}."
+        )
+
+    def _artifact_task_id(self, status: Any) -> str | None:
+        if isinstance(status, dict):
+            task_id = status.get("task_id")
+            return str(task_id) if task_id else None
+        task_id = getattr(status, "task_id", None)
+        return str(task_id) if task_id else None
+
+    def _artifact_name(self, kind: str) -> str:
+        return self._ARTIFACT_LABELS[kind]
 
     def _get_notebook_title(self, full_id: str) -> str:
         try:
