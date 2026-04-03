@@ -241,7 +241,7 @@ class ComputerUseService:
         session: ComputerSession,
         client: Any,
         gate: Any,
-        model: str = "computer-use-preview",
+        model: str = "gpt-5.4-mini",
         system_prompt: str | None = None,
     ) -> str:
         esc_listener = _EscListener(session)

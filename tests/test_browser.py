@@ -186,7 +186,7 @@ class TestChromeCDP(unittest.TestCase):
 
         self.assertEqual(result.url, "https://ads.google.com/campaigns")
         self.assertEqual(result.title, "Google Ads")
-        mock_new_page.goto.assert_called_once_with("https://ads.google.com")
+        mock_new_page.goto.assert_called_once_with("https://ads.google.com", wait_until="domcontentloaded", timeout=30_000)
 
     def test_chrome_navigate_matches_existing_tab_by_url_pattern(self) -> None:
         mock_existing = mock.MagicMock()
@@ -213,7 +213,7 @@ class TestChromeCDP(unittest.TestCase):
             )
 
         self.assertEqual(result.url, "https://ads.google.com/campaigns")
-        mock_existing.goto.assert_called_once_with("https://ads.google.com")
+        mock_existing.goto.assert_called_once_with("https://ads.google.com", wait_until="domcontentloaded", timeout=30_000)
 
     def test_chrome_screenshot_returns_path(self) -> None:
         mock_page = mock.MagicMock()

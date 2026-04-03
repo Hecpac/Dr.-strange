@@ -184,7 +184,7 @@ console.log(JSON.stringify({{
 
     def connect_to_chrome(self, *, cdp_url: str = "http://localhost:9222") -> list[dict[str, str]]:
         with sync_playwright() as pw:
-            browser = pw.chromium.connect_over_cdp(cdp_url)
+            browser = _cdp_connect(pw, cdp_url)
             context = browser.contexts[0] if browser.contexts else None
             if context is None:
                 browser.close()
@@ -206,11 +206,13 @@ console.log(JSON.stringify({{
         page_url_pattern: str | None = None,
     ) -> BrowseResult:
         with sync_playwright() as pw:
-            browser = pw.chromium.connect_over_cdp(cdp_url)
+            browser = _cdp_connect(pw, cdp_url)
             context = browser.contexts[0]
             page = _select_cdp_page(context, page_index=page_index, page_title=page_title, page_url_pattern=page_url_pattern)
-            page.goto(url)
-            text = page.inner_text("body")[:4000] if page.query_selector("body") else ""
+            page.set_viewport_size({"width": 1280, "height": 900})
+            page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+            _wait_for_dynamic_content(page, url)
+            text = _extract_page_text(page)
             result = BrowseResult(url=page.url, title=page.title(), content=text)
             browser.close()
         return result
@@ -225,12 +227,14 @@ console.log(JSON.stringify({{
         name: str = "chrome.png",
     ) -> BrowseResult:
         with sync_playwright() as pw:
-            browser = pw.chromium.connect_over_cdp(cdp_url)
+            browser = _cdp_connect(pw, cdp_url)
             context = browser.contexts[0]
             page = _select_cdp_page(context, page_index=page_index, page_title=page_title, page_url_pattern=page_url_pattern)
+            page.set_viewport_size({"width": 1280, "height": 900})
+            _wait_for_dynamic_content(page, page.url)
             screenshot_path = f"/tmp/claw-{name}"
             page.screenshot(path=screenshot_path)
-            text = page.inner_text("body")[:4000] if page.query_selector("body") else ""
+            text = _extract_page_text(page)
             result = BrowseResult(
                 url=page.url,
                 title=page.title(),
@@ -275,6 +279,63 @@ console.log(JSON.stringify({{
 """
         result = self.run_script(script)
         return _parse_browse_result(result, action_name="screenshot")
+
+
+_CDP_MAX_RETRIES = 2
+
+# Domains that rely heavily on JS rendering and need extra wait time.
+_JS_HEAVY_DOMAINS = ("x.com", "twitter.com", "instagram.com", "facebook.com", "linkedin.com", "reddit.com")
+
+_CONTENT_LIMIT = 8000
+
+
+def _cdp_connect(pw, cdp_url: str, *, retries: int = _CDP_MAX_RETRIES):
+    """Connect to Chrome via CDP with retry logic."""
+    import time
+
+    last_exc: Exception | None = None
+    for attempt in range(retries + 1):
+        try:
+            return pw.chromium.connect_over_cdp(cdp_url, timeout=10_000)
+        except Exception as exc:
+            last_exc = exc
+            if attempt < retries:
+                time.sleep(1)
+    raise BrowserError(f"CDP connection failed after {retries + 1} attempts: {last_exc}") from last_exc
+
+
+def _is_js_heavy(url: str) -> bool:
+    """Check if a URL belongs to a JS-heavy SPA domain."""
+    from urllib.parse import urlparse
+
+    try:
+        host = urlparse(url).netloc.lower()
+    except Exception:
+        return False
+    return any(host == d or host.endswith(f".{d}") for d in _JS_HEAVY_DOMAINS)
+
+
+def _wait_for_dynamic_content(page, url: str) -> None:
+    """Wait for JS-heavy pages to finish rendering."""
+    try:
+        if _is_js_heavy(url):
+            page.wait_for_load_state("networkidle", timeout=10_000)
+            page.wait_for_timeout(1500)
+        else:
+            page.wait_for_load_state("networkidle", timeout=8_000)
+    except Exception:
+        pass  # timeout is acceptable — use whatever loaded
+
+
+def _extract_page_text(page) -> str:
+    """Extract visible text from page with higher limit."""
+    try:
+        body = page.query_selector("body")
+        if body is None:
+            return ""
+        return body.inner_text()[:_CONTENT_LIMIT]
+    except Exception:
+        return ""
 
 
 def _select_cdp_page(context, *, page_index=None, page_title=None, page_url_pattern=None):
