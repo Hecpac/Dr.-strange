@@ -94,7 +94,7 @@ async def run() -> int:
 
         # Re-wire BrowserUseService with managed CDP URL
         if managed_chrome is not None:
-            from claw_v2.browser_use import BrowserUseService
+            from claw_v2.computer import BrowserUseService
             runtime.bot.browser_use = BrowserUseService(cdp_url=managed_chrome.cdp_url)
 
         try:
