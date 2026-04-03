@@ -155,7 +155,12 @@ class LLMRouter:
                 "anthropic": AnthropicAgentAdapter(executor=anthropic_executor),
                 "openai": OpenAIAdapter(transport=openai_transport, api_key=config.openai_api_key),
                 "google": GoogleAdapter(transport=google_transport, api_key=config.google_api_key),
-                "ollama": OllamaAdapter(transport=ollama_transport, host=config.ollama_host),
+                "ollama": OllamaAdapter(
+                    transport=ollama_transport,
+                    host=config.ollama_host,
+                    num_ctx=min(config.worker_context_window, 131072),
+                    think=True,
+                ),
             },
             audit_sink=audit_sink,
             pre_hooks=pre_hooks,

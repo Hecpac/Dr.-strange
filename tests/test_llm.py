@@ -51,7 +51,7 @@ class LLMRouterTests(unittest.TestCase):
                 config=config,
                 adapters={
                     "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=echo_response("anthropic")),
-                    "ollama": StaticAdapter("ollama", tool_capable=False, responder=echo_response("ollama")),
+                    "ollama": StaticAdapter("ollama", tool_capable=True, responder=echo_response("ollama")),
                 },
             )
             response = router.ask("classify this", lane="judge", evidence_pack={"data": "x"})
@@ -67,7 +67,7 @@ class LLMRouterTests(unittest.TestCase):
                 config=config,
                 adapters={
                     "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=echo_response("anthropic")),
-                    "ollama": StaticAdapter("ollama", tool_capable=False, responder=echo_response("ollama")),
+                    "ollama": StaticAdapter("ollama", tool_capable=True, responder=echo_response("ollama")),
                 },
             )
             response = router.ask("classify this", lane="judge", evidence_pack={"data": "x"})
@@ -87,7 +87,7 @@ class LLMRouterTests(unittest.TestCase):
                 config=config,
                 adapters={
                     "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=echo_response("anthropic")),
-                    "ollama": StaticAdapter("ollama", tool_capable=False, responder=failing),
+                    "ollama": StaticAdapter("ollama", tool_capable=True, responder=failing),
                 },
             )
             response = router.ask("verify", lane="verifier", evidence_pack={"diff": "x"})

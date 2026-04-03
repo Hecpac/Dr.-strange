@@ -34,6 +34,7 @@ class RuntimeTests(unittest.TestCase):
                 "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
                 "APPROVALS_ROOT": str(root / "approvals"),
                 "JUDGE_PROVIDER": "ollama",
+                "JUDGE_MODEL": "",
             }
 
             def ollama_transport(request: LLMRequest) -> LLMResponse:
