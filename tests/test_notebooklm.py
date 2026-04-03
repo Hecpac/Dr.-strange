@@ -95,5 +95,45 @@ class SyncMethodTests(unittest.TestCase):
         self.assertEqual(len(result["sources"]), 1)
 
 
+    def test_add_sources(self) -> None:
+        client = AsyncMock()
+        client.notebooks.list.return_value = [_mock_notebook("abc-full", "NB")]
+        src1 = MagicMock()
+        src1.id = "s1"
+        src1.title = "Page 1"
+        src2 = MagicMock()
+        src2.id = "s2"
+        src2.title = "Page 2"
+        client.sources.add_url.side_effect = [src1, src2]
+        svc = self._make_service(client)
+        result = svc.add_sources("abc", ["https://a.com", "https://b.com"])
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0]["id"], "s1")
+        self.assertEqual(client.sources.add_url.await_count, 2)
+
+    def test_add_text(self) -> None:
+        client = AsyncMock()
+        client.notebooks.list.return_value = [_mock_notebook("abc-full", "NB")]
+        src = MagicMock()
+        src.id = "st1"
+        src.title = "My Text"
+        client.sources.add_text.return_value = src
+        svc = self._make_service(client)
+        result = svc.add_text("abc", "My Text", "Some content here")
+        self.assertEqual(result["id"], "st1")
+        client.sources.add_text.assert_awaited_once_with("abc-full", "My Text", "Some content here")
+
+    def test_chat(self) -> None:
+        client = AsyncMock()
+        client.notebooks.list.return_value = [_mock_notebook("abc-full", "NB")]
+        chat_result = MagicMock()
+        chat_result.text = "Here is the summary of your sources."
+        chat_result.citations = []
+        client.chat.ask.return_value = chat_result
+        svc = self._make_service(client)
+        result = svc.chat("abc", "resume las fuentes")
+        self.assertEqual(result, "Here is the summary of your sources.")
+
+
 if __name__ == "__main__":
     unittest.main()

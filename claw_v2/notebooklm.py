@@ -121,6 +121,36 @@ class NotebookLMService:
             )
         return matches[0]["id"]
 
+    async def _async_add_sources(self, notebook_id: str, urls: list[str]) -> list[dict]:
+        full_id = await self._async_resolve_notebook_id(notebook_id)
+        async with self._client_ctx() as client:
+            results = []
+            for url in urls:
+                src = await client.sources.add_url(full_id, url)
+                results.append({"id": src.id, "title": src.title})
+            return results
+
+    def add_sources(self, notebook_id: str, urls: list[str]) -> list[dict]:
+        return self._run_async(self._async_add_sources(notebook_id, urls))
+
+    async def _async_add_text(self, notebook_id: str, title: str, content: str) -> dict:
+        full_id = await self._async_resolve_notebook_id(notebook_id)
+        async with self._client_ctx() as client:
+            src = await client.sources.add_text(full_id, title, content)
+            return {"id": src.id, "title": src.title}
+
+    def add_text(self, notebook_id: str, title: str, content: str) -> dict:
+        return self._run_async(self._async_add_text(notebook_id, title, content))
+
+    async def _async_chat(self, notebook_id: str, question: str) -> str:
+        full_id = await self._async_resolve_notebook_id(notebook_id)
+        async with self._client_ctx() as client:
+            result = await client.chat.ask(full_id, question)
+            return result.text
+
+    def chat(self, notebook_id: str, question: str) -> str:
+        return self._run_async(self._async_chat(notebook_id, question))
+
     def _resolve_notebook_id(self, partial_id: str) -> str:
         return self._run_async(self._async_resolve_notebook_id(partial_id))
 
