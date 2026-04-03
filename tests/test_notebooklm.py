@@ -212,5 +212,77 @@ class BackgroundTests(unittest.TestCase):
         self.assertIn("ya hay una operación", result.lower())
 
 
+import tempfile
+from pathlib import Path
+
+from tests.helpers import make_config
+
+
+def _make_bot_with_nlm(nlm_service: NotebookLMService) -> "BotService":
+    """Create a minimal BotService with a NotebookLMService attached."""
+    from claw_v2.bot import BotService
+
+    tmpdir = tempfile.mkdtemp()
+    config = make_config(Path(tmpdir))
+    brain = MagicMock()
+    brain.handle_message.return_value = MagicMock(content="brain response")
+    bot = BotService(
+        brain=brain,
+        auto_research=MagicMock(),
+        heartbeat=MagicMock(),
+        approvals=MagicMock(),
+        allowed_user_id="123",
+        config=config,
+    )
+    bot.notebooklm = nlm_service
+    return bot
+
+
+class BotCommandTests(unittest.TestCase):
+    def test_nlm_list(self) -> None:
+        nlm = MagicMock(spec=NotebookLMService)
+        nlm.list_notebooks.return_value = [
+            {"id": "abc123", "title": "Test NB", "created_at": "2026-04-02"},
+        ]
+        bot = _make_bot_with_nlm(nlm)
+        result = bot.handle_text(user_id="123", session_id="s1", text="/nlm_list")
+        self.assertIn("abc123", result)
+        self.assertIn("Test NB", result)
+
+    def test_nlm_create(self) -> None:
+        nlm = MagicMock(spec=NotebookLMService)
+        nlm.create_notebook.return_value = {"id": "new-id", "title": "Noticias AI"}
+        bot = _make_bot_with_nlm(nlm)
+        result = bot.handle_text(user_id="123", session_id="s1", text="/nlm_create Noticias AI")
+        nlm.create_notebook.assert_called_once_with("Noticias AI")
+        self.assertIn("new-id", result)
+
+    def test_nlm_research(self) -> None:
+        nlm = MagicMock(spec=NotebookLMService)
+        nlm.start_research.return_value = "Deep Research iniciado..."
+        bot = _make_bot_with_nlm(nlm)
+        result = bot.handle_text(user_id="123", session_id="s1", text="/nlm_research abc AI trends April")
+        nlm.start_research.assert_called_once_with("abc", "AI trends April")
+        self.assertIn("Deep Research iniciado", result)
+
+    def test_nlm_not_configured(self) -> None:
+        from claw_v2.bot import BotService
+
+        tmpdir = tempfile.mkdtemp()
+        config = make_config(Path(tmpdir))
+        brain = MagicMock()
+        brain.handle_message.return_value = MagicMock(content="brain response")
+        bot = BotService(
+            brain=brain,
+            auto_research=MagicMock(),
+            heartbeat=MagicMock(),
+            approvals=MagicMock(),
+            allowed_user_id="123",
+            config=config,
+        )
+        result = bot.handle_text(user_id="123", session_id="s1", text="/nlm_list")
+        self.assertIn("no disponible", result.lower())
+
+
 if __name__ == "__main__":
     unittest.main()

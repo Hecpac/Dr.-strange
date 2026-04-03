@@ -73,7 +73,7 @@ _HOST_URL_RE = re.compile(
     r"(?P<url>(?<!@)(?:localhost(?::\d+)?|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}(?::\d+)?)(?:/[^\s<>()]*)?)",
     re.IGNORECASE,
 )
-_DEFAULT_COMPUTER_MODEL = "computer-use-preview"
+_DEFAULT_COMPUTER_MODEL = "gpt-5.4-mini"
 _COMPUTER_SYSTEM_PROMPT = (
     "You control the user's Mac via the computer-use tool. "
     "Be careful, explicit, and incremental. "
@@ -126,8 +126,10 @@ class BotService:
         self.computer_model = computer_model
         self.computer_system_prompt = computer_system_prompt or _COMPUTER_SYSTEM_PROMPT
         self.observe = observe
+        self.learning: Any | None = None
         self._computer_sessions: dict[str, Any] = {}
         self._computer_client: Any | None = None
+        self.notebooklm: Any | None = None
 
     def handle_text(self, *, user_id: str, session_id: str, text: str) -> str:
         if self.allowed_user_id is None:
@@ -386,6 +388,15 @@ class BotService:
                     result = self.pipeline.complete_pipeline(run.issue_id)
                     return json.dumps({"status": result.status, "pr_url": result.pr_url}, indent=2)
             return "approval recorded but no matching pipeline run found"
+        if stripped.startswith("/feedback"):
+            if self.learning is None:
+                return "learning loop not available"
+            parts = stripped.split(maxsplit=2)
+            if len(parts) < 2:
+                return "usage: /feedback <positive|negative|note> [outcome_id]"
+            rating = parts[1]
+            oid = int(parts[2]) if len(parts) == 3 else None
+            return self.learning.feedback(oid, rating)
         if stripped.startswith("/pipeline_merge "):
             if self.pipeline is None:
                 return "pipeline service unavailable"
@@ -416,7 +427,7 @@ class BotService:
             except Exception:
                 logger.exception("pipeline error for %s", issue_id)
                 return "pipeline error — check logs for details"
-        if stripped in ("/pipeline", "/pipeline_approve", "/pipeline_merge", "/social_preview", "/social_publish"):
+        if stripped in ("/pipeline", "/pipeline_approve", "/pipeline_merge", "/social_preview", "/social_publish", "/feedback"):
             return f"usage: {stripped} <argument>"
         if stripped == "/social_status":
             if self.content_engine is None:
@@ -449,6 +460,10 @@ class BotService:
             except Exception:
                 logger.exception("social_publish error for %s", account)
                 return "error publishing — check logs"
+        # --- NotebookLM commands ---
+        if stripped.startswith("/nlm_"):
+            return self._nlm_dispatch(stripped)
+
         return self.brain.handle_message(session_id, stripped).content
 
     def handle_multimodal(
@@ -635,11 +650,24 @@ class BotService:
             normalized_url = _normalize_url(url)
         except ValueError as exc:
             return str(exc)
-        # Strategy 1: Playwright (headless browser)
+        # Auth/JS-heavy domains (Twitter, Instagram, etc.) → Chrome CDP first
+        # These need real cookies and JS rendering; headless always hits login walls.
+        if _needs_real_browser(normalized_url) and self.browser is not None:
+            try:
+                from urllib.parse import urlparse
+                host = urlparse(normalized_url).netloc.lower()
+                result = self.browser.chrome_navigate(
+                    normalized_url, page_url_pattern=host,
+                )
+                if result.content.strip():
+                    return f"**{result.title}** ({result.url})\n\n{result.content[:6000]}"
+            except Exception:
+                pass  # fall through to other strategies
+        # Public pages: Playwright (headless, fast)
         if self.browser is not None:
             try:
                 result = self.browser.browse(normalized_url)
-                content = result.content[:4000] if result.content else ""
+                content = result.content[:6000] if result.content else ""
                 if not _is_login_wall(content):
                     return json.dumps({
                         "url": result.url,
@@ -647,24 +675,13 @@ class BotService:
                         "content": content,
                     }, indent=2)
             except Exception:
-                pass  # fall through to next strategy
-        # Strategy 2: Firecrawl CLI (handles JS-rendered pages)
-        try:
-            import subprocess as _sp
-            fc = _sp.run(
-                ["firecrawl", "scrape", normalized_url],
-                capture_output=True, text=True, timeout=30, check=False,
-            )
-            if fc.returncode == 0 and fc.stdout.strip() and "do not support" not in fc.stdout:
-                content = fc.stdout.strip()[:4000]
-                return json.dumps({"url": normalized_url, "title": "(firecrawl)", "content": content}, indent=2)
-        except (FileNotFoundError, _sp.TimeoutExpired):
-            pass
-        # Strategy 3: Chrome CDP (user's real browser session)
+                pass
+        # Fallback: Chrome CDP for any remaining page
         if self.browser is not None:
             try:
                 result = self.browser.chrome_navigate(normalized_url)
-                return f"**{result.title}** ({result.url})\n\n{result.content[:4000]}"
+                if result.content.strip():
+                    return f"**{result.title}** ({result.url})\n\n{result.content[:6000]}"
             except Exception:
                 pass
         return f"browse error: all strategies failed for {normalized_url}"
@@ -776,10 +793,15 @@ class BotService:
         if self.browser is None:
             return "browser unavailable"
         try:
-            result = self.browser.chrome_navigate(normalized_url)
+            from urllib.parse import urlparse
+            host = urlparse(normalized_url).netloc.lower()
+            result = self.browser.chrome_navigate(
+                normalized_url,
+                page_url_pattern=host,
+            )
         except Exception as exc:
             return _format_chrome_cdp_error(exc, prefix="chrome browse error")
-        return f"**{result.title}** ({result.url})\n\n{result.content[:3000]}"
+        return f"**{result.title}** ({result.url})\n\n{result.content[:6000]}"
 
     def _chrome_shot_response(self, command: str) -> str:
         if self.browser is None:
@@ -1020,6 +1042,120 @@ class BotService:
 
         return None
 
+    # -- NotebookLM handlers ----------------------------------------------------
+
+    def _nlm_dispatch(self, command: str) -> str:
+        if self.notebooklm is None:
+            return "NotebookLM no disponible. El servicio no está configurado."
+        try:
+            if command == "/nlm_list":
+                return self._nlm_list_response()
+            if command.startswith("/nlm_create "):
+                title = command.split(maxsplit=1)[1]
+                return self._nlm_create_response(title)
+            if command == "/nlm_create":
+                return "usage: /nlm_create <titulo>"
+            if command.startswith("/nlm_delete "):
+                nb_id = command.split(maxsplit=1)[1]
+                return self._nlm_delete_response(nb_id)
+            if command == "/nlm_delete":
+                return "usage: /nlm_delete <notebook_id>"
+            if command.startswith("/nlm_status "):
+                nb_id = command.split(maxsplit=1)[1]
+                return self._nlm_status_response(nb_id)
+            if command == "/nlm_status":
+                return "usage: /nlm_status <notebook_id>"
+            if command.startswith("/nlm_sources "):
+                parts = command.split()
+                if len(parts) < 3:
+                    return "usage: /nlm_sources <notebook_id> <url1> [url2] ..."
+                return self._nlm_sources_response(parts[1], parts[2:])
+            if command == "/nlm_sources":
+                return "usage: /nlm_sources <notebook_id> <url1> [url2] ..."
+            if command.startswith("/nlm_text "):
+                rest = command.split(maxsplit=2)
+                if len(rest) < 3 or "|" not in rest[2]:
+                    return "usage: /nlm_text <notebook_id> <titulo> | <contenido>"
+                nb_id = rest[1]
+                title_and_content = rest[2]
+                pipe_idx = title_and_content.index("|")
+                title = title_and_content[:pipe_idx].strip()
+                content = title_and_content[pipe_idx + 1:].strip()
+                return self._nlm_text_response(nb_id, title, content)
+            if command == "/nlm_text":
+                return "usage: /nlm_text <notebook_id> <titulo> | <contenido>"
+            if command.startswith("/nlm_research "):
+                parts = command.split(maxsplit=2)
+                if len(parts) < 3:
+                    return "usage: /nlm_research <notebook_id> <query>"
+                return self._nlm_research_response(parts[1], parts[2])
+            if command == "/nlm_research":
+                return "usage: /nlm_research <notebook_id> <query>"
+            if command.startswith("/nlm_podcast "):
+                nb_id = command.split(maxsplit=1)[1]
+                return self._nlm_podcast_response(nb_id)
+            if command == "/nlm_podcast":
+                return "usage: /nlm_podcast <notebook_id>"
+            if command.startswith("/nlm_chat "):
+                parts = command.split(maxsplit=2)
+                if len(parts) < 3:
+                    return "usage: /nlm_chat <notebook_id> <pregunta>"
+                return self._nlm_chat_response(parts[1], parts[2])
+            if command == "/nlm_chat":
+                return "usage: /nlm_chat <notebook_id> <pregunta>"
+            return "Comando NLM no reconocido. Disponibles: /nlm_list, /nlm_create, /nlm_delete, /nlm_status, /nlm_sources, /nlm_text, /nlm_research, /nlm_podcast, /nlm_chat"
+        except ValueError as exc:
+            return f"Error: {exc}"
+        except Exception as exc:
+            logger.exception("NLM command error")
+            return f"Error en NotebookLM: {exc}"
+
+    def _nlm_list_response(self) -> str:
+        notebooks = self.notebooklm.list_notebooks()
+        if not notebooks:
+            return "No hay notebooks."
+        lines = []
+        for nb in notebooks:
+            short_id = nb["id"][:8]
+            lines.append(f"{short_id}  {nb['title']}")
+        return "\n".join(lines)
+
+    def _nlm_create_response(self, title: str) -> str:
+        result = self.notebooklm.create_notebook(title)
+        return f"Notebook creado: {result['id'][:8]} — {result['title']}"
+
+    def _nlm_delete_response(self, notebook_id: str) -> str:
+        self.notebooklm.delete_notebook(notebook_id)
+        return "Notebook eliminado."
+
+    def _nlm_status_response(self, notebook_id: str) -> str:
+        info = self.notebooklm.status(notebook_id)
+        nb = info["notebook"]
+        lines = [f"Notebook: {nb['title']} ({nb['id'][:8]})", f"Sources: {nb['sources_count']}"]
+        for src in info["sources"]:
+            lines.append(f"  - {src['title']} [{src['kind']}]")
+        return "\n".join(lines)
+
+    def _nlm_sources_response(self, notebook_id: str, urls: list[str]) -> str:
+        results = self.notebooklm.add_sources(notebook_id, urls)
+        lines = [f"{len(results)} source(s) agregados:"]
+        for src in results:
+            lines.append(f"  - {src['title']}")
+        return "\n".join(lines)
+
+    def _nlm_text_response(self, notebook_id: str, title: str, content: str) -> str:
+        result = self.notebooklm.add_text(notebook_id, title, content)
+        return f"Source de texto agregado: {result['title']}"
+
+    def _nlm_research_response(self, notebook_id: str, query: str) -> str:
+        return self.notebooklm.start_research(notebook_id, query)
+
+    def _nlm_podcast_response(self, notebook_id: str) -> str:
+        return self.notebooklm.start_podcast(notebook_id)
+
+    def _nlm_chat_response(self, notebook_id: str, question: str) -> str:
+        return self.notebooklm.chat(notebook_id, question)
+
 
 def _parse_toggle(value: str) -> bool:
     normalized = value.strip().lower()
@@ -1099,6 +1235,32 @@ def _looks_like_standalone_url(text: str, url: str) -> bool:
     remainder = text.replace(url, " ", 1)
     remainder = re.sub(r"[\s`\"'“”‘’<>()\[\]{}.,;:!?-]+", "", remainder)
     return remainder == ""
+
+
+# Domains that require real browser cookies (auth) or heavy JS rendering.
+# Headless browsers always hit login walls on these.
+_AUTH_DOMAINS = frozenset({
+    "x.com", "twitter.com",
+    "instagram.com",
+    "facebook.com", "fb.com",
+    "linkedin.com",
+    "reddit.com",
+    "tiktok.com",
+    "threads.net",
+    "mail.google.com",
+    "web.whatsapp.com",
+})
+
+
+def _needs_real_browser(url: str) -> bool:
+    """Check if URL needs Chrome CDP (auth cookies + JS) instead of headless."""
+    from urllib.parse import urlparse
+
+    try:
+        host = urlparse(url).netloc.lower()
+    except Exception:
+        return False
+    return any(host == d or host.endswith(f".{d}") for d in _AUTH_DOMAINS)
 
 
 _LOGIN_WALL_SIGNALS = [
