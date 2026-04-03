@@ -63,6 +63,28 @@ class BrowseJinaTests(unittest.TestCase):
         mock_jina.assert_not_called()
         self.assertIn("error", result.lower())
 
+    @patch("claw_v2.bot._tweet_oembed_read")
+    @patch("claw_v2.bot._jina_read")
+    def test_browse_tweet_login_wall_falls_back_to_oembed(self, mock_jina, mock_oembed) -> None:
+        tweet_url = "https://x.com/tendenciatuits/status/2039116558836936982?s=46"
+        mock_oembed.return_value = f"**Autor on X** ({tweet_url})\n\nTexto limpio del tweet."
+        browser = MagicMock()
+        browser.chrome_navigate.return_value = BrowseResult(
+            url=tweet_url,
+            title="X",
+            content="Don't miss what's happening\nLog in\nSign up\nSee new posts " + "x" * 200,
+        )
+        chrome = MagicMock()
+        chrome.cdp_url = "http://localhost:9250"
+        bot = _make_bot(browser=browser)
+        bot.managed_chrome = chrome
+
+        result = bot.handle_text(user_id="123", session_id="s1", text=f"/browse {tweet_url}")
+
+        mock_jina.assert_not_called()
+        browser.chrome_navigate.assert_called_once()
+        self.assertIn("Texto limpio del tweet", result)
+
     @patch("claw_v2.bot._jina_read")
     def test_browse_jina_empty_falls_to_cdp(self, mock_jina) -> None:
         mock_jina.return_value = ""  # empty = validation fail

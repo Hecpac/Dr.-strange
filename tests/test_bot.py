@@ -648,6 +648,48 @@ class BotTests(unittest.TestCase):
                 self.assertIn("Docs", result)
                 mock_jina.assert_called_once_with("https://example.com/docs")
 
+    @patch("claw_v2.bot._tweet_oembed_read")
+    def test_natural_language_review_tweet_reuses_recent_tweet_url(self, mock_oembed) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                from claw_v2.browser import BrowseResult
+
+                tweet_url = "https://x.com/tendenciatuits/status/2039116558836936982?s=46"
+                mock_oembed.return_value = f"**Tendencias y Tuits Borrados on X** ({tweet_url})\n\nTexto limpio del tweet."
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.browser = MagicMock()
+                runtime.bot.managed_chrome = MagicMock()
+                runtime.bot.managed_chrome.cdp_url = "http://localhost:9250"
+                runtime.bot.browser.chrome_navigate.return_value = BrowseResult(
+                    url=tweet_url,
+                    title="X",
+                    content="Don't miss what's happening\nLog in\nSign up\nSee new posts " + "x" * 200,
+                )
+
+                first = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text=tweet_url,
+                )
+                second = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="Revisa el tweet",
+                )
+
+                self.assertIn("Texto limpio del tweet", first)
+                self.assertIn("Texto limpio del tweet", second)
+                self.assertEqual(runtime.bot.browser.chrome_navigate.call_count, 2)
+
     def test_natural_language_review_request_uses_computer_read(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

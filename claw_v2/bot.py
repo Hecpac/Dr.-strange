@@ -153,6 +153,7 @@ class BotService:
         self.notebooklm: Any | None = None
         self._active_notebooks: dict[str, dict[str, str]] = {}
         self.managed_chrome: Any | None = None
+        self._recent_browse_urls: dict[str, str] = {}
 
     def handle_text(self, *, user_id: str, session_id: str, text: str) -> str:
         if self.allowed_user_id is None:
@@ -182,7 +183,7 @@ class BotService:
             parts = stripped.split(maxsplit=1)
             if len(parts) != 2:
                 return "usage: /browse <url>"
-            return self._browse_response(parts[1])
+            return self._browse_response(parts[1], session_id=session_id)
         if stripped == "/terminal_list":
             return self._terminal_list_response()
         if stripped == "/terminal_open":
@@ -236,7 +237,7 @@ class BotService:
             parts = stripped.split(maxsplit=1)
             if len(parts) != 2:
                 return "usage: /chrome_browse <url>"
-            return self._chrome_browse_response(parts[1])
+            return self._chrome_browse_response(parts[1], session_id=session_id)
         if stripped.startswith("/chrome_shot"):
             return self._chrome_shot_response(stripped)
         if stripped == "/chrome_login":
@@ -676,17 +677,21 @@ class BotService:
         payload["pull_request_draft"] = pr.draft
         return json.dumps(payload, indent=2, sort_keys=True)
 
-    def _browse_response(self, url: str) -> str:
+    def _browse_response(self, url: str, *, session_id: str | None = None) -> str:
         try:
             normalized_url = _normalize_url(url)
         except ValueError as exc:
             return str(exc)
+        self._remember_recent_browse_url(session_id, normalized_url)
 
         cdp_available = self.managed_chrome is not None and self.browser is not None
+        tweet_fallback = _tweet_oembed_read(normalized_url) if _is_tweet_url(normalized_url) else ""
 
         # Auth domains → CDP (needs cookies)
         if _needs_real_browser(normalized_url):
             if not cdp_available:
+                if tweet_fallback:
+                    return tweet_fallback[:6000]
                 # Degrade: try Jina best-effort
                 content = _jina_read(normalized_url)
                 if content:
@@ -700,9 +705,13 @@ class BotService:
                     cdp_url=self.managed_chrome.cdp_url,
                     page_url_pattern=host,
                 )
-                if result.content.strip():
+                if _is_usable_browse_content(normalized_url, result.content):
                     return f"**{result.title}** ({result.url})\n\n{result.content[:6000]}"
+                if tweet_fallback:
+                    return tweet_fallback[:6000]
             except Exception as exc:
+                if tweet_fallback:
+                    return tweet_fallback[:6000]
                 return _format_chrome_cdp_error(exc, prefix="browse error")
 
         # Public URLs → Jina first
@@ -716,7 +725,7 @@ class BotService:
                 result = self.browser.chrome_navigate(
                     normalized_url, cdp_url=self.managed_chrome.cdp_url,
                 )
-                if result.content.strip():
+                if _is_usable_browse_content(normalized_url, result.content):
                     return f"**{result.title}** ({result.url})\n\n{result.content[:6000]}"
             except Exception:
                 pass
@@ -822,13 +831,15 @@ class BotService:
             return _format_chrome_cdp_error(exc, prefix="chrome CDP error")
         return json.dumps({"pages": pages}, indent=2, sort_keys=True)
 
-    def _chrome_browse_response(self, url: str) -> str:
+    def _chrome_browse_response(self, url: str, *, session_id: str | None = None) -> str:
         try:
             normalized_url = _normalize_url(url)
         except ValueError as exc:
             return str(exc)
+        self._remember_recent_browse_url(session_id, normalized_url)
         if self.browser is None or self.managed_chrome is None:
             return "Chrome no disponible."
+        tweet_fallback = _tweet_oembed_read(normalized_url) if _is_tweet_url(normalized_url) else ""
         try:
             from urllib.parse import urlparse
             host = urlparse(normalized_url).netloc.lower()
@@ -838,7 +849,11 @@ class BotService:
                 page_url_pattern=host,
             )
         except Exception as exc:
+            if tweet_fallback:
+                return tweet_fallback[:6000]
             return _format_chrome_cdp_error(exc, prefix="chrome browse error")
+        if not _is_usable_browse_content(normalized_url, result.content) and tweet_fallback:
+            return tweet_fallback[:6000]
         return f"**{result.title}** ({result.url})\n\n{result.content[:6000]}"
 
     def _chrome_shot_response(self, command: str) -> str:
@@ -1078,9 +1093,14 @@ class BotService:
 
         if extracted_url is not None:
             if "chrome" in normalized and (any(token in normalized for token in _BROWSE_SHORTCUT_TOKENS) or _looks_like_standalone_url(text, extracted_url)):
-                return self._chrome_browse_response(extracted_url)
+                return self._chrome_browse_response(extracted_url, session_id=session_id)
             if any(token in normalized for token in _BROWSE_SHORTCUT_TOKENS) or _looks_like_standalone_url(text, extracted_url):
-                return self._browse_response(extracted_url)
+                return self._browse_response(extracted_url, session_id=session_id)
+
+        if _looks_like_tweet_followup_request(normalized):
+            recent_tweet_url = self._recent_tweet_url(session_id)
+            if recent_tweet_url is not None:
+                return self._browse_response(recent_tweet_url, session_id=session_id)
 
         if _computer_instruction_requires_actions(text):
             return self._computer_action_response(text, session_id)
@@ -1096,8 +1116,18 @@ class BotService:
 
         if "google ads" in normalized or "ads.google.com" in normalized:
             if any(token in normalized for token in ("abre", "abrir", "open", "revisa", "revisa", "revisalo", "review", "check")):
-                return self._chrome_browse_response("https://ads.google.com")
+                return self._chrome_browse_response("https://ads.google.com", session_id=session_id)
 
+        return None
+
+    def _remember_recent_browse_url(self, session_id: str | None, url: str) -> None:
+        if session_id:
+            self._recent_browse_urls[session_id] = url
+
+    def _recent_tweet_url(self, session_id: str) -> str | None:
+        url = self._recent_browse_urls.get(session_id)
+        if url and _is_tweet_url(url):
+            return url
         return None
 
     # -- NotebookLM handlers ----------------------------------------------------
@@ -1396,6 +1426,49 @@ def _is_login_wall(content: str) -> bool:
     return any(signal in lower for signal in _LOGIN_WALL_SIGNALS)
 
 
+_RAW_MARKUP_SIGNALS = [
+    "<meta",
+    "<link rel",
+    "dns-prefetch",
+    "preconnect",
+    "viewport-fit=cover",
+    "user-scalable=0",
+]
+
+
+def _is_tweet_url(url: str) -> bool:
+    try:
+        parsed = urlsplit(url)
+    except Exception:
+        return False
+    host = parsed.netloc.lower()
+    if not any(host == domain or host.endswith(f".{domain}") for domain in ("x.com", "twitter.com")):
+        return False
+    return "/status/" in parsed.path
+
+
+def _looks_like_tweet_followup_request(normalized_text: str) -> bool:
+    if not any(token in normalized_text for token in _BROWSE_SHORTCUT_TOKENS):
+        return False
+    return any(token in normalized_text for token in ("tweet", "tweets", "tuit", "tuits", "post"))
+
+
+def _looks_like_raw_markup(content: str) -> bool:
+    lower = content.lower()
+    return any(signal in lower for signal in _RAW_MARKUP_SIGNALS)
+
+
+def _is_usable_browse_content(url: str, content: str) -> bool:
+    stripped = content.strip()
+    if not stripped:
+        return False
+    if _is_login_wall(stripped):
+        return False
+    if _is_tweet_url(url) and _looks_like_raw_markup(stripped):
+        return False
+    return True
+
+
 def _normalize_url(value: str) -> str:
     candidate = _strip_url_punctuation(value)
     if not candidate:
@@ -1436,6 +1509,57 @@ def _jina_read(url: str, *, timeout: float = 10) -> str:
         return content
     except Exception:
         return ""
+
+
+def _tweet_oembed_read(url: str, *, timeout: float = 10) -> str:
+    """Best-effort public tweet extraction via X/Twitter oEmbed."""
+    if not _is_tweet_url(url):
+        return ""
+    import html as html_lib
+
+    import httpx
+
+    try:
+        response = httpx.get(
+            "https://publish.twitter.com/oembed",
+            params={
+                "url": url,
+                "omit_script": "true",
+                "dnt": "true",
+                "align": "center",
+            },
+            timeout=timeout,
+            follow_redirects=True,
+        )
+        response.raise_for_status()
+        data = response.json()
+    except Exception:
+        return ""
+
+    raw_html = str(data.get("html", "")).strip()
+    if not raw_html:
+        return ""
+
+    paragraphs = re.findall(r"<p[^>]*>(.*?)</p>", raw_html, flags=re.IGNORECASE | re.DOTALL)
+    text_parts: list[str] = []
+    for paragraph in paragraphs:
+        text = re.sub(r"<br\s*/?>", "\n", paragraph, flags=re.IGNORECASE)
+        text = re.sub(r"<[^>]+>", "", text)
+        text = html_lib.unescape(text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        text = re.sub(r"[ \t]+", " ", text).strip()
+        if text:
+            text_parts.append(text)
+
+    if not text_parts:
+        return ""
+
+    author_name = str(data.get("author_name", "")).strip()
+    title = f"{author_name} on X" if author_name else "Tweet"
+    content = "\n\n".join(text_parts)
+    if not _is_usable_browse_content(url, content):
+        return ""
+    return f"**{title}** ({url})\n\n{content}"
 
 
 def _format_chrome_cdp_error(exc: Exception, *, prefix: str) -> str:
