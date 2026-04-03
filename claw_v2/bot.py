@@ -68,6 +68,27 @@ _COMPUTER_READ_TOKENS = (
     "dime que ves",
     "describe la pantalla",
 )
+_NLM_CREATE_RE = re.compile(
+    r"^\s*(?:por favor\s+)?(?:(?:cr[eé]a(?:me)?)|(?:genera(?:me)?)|(?:haz(?:me)?)|quiero|necesito)\s+"
+    r"(?:un\s+)?(?:cuaderno|notebook)(?:\s+(?:sobre|de))?\s+(.+?)\s*$",
+    re.IGNORECASE,
+)
+_NLM_ARTIFACT_KINDS = {
+    "podcast": "podcast",
+    "infografia": "infographic",
+    "infographic": "infographic",
+    "video": "video",
+}
+_NLM_ACTION_TOKENS = (
+    "crea",
+    "creame",
+    "genera",
+    "generame",
+    "haz",
+    "hazme",
+    "quiero",
+    "necesito",
+)
 _SCHEME_URL_RE = re.compile(r"(?P<url>https?://[^\s<>()]+)", re.IGNORECASE)
 _HOST_URL_RE = re.compile(
     r"(?P<url>(?<!@)(?:localhost(?::\d+)?|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}(?::\d+)?)(?:/[^\s<>()]*)?)",
@@ -130,6 +151,8 @@ class BotService:
         self._computer_sessions: dict[str, Any] = {}
         self._computer_client: Any | None = None
         self.notebooklm: Any | None = None
+        self._active_notebooks: dict[str, dict[str, str]] = {}
+        self.managed_chrome: Any | None = None
 
     def handle_text(self, *, user_id: str, session_id: str, text: str) -> str:
         if self.allowed_user_id is None:
@@ -462,7 +485,11 @@ class BotService:
                 return "error publishing — check logs"
         # --- NotebookLM commands ---
         if stripped.startswith("/nlm_"):
-            return self._nlm_dispatch(stripped)
+            return self._nlm_dispatch(session_id, stripped)
+
+        nlm_response = self._nlm_natural_language_response(session_id, stripped)
+        if nlm_response is not None:
+            return nlm_response
 
         return self.brain.handle_message(session_id, stripped).content
 
@@ -650,41 +677,47 @@ class BotService:
             normalized_url = _normalize_url(url)
         except ValueError as exc:
             return str(exc)
-        # Auth/JS-heavy domains (Twitter, Instagram, etc.) → Chrome CDP first
-        # These need real cookies and JS rendering; headless always hits login walls.
-        if _needs_real_browser(normalized_url) and self.browser is not None:
+
+        cdp_available = self.managed_chrome is not None and self.browser is not None
+
+        # Auth domains → CDP (needs cookies)
+        if _needs_real_browser(normalized_url):
+            if not cdp_available:
+                # Degrade: try Jina best-effort
+                content = _jina_read(normalized_url)
+                if content:
+                    return f"Contenido parcial (CDP no disponible):\n\n{content[:6000]}"
+                return f"browse error: {normalized_url} requiere Chrome CDP pero no está disponible."
             try:
                 from urllib.parse import urlparse
                 host = urlparse(normalized_url).netloc.lower()
                 result = self.browser.chrome_navigate(
-                    normalized_url, page_url_pattern=host,
+                    normalized_url,
+                    cdp_url=self.managed_chrome.cdp_url,
+                    page_url_pattern=host,
+                )
+                if result.content.strip():
+                    return f"**{result.title}** ({result.url})\n\n{result.content[:6000]}"
+            except Exception as exc:
+                return _format_chrome_cdp_error(exc, prefix="browse error")
+
+        # Public URLs → Jina first
+        content = _jina_read(normalized_url)
+        if content:
+            return content[:6000]
+
+        # Jina failed → CDP fallback
+        if cdp_available:
+            try:
+                result = self.browser.chrome_navigate(
+                    normalized_url, cdp_url=self.managed_chrome.cdp_url,
                 )
                 if result.content.strip():
                     return f"**{result.title}** ({result.url})\n\n{result.content[:6000]}"
             except Exception:
-                pass  # fall through to other strategies
-        # Public pages: Playwright (headless, fast)
-        if self.browser is not None:
-            try:
-                result = self.browser.browse(normalized_url)
-                content = result.content[:6000] if result.content else ""
-                if not _is_login_wall(content):
-                    return json.dumps({
-                        "url": result.url,
-                        "title": result.title,
-                        "content": content,
-                    }, indent=2)
-            except Exception:
                 pass
-        # Fallback: Chrome CDP for any remaining page
-        if self.browser is not None:
-            try:
-                result = self.browser.chrome_navigate(normalized_url)
-                if result.content.strip():
-                    return f"**{result.title}** ({result.url})\n\n{result.content[:6000]}"
-            except Exception:
-                pass
-        return f"browse error: all strategies failed for {normalized_url}"
+
+        return f"browse error: no se pudo leer {normalized_url}"
 
     def _tokens_info_response(self, session_id: str) -> str:
         message_count = self.brain.memory.count_messages(session_id)
@@ -1044,7 +1077,7 @@ class BotService:
 
     # -- NotebookLM handlers ----------------------------------------------------
 
-    def _nlm_dispatch(self, command: str) -> str:
+    def _nlm_dispatch(self, session_id: str, command: str) -> str:
         if self.notebooklm is None:
             return "NotebookLM no disponible. El servicio no está configurado."
         try:
@@ -1052,7 +1085,7 @@ class BotService:
                 return self._nlm_list_response()
             if command.startswith("/nlm_create "):
                 title = command.split(maxsplit=1)[1]
-                return self._nlm_create_response(title)
+                return self._nlm_create_response(session_id, title)
             if command == "/nlm_create":
                 return "usage: /nlm_create <titulo>"
             if command.startswith("/nlm_delete "):
@@ -1093,9 +1126,9 @@ class BotService:
                 return "usage: /nlm_research <notebook_id> <query>"
             if command.startswith("/nlm_podcast "):
                 nb_id = command.split(maxsplit=1)[1]
-                return self._nlm_podcast_response(nb_id)
+                return self._nlm_podcast_response(session_id, nb_id)
             if command == "/nlm_podcast":
-                return "usage: /nlm_podcast <notebook_id>"
+                return self._nlm_podcast_response(session_id, None)
             if command.startswith("/nlm_chat "):
                 parts = command.split(maxsplit=2)
                 if len(parts) < 3:
@@ -1117,12 +1150,19 @@ class BotService:
         lines = []
         for nb in notebooks:
             short_id = nb["id"][:8]
-            lines.append(f"{short_id}  {nb['title']}")
+            date = nb.get("created_at") or "-"
+            lines.append(f"{short_id}  {nb['title']}  {date}")
         return "\n".join(lines)
 
-    def _nlm_create_response(self, title: str) -> str:
+    def _nlm_create_response(self, session_id: str, title: str) -> str:
         result = self.notebooklm.create_notebook(title)
-        return f"Notebook creado: {result['id'][:8]} — {result['title']}"
+        self._set_active_notebook(session_id, result["id"], result["title"])
+        research = self.notebooklm.start_research(result["id"], result["title"])
+        return (
+            f"Notebook creado: {result['id'][:8]} — {result['title']}\n"
+            f"{research}\n"
+            "Queda como cuaderno activo para esta conversación."
+        )
 
     def _nlm_delete_response(self, notebook_id: str) -> str:
         self.notebooklm.delete_notebook(notebook_id)
@@ -1144,17 +1184,49 @@ class BotService:
         return "\n".join(lines)
 
     def _nlm_text_response(self, notebook_id: str, title: str, content: str) -> str:
+        if not title.strip() or not content.strip():
+            return "usage: /nlm_text <notebook_id> <titulo> | <contenido>"
         result = self.notebooklm.add_text(notebook_id, title, content)
         return f"Source de texto agregado: {result['title']}"
 
     def _nlm_research_response(self, notebook_id: str, query: str) -> str:
         return self.notebooklm.start_research(notebook_id, query)
 
-    def _nlm_podcast_response(self, notebook_id: str) -> str:
-        return self.notebooklm.start_podcast(notebook_id)
+    def _nlm_podcast_response(self, session_id: str, notebook_id: str | None) -> str:
+        target = notebook_id or self._active_notebook_id(session_id)
+        if target is None:
+            return "No hay cuaderno activo. Primero dime `creame un cuaderno sobre ...`."
+        self._set_active_notebook(session_id, target)
+        return self.notebooklm.start_podcast(target)
 
     def _nlm_chat_response(self, notebook_id: str, question: str) -> str:
         return self.notebooklm.chat(notebook_id, question)
+
+    def _nlm_natural_language_response(self, session_id: str, text: str) -> str | None:
+        if self.notebooklm is None or not text or text.startswith("/"):
+            return None
+        if topic := _extract_nlm_create_topic(text):
+            return self._nlm_create_response(session_id, topic)
+        if kind := _extract_nlm_artifact_kind(text):
+            target = self._active_notebook_id(session_id)
+            if target is None:
+                return "No hay cuaderno activo. Primero dime `creame un cuaderno sobre ...`."
+            self._set_active_notebook(session_id, target)
+            return self.notebooklm.start_artifact(target, kind)
+        return None
+
+    def _set_active_notebook(self, session_id: str, notebook_id: str, title: str | None = None) -> None:
+        current = self._active_notebooks.get(session_id, {})
+        self._active_notebooks[session_id] = {
+            "id": notebook_id,
+            "title": title or current.get("title", notebook_id[:8]),
+        }
+
+    def _active_notebook_id(self, session_id: str) -> str | None:
+        notebook = self._active_notebooks.get(session_id)
+        if notebook is None:
+            return None
+        return notebook["id"]
 
 
 def _parse_toggle(value: str) -> bool:
@@ -1164,6 +1236,24 @@ def _parse_toggle(value: str) -> bool:
     if normalized in {"off", "false", "0", "no"}:
         return False
     raise ValueError("toggle must be one of: on, off")
+
+
+def _extract_nlm_create_topic(text: str) -> str | None:
+    match = _NLM_CREATE_RE.match(text.strip())
+    if not match:
+        return None
+    topic = match.group(1).strip()
+    return topic or None
+
+
+def _extract_nlm_artifact_kind(text: str) -> str | None:
+    normalized = _normalize_command_text(text)
+    if not any(token in normalized for token in _NLM_ACTION_TOKENS):
+        return None
+    for token, kind in _NLM_ARTIFACT_KINDS.items():
+        if token in normalized:
+            return kind
+    return None
 
 
 def _normalize_command_text(text: str) -> str:
@@ -1300,6 +1390,27 @@ def _format_computer_pending_summary(task: str, pending_action: dict[str, Any]) 
     if "text" in pending_action:
         return f"{task} — {action} {pending_action['text']!r}"
     return f"{task} — {action}"
+
+
+def _jina_read(url: str, *, timeout: float = 10) -> str:
+    """Fetch URL content as markdown via Jina Reader."""
+    import httpx
+    try:
+        response = httpx.get(
+            f"https://r.jina.ai/{url}",
+            headers={"Accept": "text/markdown"},
+            timeout=timeout,
+            follow_redirects=True,
+        )
+        response.raise_for_status()
+        content = response.text.strip()
+        if len(content) < 100:
+            return ""
+        if _is_login_wall(content):
+            return ""
+        return content
+    except Exception:
+        return ""
 
 
 def _format_chrome_cdp_error(exc: Exception, *, prefix: str) -> str:

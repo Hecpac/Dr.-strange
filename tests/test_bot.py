@@ -590,9 +590,10 @@ class BotTests(unittest.TestCase):
                     text="Ya chrome esta abierto en Google Ads revisalo",
                 )
                 self.assertIn("Google Ads", result)
-                runtime.bot.browser.chrome_navigate.assert_called_once_with("https://ads.google.com")
+                runtime.bot.browser.chrome_navigate.assert_called_once_with("https://ads.google.com", page_url_pattern="ads.google.com")
 
-    def test_natural_language_url_uses_isolated_browse(self) -> None:
+    @patch("claw_v2.bot._jina_read")
+    def test_natural_language_url_uses_isolated_browse(self, mock_jina) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             env = {
@@ -604,23 +605,18 @@ class BotTests(unittest.TestCase):
                 "TELEGRAM_ALLOWED_USER_ID": "123",
             }
             with patch.dict(os.environ, env, clear=False):
-                from claw_v2.browser import BrowseResult
+                mock_jina.return_value = "# Pricing\n\nOpenAI API Pricing — pay per token for GPT models. " + "x" * 200
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
-                runtime.bot.browser = MagicMock()
-                runtime.bot.browser.browse.return_value = BrowseResult(
-                    url="https://openai.com/pricing",
-                    title="Pricing",
-                    content="pricing details...",
-                )
                 result = runtime.bot.handle_text(
                     user_id="123",
                     session_id="s1",
                     text="Revisa https://openai.com/pricing",
                 )
                 self.assertIn("Pricing", result)
-                runtime.bot.browser.browse.assert_called_once_with("https://openai.com/pricing")
+                mock_jina.assert_called_once_with("https://openai.com/pricing")
 
-    def test_natural_language_bare_domain_is_normalized_for_browse(self) -> None:
+    @patch("claw_v2.bot._jina_read")
+    def test_natural_language_bare_domain_is_normalized_for_browse(self, mock_jina) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             env = {
@@ -632,21 +628,15 @@ class BotTests(unittest.TestCase):
                 "TELEGRAM_ALLOWED_USER_ID": "123",
             }
             with patch.dict(os.environ, env, clear=False):
-                from claw_v2.browser import BrowseResult
+                mock_jina.return_value = "# Docs\n\ndocumentation content here " + "x" * 200
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
-                runtime.bot.browser = MagicMock()
-                runtime.bot.browser.browse.return_value = BrowseResult(
-                    url="https://example.com/docs",
-                    title="Docs",
-                    content="documentation...",
-                )
                 result = runtime.bot.handle_text(
                     user_id="123",
                     session_id="s1",
                     text="revisa example.com/docs",
                 )
                 self.assertIn("Docs", result)
-                runtime.bot.browser.browse.assert_called_once_with("https://example.com/docs")
+                mock_jina.assert_called_once_with("https://example.com/docs")
 
     def test_natural_language_review_request_uses_computer_read(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -723,7 +713,8 @@ class BotTests(unittest.TestCase):
                 self.assertIn("/action_approve", result)
                 runtime.bot.computer.run_agent_loop.assert_called_once()
 
-    def test_browse_command_normalizes_bare_domain(self) -> None:
+    @patch("claw_v2.bot._jina_read")
+    def test_browse_command_normalizes_bare_domain(self, mock_jina) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             env = {
@@ -735,21 +726,15 @@ class BotTests(unittest.TestCase):
                 "TELEGRAM_ALLOWED_USER_ID": "123",
             }
             with patch.dict(os.environ, env, clear=False):
-                from claw_v2.browser import BrowseResult
+                mock_jina.return_value = "# Local App\n\nlocal preview content " + "x" * 200
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
-                runtime.bot.browser = MagicMock()
-                runtime.bot.browser.browse.return_value = BrowseResult(
-                    url="https://localhost:3000",
-                    title="Local App",
-                    content="local preview...",
-                )
                 result = runtime.bot.handle_text(
                     user_id="123",
                     session_id="s1",
                     text="/browse localhost:3000",
                 )
                 self.assertIn("Local App", result)
-                runtime.bot.browser.browse.assert_called_once_with("https://localhost:3000")
+                mock_jina.assert_called_once_with("https://localhost:3000")
 
     def test_natural_language_terminal_shortcut_opens_claude(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
