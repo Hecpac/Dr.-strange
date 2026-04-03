@@ -17,23 +17,25 @@ Make URL reading instant and browser interaction frictionless.
 
 Replace the 3-strategy pipeline for `/browse`.
 
-**`_browse_response` flow:**
+**`_browse_response` flow — single decision tree:**
 
-For auth/social domains (`_AUTH_DOMAINS`):
-1. ManagedChrome first (has cookies, JS rendering)
-2. If CDP fails → Jina as fallback
+`x.com` and `twitter.com` are in `_AUTH_DOMAINS`. There is no fxtwitter transform. All auth domains go through CDP.
 
-For public URLs:
-1. If tweet (`x.com`, `twitter.com`) → transform to `fxtwitter.com`
-2. `httpx.get(f"https://r.jina.ai/{url}", headers={"Accept": "text/markdown"}, timeout=10)`
-3. **Content validation** — Jina 200 is not enough. Check:
-   - Response has >100 chars of content (not empty/stub)
-   - No login wall signals (`_is_login_wall()` reused from current code)
-   - Content-type is text (not binary/error page)
-4. If Jina fails OR content validation fails → fallback to ManagedChrome CDP
-5. Pass result to brain for analysis
+```
+URL arrives
+  ├── domain in _AUTH_DOMAINS? → ManagedChrome CDP (has cookies + JS)
+  │     └── CDP fails? → return error (no Jina fallback — auth content needs cookies)
+  └── public URL → Jina Reader
+        ├── httpx.get("https://r.jina.ai/{url}", headers={"Accept": "text/markdown"}, timeout=10)
+        ├── Content validation (Jina 200 is not enough):
+        │     - Response has >100 chars (not empty/stub)
+        │     - No login wall signals (_is_login_wall() reused)
+        │     - Content-type is text (not binary/error)
+        ├── Validation passes? → return markdown
+        └── Validation fails? → fallback to ManagedChrome CDP
+```
 
-Eliminates: Playwright headless for reading, Firecrawl, multi-strategy cascade.
+Eliminates: Playwright headless for reading, Firecrawl, fxtwitter transform, multi-strategy cascade.
 
 Response time: 2-5 seconds for public URLs (vs 30-90 current).
 
@@ -53,8 +55,9 @@ class ManagedChrome:
 2. For each PID → `ps -p {pid} -o comm=` → check if Chrome
    - If Chrome → `kill {pid}` (cleanup zombie from crash)
    - If not Chrome → raise error: "Port {port} occupied by {process}. Set CLAW_CHROME_PORT."
-3. Launch: `Google Chrome --remote-debugging-port={port} --user-data-dir={profile_dir} --no-first-run --headless=new`
-4. Wait until `GET http://localhost:{port}/json/version` responds (max 10s)
+3. **Wait for port release:** poll `lsof -ti :{port}` until empty or 5s timeout. Old process needs time to die and release the port + profile lock.
+4. Launch: `Google Chrome --remote-debugging-port={port} --user-data-dir={profile_dir} --no-first-run --headless=new`
+5. Wait until `GET http://localhost:{port}/json/version` responds (max 10s)
 
 **No PID files. No lock files. No state.** The port is the state. Start always cleans up and launches fresh.
 
@@ -94,7 +97,8 @@ Change: `BrowserUseService(cdp_url=managed_chrome.cdp_url)`. This means `Browser
 
 ### Config change
 
-`chrome_cdp_url` in `AppConfig` becomes vestigial. Replace with `claw_chrome_port: int` (default 9250, from `CLAW_CHROME_PORT`). The actual URL is always derived from ManagedChrome.
+- Replace `chrome_cdp_url: str` with `claw_chrome_port: int` (default 9250, from `CLAW_CHROME_PORT`). The actual URL is always derived from ManagedChrome.
+- **Keep `chrome_cdp_enabled: bool`** (default True, from `CHROME_CDP_ENABLED`). When False, ManagedChrome is not started in lifecycle.py and all CDP features gracefully degrade (browse falls back to Jina only, `/chrome_*` commands return "Chrome not enabled"). Tests set this to False via `make_config` so no Chrome process is needed in CI.
 
 ## Error Messages
 
@@ -119,19 +123,28 @@ Both commands call `managed_chrome.stop()` then `managed_chrome.start(headless=T
 ## Testing
 
 **`tests/test_browse.py` (new):**
-- `test_browse_jina_success` — mock httpx.get, returns markdown
-- `test_browse_tweet_transforms_url` — x.com → fxtwitter.com
+- `test_browse_jina_success` — mock httpx.get, returns markdown for public URL
 - `test_browse_jina_fallback_to_cdp` — Jina returns empty content, falls through to CDP
 - `test_browse_jina_login_wall_falls_to_cdp` — Jina 200 but login wall detected, falls to CDP
-- `test_browse_auth_domain_skips_jina` — x.com goes to CDP first, not Jina
+- `test_browse_auth_domain_goes_to_cdp` — x.com goes to CDP, not Jina
+- `test_browse_auth_domain_cdp_fails_returns_error` — x.com CDP fails, returns error (no Jina fallback)
 
 **`tests/test_chrome.py` (new):**
 - `test_start_kills_existing_chrome_on_port` — mock lsof returning Chrome PID, verify kill called
+- `test_start_waits_for_port_release` — verify poll loop after kill before relaunch
 - `test_start_errors_if_port_occupied_by_non_chrome` — mock lsof returning non-Chrome PID, verify error
 - `test_start_launches_chrome` — mock subprocess.Popen, verify correct flags
 - `test_stop_kills_subprocess` — verify process terminated
 - `test_ensure_idempotent` — calling twice doesn't launch two Chrome processes
 - `test_custom_port` — verify configured port used
+
+**`tests/test_bot.py` (modify):**
+- Update CDP error message test to match new message
+- `test_chrome_login_restarts_visible` — `/chrome_login` calls stop then start(headless=False)
+- `test_chrome_headless_restarts` — `/chrome_headless` calls stop then start(headless=True)
+
+**`tests/test_lifecycle.py` or inline:**
+- `test_browser_use_service_gets_managed_cdp_url` — verify BrowserUseService constructed with managed port
 
 ## Files Changed
 
