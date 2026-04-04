@@ -91,6 +91,8 @@ class ConsolidateTests(unittest.TestCase):
     def test_consolidate_parses_actions(self) -> None:
         svc, memory, _, router = _make_service()
         router.ask.return_value = MagicMock(content='[{"action": "delete", "key": "old_fact"}, {"action": "create", "key": "new_fact", "value": "hello"}]')
+        # search_facts must return the existing fact so the verified delete path finds it
+        memory.search_facts.return_value = [{"key": "old_fact", "value": "stale", "confidence": 0.5, "source": "user"}]
         facts = [{"key": "old_fact", "value": "stale", "confidence": 0.5, "source": "user"}]
         result = svc._consolidate(facts, [])
         self.assertEqual(result, 2)
