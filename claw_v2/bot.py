@@ -7,7 +7,7 @@ import re
 import threading
 import time
 import unicodedata
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit
@@ -22,6 +22,11 @@ from claw_v2.github import GitHubPullRequestService
 from claw_v2.heartbeat import HeartbeatService
 from claw_v2.pipeline import PipelineService
 from claw_v2.social import SocialPublisher
+
+
+@dataclass(slots=True)
+class _BrainShortcut:
+    text: str
 
 _BROWSE_SHORTCUT_TOKENS = (
     "abre",
@@ -39,6 +44,16 @@ _BROWSE_SHORTCUT_TOKENS = (
     "visit",
     "navega",
     "browse",
+)
+_TWEET_ANALYSIS_SHORTCUT_TOKENS = (
+    "revisa",
+    "revisalo",
+    "review",
+    "check",
+    "lee",
+    "read",
+    "analiza",
+    "analyze",
 )
 _COMPUTER_ACTION_TOKENS = (
     "click",
@@ -287,6 +302,8 @@ class BotService:
         if stripped == "/buddy" or stripped == "/buddy card":
             return self._buddy_card_response(user_id)
         shortcut_response = self._maybe_handle_shortcut(stripped, session_id=session_id)
+        if isinstance(shortcut_response, _BrainShortcut):
+            return self._brain_text_response(session_id, shortcut_response.text)
         if shortcut_response is not None:
             # Store the exchange so the brain has context on subsequent messages.
             self.brain.memory.store_message(session_id, "user", stripped)
@@ -509,23 +526,7 @@ class BotService:
         if nlm_response is not None:
             return nlm_response
 
-        # Pre-fetch tweet content so the brain has it in context,
-        # but store only the original message in memory (avoid polluting history).
-        enriched = _enrich_tweet_urls(stripped)
-        if enriched != stripped:
-            response = self.brain.handle_message(
-                session_id, enriched, memory_text=stripped,
-            )
-        else:
-            response = self.brain.handle_message(session_id, stripped)
-
-        raw_content = response.content or ""
-        content = raw_content.strip()
-        if not content or content == "(no result)":
-            content = "Recibido. ¿Qué quieres que haga con esto?"
-        if content != raw_content:
-            self.brain.memory.replace_latest_assistant_message(session_id, raw_content, content)
-        return content
+        return self._brain_text_response(session_id, stripped)
 
     def _help_response(self, topic: str | None = None) -> str:
         if topic is None:
@@ -629,6 +630,21 @@ class BotService:
             f"Tema de ayuda no reconocido: {topic}\n"
             "Prueba con: approvals, pipeline, agents, terminal, browser, social, notebooklm."
         )
+
+    def _brain_text_response(self, session_id: str, text: str) -> str:
+        enriched = _enrich_tweet_urls(text)
+        if enriched != text:
+            response = self.brain.handle_message(session_id, enriched, memory_text=text)
+        else:
+            response = self.brain.handle_message(session_id, text)
+
+        raw_content = response.content or ""
+        content = raw_content.strip()
+        if not content or content == "(no result)":
+            content = "Recibido. ¿Qué quieres que haga con esto?"
+        if content != raw_content:
+            self.brain.memory.replace_latest_assistant_message(session_id, raw_content, content)
+        return content
 
     def handle_multimodal(
         self,
@@ -1449,14 +1465,27 @@ class BotService:
         session.status = "aborted"
         return "computer session aborted"
 
-    def _maybe_handle_shortcut(self, text: str, *, session_id: str) -> str | None:
+    def _maybe_handle_shortcut(self, text: str, *, session_id: str) -> str | _BrainShortcut | None:
         if not text or text.startswith("/"):
             return None
 
         normalized = _normalize_command_text(text)
         extracted_url = _extract_url_candidate(text)
+        normalized_url: str | None = None
+        if extracted_url is not None:
+            try:
+                normalized_url = _normalize_url(extracted_url)
+            except ValueError:
+                normalized_url = None
 
         if extracted_url is not None:
+            if (
+                normalized_url is not None
+                and _is_tweet_url(normalized_url)
+                and not _looks_like_standalone_url(text, extracted_url)
+                and any(token in normalized for token in _TWEET_ANALYSIS_SHORTCUT_TOKENS)
+            ):
+                return _BrainShortcut(text)
             if "chrome" in normalized and (any(token in normalized for token in _BROWSE_SHORTCUT_TOKENS) or _looks_like_standalone_url(text, extracted_url)):
                 return self._chrome_browse_response(extracted_url, session_id=session_id)
             if any(token in normalized for token in _BROWSE_SHORTCUT_TOKENS) or _looks_like_standalone_url(text, extracted_url):
@@ -1465,7 +1494,7 @@ class BotService:
         if _looks_like_tweet_followup_request(normalized):
             recent_tweet_url = self._recent_tweet_url(session_id)
             if recent_tweet_url is not None:
-                return self._browse_response(recent_tweet_url, session_id=session_id)
+                return _BrainShortcut(f"{text}\n\n{recent_tweet_url}")
 
         if _computer_instruction_requires_actions(text):
             return self._computer_action_response(text, session_id)
@@ -1829,7 +1858,28 @@ def _is_tweet_url(url: str) -> bool:
 def _looks_like_tweet_followup_request(normalized_text: str) -> bool:
     if not any(token in normalized_text for token in _BROWSE_SHORTCUT_TOKENS):
         return False
-    return any(token in normalized_text for token in ("tweet", "tweets", "tuit", "tuits", "post"))
+    if not any(token in normalized_text for token in ("tweet", "tweets", "tuit", "tuits", "post")):
+        return False
+    # Only reuse the prior tweet when the user clearly points back to it.
+    return any(
+        token in normalized_text
+        for token in (
+            "ultimo tweet",
+            "ultimo tuit",
+            "ultimos tweets",
+            "ultimos tuits",
+            "tweet anterior",
+            "tuit anterior",
+            "ese tweet",
+            "ese tuit",
+            "este tweet",
+            "este tuit",
+            "tweet de arriba",
+            "tuit de arriba",
+            "tweet pasado",
+            "tuit pasado",
+        )
+    )
 
 
 def _looks_like_raw_markup(content: str) -> bool:

@@ -741,12 +741,82 @@ class BotTests(unittest.TestCase):
                 second = runtime.bot.handle_text(
                     user_id="123",
                     session_id="s1",
-                    text="Revisa el tweet",
+                    text="Revisa el último tweet",
                 )
 
                 self.assertIn("Texto limpio del tweet", first)
-                self.assertIn("Texto limpio del tweet", second)
-                self.assertEqual(runtime.bot.browser.chrome_navigate.call_count, 2)
+                self.assertEqual(second, "handled")
+                self.assertEqual(runtime.bot.browser.chrome_navigate.call_count, 1)
+
+    @patch("claw_v2.bot._tweet_fxtwitter_read")
+    def test_ambiguous_x_tweet_request_does_not_reuse_previous_tweet(self, mock_tweet_read) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                from claw_v2.browser import BrowseResult
+
+                tweet_url = "https://x.com/tendenciatuits/status/2039116558836936982?s=46"
+                mock_tweet_read.return_value = f"**Tendencias y Tuits Borrados on X** ({tweet_url})\n\nTexto limpio del tweet."
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.browser = MagicMock()
+                runtime.bot.managed_chrome = MagicMock()
+                runtime.bot.managed_chrome.cdp_url = "http://localhost:9250"
+                runtime.bot.browser.chrome_navigate.return_value = BrowseResult(
+                    url=tweet_url,
+                    title="X",
+                    content="Don't miss what's happening\nLog in\nSign up\nSee new posts " + "x" * 200,
+                )
+
+                first = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text=tweet_url,
+                )
+                second = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="Revisa el tweet de X",
+                )
+
+                self.assertIn("Texto limpio del tweet", first)
+                self.assertEqual(second, "handled")
+                self.assertEqual(runtime.bot.browser.chrome_navigate.call_count, 1)
+
+    @patch("claw_v2.bot._tweet_fxtwitter_read")
+    def test_natural_language_review_tweet_url_uses_brain_analysis(self, mock_tweet_read) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                tweet_url = "https://x.com/karpathy/status/2044708010506541998?s=46"
+                mock_tweet_read.return_value = f"**Andrej Karpathy (@karpathy) on X** ({tweet_url})\n\nTexto limpio del tweet."
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.browser = MagicMock()
+
+                result = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text=f"Revisa este tweet {tweet_url}",
+                )
+
+                self.assertEqual(result, "handled")
+                runtime.bot.browser.chrome_navigate.assert_not_called()
+                mock_tweet_read.assert_called_once_with(tweet_url)
 
     def test_natural_language_review_request_uses_computer_read(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
