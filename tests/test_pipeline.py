@@ -10,7 +10,17 @@ from unittest.mock import MagicMock, patch
 from claw_v2.approval import ApprovalManager
 from claw_v2.linear import LinearIssue, LinearService
 from claw_v2.memory import MemoryStore
-from claw_v2.pipeline import PipelineRun, PipelineService, _derive_lesson, _record_outcome, _retrieve_lessons
+from claw_v2.pipeline import (
+    PipelineRun,
+    PipelineService,
+    _create_branch,
+    _create_worktree,
+    _derive_lesson,
+    _push_branch,
+    _record_outcome,
+    _retrieve_lessons,
+    _validate_branch_name,
+)
 
 
 def _make_issue(issue_id: str = "HEC-1", title: str = "Fix bug") -> LinearIssue:
@@ -106,6 +116,50 @@ class ProcessIssueTests(unittest.TestCase):
             self.assertEqual(run.status, "failed")
             linear.post_comment.assert_called_once()
             self.assertIn("failed", linear.post_comment.call_args[0][1].lower())
+
+    def test_process_issue_rejects_unsafe_branch_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / ".git").mkdir()
+            linear = MagicMock(spec=LinearService)
+            issue = _make_issue()
+            issue.branch_name = "-bad-branch"
+            linear.get_issue.return_value = issue
+            svc = PipelineService(
+                linear=linear,
+                router=MagicMock(),
+                approvals=ApprovalManager(root / "approvals", "secret"),
+                pull_requests=MagicMock(),
+                observe=None,
+                default_repo_root=root,
+                max_retries=2,
+                state_root=root / "pipeline",
+            )
+            with self.assertRaises(ValueError):
+                svc.process_issue("HEC-1")
+
+
+class BranchValidationTests(unittest.TestCase):
+    def test_validate_branch_name_rejects_git_unsafe_forms(self) -> None:
+        for branch in ("-bad", "feat//oops", "feat/oops.lock", "feat/@{bad}", "feat\\oops", "feat/end/"):
+            with self.subTest(branch=branch):
+                with self.assertRaises(ValueError):
+                    _validate_branch_name(branch)
+
+    def test_git_commands_terminate_options_before_branch_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            with patch("claw_v2.pipeline.subprocess.run") as mock_run:
+                _create_branch(root, "feat/safe")
+                _create_worktree(root, "feat/safe")
+                _push_branch(root, "feat/safe")
+
+            branch_cmd = mock_run.call_args_list[0].args[0]
+            worktree_cmd = mock_run.call_args_list[1].args[0]
+            push_cmd = mock_run.call_args_list[2].args[0]
+            self.assertIn("--", branch_cmd)
+            self.assertIn("--", worktree_cmd)
+            self.assertIn("--", push_cmd)
 
 
 class CompletePipelineTests(unittest.TestCase):

@@ -50,6 +50,33 @@ class SafetyTests(unittest.TestCase):
             decision = sandbox_hook("Write", {"path": str(Path(tmpdir) / "outside.txt")}, policy=policy)
             self.assertFalse(decision.allowed)
 
+    def test_sandbox_blocks_env_wrapped_rm(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            policy = SandboxPolicy(workspace_root=workspace)
+            decision = sandbox_hook("Bash", {"command": "env FOO=1 rm -rf /"}, policy=policy)
+            self.assertFalse(decision.allowed)
+            self.assertIn("dangerous", decision.reason)
+
+    def test_sandbox_blocks_env_wrapped_curl_when_network_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            policy = SandboxPolicy(workspace_root=workspace, network_policy="none")
+            decision = sandbox_hook("Bash", {"command": "env HTTPS_PROXY=http://proxy curl https://example.com"}, policy=policy)
+            self.assertFalse(decision.allowed)
+            self.assertIn("network", decision.reason)
+
+    def test_sandbox_blocks_xargs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            policy = SandboxPolicy(workspace_root=workspace)
+            decision = sandbox_hook("Bash", {"command": "printf / | xargs rm -rf"}, policy=policy)
+            self.assertFalse(decision.allowed)
+            self.assertIn("xargs", decision.reason)
+
 
 if __name__ == "__main__":
     unittest.main()

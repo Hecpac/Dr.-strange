@@ -63,7 +63,7 @@ class PipelineService:
     def process_issue(self, issue_id: str, *, repo_root: Path | None = None) -> PipelineRun:
         repo = repo_root or self.default_repo_root
         issue = self.linear.get_issue(issue_id)
-        branch = issue.branch_name or _slugify_branch(issue.id, issue.title)
+        branch = _validate_branch_name(issue.branch_name or _slugify_branch(issue.id, issue.title))
         self.linear.update_status(issue_id, "In Progress")
         run = PipelineRun(issue_id=issue_id, branch_name=branch, repo_root=str(repo), status="in_progress")
         _create_branch(repo, branch)
@@ -242,6 +242,25 @@ class PipelineService:
         return PipelineRun(**{k: v for k, v in data.items() if k in PipelineRun.__dataclass_fields__})
 
 
+_SAFE_BRANCH_RE = re.compile(r"^[a-zA-Z0-9._/-]+$")
+
+
+def _validate_branch_name(branch: str) -> str:
+    if not branch or not _SAFE_BRANCH_RE.match(branch):
+        raise ValueError(f"Unsafe branch name: {branch!r}")
+    if (
+        branch.startswith(("-", "/", "."))
+        or branch.endswith(("/", "."))
+        or ".." in branch
+        or "//" in branch
+        or ".lock" in branch
+        or "@{" in branch
+        or "\\" in branch
+    ):
+        raise ValueError(f"Unsafe branch name: {branch!r}")
+    return branch
+
+
 def _slugify_branch(issue_id: str, title: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:40]
     return f"feat/{issue_id.lower()}-{slug}"
@@ -257,7 +276,7 @@ def _build_code_prompt(issue: LinearIssue, run: PipelineRun, *, past_lessons: st
 
 
 def _create_branch(repo: Path, branch: str) -> None:
-    subprocess.run(["git", "-C", str(repo), "branch", "--no-track", branch, "HEAD"], capture_output=True, text=True, check=False)
+    subprocess.run(["git", "-C", str(repo), "branch", "--no-track", "--", branch, "HEAD"], capture_output=True, text=True, check=False)
 
 
 def _create_worktree(repo: Path, branch: str) -> Path:
@@ -265,7 +284,7 @@ def _create_worktree(repo: Path, branch: str) -> Path:
     if wt_path.exists():
         shutil.rmtree(wt_path)
     wt_path.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "-C", str(repo), "worktree", "add", str(wt_path), branch], capture_output=True, text=True, check=True)
+    subprocess.run(["git", "-C", str(repo), "worktree", "add", "--", str(wt_path), branch], capture_output=True, text=True, check=True)
     return wt_path
 
 
@@ -293,7 +312,7 @@ def _commit_worktree(wt_path: Path, message: str) -> None:
 
 
 def _push_branch(repo: Path, branch: str) -> None:
-    subprocess.run(["git", "-C", str(repo), "push", "-u", "origin", branch], capture_output=True, text=True, check=True)
+    subprocess.run(["git", "-C", str(repo), "push", "-u", "origin", "--", branch], capture_output=True, text=True, check=True)
 
 
 def _parse_pr_number_from_url(url: str) -> int | None:

@@ -55,6 +55,7 @@ class BrainService:
     ) -> LLMResponse:
         stored_user_message = memory_text or _summarize_user_prompt(message)
         provider_session_id = self.memory.get_provider_session(session_id, "anthropic")
+        provider_cursor = self.memory.get_provider_session_cursor(session_id, "anthropic")
         # When resuming a provider session, skip message history — the SDK already has it.
         # Including both causes Claude to re-summarize the entire conversation each time.
         resuming = provider_session_id is not None
@@ -63,6 +64,7 @@ class BrainService:
             message=message,
             stored_user_message=stored_user_message,
             include_history=not resuming,
+            catchup_after_id=provider_cursor,
         )
         try:
             response = self.router.ask(
@@ -92,6 +94,7 @@ class BrainService:
                 message=message,
                 stored_user_message=stored_user_message,
                 include_history=True,
+                catchup_after_id=None,
             )
             response = self.router.ask(
                 prompt,
@@ -103,10 +106,15 @@ class BrainService:
                 timeout=300.0,
             )
         provider_session_artifact = response.artifacts.get("session_id")
-        if isinstance(provider_session_artifact, str) and provider_session_artifact:
-            self.memory.link_provider_session(session_id, response.provider, provider_session_artifact)
         self.memory.store_message(session_id, "user", stored_user_message)
         self.memory.store_message(session_id, "assistant", response.content)
+        if isinstance(provider_session_artifact, str) and provider_session_artifact:
+            self.memory.link_provider_session(
+                session_id,
+                response.provider,
+                provider_session_artifact,
+                last_message_id=self.memory.last_message_id(session_id),
+            )
         return response
 
     def _build_prompt(
@@ -116,28 +124,45 @@ class BrainService:
         message: UserPrompt,
         stored_user_message: str,
         include_history: bool,
+        catchup_after_id: int | None,
     ) -> UserPrompt:
         lessons = ""
         if self.learning:
             lessons = self.learning.retrieve_lessons(stored_user_message)
         if isinstance(message, str):
             if not include_history:
-                return f"{lessons}\n{message}" if lessons else message
+                # Include recent messages the SDK session might have missed
+                # (shortcuts bypass the brain, creating gaps in the SDK context).
+                catchup = self._build_catchup(session_id, after_id=catchup_after_id)
+                prompt = f"{catchup}{message}" if catchup else message
+                return f"{lessons}\n{prompt}" if lessons else prompt
             ctx = self.memory.build_context(session_id, stored_user_message, include_history=True)
             return f"{lessons}\n{ctx}" if lessons else ctx
 
         if not include_history:
-            if lessons:
-                return [{"type": "text", "text": lessons}, *message]
+            catchup = self._build_catchup(session_id, after_id=catchup_after_id)
+            preamble = f"{lessons}\n{catchup}" if lessons and catchup else (lessons or catchup)
+            if preamble:
+                return [{"type": "text", "text": preamble}, *message]
             return message
 
         context = self.memory.build_context(session_id, include_history=True).strip()
         blocks: list[UserContentBlock] = []
         preamble = f"{lessons}\n{context}" if lessons else context
-        if preamble:
-            blocks.append({"type": "text", "text": f"{preamble}\n# Current input"})
+        marker_text = f"{preamble}\n# Current input" if preamble else "# Current input"
+        blocks.append({"type": "text", "text": marker_text})
         blocks.extend(message)
         return blocks
+
+    def _build_catchup(self, session_id: str, *, after_id: int | None) -> str:
+        """Return recent messages that shortcuts stored but the SDK session hasn't seen."""
+        if after_id is None:
+            return ""
+        recent = self.memory.get_messages_since(session_id, after_id, limit=50)
+        if not recent:
+            return ""
+        lines = [f"{row['role']}: {row['content']}" for row in recent]
+        return "# Recent context (includes messages outside this session)\n" + "\n".join(lines) + "\n\n"
 
     def verify_critical_action(
         self,

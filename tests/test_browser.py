@@ -238,3 +238,50 @@ class TestChromeCDP(unittest.TestCase):
         self.assertEqual(result.url, "https://example.com")
         self.assertIsNotNone(result.screenshot_path)
         mock_page.screenshot.assert_called_once()
+
+
+class TestBrowserbaseCDP(unittest.TestCase):
+    @mock.patch("httpx.post")
+    def test_browserbase_browse_creates_and_releases_session(self, mock_post) -> None:
+        create_response = mock.MagicMock()
+        create_response.json.return_value = {
+            "id": "sess_123",
+            "connectUrl": "wss://connect.browserbase.example/devtools/browser/abc",
+        }
+        create_response.raise_for_status.return_value = None
+        release_response = mock.MagicMock()
+        release_response.raise_for_status.return_value = None
+        mock_post.side_effect = [create_response, release_response]
+
+        mock_body = mock.MagicMock()
+        mock_body.inner_text.return_value = "page content"
+        mock_page = mock.MagicMock()
+        mock_page.url = "https://example.com"
+        mock_page.title.return_value = "Example"
+        mock_page.query_selector.return_value = mock_body
+
+        mock_context = mock.MagicMock()
+        mock_context.pages = [mock_page]
+
+        mock_browser = mock.MagicMock()
+        mock_browser.contexts = [mock_context]
+
+        with mock.patch("claw_v2.browser.sync_playwright") as mock_pw:
+            mock_pw.return_value.__enter__ = mock.MagicMock(return_value=mock_pw.return_value)
+            mock_pw.return_value.__exit__ = mock.MagicMock(return_value=False)
+            mock_pw.return_value.chromium.connect_over_cdp.return_value = mock_browser
+
+            svc = DevBrowserService()
+            result = svc.browserbase_browse(
+                "https://example.com",
+                api_key="bb-key",
+                project_id="proj-123",
+            )
+
+        self.assertEqual(result.title, "Example")
+        self.assertEqual(mock_post.call_count, 2)
+        create_call = mock_post.call_args_list[0]
+        self.assertEqual(create_call.kwargs["headers"]["X-BB-API-Key"], "bb-key")
+        self.assertEqual(create_call.kwargs["json"]["projectId"], "proj-123")
+        release_call = mock_post.call_args_list[1]
+        self.assertEqual(release_call.kwargs["json"]["status"], "REQUEST_RELEASE")

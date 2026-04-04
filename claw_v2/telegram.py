@@ -8,8 +8,10 @@ import time
 from pathlib import Path
 from typing import Any
 
-from telegram import Update
+from telegram import LinkPreviewOptions, Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
+
+_NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 from claw_v2.bot import BotService
 from claw_v2.voice import VoiceUnavailableError, extract_audio, transcribe
@@ -138,34 +140,16 @@ class TelegramTransport:
         from telegram import BotCommand
         commands = [
             BotCommand("browse", "Abrir y revisar cualquier URL — /browse <url>"),
-            BotCommand("chrome_pages", "Listar tabs de Chrome con CDP"),
-            BotCommand("chrome_browse", "Abrir URL en tu Chrome — /chrome_browse <url>"),
-            BotCommand("chrome_shot", "Screenshot del tab actual de Chrome"),
+            BotCommand("status", "Estado del sistema (heartbeat)"),
+            BotCommand("approvals", "Ver aprobaciones pendientes"),
+            BotCommand("pipeline_status", "Ver pipelines activos"),
+            BotCommand("agents", "Listar agentes registrados"),
             BotCommand("screen", "Screenshot del escritorio actual"),
             BotCommand("computer", "Control de escritorio — /computer <instruccion>"),
-            BotCommand("computer_abort", "Cancelar sesión activa de Computer Use"),
-            BotCommand("tokens", "Ver uso de contexto y tokens"),
-            BotCommand("config", "Ver configuración de modelos LLM"),
-            BotCommand("status", "Estado del sistema (heartbeat)"),
-            BotCommand("agents", "Listar agentes registrados"),
             BotCommand("terminal_list", "Listar sesiones PTY de claude/codex"),
-            BotCommand("terminal_open", "Abrir puente PTY — /terminal_open <claude|codex> [cwd]"),
-            BotCommand("terminal_status", "Ver estado PTY — /terminal_status <session_id>"),
-            BotCommand("terminal_read", "Leer salida PTY — /terminal_read <session_id> [offset]"),
-            BotCommand("terminal_send", "Enviar texto a una PTY — /terminal_send <session_id> <text>"),
-            BotCommand("terminal_close", "Cerrar una PTY — /terminal_close <session_id>"),
-            BotCommand("action_approve", "Aprobar acción pendiente — /action_approve <id> <token>"),
-            BotCommand("action_abort", "Abortar acción pendiente — /action_abort <id>"),
-            BotCommand("pipeline", "Ejecutar pipeline — /pipeline <issue_id>"),
-            BotCommand("pipeline_status", "Ver pipelines activos"),
-            BotCommand("social_status", "Ver cuentas sociales"),
-            BotCommand("social_preview", "Preview de posts — /social_preview <cuenta>"),
-            BotCommand("approvals", "Ver aprobaciones pendientes"),
             BotCommand("nlm_list", "Listar cuadernos de NotebookLM"),
             BotCommand("nlm_create", "Crear cuaderno + Deep Research — /nlm_create <tema>"),
-            BotCommand("nlm_podcast", "Generar podcast del cuaderno activo"),
-            BotCommand("chrome_login", "Chrome visible para login — /chrome_login"),
-            BotCommand("chrome_headless", "Volver a Chrome headless — /chrome_headless"),
+            BotCommand("help", "Ayuda por tema — /help [topic]"),
         ]
         try:
             await self._app.bot.set_my_commands(commands)
@@ -207,7 +191,7 @@ class TelegramTransport:
         if not response or not response.strip():
             response = "(procesando... intenta de nuevo en unos segundos)"
         for part in _split_message(response):
-            await update.message.reply_text(part)
+            await update.message.reply_text(part, link_preview_options=_NO_PREVIEW)
 
     async def _handle_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_authorized(update):
@@ -370,7 +354,7 @@ class TelegramTransport:
         if not response or not response.strip():
             response = "(procesando... intenta de nuevo en unos segundos)"
         for part in _split_message(response):
-            await update.message.reply_text(part)
+            await update.message.reply_text(part, link_preview_options=_NO_PREVIEW)
 
     async def send_photo(self, *, chat_id: int, photo_path: str, caption: str | None = None) -> None:
         if self._app is None:
@@ -395,7 +379,7 @@ class TelegramTransport:
             logger.exception("Error handling voice message")
             response = "Error processing your voice message."
         for part in _split_message(response):
-            await update.message.reply_text(part)
+            await update.message.reply_text(part, link_preview_options=_NO_PREVIEW)
 
     def _is_authorized(self, update: Update) -> bool:
         if self._allowed_user_id is None:

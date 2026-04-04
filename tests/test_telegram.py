@@ -47,6 +47,33 @@ class TransportStartTests(unittest.IsolatedAsyncioTestCase):
         mock_app.updater.start_polling.assert_awaited_once()
         await transport.stop()
 
+    async def test_set_commands_uses_curated_short_menu(self) -> None:
+        transport = TelegramTransport(bot_service=MagicMock(), token="test-token")
+        transport._app = MagicMock()
+        transport._app.bot = AsyncMock()
+
+        await transport._set_commands()
+
+        transport._app.bot.set_my_commands.assert_awaited_once()
+        commands = transport._app.bot.set_my_commands.await_args.args[0]
+        names = [command.command for command in commands]
+        self.assertEqual(
+            names,
+            [
+                "browse",
+                "status",
+                "approvals",
+                "pipeline_status",
+                "agents",
+                "screen",
+                "computer",
+                "terminal_list",
+                "nlm_list",
+                "nlm_create",
+                "help",
+            ],
+        )
+
 
 class HandleTextTests(unittest.IsolatedAsyncioTestCase):
     async def test_unauthorized_user_silently_dropped(self) -> None:
@@ -95,8 +122,10 @@ class HandleTextTests(unittest.IsolatedAsyncioTestCase):
             )
             await transport._handle_text(update, MagicMock())
 
-        update.message.reply_text.assert_awaited_once_with(
-            "El runtime de Claude falló al iniciar esta solicitud. Intenta de nuevo en unos segundos."
+        update.message.reply_text.assert_awaited_once()
+        self.assertEqual(
+            update.message.reply_text.await_args.args[0],
+            "El runtime de Claude falló al iniciar esta solicitud. Intenta de nuevo en unos segundos.",
         )
 
 
@@ -186,7 +215,8 @@ class HandleImageTests(unittest.IsolatedAsyncioTestCase):
         with patch("claw_v2.telegram.asyncio.to_thread", new_callable=AsyncMock, return_value="image response") as mock_to_thread:
             await transport._handle_photo(update, mock_context)
 
-        update.message.reply_text.assert_awaited_once_with("image response")
+        update.message.reply_text.assert_awaited_once()
+        self.assertEqual(update.message.reply_text.await_args.args[0], "image response")
         _, kwargs = mock_to_thread.await_args
         self.assertEqual(kwargs["user_id"], "123")
         self.assertEqual(kwargs["session_id"], "tg-1")
@@ -227,7 +257,8 @@ class HandleImageTests(unittest.IsolatedAsyncioTestCase):
         with patch("claw_v2.telegram.asyncio.to_thread", new_callable=AsyncMock, return_value="doc response") as mock_to_thread:
             await transport._handle_image_document(update, mock_context)
 
-        update.message.reply_text.assert_awaited_once_with("doc response")
+        update.message.reply_text.assert_awaited_once()
+        self.assertEqual(update.message.reply_text.await_args.args[0], "doc response")
         _, kwargs = mock_to_thread.await_args
         self.assertEqual(kwargs["memory_text"], "[Imagen adjunta]")
         blocks = kwargs["content_blocks"]

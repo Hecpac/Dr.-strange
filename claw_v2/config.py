@@ -16,6 +16,26 @@ def _env_bool(name: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
 _SECONDARY_PROVIDER_DEFAULT_MODELS: dict[str, str] = {
     "openai": "gpt-5.4-mini",
     "google": "gemini-2.5-pro",
@@ -73,6 +93,12 @@ class AppConfig:
     dev_browser_path: str
     dev_browser_browsers_path: str
     dev_browser_timeout: int
+    browse_backend: str
+    browserbase_api_key: str | None
+    browserbase_project_id: str | None
+    browserbase_api_url: str
+    browserbase_region: str | None
+    browserbase_keep_alive: bool
     sdk_bypass_permissions: bool
     daily_cost_limit: float
     chrome_cdp_enabled: bool
@@ -113,21 +139,21 @@ class AppConfig:
             worker_effort=os.getenv("WORKER_EFFORT", "high"),
             brain_effort=os.getenv("BRAIN_EFFORT", "high"),
             judge_effort=os.getenv("JUDGE_EFFORT", "medium"),
-            max_budget_usd=float(os.getenv("MAX_BUDGET_USD", "0.50")),
+            max_budget_usd=_env_float("MAX_BUDGET_USD", 0.50),
             db_path=Path(os.getenv("DB_PATH", "data/claw.db")),
-            heartbeat_interval=int(os.getenv("HEARTBEAT_INTERVAL", "1800")),
-            daily_token_budget=float(os.getenv("DAILY_TOKEN_BUDGET", "10.00")),
+            heartbeat_interval=_env_int("HEARTBEAT_INTERVAL", 1800),
+            daily_token_budget=_env_float("DAILY_TOKEN_BUDGET", 10.00),
             workspace_root=Path(os.getenv("WORKSPACE_ROOT", str(cwd))),
             agent_state_root=Path(os.getenv("AGENT_STATE_ROOT", str(home / ".claw" / "agents"))),
             agent_definitions_root=Path(os.getenv("AGENT_DEFINITIONS_ROOT", str(cwd / "agents"))),
             eval_artifacts_root=Path(os.getenv("EVAL_ARTIFACTS_ROOT", str(home / ".claw" / "evals"))),
             eval_on_self_improve=_env_bool("EVAL_ON_SELF_IMPROVE", True),
             use_compaction=_env_bool("USE_COMPACTION", True),
-            cache_prefix_ttl=int(os.getenv("CACHE_PREFIX_TTL", "3600")),
+            cache_prefix_ttl=_env_int("CACHE_PREFIX_TTL", 3600),
             approvals_root=Path(os.getenv("APPROVALS_ROOT", str(home / ".claw" / "pending_approvals"))),
             pipeline_repo_root=Path(pr) if (pr := os.getenv("PIPELINE_REPO_ROOT")) else None,
             pipeline_label=os.getenv("PIPELINE_LABEL", "claw-auto"),
-            pipeline_max_retries=int(os.getenv("PIPELINE_MAX_RETRIES", "3")),
+            pipeline_max_retries=_env_int("PIPELINE_MAX_RETRIES", 3),
             pipeline_state_root=Path(os.getenv("PIPELINE_STATE_ROOT", str(home / ".claw" / "pipeline"))),
             social_accounts_root=Path(os.getenv("SOCIAL_ACCOUNTS_ROOT", str(Path(__file__).parent / "agents" / "social" / "accounts"))),
             social_keychain_prefix=os.getenv("SOCIAL_KEYCHAIN_PREFIX", "com.pachano.claw.social"),
@@ -140,20 +166,26 @@ class AppConfig:
                 if p.strip()
             ],
             extra_workspace_roots=[Path(p) for p in os.getenv("EXTRA_WORKSPACE_ROOTS", "").split(":") if p.strip()],
-            brain_context_window=int(os.getenv("BRAIN_CONTEXT_WINDOW", "1000000")),
-            brain_max_output=int(os.getenv("BRAIN_MAX_OUTPUT", "128000")),
-            worker_context_window=int(os.getenv("WORKER_CONTEXT_WINDOW", "1000000")),
-            worker_max_output=int(os.getenv("WORKER_MAX_OUTPUT", "64000")),
+            brain_context_window=_env_int("BRAIN_CONTEXT_WINDOW", 1000000),
+            brain_max_output=_env_int("BRAIN_MAX_OUTPUT", 128000),
+            worker_context_window=_env_int("WORKER_CONTEXT_WINDOW", 1000000),
+            worker_max_output=_env_int("WORKER_MAX_OUTPUT", 64000),
             dev_browser_path=os.getenv("DEV_BROWSER_PATH", "dev-browser"),
             dev_browser_browsers_path=os.getenv("PLAYWRIGHT_BROWSERS_PATH", "/tmp/pw-browsers"),
-            dev_browser_timeout=int(os.getenv("DEV_BROWSER_TIMEOUT", "30")),
+            dev_browser_timeout=_env_int("DEV_BROWSER_TIMEOUT", 30),
+            browse_backend=os.getenv("BROWSE_BACKEND", "auto"),
+            browserbase_api_key=os.getenv("BROWSERBASE_API_KEY"),
+            browserbase_project_id=os.getenv("BROWSERBASE_PROJECT_ID"),
+            browserbase_api_url=os.getenv("BROWSERBASE_API_URL", "https://api.browserbase.com"),
+            browserbase_region=os.getenv("BROWSERBASE_REGION"),
+            browserbase_keep_alive=_env_bool("BROWSERBASE_KEEP_ALIVE", False),
             sdk_bypass_permissions=_env_bool("SDK_BYPASS_PERMISSIONS", False),
-            daily_cost_limit=float(os.getenv("DAILY_COST_LIMIT", "0")),
+            daily_cost_limit=_env_float("DAILY_COST_LIMIT", 0.0),
             chrome_cdp_enabled=_env_bool("CHROME_CDP_ENABLED", True),
-            claw_chrome_port=int(os.getenv("CLAW_CHROME_PORT", "9250")),
+            claw_chrome_port=_env_int("CLAW_CHROME_PORT", 9250),
             computer_use_enabled=_env_bool("COMPUTER_USE_ENABLED", True),
-            computer_display_width=int(os.getenv("COMPUTER_DISPLAY_WIDTH", "1280")),
-            computer_display_height=int(os.getenv("COMPUTER_DISPLAY_HEIGHT", "800")),
+            computer_display_width=_env_int("COMPUTER_DISPLAY_WIDTH", 1280),
+            computer_display_height=_env_int("COMPUTER_DISPLAY_HEIGHT", 800),
             ollama_host=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
             sensitive_urls=[u for u in os.getenv("SENSITIVE_URLS", "ads.google.com:polymarket.com:robinhood.com:binance.com:stripe.com:paypal.com").split(":") if u.strip()],
         )
@@ -174,6 +206,7 @@ class AppConfig:
         if self.claude_auth_mode not in {"subscription", "api_key", "auto"}:
             raise ValueError("claude_auth_mode must be one of: subscription, api_key, auto.")
         supported = {"anthropic", "openai", "google", "ollama"}
+        supported_browse_backends = {"auto", "chrome_cdp", "playwright_local", "browserbase_cdp"}
         secondary = {
             "verifier_provider": self.verifier_provider,
             "research_provider": self.research_provider,
@@ -182,6 +215,8 @@ class AppConfig:
         for field_name, value in secondary.items():
             if value is not None and value not in supported:
                 raise ValueError(f"{field_name} must be one of {sorted(supported)}.")
+        if self.browse_backend not in supported_browse_backends:
+            raise ValueError(f"browse_backend must be one of {sorted(supported_browse_backends)}.")
 
     def provider_for_lane(self, lane: Lane) -> str:
         mapping = {

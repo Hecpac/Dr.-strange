@@ -175,6 +175,51 @@ class RuntimeTests(unittest.TestCase):
                 recent = runtime.memory.get_recent_messages("session-1")
                 self.assertEqual(recent[-2]["content"], "[Imagen adjunta]\nque ves en esta imagen?")
 
+    def test_brain_resume_only_catches_up_unsynced_shortcuts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+            }
+            seen_prompts: list[object] = []
+            seen_session_ids: list[str | None] = []
+
+            def sessionful_anthropic(request: LLMRequest) -> LLMResponse:
+                seen_prompts.append(request.prompt)
+                seen_session_ids.append(request.session_id)
+                provider_session_id = request.session_id or "sdk-session-1"
+                return LLMResponse(
+                    content="handled:brain",
+                    lane=request.lane,
+                    provider="anthropic",
+                    model=request.model,
+                    confidence=0.9,
+                    cost_estimate=0.02,
+                    artifacts={"session_id": provider_session_id},
+                )
+
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=sessionful_anthropic)
+                runtime.brain.handle_message("session-1", "hello")
+
+                for idx in range(4):
+                    runtime.memory.store_message("session-1", "user", f"shortcut-user-{idx}")
+                    runtime.memory.store_message("session-1", "assistant", f"shortcut-assistant-{idx}")
+
+                runtime.brain.handle_message("session-1", "follow up")
+
+                self.assertEqual(seen_session_ids, [None, "sdk-session-1"])
+                prompt = seen_prompts[-1]
+                self.assertIsInstance(prompt, str)
+                self.assertIn("shortcut-user-0", prompt)
+                self.assertIn("shortcut-assistant-3", prompt)
+                self.assertNotIn("user: hello", prompt)
+                self.assertTrue(prompt.rstrip().endswith("follow up"))
+
 
     def test_cost_gate_blocks_when_limit_exceeded(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

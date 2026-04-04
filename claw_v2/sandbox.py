@@ -23,12 +23,61 @@ def is_within_allowed(path: Path, policy: SandboxPolicy) -> bool:
     return any(resolved.is_relative_to(root.expanduser().resolve(strict=False)) for root in roots)
 
 
+def _unwrap_command_tokens(tokens: list[str]) -> list[str]:
+    remaining = list(tokens)
+    while remaining:
+        base_cmd = Path(remaining[0]).name
+        if base_cmd in {"bash", "sh", "zsh", "fish", "dash"}:
+            if "-c" not in remaining:
+                return remaining
+            c_idx = remaining.index("-c")
+            if c_idx + 1 >= len(remaining):
+                return remaining
+            try:
+                return shlex.split(remaining[c_idx + 1])
+            except ValueError:
+                return []
+        if base_cmd in {"env", "command", "sudo", "nice", "nohup"}:
+            idx = 1
+            if base_cmd == "env":
+                while idx < len(remaining) and (
+                    "=" in remaining[idx]
+                    and not remaining[idx].startswith("-")
+                    and remaining[idx].split("=", 1)[0]
+                ):
+                    idx += 1
+            else:
+                while idx < len(remaining) and remaining[idx].startswith("-"):
+                    idx += 1
+                    if base_cmd == "sudo" and idx < len(remaining) and remaining[idx - 1] in {"-u", "-g", "-h", "-p"}:
+                        idx += 1
+                    if base_cmd == "nice" and idx < len(remaining) and remaining[idx - 1] == "-n":
+                        idx += 1
+            remaining = remaining[idx:]
+            continue
+        if base_cmd == "xargs":
+            return remaining
+        return remaining
+    return remaining
+
+
 def check_command(command: str, policy: SandboxPolicy) -> str | None:
-    dangerous_fragments = (" rm ", " shutdown", " reboot", "diskutil", " mkfs", " dd ")
-    padded = f" {command} "
-    if any(fragment in padded for fragment in dangerous_fragments):
-        return "dangerous shell fragment detected"
-    if policy.network_policy == "none" and any(token in command for token in ("curl ", "wget ", "http://", "https://")):
+    dangerous_commands = {"rm", "shutdown", "reboot", "diskutil", "mkfs", "dd"}
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return "unparseable command"
+    if not tokens:
+        return None
+    tokens = _unwrap_command_tokens(tokens)
+    if not tokens:
+        return "unparseable command"
+    if "xargs" in [Path(token).name for token in tokens]:
+        return "xargs is not allowed"
+    base_cmd = Path(tokens[0]).name
+    if base_cmd in dangerous_commands:
+        return "dangerous command detected"
+    if policy.network_policy == "none" and base_cmd in {"curl", "wget"}:
         return "network access not allowed for this agent"
     return None
 

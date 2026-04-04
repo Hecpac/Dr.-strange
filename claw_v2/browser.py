@@ -259,6 +259,54 @@ console.log(JSON.stringify({{
             browser.close()
         return result
 
+    def browserbase_browse(
+        self,
+        url: str,
+        *,
+        api_key: str,
+        project_id: str,
+        api_url: str = "https://api.browserbase.com",
+        region: str | None = None,
+        keep_alive: bool = False,
+    ) -> BrowseResult:
+        if not api_key.strip():
+            raise BrowserError("browserbase api_key is required")
+        if not project_id.strip():
+            raise BrowserError("browserbase project_id is required")
+
+        session = _browserbase_create_session(
+            api_key=api_key,
+            project_id=project_id,
+            api_url=api_url,
+            region=region,
+            keep_alive=keep_alive,
+        )
+        session_id = str(session["id"])
+        connect_url = str(session["connectUrl"])
+        try:
+            with sync_playwright() as pw:
+                browser = pw.chromium.connect_over_cdp(connect_url, timeout=10_000)
+                context = browser.contexts[0] if browser.contexts else None
+                if context is None:
+                    browser.close()
+                    raise BrowserError("browserbase session did not expose a browser context")
+                page = context.pages[0] if context.pages else context.new_page()
+                page.set_viewport_size({"width": 1280, "height": 900})
+                page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                _wait_for_dynamic_content(page, url)
+                text = _extract_page_text(page)
+                result = BrowseResult(url=page.url, title=page.title(), content=text)
+                browser.close()
+                return result
+        finally:
+            if not keep_alive:
+                _browserbase_release_session(
+                    api_key=api_key,
+                    session_id=session_id,
+                    project_id=project_id,
+                    api_url=api_url,
+                )
+
     def browse(self, url: str, *, page_name: str = "main") -> BrowseResult:
         safe_url = _js_escape(url)
         safe_page = _js_escape(page_name)
@@ -380,3 +428,63 @@ def _parse_browse_result(result: ScriptResult, *, action_name: str) -> BrowseRes
         content=data["content"],
         screenshot_path=data.get("screenshot_path"),
     )
+
+
+def _browserbase_create_session(
+    *,
+    api_key: str,
+    project_id: str,
+    api_url: str,
+    region: str | None,
+    keep_alive: bool,
+) -> dict[str, Any]:
+    import httpx
+
+    payload: dict[str, Any] = {
+        "projectId": project_id,
+        "keepAlive": keep_alive,
+    }
+    if region:
+        payload["region"] = region
+    response = httpx.post(
+        f"{api_url.rstrip('/')}/v1/sessions",
+        headers={
+            "Content-Type": "application/json",
+            "X-BB-API-Key": api_key,
+        },
+        json=payload,
+        timeout=20.0,
+    )
+    response.raise_for_status()
+    data = response.json()
+    if "id" not in data or "connectUrl" not in data:
+        raise BrowserError("browserbase session response missing id/connectUrl")
+    return data
+
+
+def _browserbase_release_session(
+    *,
+    api_key: str,
+    session_id: str,
+    project_id: str,
+    api_url: str,
+) -> None:
+    import httpx
+
+    try:
+        response = httpx.post(
+            f"{api_url.rstrip('/')}/v1/sessions/{session_id}",
+            headers={
+                "Content-Type": "application/json",
+                "X-BB-API-Key": api_key,
+            },
+            json={
+                "projectId": project_id,
+                "status": "REQUEST_RELEASE",
+            },
+            timeout=10.0,
+        )
+        response.raise_for_status()
+    except Exception:
+        # Cleanup is best-effort; the session will eventually expire server-side.
+        return

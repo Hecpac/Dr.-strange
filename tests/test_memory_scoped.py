@@ -82,3 +82,38 @@ class ProviderSessionTTLTests(unittest.TestCase):
         # With 5-minute TTL, should be expired
         result = self.store.get_provider_session("app-1", "anthropic", max_age_seconds=300)
         self.assertIsNone(result)
+
+    def test_link_provider_session_tracks_last_message_id(self) -> None:
+        self.store.store_message("app-1", "user", "hello")
+        self.store.store_message("app-1", "assistant", "world")
+        self.store.link_provider_session("app-1", "anthropic", "sdk-1")
+
+        self.assertEqual(self.store.get_provider_session("app-1", "anthropic"), "sdk-1")
+        self.assertEqual(self.store.get_provider_session_cursor("app-1", "anthropic"), 2)
+
+    def test_get_messages_since_returns_only_unsynced_messages(self) -> None:
+        self.store.store_message("app-1", "user", "synced-user")
+        self.store.store_message("app-1", "assistant", "synced-assistant")
+        self.store.link_provider_session("app-1", "anthropic", "sdk-1")
+        self.store.store_message("app-1", "user", "shortcut-user")
+        self.store.store_message("app-1", "assistant", "shortcut-assistant")
+
+        recent = self.store.get_messages_since("app-1", 2)
+        self.assertEqual(
+            [(row["role"], row["content"]) for row in recent],
+            [("user", "shortcut-user"), ("assistant", "shortcut-assistant")],
+        )
+
+    def test_replace_latest_assistant_message_updates_visible_reply(self) -> None:
+        self.store.store_message("app-1", "user", "hello")
+        self.store.store_message("app-1", "assistant", "(no result)")
+
+        replaced = self.store.replace_latest_assistant_message(
+            "app-1",
+            "(no result)",
+            "Recibido. ¿Qué quieres que haga con esto?",
+        )
+
+        self.assertTrue(replaced)
+        recent = self.store.get_recent_messages("app-1", limit=2)
+        self.assertEqual(recent[-1]["content"], "Recibido. ¿Qué quieres que haga con esto?")

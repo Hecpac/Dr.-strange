@@ -112,6 +112,66 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
                             args = mock_transport_cls.call_args
                             self.assertIsNone(args.kwargs.get("token") or args[1].get("token"))
 
+    async def test_run_skips_managed_chrome_autostart_for_playwright_local_backend(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+            }
+            with patch.dict(os.environ, env, clear=False):
+                with patch("claw_v2.lifecycle.PidLock"):
+                    with patch("claw_v2.lifecycle.TelegramTransport") as mock_transport_cls:
+                        mock_transport = AsyncMock()
+                        mock_transport_cls.return_value = mock_transport
+                        with patch("claw_v2.lifecycle.ManagedChrome") as mock_managed_chrome_cls:
+                            with patch("claw_v2.lifecycle.build_runtime") as mock_build:
+                                mock_runtime = MagicMock()
+                                mock_runtime.config.telegram_bot_token = None
+                                mock_runtime.config.telegram_allowed_user_id = None
+                                mock_runtime.config.openai_api_key = None
+                                mock_runtime.config.chrome_cdp_enabled = True
+                                mock_runtime.config.browse_backend = "playwright_local"
+                                mock_runtime.daemon.run_loop = AsyncMock()
+                                mock_build.return_value = mock_runtime
+
+                                await run()
+
+                                mock_managed_chrome_cls.assert_not_called()
+
+    async def test_run_skips_managed_chrome_autostart_for_browserbase_backend(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+            }
+            with patch.dict(os.environ, env, clear=False):
+                with patch("claw_v2.lifecycle.PidLock"):
+                    with patch("claw_v2.lifecycle.TelegramTransport") as mock_transport_cls:
+                        mock_transport = AsyncMock()
+                        mock_transport_cls.return_value = mock_transport
+                        with patch("claw_v2.lifecycle.ManagedChrome") as mock_managed_chrome_cls:
+                            with patch("claw_v2.lifecycle.build_runtime") as mock_build:
+                                mock_runtime = MagicMock()
+                                mock_runtime.config.telegram_bot_token = None
+                                mock_runtime.config.telegram_allowed_user_id = None
+                                mock_runtime.config.openai_api_key = None
+                                mock_runtime.config.chrome_cdp_enabled = True
+                                mock_runtime.config.browse_backend = "browserbase_cdp"
+                                mock_runtime.daemon.run_loop = AsyncMock()
+                                mock_build.return_value = mock_runtime
+
+                                await run()
+
+                                mock_managed_chrome_cls.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

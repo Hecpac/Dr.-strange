@@ -89,7 +89,7 @@ async def run() -> int:
 
         # Wire ManagedChrome
         managed_chrome = None
-        if runtime.config.chrome_cdp_enabled:
+        if runtime.config.chrome_cdp_enabled and runtime.config.browse_backend in {"auto", "chrome_cdp"}:
             try:
                 managed_chrome = ManagedChrome(port=runtime.config.claw_chrome_port)
                 managed_chrome.start()

@@ -26,6 +26,64 @@ def fake_anthropic(request: LLMRequest) -> LLMResponse:
 
 
 class BotTests(unittest.TestCase):
+    def test_help_command_surfaces_main_and_topic_specific_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+
+                overview = runtime.bot.handle_text(user_id="123", session_id="s1", text="/help")
+                self.assertIn("/approvals", overview)
+                self.assertIn("/help pipeline", overview)
+                self.assertIn("/terminal_list", overview)
+
+                pipeline_help = runtime.bot.handle_text(user_id="123", session_id="s1", text="/help pipeline")
+                self.assertIn("/pipeline_status", pipeline_help)
+                self.assertIn("/pipeline_merge <issue_id>", pipeline_help)
+
+                agents_help = runtime.bot.handle_text(user_id="123", session_id="s1", text="/help agents")
+                self.assertIn("/agent_create", agents_help)
+                self.assertIn("/agent_pr", agents_help)
+
+                unknown = runtime.bot.handle_text(user_id="123", session_id="s1", text="/help desconocido")
+                self.assertIn("Tema de ayuda no reconocido", unknown)
+
+    def test_bot_persists_visible_fallback_instead_of_no_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+
+            def no_result_anthropic(request: LLMRequest) -> LLMResponse:
+                return LLMResponse(
+                    content="(no result)",
+                    lane=request.lane,
+                    provider="anthropic",
+                    model=request.model,
+                )
+
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=no_result_anthropic)
+                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="hola")
+
+                self.assertEqual(reply, "Recibido. ¿Qué quieres que haga con esto?")
+                recent = runtime.memory.get_recent_messages("s1", limit=2)
+                self.assertEqual(recent[-1]["content"], "Recibido. ¿Qué quieres que haga con esto?")
+
     def test_terminal_commands_delegate_to_bridge(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -648,8 +706,8 @@ class BotTests(unittest.TestCase):
                 self.assertIn("Docs", result)
                 mock_jina.assert_called_once_with("https://example.com/docs")
 
-    @patch("claw_v2.bot._tweet_oembed_read")
-    def test_natural_language_review_tweet_reuses_recent_tweet_url(self, mock_oembed) -> None:
+    @patch("claw_v2.bot._tweet_fxtwitter_read")
+    def test_natural_language_review_tweet_reuses_recent_tweet_url(self, mock_tweet_read) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             env = {
@@ -664,7 +722,7 @@ class BotTests(unittest.TestCase):
                 from claw_v2.browser import BrowseResult
 
                 tweet_url = "https://x.com/tendenciatuits/status/2039116558836936982?s=46"
-                mock_oembed.return_value = f"**Tendencias y Tuits Borrados on X** ({tweet_url})\n\nTexto limpio del tweet."
+                mock_tweet_read.return_value = f"**Tendencias y Tuits Borrados on X** ({tweet_url})\n\nTexto limpio del tweet."
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 runtime.bot.browser = MagicMock()
                 runtime.bot.managed_chrome = MagicMock()
@@ -787,6 +845,72 @@ class BotTests(unittest.TestCase):
                 )
                 self.assertIn("Local App", result)
                 mock_jina.assert_called_once_with("https://localhost:3000")
+
+    @patch("claw_v2.bot._jina_read")
+    def test_browse_emits_observe_event_for_public_strategy(self, mock_jina) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                mock_jina.return_value = "# Public\n\ncontenido publico " + "x" * 100
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+
+                runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="/browse https://example.com/public",
+                )
+
+                event = runtime.observe.recent_events(1)[0]
+                self.assertEqual(event["event_type"], "browse_result")
+                self.assertEqual(event["payload"]["strategy"], "public")
+                self.assertEqual(event["payload"]["selected_backend"], "jina")
+                self.assertEqual(event["payload"]["status"], "success")
+
+    @patch("claw_v2.bot._tweet_fxtwitter_read")
+    def test_browse_emits_observe_event_for_authenticated_strategy(self, mock_tweet_read) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                from claw_v2.browser import BrowseResult
+
+                mock_tweet_read.return_value = ""
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.browser = MagicMock()
+                runtime.bot.managed_chrome = MagicMock()
+                runtime.bot.managed_chrome.cdp_url = "http://localhost:9250"
+                runtime.bot.browser.chrome_navigate.return_value = BrowseResult(
+                    url="https://x.com/acme/status/1",
+                    title="Tweet",
+                    content="tweet content " + "x" * 200,
+                )
+
+                runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="/browse https://x.com/acme/status/1",
+                )
+
+                event = runtime.observe.recent_events(1)[0]
+                self.assertEqual(event["event_type"], "browse_result")
+                self.assertEqual(event["payload"]["strategy"], "authenticated")
+                self.assertEqual(event["payload"]["selected_backend"], "chrome_cdp")
+                self.assertEqual(event["payload"]["status"], "success")
 
     def test_natural_language_terminal_shortcut_opens_claude(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

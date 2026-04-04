@@ -43,6 +43,25 @@ class AppConfigDefaultsTests(unittest.TestCase):
         decision = sandbox_hook("Read", {"file_path": str(home / "agents" / "notes.txt")}, policy=policy)
         self.assertTrue(decision.allowed)
 
+    def test_browse_backend_defaults_and_accepts_override(self) -> None:
+        previous_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.chdir(tmpdir)
+            try:
+                with patch.dict(os.environ, {}, clear=True):
+                    config = AppConfig.from_env()
+                self.assertEqual(config.browse_backend, "auto")
+
+                with patch.dict(os.environ, {"BROWSE_BACKEND": "playwright_local"}, clear=True):
+                    configured = AppConfig.from_env()
+                self.assertEqual(configured.browse_backend, "playwright_local")
+
+                with patch.dict(os.environ, {"BROWSE_BACKEND": "browserbase_cdp"}, clear=True):
+                    browserbase_configured = AppConfig.from_env()
+                self.assertEqual(browserbase_configured.browse_backend, "browserbase_cdp")
+            finally:
+                os.chdir(previous_cwd)
+
 
 if __name__ == "__main__":
     unittest.main()

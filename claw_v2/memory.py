@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS provider_sessions (
     app_session_id TEXT NOT NULL,
     provider TEXT NOT NULL,
     provider_session_id TEXT NOT NULL,
+    last_message_id INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (app_session_id, provider)
 );
@@ -96,6 +97,10 @@ _MIGRATION_ADD_OUTCOME_TAGS = """
 ALTER TABLE task_outcomes ADD COLUMN tags TEXT NOT NULL DEFAULT '[]';
 """
 
+_MIGRATION_ADD_PROVIDER_LAST_MESSAGE_ID = """
+ALTER TABLE provider_sessions ADD COLUMN last_message_id INTEGER NOT NULL DEFAULT 0;
+"""
+
 
 class MemoryStore:
     def __init__(self, db_path: Path | str) -> None:
@@ -125,6 +130,14 @@ class MemoryStore:
                     self._conn.commit()
                 except sqlite3.OperationalError:
                     pass
+        cursor = self._conn.execute("PRAGMA table_info(provider_sessions)")
+        provider_cols = {row[1] for row in cursor.fetchall()}
+        if "last_message_id" not in provider_cols:
+            try:
+                self._conn.execute(_MIGRATION_ADD_PROVIDER_LAST_MESSAGE_ID)
+                self._conn.commit()
+            except sqlite3.OperationalError:
+                pass
 
     def store_message(self, session_id: str, role: str, content: str) -> None:
         with self._lock:
@@ -147,6 +160,22 @@ class MemoryStore:
         ).fetchall()
         return [dict(row) for row in reversed(rows)]
 
+    def get_messages_since(self, session_id: str, after_id: int, limit: int | None = None) -> list[dict]:
+        sql = [
+            """
+            SELECT id, role, content, created_at
+            FROM messages
+            WHERE session_id = ? AND id > ?
+            ORDER BY id ASC
+            """
+        ]
+        params: list[object] = [session_id, after_id]
+        if limit is not None:
+            sql.append("LIMIT ?")
+            params.append(limit)
+        rows = self._conn.execute("\n".join(sql), params).fetchall()
+        return [dict(row) for row in rows]
+
     def count_messages(self, session_id: str) -> int:
         row = self._conn.execute(
             """
@@ -157,6 +186,38 @@ class MemoryStore:
             (session_id,),
         ).fetchone()
         return row["count"] if row else 0
+
+    def last_message_id(self, session_id: str) -> int:
+        row = self._conn.execute(
+            """
+            SELECT MAX(id) AS max_id
+            FROM messages
+            WHERE session_id = ?
+            """,
+            (session_id,),
+        ).fetchone()
+        return int(row["max_id"] or 0) if row else 0
+
+    def replace_latest_assistant_message(self, session_id: str, previous_content: str, new_content: str) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT id, content
+                FROM messages
+                WHERE session_id = ? AND role = 'assistant'
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (session_id,),
+            ).fetchone()
+            if row is None or row["content"] != previous_content:
+                return False
+            self._conn.execute(
+                "UPDATE messages SET content = ? WHERE id = ?",
+                (new_content, row["id"]),
+            )
+            self._conn.commit()
+            return True
 
     def store_fact(
         self,
@@ -232,27 +293,42 @@ class MemoryStore:
         self,
         session_id: str,
         message: str | None = None,
-        budget: int = 16000,
+        budget: int = 64000,
         include_history: bool = True,
     ) -> str:
-        facts = self.get_profile_facts()[:10]
-        fact_lines = [f"{row['key']}={row['value']}" for row in facts]
-        sections = ["# Profile facts", *fact_lines]
-        if include_history:
-            recent = self.get_recent_messages(session_id, limit=20)
-            recent_lines = [f"{row['role']}: {row['content']}" for row in recent]
-            sections.extend(["# Recent messages", *recent_lines])
+        # Current input goes FIRST — never truncate what the user just said.
+        sections: list[str] = []
         if message is not None:
             sections.extend(["# Current input", message])
-        context = "\n".join(sections)
-        return context[:budget]
 
-    def get_provider_session(
+        facts = self.get_profile_facts()[:10]
+        if facts:
+            fact_lines = [f"{row['key']}={row['value']}" for row in facts]
+            sections.extend(["# Profile facts", *fact_lines])
+
+        if include_history:
+            recent = self.get_recent_messages(session_id, limit=20)
+            # Trim old messages to fit within remaining budget
+            current_len = sum(len(s) for s in sections) + len(sections)  # newlines
+            remaining = budget - current_len
+            recent_lines: list[str] = []
+            for row in reversed(recent):  # newest first
+                line = f"{row['role']}: {row['content']}"
+                if remaining - len(line) - 1 < 0:
+                    break
+                recent_lines.insert(0, line)
+                remaining -= len(line) + 1
+            if recent_lines:
+                sections.extend(["# Recent messages", *recent_lines])
+
+        return "\n".join(sections)
+
+    def _provider_session_row(
         self, app_session_id: str, provider: str, *, max_age_seconds: int = 7200,
-    ) -> str | None:
+    ) -> sqlite3.Row | None:
         row = self._conn.execute(
             """
-            SELECT provider_session_id, updated_at
+            SELECT provider_session_id, last_message_id, updated_at
             FROM provider_sessions
             WHERE app_session_id = ? AND provider = ?
             """,
@@ -271,18 +347,42 @@ class MemoryStore:
                     return None
             except (ValueError, TypeError):
                 pass
-        return row["provider_session_id"]
+        return row
 
-    def link_provider_session(self, app_session_id: str, provider: str, provider_session_id: str) -> None:
+    def get_provider_session(
+        self, app_session_id: str, provider: str, *, max_age_seconds: int = 7200,
+    ) -> str | None:
+        row = self._provider_session_row(app_session_id, provider, max_age_seconds=max_age_seconds)
+        return row["provider_session_id"] if row else None
+
+    def get_provider_session_cursor(
+        self, app_session_id: str, provider: str, *, max_age_seconds: int = 7200,
+    ) -> int | None:
+        row = self._provider_session_row(app_session_id, provider, max_age_seconds=max_age_seconds)
+        return int(row["last_message_id"] or 0) if row else None
+
+    def link_provider_session(
+        self,
+        app_session_id: str,
+        provider: str,
+        provider_session_id: str,
+        *,
+        last_message_id: int | None = None,
+    ) -> None:
+        if last_message_id is None:
+            last_message_id = self.last_message_id(app_session_id)
         with self._lock:
             self._conn.execute(
                 """
-                INSERT INTO provider_sessions (app_session_id, provider, provider_session_id)
-                VALUES (?, ?, ?)
+                INSERT INTO provider_sessions (app_session_id, provider, provider_session_id, last_message_id)
+                VALUES (?, ?, ?, ?)
                 ON CONFLICT(app_session_id, provider)
-                DO UPDATE SET provider_session_id = excluded.provider_session_id, updated_at = CURRENT_TIMESTAMP
+                DO UPDATE SET
+                    provider_session_id = excluded.provider_session_id,
+                    last_message_id = excluded.last_message_id,
+                    updated_at = CURRENT_TIMESTAMP
                 """,
-                (app_session_id, provider, provider_session_id),
+                (app_session_id, provider, provider_session_id, last_message_id),
             )
             self._conn.commit()
 

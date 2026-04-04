@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import threading
+import time
 import unicodedata
 from dataclasses import asdict
 from pathlib import Path
@@ -92,7 +93,7 @@ _NLM_ACTION_TOKENS = (
 )
 _SCHEME_URL_RE = re.compile(r"(?P<url>https?://[^\s<>()]+)", re.IGNORECASE)
 _HOST_URL_RE = re.compile(
-    r"(?P<url>(?<!@)(?:localhost(?::\d+)?|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}(?::\d+)?)(?:/[^\s<>()]*)?)",
+    r"(?P<url>(?<!@)(?:localhost|(?:\d{1,3}\.){3}\d{1,3}|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,})(?::\d+)?(?:[/?#][^\s<>()]*)?)",
     re.IGNORECASE,
 )
 _DEFAULT_COMPUTER_MODEL = "gpt-5.4-mini"
@@ -163,6 +164,13 @@ class BotService:
         if user_id != self.allowed_user_id:
             raise PermissionError("user is not allowed to access this bot")
         stripped = text.strip()
+        if stripped == "/help":
+            return self._help_response()
+        if stripped.startswith("/help "):
+            parts = stripped.split(maxsplit=1)
+            if len(parts) != 2:
+                return self._help_response()
+            return self._help_response(parts[1])
         if stripped == "/status":
             return json.dumps(asdict(self.heartbeat.collect()), indent=2, sort_keys=True)
         if stripped == "/config":
@@ -280,6 +288,9 @@ class BotService:
             return self._buddy_card_response(user_id)
         shortcut_response = self._maybe_handle_shortcut(stripped, session_id=session_id)
         if shortcut_response is not None:
+            # Store the exchange so the brain has context on subsequent messages.
+            self.brain.memory.store_message(session_id, "user", stripped)
+            self.brain.memory.store_message(session_id, "assistant", shortcut_response[:2000])
             return shortcut_response
         if stripped == "/agents":
             return json.dumps(self._list_agents_payload(), indent=2, sort_keys=True)
@@ -498,7 +509,126 @@ class BotService:
         if nlm_response is not None:
             return nlm_response
 
-        return self.brain.handle_message(session_id, stripped).content
+        # Pre-fetch tweet content so the brain has it in context,
+        # but store only the original message in memory (avoid polluting history).
+        enriched = _enrich_tweet_urls(stripped)
+        if enriched != stripped:
+            response = self.brain.handle_message(
+                session_id, enriched, memory_text=stripped,
+            )
+        else:
+            response = self.brain.handle_message(session_id, stripped)
+
+        raw_content = response.content or ""
+        content = raw_content.strip()
+        if not content or content == "(no result)":
+            content = "Recibido. ¿Qué quieres que haga con esto?"
+        if content != raw_content:
+            self.brain.memory.replace_latest_assistant_message(session_id, raw_content, content)
+        return content
+
+    def _help_response(self, topic: str | None = None) -> str:
+        if topic is None:
+            return (
+                "Comandos principales:\n"
+                "/status - salud general del bot\n"
+                "/approvals - aprobaciones pendientes\n"
+                "/pipeline_status - pipelines activos\n"
+                "/agents - estado de agentes\n"
+                "/browse <url> - revisar una URL\n"
+                "/screen - screenshot actual\n"
+                "/computer <instruccion> - operar el escritorio\n"
+                "/terminal_list - sesiones PTY abiertas\n"
+                "/nlm_create <tema> - crear cuaderno de NotebookLM\n"
+                "/nlm_list - listar cuadernos de NotebookLM\n"
+                "\n"
+                "Ayuda por tema:\n"
+                "/help approvals\n"
+                "/help pipeline\n"
+                "/help agents\n"
+                "/help terminal\n"
+                "/help browser\n"
+                "/help social\n"
+                "/help notebooklm"
+            )
+
+        normalized = topic.strip().lower().replace("-", "").replace("_", "")
+        if normalized in {"approval", "approvals"}:
+            return (
+                "Aprobaciones:\n"
+                "/approvals - listar pendientes\n"
+                "/approval_status <approval_id> - ver estado\n"
+                "/approve <approval_id> <token> - aprobar manualmente\n"
+                "/action_approve <approval_id> <token> - aprobar acción pendiente\n"
+                "/action_abort <approval_id> - abortar acción pendiente"
+            )
+        if normalized in {"pipeline", "pipelines"}:
+            return (
+                "Pipeline:\n"
+                "/pipeline <issue_id> [repo_root] - ejecutar pipeline\n"
+                "/pipeline_status - ver runs activos\n"
+                "/pipeline_approve <approval_id> <token> - aprobar y completar pipeline\n"
+                "/pipeline_merge <issue_id> - merge y cierre"
+            )
+        if normalized in {"agent", "agents"}:
+            return (
+                "Agentes:\n"
+                "/agents - listar agentes\n"
+                "/agent_status <agent_name> - ver detalle\n"
+                "/agent_create <name> <researcher|operator|deployer> <instruction> - crear agente\n"
+                "/agent_run <agent_name> <max_experiments> - correr loop\n"
+                "/agent_publish <agent_name> <max_experiments> - publicar cambios\n"
+                "/agent_pr <agent_name> <max_experiments> - abrir draft PR\n"
+                "/agent_pause <agent_name> - pausar\n"
+                "/agent_resume <agent_name> - reanudar\n"
+                "/agent_history <agent_name> [limit] - historial reciente"
+            )
+        if normalized in {"terminal", "terminals", "pty"}:
+            return (
+                "Terminal:\n"
+                "/terminal_list - listar sesiones\n"
+                "/terminal_open <claude|codex> [cwd] - abrir PTY\n"
+                "/terminal_status <session_id> - ver estado\n"
+                "/terminal_read <session_id> [offset] - leer salida\n"
+                "/terminal_send <session_id> <text> - enviar texto\n"
+                "/terminal_close <session_id> - cerrar sesión"
+            )
+        if normalized in {"browser", "browse", "chrome", "screen", "computer"}:
+            return (
+                "Navegación y escritorio:\n"
+                "/browse <url> - revisar una URL\n"
+                "/chrome_pages - listar tabs de Chrome\n"
+                "/chrome_browse <url> - abrir URL en Chrome\n"
+                "/chrome_shot - screenshot del tab actual\n"
+                "/chrome_login - abrir Chrome visible para login\n"
+                "/chrome_headless - volver a headless\n"
+                "/screen - screenshot del escritorio\n"
+                "/computer <instruccion> - controlar escritorio\n"
+                "/computer_abort - cancelar sesión activa"
+            )
+        if normalized in {"social", "socialmedia"}:
+            return (
+                "Social:\n"
+                "/social_status - listar cuentas\n"
+                "/social_preview <cuenta> - previsualizar posts\n"
+                "/social_publish <cuenta> - publicar batch"
+            )
+        if normalized in {"notebooklm", "nlm", "notebook"}:
+            return (
+                "NotebookLM:\n"
+                "/nlm_list - listar cuadernos\n"
+                "/nlm_create <tema> - crear cuaderno\n"
+                "/nlm_status <notebook_id> - ver estado\n"
+                "/nlm_sources <notebook_id> <url1,url2,...> - agregar fuentes\n"
+                "/nlm_text <notebook_id> <titulo> | <contenido> - agregar nota\n"
+                "/nlm_research <notebook_id> <consulta> - correr research\n"
+                "/nlm_podcast [notebook_id] - generar podcast\n"
+                "/nlm_chat <notebook_id> <pregunta> - chatear con el cuaderno"
+            )
+        return (
+            f"Tema de ayuda no reconocido: {topic}\n"
+            "Prueba con: approvals, pipeline, agents, terminal, browser, social, notebooklm."
+        )
 
     def handle_multimodal(
         self,
@@ -686,53 +816,277 @@ class BotService:
             return str(exc)
         self._remember_recent_browse_url(session_id, normalized_url)
 
-        cdp_available = self.managed_chrome is not None and self.browser is not None
-        tweet_fallback = _tweet_oembed_read(normalized_url) if _is_tweet_url(normalized_url) else ""
+        backend = self._browse_backend()
+        playwright_available = backend in {"auto", "playwright_local"} and self.browser is not None
+        browserbase_available = (
+            backend == "browserbase_cdp"
+            and self.browser is not None
+            and self.config is not None
+            and bool(getattr(self.config, "browserbase_api_key", None))
+            and bool(getattr(self.config, "browserbase_project_id", None))
+        )
+        cdp_available = (
+            backend in {"auto", "chrome_cdp"}
+            and self.managed_chrome is not None
+            and self.browser is not None
+        )
+        tweet_fallback = _tweet_fxtwitter_read(normalized_url) if _is_tweet_url(normalized_url) else ""
+        auth_required = _needs_real_browser(normalized_url)
+        started_at = time.perf_counter()
 
-        # Auth domains → CDP (needs cookies)
-        if _needs_real_browser(normalized_url):
-            if not cdp_available:
-                if tweet_fallback:
-                    return tweet_fallback[:6000]
-                # Degrade: try Jina best-effort
-                content = _jina_read(normalized_url)
-                if content:
-                    return f"Contenido parcial (CDP no disponible):\n\n{content[:6000]}"
-                return f"browse error: {normalized_url} requiere Chrome CDP pero no está disponible."
+        if auth_required:
+            response, outcome = self._browse_authenticated_response(
+                normalized_url,
+                tweet_fallback=tweet_fallback,
+                configured_backend=backend,
+                cdp_available=cdp_available,
+                browserbase_available=browserbase_available,
+                playwright_available=playwright_available,
+            )
+        else:
+            response, outcome = self._browse_public_response(
+                normalized_url,
+                configured_backend=backend,
+                cdp_available=cdp_available,
+                browserbase_available=browserbase_available,
+                playwright_available=playwright_available,
+            )
+
+        self._emit_browse_event(
+            url=normalized_url,
+            configured_backend=backend,
+            strategy=outcome["strategy"],
+            selected_backend=outcome["selected_backend"],
+            status=outcome["status"],
+            auth_required=auth_required,
+            duration_ms=round((time.perf_counter() - started_at) * 1000, 1),
+            note=outcome.get("note"),
+        )
+        return response
+
+    def _browse_backend(self) -> str:
+        if self.config is None:
+            return "auto"
+        backend = getattr(self.config, "browse_backend", "auto")
+        if not isinstance(backend, str) or not backend.strip():
+            return "auto"
+        return backend.strip().lower()
+
+    def _browse_public_response(
+        self,
+        url: str,
+        *,
+        configured_backend: str,
+        cdp_available: bool,
+        browserbase_available: bool,
+        playwright_available: bool,
+    ) -> tuple[str, dict[str, str]]:
+        content = _jina_read(url)
+        if content:
+            return content[:6000], {
+                "strategy": "public",
+                "selected_backend": "jina",
+                "status": "success",
+            }
+
+        if playwright_available:
+            content = self._playwright_browse_response(url)
+            if content:
+                return content, {
+                    "strategy": "public",
+                    "selected_backend": "playwright_local",
+                    "status": "success",
+                }
+
+        if browserbase_available:
+            content = self._browserbase_browse_response(url)
+            if content:
+                return content, {
+                    "strategy": "public",
+                    "selected_backend": "browserbase_cdp",
+                    "status": "success",
+                }
+
+        if configured_backend == "chrome_cdp" and cdp_available:
+            try:
+                result = self.browser.chrome_navigate(
+                    url,
+                    cdp_url=self.managed_chrome.cdp_url,
+                )
+                if _is_usable_browse_content(url, result.content):
+                    return f"**{result.title}** ({result.url})\n\n{result.content[:6000]}", {
+                        "strategy": "public",
+                        "selected_backend": "chrome_cdp",
+                        "status": "success",
+                    }
+            except Exception as exc:
+                return _format_chrome_cdp_error(exc, prefix="browse error"), {
+                    "strategy": "public",
+                    "selected_backend": "chrome_cdp",
+                    "status": "error",
+                    "note": "cdp_failed",
+                }
+
+        return f"browse error: no se pudo leer {url}", {
+            "strategy": "public",
+            "selected_backend": "none",
+            "status": "error",
+            "note": "all_backends_failed",
+        }
+
+    def _browse_authenticated_response(
+        self,
+        url: str,
+        *,
+        tweet_fallback: str,
+        configured_backend: str,
+        cdp_available: bool,
+        browserbase_available: bool,
+        playwright_available: bool,
+    ) -> tuple[str, dict[str, str]]:
+        if cdp_available:
             try:
                 from urllib.parse import urlparse
-                host = urlparse(normalized_url).netloc.lower()
+                host = urlparse(url).netloc.lower()
                 result = self.browser.chrome_navigate(
-                    normalized_url,
+                    url,
                     cdp_url=self.managed_chrome.cdp_url,
                     page_url_pattern=host,
                 )
-                if _is_usable_browse_content(normalized_url, result.content):
-                    return f"**{result.title}** ({result.url})\n\n{result.content[:6000]}"
-                if tweet_fallback:
-                    return tweet_fallback[:6000]
+                if _is_usable_browse_content(url, result.content):
+                    return f"**{result.title}** ({result.url})\n\n{result.content[:6000]}", {
+                        "strategy": "authenticated",
+                        "selected_backend": "chrome_cdp",
+                        "status": "success",
+                    }
             except Exception as exc:
-                if tweet_fallback:
-                    return tweet_fallback[:6000]
-                return _format_chrome_cdp_error(exc, prefix="browse error")
+                if configured_backend == "chrome_cdp":
+                    return _format_chrome_cdp_error(exc, prefix="browse error"), {
+                        "strategy": "authenticated",
+                        "selected_backend": "chrome_cdp",
+                        "status": "error",
+                        "note": "cdp_failed",
+                    }
 
-        # Public URLs → Jina first
-        content = _jina_read(normalized_url)
-        if content:
-            return content[:6000]
+        if browserbase_available:
+            content = self._browserbase_browse_response(url)
+            if content:
+                return f"Contenido parcial (sesión remota sin cookies locales):\n\n{content}", {
+                    "strategy": "authenticated",
+                    "selected_backend": "browserbase_cdp",
+                    "status": "partial",
+                    "note": "remote_session_no_local_cookies",
+                }
 
-        # Jina failed → CDP fallback
-        if cdp_available:
-            try:
-                result = self.browser.chrome_navigate(
-                    normalized_url, cdp_url=self.managed_chrome.cdp_url,
+        fallback_content, fallback_backend, note = self._browse_textual_fallback(
+            url,
+            tweet_fallback=tweet_fallback,
+            playwright_available=playwright_available,
+        )
+        if fallback_content:
+            return fallback_content, {
+                "strategy": "authenticated",
+                "selected_backend": fallback_backend,
+                "status": "partial",
+                "note": note,
+            }
+
+        return f"browse error: {url} requiere navegador autenticado y Chrome CDP no está disponible.", {
+            "strategy": "authenticated",
+            "selected_backend": "none",
+            "status": "error",
+            "note": "no_authenticated_backend",
+        }
+
+    def _browse_textual_fallback(
+        self,
+        url: str,
+        *,
+        tweet_fallback: str,
+        playwright_available: bool,
+    ) -> tuple[str, str, str]:
+        if tweet_fallback:
+            return tweet_fallback[:6000], "tweet_fallback", "tweet_reader"
+
+        if playwright_available:
+            content = self._playwright_browse_response(url)
+            if content:
+                return (
+                    f"Contenido parcial (sin sesión autenticada):\n\n{content}",
+                    "playwright_local",
+                    "no_authenticated_session",
                 )
-                if _is_usable_browse_content(normalized_url, result.content):
-                    return f"**{result.title}** ({result.url})\n\n{result.content[:6000]}"
-            except Exception:
-                logger.debug("CDP browse failed for %s, falling back", normalized_url, exc_info=True)
 
-        return f"browse error: no se pudo leer {normalized_url}"
+        content = _jina_read(url)
+        if content:
+            return (
+                f"Contenido parcial (CDP no disponible):\n\n{content[:6000]}",
+                "jina",
+                "best_effort_textual",
+            )
+        return "", "none", "all_textual_fallbacks_failed"
+
+    def _playwright_browse_response(self, url: str) -> str:
+        if self.browser is None or not hasattr(self.browser, "browse"):
+            return ""
+        try:
+            result = self.browser.browse(url)
+        except Exception:
+            logger.debug("Playwright local browse failed for %s", url, exc_info=True)
+            return ""
+        if not _is_usable_browse_content(url, result.content):
+            return ""
+        return f"**{result.title}** ({result.url})\n\n{result.content[:6000]}"
+
+    def _browserbase_browse_response(self, url: str) -> str:
+        if self.browser is None or self.config is None or not hasattr(self.browser, "browserbase_browse"):
+            return ""
+        api_key = getattr(self.config, "browserbase_api_key", None)
+        project_id = getattr(self.config, "browserbase_project_id", None)
+        if not api_key or not project_id:
+            return ""
+        try:
+            result = self.browser.browserbase_browse(
+                url,
+                api_key=api_key,
+                project_id=project_id,
+                api_url=getattr(self.config, "browserbase_api_url", "https://api.browserbase.com"),
+                region=getattr(self.config, "browserbase_region", None),
+                keep_alive=bool(getattr(self.config, "browserbase_keep_alive", False)),
+            )
+        except Exception:
+            logger.debug("Browserbase browse failed for %s", url, exc_info=True)
+            return ""
+        if not _is_usable_browse_content(url, result.content):
+            return ""
+        return f"**{result.title}** ({result.url})\n\n{result.content[:6000]}"
+
+    def _emit_browse_event(
+        self,
+        *,
+        url: str,
+        configured_backend: str,
+        strategy: str,
+        selected_backend: str,
+        status: str,
+        auth_required: bool,
+        duration_ms: float,
+        note: str | None = None,
+    ) -> None:
+        if self.observe is None:
+            return
+        payload = {
+            "url": url,
+            "configured_backend": configured_backend,
+            "strategy": strategy,
+            "selected_backend": selected_backend,
+            "status": status,
+            "auth_required": auth_required,
+            "duration_ms": duration_ms,
+        }
+        if note:
+            payload["note"] = note
+        self.observe.emit("browse_result", payload=payload)
 
     def _tokens_info_response(self, session_id: str) -> str:
         message_count = self.brain.memory.count_messages(session_id)
@@ -841,7 +1195,7 @@ class BotService:
         self._remember_recent_browse_url(session_id, normalized_url)
         if self.browser is None or self.managed_chrome is None:
             return "Chrome no disponible."
-        tweet_fallback = _tweet_oembed_read(normalized_url) if _is_tweet_url(normalized_url) else ""
+        tweet_fallback = _tweet_fxtwitter_read(normalized_url) if _is_tweet_url(normalized_url) else ""
         try:
             from urllib.parse import urlparse
             host = urlparse(normalized_url).netloc.lower()
@@ -1431,7 +1785,7 @@ _LOGIN_WALL_SIGNALS = [
 
 def _is_login_wall(content: str) -> bool:
     """Detect pages that returned a login/signup wall instead of real content."""
-    if not content or len(content.strip()) < 80:
+    if not content or not content.strip():
         return True
     lower = content.lower()
     return any(signal in lower for signal in _LOGIN_WALL_SIGNALS)
@@ -1445,6 +1799,20 @@ _RAW_MARKUP_SIGNALS = [
     "viewport-fit=cover",
     "user-scalable=0",
 ]
+
+
+def _enrich_tweet_urls(text: str) -> str:
+    """If text contains tweet URLs, pre-fetch content and append to message."""
+    urls = _SCHEME_URL_RE.findall(text)
+    tweet_urls = [_strip_url_punctuation(u) for u in urls if _is_tweet_url(_strip_url_punctuation(u))]
+    if not tweet_urls:
+        return text
+    enriched = text
+    for url in tweet_urls:
+        content = _tweet_fxtwitter_read(url)
+        if content:
+            enriched += f"\n\n---\n[Contenido del tweet pre-cargado]:\n{content}"
+    return enriched
 
 
 def _is_tweet_url(url: str) -> bool:
@@ -1513,7 +1881,7 @@ def _jina_read(url: str, *, timeout: float = 10) -> str:
         )
         response.raise_for_status()
         content = response.text.strip()
-        if len(content) < 100:
+        if len(content) < 20:
             return ""
         if _is_login_wall(content):
             return ""
@@ -1522,23 +1890,60 @@ def _jina_read(url: str, *, timeout: float = 10) -> str:
         return ""
 
 
-def _tweet_oembed_read(url: str, *, timeout: float = 10) -> str:
-    """Best-effort public tweet extraction via X/Twitter oEmbed."""
+def _tweet_fxtwitter_read(url: str, *, timeout: float = 15) -> str:
+    """Fetch full tweet text via fxtwitter public API."""
     if not _is_tweet_url(url):
         return ""
-    import html as html_lib
+    import httpx
 
+    match = re.search(r"/status/(\d+)", url)
+    if not match:
+        return ""
+    # Extract username from URL path
+    parsed = urlsplit(url)
+    path_parts = [p for p in parsed.path.split("/") if p]
+    if len(path_parts) < 2:
+        return ""
+    user, tweet_id = path_parts[0], match.group(1)
+
+    try:
+        response = httpx.get(
+            f"https://api.fxtwitter.com/{user}/status/{tweet_id}",
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=timeout,
+            follow_redirects=True,
+        )
+        response.raise_for_status()
+        data = response.json()
+    except Exception:
+        return _tweet_oembed_fallback(url, timeout=timeout)
+
+    if data.get("code") != 200 or "tweet" not in data:
+        return _tweet_oembed_fallback(url, timeout=timeout)
+
+    tweet = data["tweet"]
+    text = tweet.get("text", "").strip()
+    if not text:
+        return ""
+    author = tweet.get("author", {}).get("name", "")
+    handle = tweet.get("author", {}).get("screen_name", "")
+    likes = tweet.get("likes", 0)
+    retweets = tweet.get("retweets", 0)
+    views = tweet.get("views", 0)
+    title = f"{author} (@{handle}) on X" if author else "Tweet"
+    stats = f"Likes: {likes:,} | RT: {retweets:,} | Views: {views:,}"
+    return f"**{title}** ({url})\n\n{text}\n\n---\n{stats}"
+
+
+def _tweet_oembed_fallback(url: str, *, timeout: float = 10) -> str:
+    """Fallback: oEmbed (may truncate long tweets)."""
+    import html as html_lib
     import httpx
 
     try:
         response = httpx.get(
             "https://publish.twitter.com/oembed",
-            params={
-                "url": url,
-                "omit_script": "true",
-                "dnt": "true",
-                "align": "center",
-            },
+            params={"url": url, "omit_script": "true", "dnt": "true"},
             timeout=timeout,
             follow_redirects=True,
         )
@@ -1550,7 +1955,6 @@ def _tweet_oembed_read(url: str, *, timeout: float = 10) -> str:
     raw_html = str(data.get("html", "")).strip()
     if not raw_html:
         return ""
-
     paragraphs = re.findall(r"<p[^>]*>(.*?)</p>", raw_html, flags=re.IGNORECASE | re.DOTALL)
     text_parts: list[str] = []
     for paragraph in paragraphs:
@@ -1561,15 +1965,11 @@ def _tweet_oembed_read(url: str, *, timeout: float = 10) -> str:
         text = re.sub(r"[ \t]+", " ", text).strip()
         if text:
             text_parts.append(text)
-
     if not text_parts:
         return ""
-
     author_name = str(data.get("author_name", "")).strip()
     title = f"{author_name} on X" if author_name else "Tweet"
     content = "\n\n".join(text_parts)
-    if not _is_usable_browse_content(url, content):
-        return ""
     return f"**{title}** ({url})\n\n{content}"
 
 
