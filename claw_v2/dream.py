@@ -214,7 +214,7 @@ class AutoDreamService:
             return 0
 
     def _apply_actions(self, llm_response: str) -> int:
-        """Parse LLM response and apply memory actions."""
+        """Parse LLM response and apply memory actions with verification."""
         import json
 
         try:
@@ -232,15 +232,34 @@ class AutoDreamService:
         for action in actions:
             act = action.get("action")
             key = action.get("key", "")
-            if act == "delete" and key:
-                self.memory.store_fact(key, "", source="dream", confidence=0.0)
-                count += 1
-            elif act == "update" and key:
-                self.memory.store_fact(key, action.get("value", ""), source="dream", confidence=0.7)
-                count += 1
-            elif act == "create" and key:
-                self.memory.store_fact(key, action.get("value", ""), source=action.get("source", "dream"), confidence=0.5)
-                count += 1
+            if not key:
+                continue
+            if act == "delete":
+                # Verify: only delete if the fact actually exists and has low confidence.
+                existing = self.memory.search_facts(key, limit=1, agent_name=self.agent_name)
+                if not existing:
+                    existing = self.memory.search_facts(key, limit=1)
+                if existing and existing[0].get("confidence", 1.0) < 0.6:
+                    self.memory.store_fact(key, "", source="dream", confidence=0.0)
+                    count += 1
+                else:
+                    logger.info("autoDream: skipped delete of '%s' (not found or confidence >= 0.6)", key)
+            elif act == "update" and action.get("value"):
+                # Verify: only update if original fact exists.
+                existing = self.memory.search_facts(key, limit=1)
+                if existing:
+                    self.memory.store_fact(key, action["value"], source="dream", confidence=0.7)
+                    count += 1
+                else:
+                    logger.info("autoDream: skipped update of '%s' (original not found)", key)
+            elif act == "create":
+                # Verify: don't create duplicates.
+                existing = self.memory.search_facts(key, limit=1)
+                if not existing or existing[0].get("key") != key:
+                    self.memory.store_fact(key, action.get("value", ""), source=action.get("source", "dream"), confidence=0.5)
+                    count += 1
+                else:
+                    logger.info("autoDream: skipped create of '%s' (already exists)", key)
         return count
 
     def _prune(self) -> int:

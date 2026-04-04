@@ -76,8 +76,31 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
+_ST_MODEL = None
+_ST_LOCK = threading.Lock()
+
+
+def _get_st_model():
+    """Lazy-load sentence-transformers model on first use."""
+    global _ST_MODEL
+    if _ST_MODEL is None:
+        with _ST_LOCK:
+            if _ST_MODEL is None:
+                try:
+                    from sentence_transformers import SentenceTransformer
+                    _ST_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
+                except Exception:
+                    _ST_MODEL = False  # Mark as unavailable
+    return _ST_MODEL if _ST_MODEL is not False else None
+
+
 def _simple_embedding(text: str, dim: int = 128) -> list[float]:
-    """Lightweight bag-of-chars embedding. Replace with a real model for production."""
+    """Semantic embedding via sentence-transformers, with bag-of-chars fallback."""
+    model = _get_st_model()
+    if model is not None:
+        vec = model.encode(text, normalize_embeddings=True).tolist()
+        return vec
+    # Fallback: lightweight bag-of-chars embedding.
     vec = [0.0] * dim
     for i, ch in enumerate(text.lower()):
         vec[ord(ch) % dim] += 1.0 / (1 + i * 0.01)
@@ -314,12 +337,12 @@ class MemoryStore:
         if message is not None:
             sections.extend(["# Current input", message])
 
-        facts = self.get_profile_facts()[:10]
+        facts = self.get_profile_facts()[:20]
         if facts:
             fact_lines = [f"{row['key']}={row['value']}" for row in facts]
             sections.extend(["# Profile facts", *fact_lines])
 
-        learning_facts = self.get_learning_facts(limit=2)
+        learning_facts = self.get_learning_facts(limit=5)
         if learning_facts:
             learning_lines = [row["value"] for row in learning_facts if row.get("value")]
             if learning_lines:
@@ -327,18 +350,42 @@ class MemoryStore:
 
         if include_history:
             recent = self.get_recent_messages(session_id, limit=20)
-            # Trim old messages to fit within remaining budget
-            current_len = sum(len(s) for s in sections) + len(sections)  # newlines
-            remaining = budget - current_len
-            recent_lines: list[str] = []
-            for row in reversed(recent):  # newest first
-                line = f"{row['role']}: {row['content']}"
-                if remaining - len(line) - 1 < 0:
-                    break
-                recent_lines.insert(0, line)
-                remaining -= len(line) + 1
-            if recent_lines:
-                sections.extend(["# Recent messages", *recent_lines])
+            if recent:
+                current_len = sum(len(s) for s in sections) + len(sections)
+                remaining = budget - current_len
+                # Always preserve first message (foundational context) and newest messages.
+                # Sacrifice middle messages when budget is tight.
+                first_line = f"{recent[0]['role']}: {recent[0]['content']}"
+                rest = recent[1:]
+                recent_lines: list[str] = []
+                # Reserve space for the foundational first message.
+                first_cost = len(first_line) + 1
+                if first_cost < remaining:
+                    remaining -= first_cost
+                    recent_lines.append(first_line)
+                    # Fill from newest backwards with the remaining budget.
+                    tail_lines: list[str] = []
+                    skipped = 0
+                    for row in reversed(rest):
+                        line = f"{row['role']}: {row['content']}"
+                        if remaining - len(line) - 1 < 0:
+                            skipped += 1
+                            continue
+                        tail_lines.insert(0, line)
+                        remaining -= len(line) + 1
+                    if skipped:
+                        recent_lines.append(f"[... {skipped} mensajes intermedios omitidos ...]")
+                    recent_lines.extend(tail_lines)
+                else:
+                    # Budget too small even for first message — fill newest only.
+                    for row in reversed(recent):
+                        line = f"{row['role']}: {row['content']}"
+                        if remaining - len(line) - 1 < 0:
+                            break
+                        recent_lines.insert(0, line)
+                        remaining -= len(line) + 1
+                if recent_lines:
+                    sections.extend(["# Recent messages", *recent_lines])
 
         return "\n".join(sections)
 
@@ -472,6 +519,7 @@ class MemoryStore:
     ) -> list[dict]:
         embedder = embed_fn or _simple_embedding
         query_vec = embedder(query)
+        query_dim = len(query_vec)
         rows = self._conn.execute(
             """
             SELECT f.id, f.key, f.value, f.source, f.source_trust, f.confidence, fe.embedding
@@ -480,8 +528,13 @@ class MemoryStore:
             """,
         ).fetchall()
         scored = []
+        stale_ids: list[tuple[int, str, str]] = []
         for row in rows:
             stored_vec = json.loads(row["embedding"])
+            if len(stored_vec) != query_dim:
+                # Dimension mismatch — re-embed on the fly and queue for update.
+                stored_vec = embedder(f"{row['key']} {row['value']}")
+                stale_ids.append((row["id"], row["key"], row["value"]))
             sim = _cosine_similarity(query_vec, stored_vec)
             if sim >= min_similarity:
                 scored.append({
@@ -489,6 +542,16 @@ class MemoryStore:
                     "source": row["source"], "confidence": row["confidence"],
                     "similarity": round(sim, 4),
                 })
+        # Lazily migrate stale embeddings in the background.
+        if stale_ids:
+            with self._lock:
+                for fact_id, key, value in stale_ids:
+                    new_vec = embedder(f"{key} {value}")
+                    self._conn.execute(
+                        "UPDATE fact_embeddings SET embedding = ? WHERE fact_id = ?",
+                        (json.dumps(new_vec), fact_id),
+                    )
+                self._conn.commit()
         scored.sort(key=lambda x: x["similarity"], reverse=True)
         return scored[:limit]
 

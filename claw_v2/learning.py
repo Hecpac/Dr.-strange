@@ -53,7 +53,14 @@ class LearningLoop:
 
     def retrieve_lessons(self, context: str, *, task_type: str | None = None, limit: int = 3) -> str:
         """Retrieve relevant past lessons formatted for injection into a prompt."""
-        keywords = " ".join(context.split()[:20])
+        # Strip common preamble markers to extract the actual user message.
+        clean = context
+        for marker in ("# Current input\n", "# Profile facts\n", "# Recent messages\n", "# Learning rules\n"):
+            if marker in clean:
+                clean = clean.split(marker)[-1]
+        # Use the last meaningful line (most likely the user's actual query) if multi-line.
+        lines = [ln.strip() for ln in clean.strip().splitlines() if ln.strip() and not ln.startswith("#")]
+        keywords = " ".join(lines[-1].split()[:20]) if lines else " ".join(context.split()[:20])
         outcomes = self.memory.search_past_outcomes(keywords, task_type=task_type, limit=limit)
         if not outcomes:
             outcomes = self.memory.recent_failures(task_type=task_type, limit=limit)
