@@ -43,6 +43,33 @@ class AgentScopedFactsTests(unittest.TestCase):
         facts = store2.search_facts("test", agent_name="alma")
         self.assertEqual(len(facts), 1)
 
+    def test_build_context_includes_learning_rules(self) -> None:
+        self.store.store_fact(
+            "learning_loop_consolidated",
+            "Prefer explicit fallback messaging after browse failures.",
+            source="learning_loop",
+            source_trust="self",
+            confidence=0.7,
+            entity_tags=("learning", "consolidated"),
+        )
+        context = self.store.build_context("s1", message="hola", include_history=False)
+        self.assertIn("# Learning rules", context)
+        self.assertIn("Prefer explicit fallback messaging", context)
+
+    def test_outcome_feedback_is_returned_in_search_results(self) -> None:
+        outcome_id = self.store.store_task_outcome(
+            task_type="browse",
+            task_id="s1:1",
+            description="Browse failed",
+            approach="strategy=public backend=none",
+            outcome="failure",
+            lesson="Retry with a different backend.",
+            error_snippet="browse error",
+        )
+        self.store.update_outcome_feedback(outcome_id, "negative")
+        outcomes = self.store.search_past_outcomes("Browse", task_type="browse")
+        self.assertEqual(outcomes[0]["feedback"], "negative")
+
 
 class ProviderSessionTTLTests(unittest.TestCase):
     def setUp(self) -> None:

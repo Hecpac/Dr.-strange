@@ -99,6 +99,40 @@ class TelegramTransport:
         self._rate_max = 10  # max requests per window
         self._rate_window = 60.0  # seconds
 
+    def _emit_latency(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        message_kind: str,
+        status: str,
+        bot_ms: float,
+        reply_ms: float,
+        total_ms: float,
+        response_parts: int,
+        response_chars: int,
+    ) -> None:
+        observe = getattr(self._bot_service, "observe", None)
+        if observe is None:
+            return
+        try:
+            observe.emit(
+                "telegram_latency",
+                payload={
+                    "session_id": session_id,
+                    "user_id": user_id,
+                    "message_kind": message_kind,
+                    "status": status,
+                    "bot_ms": round(bot_ms, 1),
+                    "reply_ms": round(reply_ms, 1),
+                    "total_ms": round(total_ms, 1),
+                    "response_parts": response_parts,
+                    "response_chars": response_chars,
+                },
+            )
+        except Exception:
+            logger.debug("Could not emit telegram latency", exc_info=True)
+
     async def start(self) -> None:
         if self._token is None:
             return
@@ -165,6 +199,7 @@ class TelegramTransport:
             return
         session_id = f"tg-{update.effective_chat.id}"
         text = update.message.text or ""
+        started_at = time.perf_counter()
         await update.message.chat.send_action("typing")
         try:
             response = await asyncio.to_thread(
@@ -188,10 +223,24 @@ class TelegramTransport:
                 response = "Error con la API. Intenta de nuevo en unos segundos."
             else:
                 response = "Error procesando tu mensaje. Intenta de nuevo."
+        bot_done_at = time.perf_counter()
         if not response or not response.strip():
             response = "(procesando... intenta de nuevo en unos segundos)"
-        for part in _split_message(response):
+        parts = _split_message(response)
+        for part in parts:
             await update.message.reply_text(part, link_preview_options=_NO_PREVIEW)
+        finished_at = time.perf_counter()
+        self._emit_latency(
+            session_id=session_id,
+            user_id=user_id,
+            message_kind="text",
+            status="ok",
+            bot_ms=(bot_done_at - started_at) * 1000,
+            reply_ms=(finished_at - bot_done_at) * 1000,
+            total_ms=(finished_at - started_at) * 1000,
+            response_parts=len(parts),
+            response_chars=len(response),
+        )
 
     async def _handle_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_authorized(update):
@@ -327,6 +376,7 @@ class TelegramTransport:
     ) -> None:
         user_id = str(update.effective_user.id)
         session_id = f"tg-{update.effective_chat.id}"
+        started_at = time.perf_counter()
         await update.message.chat.send_action("typing")
         file = await context.bot.get_file(file_id)
         tmp_path = Path(
@@ -351,10 +401,24 @@ class TelegramTransport:
             response = "Error procesando tu imagen. Intenta de nuevo."
         finally:
             tmp_path.unlink(missing_ok=True)
+        bot_done_at = time.perf_counter()
         if not response or not response.strip():
             response = "(procesando... intenta de nuevo en unos segundos)"
-        for part in _split_message(response):
+        parts = _split_message(response)
+        for part in parts:
             await update.message.reply_text(part, link_preview_options=_NO_PREVIEW)
+        finished_at = time.perf_counter()
+        self._emit_latency(
+            session_id=session_id,
+            user_id=user_id,
+            message_kind="image",
+            status="ok",
+            bot_ms=(bot_done_at - started_at) * 1000,
+            reply_ms=(finished_at - bot_done_at) * 1000,
+            total_ms=(finished_at - started_at) * 1000,
+            response_parts=len(parts),
+            response_chars=len(response),
+        )
 
     async def send_photo(self, *, chat_id: int, photo_path: str, caption: str | None = None) -> None:
         if self._app is None:
@@ -371,6 +435,7 @@ class TelegramTransport:
     async def _handle_text_content(self, update: Update, text: str) -> None:
         user_id = str(update.effective_user.id)
         session_id = f"tg-{update.effective_chat.id}"
+        started_at = time.perf_counter()
         try:
             response = await asyncio.to_thread(
                 self._bot_service.handle_text, user_id=user_id, session_id=session_id, text=text,
@@ -378,8 +443,22 @@ class TelegramTransport:
         except Exception:
             logger.exception("Error handling voice message")
             response = "Error processing your voice message."
-        for part in _split_message(response):
+        bot_done_at = time.perf_counter()
+        parts = _split_message(response)
+        for part in parts:
             await update.message.reply_text(part, link_preview_options=_NO_PREVIEW)
+        finished_at = time.perf_counter()
+        self._emit_latency(
+            session_id=session_id,
+            user_id=user_id,
+            message_kind="transcript",
+            status="ok",
+            bot_ms=(bot_done_at - started_at) * 1000,
+            reply_ms=(finished_at - bot_done_at) * 1000,
+            total_ms=(finished_at - started_at) * 1000,
+            response_parts=len(parts),
+            response_chars=len(response),
+        )
 
     def _is_authorized(self, update: Update) -> bool:
         if self._allowed_user_id is None:

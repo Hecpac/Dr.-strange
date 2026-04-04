@@ -632,11 +632,13 @@ class BotService:
         )
 
     def _brain_text_response(self, session_id: str, text: str) -> str:
+        prompt_text = text
         enriched = _enrich_tweet_urls(text)
         if enriched != text:
-            response = self.brain.handle_message(session_id, enriched, memory_text=text)
-        else:
-            response = self.brain.handle_message(session_id, text)
+            prompt_text = _format_tweet_analysis_prompt(text, enriched)
+        if _looks_like_runtime_capability_question(text):
+            prompt_text = _format_runtime_capability_prompt(prompt_text)
+        response = self.brain.handle_message(session_id, prompt_text, memory_text=text)
 
         raw_content = response.content or ""
         content = raw_content.strip()
@@ -644,6 +646,16 @@ class BotService:
             content = "Recibido. ¿Qué quieres que haga con esto?"
         if content != raw_content:
             self.brain.memory.replace_latest_assistant_message(session_id, raw_content, content)
+        if content == "Recibido. ¿Qué quieres que haga con esto?":
+            self._record_learning_outcome(
+                task_type="telegram_message",
+                session_id=session_id,
+                description=f"Bot returned fallback for message: {text[:200]}",
+                approach="brain.handle_message",
+                outcome="failure",
+                error_snippet=(raw_content or "empty_response")[:500],
+                lesson="When the brain returns empty output, ask a clarifying question and inspect prompt/context assembly.",
+            )
         return content
 
     def handle_multimodal(
@@ -878,6 +890,20 @@ class BotService:
             duration_ms=round((time.perf_counter() - started_at) * 1000, 1),
             note=outcome.get("note"),
         )
+        if outcome["status"] != "success":
+            self._record_learning_outcome(
+                task_type="browse",
+                session_id=session_id,
+                description=f"Browse {outcome['status']} for {normalized_url}",
+                approach=f"strategy={outcome['strategy']} backend={outcome['selected_backend']}",
+                outcome="failure" if outcome["status"] == "error" else "partial",
+                error_snippet=response[:500],
+                lesson=(
+                    "Authenticated or JS-heavy pages need a better backend selection or clearer fallback messaging."
+                    if outcome["strategy"] == "authenticated"
+                    else "When all browse backends fail, capture the failing backend path and retry strategy explicitly."
+                ),
+            )
         return response
 
     def _browse_backend(self) -> str:
@@ -1103,6 +1129,33 @@ class BotService:
         if note:
             payload["note"] = note
         self.observe.emit("browse_result", payload=payload)
+
+    def _record_learning_outcome(
+        self,
+        *,
+        task_type: str,
+        session_id: str | None,
+        description: str,
+        approach: str,
+        outcome: str,
+        error_snippet: str | None = None,
+        lesson: str | None = None,
+    ) -> None:
+        if self.learning is None:
+            return
+        task_id = f"{session_id or 'global'}:{time.time_ns()}"
+        try:
+            self.learning.record(
+                task_type=task_type,
+                task_id=task_id,
+                description=description,
+                approach=approach,
+                outcome=outcome,
+                error_snippet=error_snippet,
+                lesson=lesson,
+            )
+        except Exception:
+            logger.debug("learning record failed for %s", task_type, exc_info=True)
 
     def _tokens_info_response(self, session_id: str) -> str:
         message_count = self.brain.memory.count_messages(session_id)
@@ -1842,6 +1895,59 @@ def _enrich_tweet_urls(text: str) -> str:
         if content:
             enriched += f"\n\n---\n[Contenido del tweet pre-cargado]:\n{content}"
     return enriched
+
+
+def _format_tweet_analysis_prompt(original_text: str, enriched_text: str) -> str:
+    return (
+        f"{original_text}\n\n"
+        "[Instrucción de formato]\n"
+        "Si respondes sobre este tweet o sobre enlaces relacionados que el tweet incluye, separa SIEMPRE la respuesta en dos secciones exactas:\n"
+        "## Fuente\n"
+        "- Resume únicamente lo que está en el tweet y, si aplica, en el contenido enlazado que sí fue leído.\n"
+        "- Distingue con claridad qué viene del tweet y qué viene del enlace.\n"
+        "- No presentes inferencias o recomendaciones como si fueran parte de la fuente.\n\n"
+        "## Aplicación sugerida\n"
+        "- Incluye solo inferencias, recomendaciones o ideas prácticas tuyas.\n"
+        "- Si no hay una recomendación útil, escribe: Ninguna por ahora.\n\n"
+        f"{enriched_text}"
+    )
+
+
+def _looks_like_runtime_capability_question(text: str) -> bool:
+    normalized = _normalize_command_text(text)
+    if not any(token in normalized for token in ("bot", "claw", "sistema", "runtime")):
+        return False
+    return any(
+        token in normalized
+        for token in (
+            "que aporta",
+            "que aportara",
+            "que tiene",
+            "que le falta",
+            "que puede",
+            "que ya tiene",
+            "que ganaria",
+            "como esta",
+            "como funciona hoy",
+        )
+    )
+
+
+def _format_runtime_capability_prompt(text: str) -> str:
+    return (
+        "[Instrucción de rigor sobre el sistema]\n"
+        "Si hablas del estado actual del bot/sistema, no sobreafirmes.\n"
+        "Estructura SIEMPRE la respuesta con estas tres secciones exactas y en este orden:\n"
+        "## Implementado hoy\n"
+        "## Parcial\n"
+        "## Sugerencia\n"
+        "En 'Implementado hoy' incluye solo capacidades verificables hoy.\n"
+        "En 'Parcial' incluye capacidades incompletas, limitadas o no plenamente confiables.\n"
+        "En 'Sugerencia' incluye inferencias, recomendaciones o próximos pasos.\n"
+        "Usa lenguaje conservador cuando no tengas evidencia directa del código o del comportamiento observado.\n"
+        "No atribuyas capacidades internas no verificadas.\n\n"
+        f"{text}"
+    )
 
 
 def _is_tweet_url(url: str) -> bool:

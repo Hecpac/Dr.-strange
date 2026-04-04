@@ -289,6 +289,19 @@ class MemoryStore:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def get_learning_facts(self, limit: int = 3) -> list[dict]:
+        rows = self._conn.execute(
+            """
+            SELECT key, value, source, confidence
+            FROM facts
+            WHERE key = 'learning_loop_consolidated' OR entity_tags LIKE '%"learning"%'
+            ORDER BY confidence DESC, id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def build_context(
         self,
         session_id: str,
@@ -305,6 +318,12 @@ class MemoryStore:
         if facts:
             fact_lines = [f"{row['key']}={row['value']}" for row in facts]
             sections.extend(["# Profile facts", *fact_lines])
+
+        learning_facts = self.get_learning_facts(limit=2)
+        if learning_facts:
+            learning_lines = [row["value"] for row in learning_facts if row.get("value")]
+            if learning_lines:
+                sections.extend(["# Learning rules", *learning_lines])
 
         if include_history:
             recent = self.get_recent_messages(session_id, limit=20)
@@ -520,7 +539,7 @@ class MemoryStore:
         if task_type:
             rows = self._conn.execute(
                 """
-                SELECT task_type, task_id, description, approach, outcome, lesson, error_snippet, retries, created_at
+                SELECT task_type, task_id, description, approach, outcome, lesson, error_snippet, retries, created_at, feedback
                 FROM task_outcomes
                 WHERE task_type = ? AND (description LIKE ? OR lesson LIKE ? OR approach LIKE ?)
                 ORDER BY id DESC LIMIT ?
@@ -530,7 +549,7 @@ class MemoryStore:
         else:
             rows = self._conn.execute(
                 """
-                SELECT task_type, task_id, description, approach, outcome, lesson, error_snippet, retries, created_at
+                SELECT task_type, task_id, description, approach, outcome, lesson, error_snippet, retries, created_at, feedback
                 FROM task_outcomes
                 WHERE description LIKE ? OR lesson LIKE ? OR approach LIKE ?
                 ORDER BY id DESC LIMIT ?
@@ -543,7 +562,7 @@ class MemoryStore:
         if task_type:
             rows = self._conn.execute(
                 """
-                SELECT task_type, task_id, description, approach, outcome, lesson, error_snippet, retries, created_at
+                SELECT task_type, task_id, description, approach, outcome, lesson, error_snippet, retries, created_at, feedback
                 FROM task_outcomes WHERE outcome = 'failure' AND task_type = ?
                 ORDER BY id DESC LIMIT ?
                 """,
@@ -552,7 +571,7 @@ class MemoryStore:
         else:
             rows = self._conn.execute(
                 """
-                SELECT task_type, task_id, description, approach, outcome, lesson, error_snippet, retries, created_at
+                SELECT task_type, task_id, description, approach, outcome, lesson, error_snippet, retries, created_at, feedback
                 FROM task_outcomes WHERE outcome = 'failure'
                 ORDER BY id DESC LIMIT ?
                 """,

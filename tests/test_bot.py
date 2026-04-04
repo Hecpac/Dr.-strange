@@ -83,6 +83,40 @@ class BotTests(unittest.TestCase):
                 self.assertEqual(reply, "Recibido. ¿Qué quieres que haga con esto?")
                 recent = runtime.memory.get_recent_messages("s1", limit=2)
                 self.assertEqual(recent[-1]["content"], "Recibido. ¿Qué quieres que haga con esto?")
+                outcomes = runtime.memory.search_past_outcomes("fallback", task_type="telegram_message")
+                self.assertEqual(len(outcomes), 1)
+                self.assertEqual(outcomes[0]["outcome"], "failure")
+                self.assertIn("clarifying question", outcomes[0]["lesson"])
+
+    @patch("claw_v2.bot._jina_read")
+    def test_browse_failure_records_learning_outcome(self, mock_jina) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                mock_jina.return_value = ""
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.browser = None
+                runtime.bot.managed_chrome = None
+
+                reply = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="/browse https://example.com/fail",
+                )
+
+                self.assertIn("browse error", reply)
+                outcomes = runtime.memory.search_past_outcomes("example.com/fail", task_type="browse")
+                self.assertEqual(len(outcomes), 1)
+                self.assertEqual(outcomes[0]["outcome"], "failure")
+                self.assertIn("backend path", outcomes[0]["lesson"])
 
     def test_terminal_commands_delegate_to_bridge(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -807,16 +841,63 @@ class BotTests(unittest.TestCase):
                 mock_tweet_read.return_value = f"**Andrej Karpathy (@karpathy) on X** ({tweet_url})\n\nTexto limpio del tweet."
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 runtime.bot.browser = MagicMock()
+                with patch.object(type(runtime.bot.brain), "handle_message") as mock_handle_message:
+                    mock_handle_message.return_value = LLMResponse(
+                        content="handled",
+                        lane="brain",
+                        provider="anthropic",
+                        model="claude-opus-4-6",
+                    )
 
-                result = runtime.bot.handle_text(
-                    user_id="123",
-                    session_id="s1",
-                    text=f"Revisa este tweet {tweet_url}",
-                )
+                    result = runtime.bot.handle_text(
+                        user_id="123",
+                        session_id="s1",
+                        text=f"Revisa este tweet {tweet_url}",
+                    )
 
                 self.assertEqual(result, "handled")
                 runtime.bot.browser.chrome_navigate.assert_not_called()
                 mock_tweet_read.assert_called_once_with(tweet_url)
+                args, kwargs = mock_handle_message.call_args
+                self.assertEqual(args[0], "s1")
+                self.assertIn("## Fuente", args[1])
+                self.assertIn("## Aplicación sugerida", args[1])
+                self.assertEqual(kwargs["memory_text"], f"Revisa este tweet {tweet_url}")
+
+    def test_runtime_capability_question_uses_conservative_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                with patch.object(type(runtime.bot.brain), "handle_message") as mock_handle_message:
+                    mock_handle_message.return_value = LLMResponse(
+                        content="handled",
+                        lane="brain",
+                        provider="anthropic",
+                        model="claude-opus-4-6",
+                    )
+
+                    result = runtime.bot.handle_text(
+                        user_id="123",
+                        session_id="s1",
+                        text="Que aportará al bot ?",
+                    )
+
+                self.assertEqual(result, "handled")
+                args, kwargs = mock_handle_message.call_args
+                self.assertIn("[Instrucción de rigor sobre el sistema]", args[1])
+                self.assertIn("## Implementado hoy", args[1])
+                self.assertIn("## Parcial", args[1])
+                self.assertIn("## Sugerencia", args[1])
+                self.assertEqual(kwargs["memory_text"], "Que aportará al bot ?")
 
     def test_natural_language_review_request_uses_computer_read(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

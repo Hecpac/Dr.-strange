@@ -89,6 +89,7 @@ class HandleTextTests(unittest.IsolatedAsyncioTestCase):
     async def test_authorized_user_gets_response(self) -> None:
         bot_service = MagicMock()
         bot_service.handle_text.return_value = "response text"
+        bot_service.observe = MagicMock()
         transport = TelegramTransport(
             bot_service=bot_service, token="t", allowed_user_id="123",
         )
@@ -104,6 +105,12 @@ class HandleTextTests(unittest.IsolatedAsyncioTestCase):
             await transport._handle_text(update, MagicMock())
 
         update.message.reply_text.assert_awaited()
+        bot_service.observe.emit.assert_called_once()
+        payload = bot_service.observe.emit.call_args.kwargs["payload"]
+        self.assertEqual(payload["message_kind"], "text")
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["response_parts"], 1)
+        self.assertGreaterEqual(payload["total_ms"], 0.0)
 
     async def test_claude_sdk_failures_return_specific_message(self) -> None:
         transport = TelegramTransport(
@@ -188,6 +195,7 @@ class HandleVoiceTests(unittest.IsolatedAsyncioTestCase):
 class HandleImageTests(unittest.IsolatedAsyncioTestCase):
     async def test_photo_message_downloaded_and_forwarded_as_multimodal(self) -> None:
         bot_service = MagicMock()
+        bot_service.observe = MagicMock()
         transport = TelegramTransport(
             bot_service=bot_service, token="t", allowed_user_id="123",
         )
@@ -217,6 +225,10 @@ class HandleImageTests(unittest.IsolatedAsyncioTestCase):
 
         update.message.reply_text.assert_awaited_once()
         self.assertEqual(update.message.reply_text.await_args.args[0], "image response")
+        bot_service.observe.emit.assert_called_once()
+        payload = bot_service.observe.emit.call_args.kwargs["payload"]
+        self.assertEqual(payload["message_kind"], "image")
+        self.assertEqual(payload["response_parts"], 1)
         _, kwargs = mock_to_thread.await_args
         self.assertEqual(kwargs["user_id"], "123")
         self.assertEqual(kwargs["session_id"], "tg-1")
@@ -230,6 +242,7 @@ class HandleImageTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_image_document_without_caption_uses_default_prompt(self) -> None:
         bot_service = MagicMock()
+        bot_service.observe = MagicMock()
         transport = TelegramTransport(
             bot_service=bot_service, token="t", allowed_user_id="123",
         )
@@ -265,6 +278,26 @@ class HandleImageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(blocks[0]["type"], "text")
         self.assertIn("Telegram", blocks[0]["text"])
         self.assertEqual(blocks[1]["source"]["media_type"], "image/jpeg")
+
+    async def test_handle_text_content_emits_transcript_latency(self) -> None:
+        bot_service = MagicMock()
+        bot_service.observe = MagicMock()
+        transport = TelegramTransport(
+            bot_service=bot_service, token="t", allowed_user_id="123",
+        )
+        update = MagicMock()
+        update.effective_user.id = 123
+        update.effective_chat.id = 1
+        update.message.reply_text = AsyncMock()
+
+        with patch("claw_v2.telegram.asyncio.to_thread", new_callable=AsyncMock, return_value="voice response"):
+            await transport._handle_text_content(update, "hola")
+
+        bot_service.observe.emit.assert_called_once()
+        payload = bot_service.observe.emit.call_args.kwargs["payload"]
+        self.assertEqual(payload["message_kind"], "transcript")
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["response_chars"], len("voice response"))
 
 
 class SendPhotoTests(unittest.IsolatedAsyncioTestCase):
