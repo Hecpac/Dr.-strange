@@ -70,6 +70,9 @@ def make_config(root: Path) -> AppConfig:
         computer_display_height=800,
         ollama_host="http://localhost:11434",
         sensitive_urls=["ads.google.com", "polymarket.com"],
+        codex_cli_path="codex",
+        codex_model="codex-mini-latest",
+        computer_use_backend="openai",
     )
     config.validate()
     config.ensure_directories()

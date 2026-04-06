@@ -63,5 +63,36 @@ class AppConfigDefaultsTests(unittest.TestCase):
                 os.chdir(previous_cwd)
 
 
+class CodexConfigTests(unittest.TestCase):
+    def test_codex_worker_provider_passes_validate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from tests.helpers import make_config
+            config = make_config(Path(tmpdir))
+            config.worker_provider = "codex"
+            config.worker_model = "codex-mini-latest"
+            # Should not raise
+            config.validate()
+
+    def test_codex_fields_have_defaults_from_env(self) -> None:
+        import os
+        previous_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.chdir(tmpdir)
+            try:
+                with patch.dict(os.environ, {}, clear=True):
+                    config = AppConfig.from_env()
+            finally:
+                os.chdir(previous_cwd)
+        self.assertEqual(config.codex_model, "codex-mini-latest")
+        self.assertEqual(config.computer_use_backend, "openai")
+
+    def test_computer_use_backend_codex_passes_validate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from tests.helpers import make_config
+            config = make_config(Path(tmpdir))
+            config.computer_use_backend = "codex"
+            config.validate()
+
+
 if __name__ == "__main__":
     unittest.main()

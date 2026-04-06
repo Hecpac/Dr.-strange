@@ -40,6 +40,7 @@ _SECONDARY_PROVIDER_DEFAULT_MODELS: dict[str, str] = {
     "openai": "gpt-5.4-mini",
     "google": "gemini-2.5-pro",
     "ollama": "gemma4",
+    "codex": "codex-mini-latest",
 }
 
 
@@ -108,6 +109,9 @@ class AppConfig:
     computer_display_height: int
     ollama_host: str
     sensitive_urls: list[str]
+    codex_cli_path: str
+    codex_model: str
+    computer_use_backend: str
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -188,6 +192,9 @@ class AppConfig:
             computer_display_height=_env_int("COMPUTER_DISPLAY_HEIGHT", 800),
             ollama_host=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
             sensitive_urls=[u for u in os.getenv("SENSITIVE_URLS", "ads.google.com:polymarket.com:robinhood.com:binance.com:stripe.com:paypal.com").split(":") if u.strip()],
+            codex_cli_path=os.getenv("CODEX_CLI_PATH") or shutil.which("codex") or "codex",
+            codex_model=os.getenv("CODEX_MODEL", "codex-mini-latest"),
+            computer_use_backend=os.getenv("COMPUTER_USE_BACKEND", "openai"),
         )
 
     def ensure_directories(self) -> None:
@@ -201,11 +208,11 @@ class AppConfig:
     def validate(self) -> None:
         if self.brain_provider != "anthropic":
             raise ValueError("brain_provider must be 'anthropic' in the current runtime design.")
-        if self.worker_provider != "anthropic":
-            raise ValueError("worker_provider must be 'anthropic' in the current runtime design.")
+        if self.worker_provider not in {"anthropic", "codex"}:
+            raise ValueError("worker_provider must be 'anthropic' or 'codex'.")
         if self.claude_auth_mode not in {"subscription", "api_key", "auto"}:
             raise ValueError("claude_auth_mode must be one of: subscription, api_key, auto.")
-        supported = {"anthropic", "openai", "google", "ollama"}
+        supported = {"anthropic", "openai", "google", "ollama", "codex"}
         supported_browse_backends = {"auto", "chrome_cdp", "playwright_local", "browserbase_cdp"}
         secondary = {
             "verifier_provider": self.verifier_provider,
@@ -217,6 +224,8 @@ class AppConfig:
                 raise ValueError(f"{field_name} must be one of {sorted(supported)}.")
         if self.browse_backend not in supported_browse_backends:
             raise ValueError(f"browse_backend must be one of {sorted(supported_browse_backends)}.")
+        if self.computer_use_backend not in {"openai", "codex"}:
+            raise ValueError("computer_use_backend must be 'openai' or 'codex'.")
 
     def provider_for_lane(self, lane: Lane) -> str:
         mapping = {
