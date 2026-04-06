@@ -69,7 +69,7 @@ class CodexAdapter(ProviderAdapter):
         ]
         if request.cwd:
             cmd += ["-C", request.cwd]
-        cmd.append(full_prompt)
+        cmd += ["--", full_prompt]
 
         try:
             result = subprocess.run(
@@ -98,7 +98,7 @@ class CodexAdapter(ProviderAdapter):
             lane=request.lane,
             provider="codex",
             model=model,
-            confidence=0.7 if content else 0.0,
+            confidence=0.7 if content else 0.3,
             cost_estimate=0.0,
             artifacts={"stderr": result.stderr.strip()[:200]},
         )

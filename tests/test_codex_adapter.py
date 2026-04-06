@@ -61,6 +61,7 @@ class CodexAdapterTests(unittest.TestCase):
         self.assertEqual(result.content, "def hello():\n    print('hello')")
         self.assertEqual(result.provider, "codex")
         self.assertEqual(result.cost_estimate, 0.0)
+        self.assertEqual(result.confidence, 0.7)
 
     def test_passes_cwd_to_subprocess(self) -> None:
         adapter = CodexAdapter(cli_path="codex")
@@ -82,3 +83,29 @@ class CodexAdapterTests(unittest.TestCase):
             with patch("claw_v2.adapters.codex.shutil.which", return_value="/usr/local/bin/codex"):
                 with self.assertRaises(AdapterError):
                     adapter.complete(_make_request())
+
+    def test_no_cwd_flag_when_cwd_is_none(self) -> None:
+        adapter = CodexAdapter(cli_path="codex")
+        fake_result = MagicMock(returncode=0, stdout="done", stderr="")
+        request = _make_request()
+        request = LLMRequest(
+            prompt=request.prompt,
+            system_prompt=request.system_prompt,
+            lane=request.lane,
+            provider=request.provider,
+            model=request.model,
+            effort=request.effort,
+            session_id=request.session_id,
+            max_budget=request.max_budget,
+            evidence_pack=request.evidence_pack,
+            allowed_tools=request.allowed_tools,
+            agents=request.agents,
+            hooks=request.hooks,
+            timeout=request.timeout,
+            cwd=None,
+        )
+        with patch("claw_v2.adapters.codex.subprocess.run", return_value=fake_result) as mock_run:
+            with patch("claw_v2.adapters.codex.shutil.which", return_value="/usr/local/bin/codex"):
+                adapter.complete(request)
+        cmd = mock_run.call_args[0][0]
+        self.assertNotIn("-C", cmd)
