@@ -108,6 +108,30 @@ class LLMRouterTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 router.ask("do work", lane="worker", provider="openai")
 
+    def test_codex_worker_lane_routes_to_codex_adapter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            config.worker_provider = "codex"
+            config.worker_model = "codex-mini-latest"
+            from claw_v2.eval_mocks import StaticAdapter, echo_response
+            router = LLMRouter(
+                config=config,
+                adapters={
+                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=echo_response("anthropic")),
+                    "codex": StaticAdapter("codex", tool_capable=True, responder=echo_response("codex")),
+                },
+            )
+            response = router.ask("write a function", lane="worker")
+            self.assertEqual(response.provider, "codex")
+
+    def test_default_router_includes_codex_adapter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            router = LLMRouter.default(config)
+            self.assertIn("codex", router.adapters)
+            from claw_v2.adapters.codex import CodexAdapter
+            self.assertIsInstance(router.adapters["codex"], CodexAdapter)
+
 
 if __name__ == "__main__":
     unittest.main()

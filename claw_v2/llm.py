@@ -5,6 +5,7 @@ from typing import Callable
 
 from claw_v2.adapters.anthropic import AnthropicAgentAdapter
 from claw_v2.adapters.base import AdapterError, LLMRequest, PostLLMHook, PreLLMHook, ProviderAdapter, UserPrompt
+from claw_v2.adapters.codex import CodexAdapter
 from claw_v2.adapters.google import GoogleAdapter
 from claw_v2.adapters.ollama import OllamaAdapter
 from claw_v2.adapters.openai import OpenAIAdapter
@@ -145,6 +146,7 @@ class LLMRouter:
         openai_transport: Callable[[LLMRequest], LLMResponse] | None = None,
         google_transport: Callable[[LLMRequest], LLMResponse] | None = None,
         ollama_transport: Callable[[LLMRequest], LLMResponse] | None = None,
+        codex_transport: Callable[[LLMRequest], LLMResponse] | None = None,
         audit_sink: Callable[[dict], None] | None = None,
         pre_hooks: list[PreLLMHook] | None = None,
         post_hooks: list[PostLLMHook] | None = None,
@@ -160,6 +162,10 @@ class LLMRouter:
                     host=config.ollama_host,
                     num_ctx=min(config.worker_context_window, 131072),
                     think=True,
+                ),
+                "codex": CodexAdapter(
+                    cli_path=config.codex_cli_path,
+                    transport=codex_transport,
                 ),
             },
             audit_sink=audit_sink,

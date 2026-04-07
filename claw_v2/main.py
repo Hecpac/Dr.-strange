@@ -91,6 +91,7 @@ def build_runtime(
     openai_transport: Callable[[LLMRequest], LLMResponse] | None = None,
     google_transport: Callable[[LLMRequest], LLMResponse] | None = None,
     ollama_transport: Callable[[LLMRequest], LLMResponse] | None = None,
+    codex_transport: Callable[[LLMRequest], LLMResponse] | None = None,
 ) -> ClawRuntime:
     config = AppConfig.from_env()
     config.validate()
@@ -135,6 +136,7 @@ def build_runtime(
         openai_transport=openai_transport,
         google_transport=google_transport,
         ollama_transport=ollama_transport,
+        codex_transport=codex_transport,
         audit_sink=audit_sink,
         pre_hooks=pre_hooks,
         post_hooks=post_hooks,
@@ -285,6 +287,9 @@ def build_runtime(
     dream = AutoDreamService(memory=memory, observe=observe, router=router)
     scheduler.register(ScheduledJob(name="auto_dream", interval_seconds=86400, handler=dream.run))
     scheduler.register(ScheduledJob(name="learning_consolidate", interval_seconds=86400, handler=learning.consolidate))
+    from claw_v2.wiki import WikiService
+    wiki = WikiService(router=router)
+    scheduler.register(ScheduledJob(name="wiki_lint", interval_seconds=86400, handler=wiki.lint))
     daemon = ClawDaemon(scheduler=scheduler, heartbeat=heartbeat, observe=observe)
     browser = DevBrowserService(
         dev_browser_path=config.dev_browser_path,
@@ -311,6 +316,8 @@ def build_runtime(
         browser_use=browser_use,
         observe=observe,
     )
+    bot.wiki = wiki
+    brain.wiki = wiki
     if config.linear_api_key:
         from claw_v2.linear import build_linear_api_caller
         linear = LinearService(mcp_caller=build_linear_api_caller(config.linear_api_key))
