@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import fcntl
 import logging
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -10,7 +11,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import pyautogui
 
@@ -133,6 +134,77 @@ class _EscListener:
             self._listener.stop()
 
 
+class CodexComputerBackend:
+    """Computer Use backend that uses Codex CLI for Mac automation.
+
+    Replaces the OpenAI Responses API visual loop with Codex-generated
+    AppleScript/bash execution. Uses the ChatGPT Pro subscription (cost $0).
+    """
+
+    _SYSTEM_PROMPT = (
+        "You are automating a Mac computer. "
+        "Execute the task using AppleScript (osascript) or shell commands. "
+        "Be direct and complete the task without asking for confirmation."
+    )
+
+    def __init__(
+        self,
+        cli_path: str = "codex",
+        model: str = "codex-mini-latest",
+        *,
+        transport: Callable[[str], str] | None = None,
+    ) -> None:
+        self.cli_path = cli_path
+        self.model = model
+        self._transport = transport
+
+    def run(self, task: str) -> str:
+        if self._transport is not None:
+            return self._transport(task)
+        return self._run_cli(task)
+
+    def _run_cli(self, task: str) -> str:
+        resolved = shutil.which(self.cli_path)
+        if not resolved:
+            raise RuntimeError(
+                f"Codex CLI not found at '{self.cli_path}'. "
+                "Install with: npm install -g @openai/codex"
+            )
+
+        prompt = f"{self._SYSTEM_PROMPT}\n\nTask: {task}"
+        cmd = [
+            resolved, "exec",
+            "--model", self.model,
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--skip-git-repo-check",
+            "--color", "never",
+            "--", prompt,
+        ]
+
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                f"Codex CLI not found at '{self.cli_path}'."
+            ) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                "Codex CLI timed out after 120s for computer use task"
+            ) from exc
+
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"Codex computer use failed (exit {result.returncode}): {result.stderr.strip()[:500]}"
+            )
+
+        return result.stdout.strip()
+
+
 class ComputerUseService:
     def __init__(
         self,
@@ -141,11 +213,13 @@ class ComputerUseService:
         display_height: int = 800,
         scale_factor: float = 1.0,
         action_delay: float = 0.3,
+        codex_backend: "CodexComputerBackend | None" = None,
     ) -> None:
         self.display_width = display_width
         self.display_height = display_height
         self.scale_factor = scale_factor
         self.action_delay = action_delay
+        self.codex_backend = codex_backend
 
     def capture_screenshot(self, *, exclude_terminals: bool = True) -> dict[str, str]:
         hidden: list[str] = []
@@ -241,9 +315,11 @@ class ComputerUseService:
         session: ComputerSession,
         client: Any,
         gate: Any,
-        model: str = "gpt-5.4-mini",
+        model: str = "gpt-5.4",
         system_prompt: str | None = None,
     ) -> str:
+        if self.codex_backend is not None:
+            return self.codex_backend.run(session.task)
         esc_listener = _EscListener(session)
         esc_listener.start()
 

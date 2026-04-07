@@ -244,5 +244,47 @@ class BrowserUseServiceTests(unittest.TestCase):
         self.assertFalse(svc.headless)
 
 
+class CodexComputerBackendTests(unittest.TestCase):
+    def test_transport_override_returns_fixed_result(self) -> None:
+        from claw_v2.computer import CodexComputerBackend
+        backend = CodexComputerBackend(transport=lambda task: "done: opened Chrome")
+        result = backend.run("open Chrome")
+        self.assertEqual(result, "done: opened Chrome")
+
+    def test_raises_runtime_error_when_cli_not_found(self) -> None:
+        from claw_v2.computer import CodexComputerBackend
+        backend = CodexComputerBackend(cli_path="nonexistent-codex-xyz")
+        with self.assertRaises(RuntimeError):
+            backend.run("open Chrome")
+
+    def test_raises_runtime_error_on_nonzero_exit(self) -> None:
+        from claw_v2.computer import CodexComputerBackend
+        from unittest.mock import patch, MagicMock
+        backend = CodexComputerBackend(cli_path="codex")
+        fake_result = MagicMock(returncode=1, stdout="", stderr="failed")
+        with patch("claw_v2.computer.subprocess.run", return_value=fake_result):
+            with patch("claw_v2.computer.shutil.which", return_value="/usr/local/bin/codex"):
+                with self.assertRaises(RuntimeError):
+                    backend.run("open Chrome")
+
+    def test_successful_run_returns_stdout(self) -> None:
+        from claw_v2.computer import CodexComputerBackend
+        from unittest.mock import patch, MagicMock
+        backend = CodexComputerBackend(cli_path="codex", model="codex-mini-latest")
+        fake_result = MagicMock(returncode=0, stdout="Opened Chrome successfully.\n", stderr="")
+        with patch("claw_v2.computer.subprocess.run", return_value=fake_result):
+            with patch("claw_v2.computer.shutil.which", return_value="/usr/local/bin/codex"):
+                result = backend.run("open Chrome")
+        self.assertEqual(result, "Opened Chrome successfully.")
+
+    def test_computer_use_service_dispatches_to_codex_backend(self) -> None:
+        from claw_v2.computer import CodexComputerBackend, ComputerUseService, ComputerSession
+        backend = CodexComputerBackend(transport=lambda task: f"completed: {task}")
+        svc = ComputerUseService(display_width=1280, display_height=800, codex_backend=backend)
+        session = ComputerSession(task="open Safari")
+        result = svc.run_agent_loop(session=session, client=None, gate=None, model="codex-mini-latest")
+        self.assertEqual(result, "completed: open Safari")
+
+
 if __name__ == "__main__":
     unittest.main()

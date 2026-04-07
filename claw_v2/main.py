@@ -29,7 +29,7 @@ from claw_v2.memory import MemoryStore
 from claw_v2.metrics import MetricsTracker
 from claw_v2.observe import ObserveStream
 from claw_v2.pipeline import PipelineService
-from claw_v2.computer import ComputerUseService, BrowserUseService
+from claw_v2.computer import ComputerUseService, BrowserUseService, CodexComputerBackend
 from claw_v2.coordinator import CoordinatorService
 from claw_v2.dream import AutoDreamService
 from claw_v2.buddy import BuddyService
@@ -297,9 +297,16 @@ def build_runtime(
         timeout=config.dev_browser_timeout,
     )
     terminal_bridge = TerminalBridgeService()
+    codex_computer_backend: CodexComputerBackend | None = None
+    if config.computer_use_backend == "codex":
+        codex_computer_backend = CodexComputerBackend(
+            cli_path=config.codex_cli_path,
+            model=config.codex_model,
+        )
     computer = ComputerUseService(
         display_width=config.computer_display_width,
         display_height=config.computer_display_height,
+        codex_backend=codex_computer_backend,
     )
     browser_use = BrowserUseService(cdp_url=f"http://localhost:{config.claw_chrome_port}")
     bot = BotService(

@@ -56,21 +56,31 @@ _TWEET_ANALYSIS_SHORTCUT_TOKENS = (
     "analyze",
 )
 _COMPUTER_ACTION_TOKENS = (
-    "click",
-    "clic",
-    "scroll",
-    "desplaza",
-    "desplazate",
-    "desplazarse",
-    "sube",
-    "baja",
-    "escribe",
-    "type",
-    "press",
-    "presiona",
-    "selecciona",
-    "drag",
-    "arrastra",
+    "haz click",
+    "haz clic",
+    "dale click",
+    "dale clic",
+    "click on",
+    "click en",
+    "clic en",
+    "scroll down",
+    "scroll up",
+    "scroll to",
+    "desplaza hacia",
+    "desplazate hacia",
+    "type in",
+    "type into",
+    "escribe en",
+    "press enter",
+    "press tab",
+    "presiona enter",
+    "presiona tab",
+    "selecciona el",
+    "selecciona la",
+    "selecciona un",
+    "drag and drop",
+    "arrastra el",
+    "arrastra la",
     "abre el menu",
     "open the menu",
 )
@@ -111,13 +121,18 @@ _HOST_URL_RE = re.compile(
     r"(?P<url>(?<!@)(?:localhost|(?:\d{1,3}\.){3}\d{1,3}|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,})(?::\d+)?(?:[/?#][^\s<>()]*)?)",
     re.IGNORECASE,
 )
-_DEFAULT_COMPUTER_MODEL = "gpt-5.4-mini"
+_DEFAULT_COMPUTER_MODEL = "gpt-5.4"
 _COMPUTER_SYSTEM_PROMPT = (
     "You control the user's Mac via the computer-use tool. "
     "Be careful, explicit, and incremental. "
     "Prefer reading the current screen before acting. "
     "When searching for a visible UI element, move/scroll as needed, then click only when confident. "
     "Stop and explain what you see when the task is complete."
+)
+_RUNTIME_CAPABILITY_SECTION_TITLES = (
+    "Implementado hoy",
+    "Parcial",
+    "Sugerencia",
 )
 
 
@@ -165,6 +180,7 @@ class BotService:
         self.computer_system_prompt = computer_system_prompt or _COMPUTER_SYSTEM_PROMPT
         self.observe = observe
         self.learning: Any | None = None
+        self.wiki: Any | None = None
         self._state_lock = threading.Lock()
         self._computer_sessions: dict[str, Any] = {}
         self._computer_client: Any | None = None
@@ -301,6 +317,20 @@ class BotService:
             return self._buddy_rename_response(user_id, parts[2])
         if stripped == "/buddy" or stripped == "/buddy card":
             return self._buddy_card_response(user_id)
+        if stripped == "/wiki":
+            return self._wiki_stats_response()
+        if stripped == "/wiki lint":
+            return self._wiki_lint_response()
+        if stripped.startswith("/wiki ingest "):
+            parts = stripped.split(maxsplit=2)
+            if len(parts) != 3:
+                return "usage: /wiki ingest <title>"
+            return self._wiki_ingest_response(parts[2], session_id)
+        if stripped.startswith("/wiki query "):
+            parts = stripped.split(maxsplit=2)
+            if len(parts) != 3:
+                return "usage: /wiki query <question>"
+            return self._wiki_query_response(parts[2])
         shortcut_response = self._maybe_handle_shortcut(stripped, session_id=session_id)
         if isinstance(shortcut_response, _BrainShortcut):
             return self._brain_text_response(session_id, shortcut_response.text)
@@ -633,10 +663,11 @@ class BotService:
 
     def _brain_text_response(self, session_id: str, text: str) -> str:
         prompt_text = text
+        runtime_capability_question = _looks_like_runtime_capability_question(text)
         enriched = _enrich_tweet_urls(text)
         if enriched != text:
             prompt_text = _format_tweet_analysis_prompt(text, enriched)
-        if _looks_like_runtime_capability_question(text):
+        if runtime_capability_question:
             prompt_text = _format_runtime_capability_prompt(prompt_text)
         response = self.brain.handle_message(session_id, prompt_text, memory_text=text)
 
@@ -644,6 +675,8 @@ class BotService:
         content = raw_content.strip()
         if not content or content == "(no result)":
             content = "Recibido. ¿Qué quieres que haga con esto?"
+        elif runtime_capability_question:
+            content = _enforce_runtime_capability_sections(content)
         if content != raw_content:
             self.brain.memory.replace_latest_assistant_message(session_id, raw_content, content)
         if content == "Recibido. ¿Qué quieres que haga con esto?":
@@ -904,6 +937,10 @@ class BotService:
                     else "When all browse backends fail, capture the failing backend path and retry strategy explicitly."
                 ),
             )
+        else:
+            # Auto-ingest successful browse into wiki
+            browse_title = _extract_title_from_url(normalized_url)
+            self._maybe_wiki_ingest(browse_title, response, source_type="browse")
         return response
 
     def _browse_backend(self) -> str:
@@ -1157,6 +1194,20 @@ class BotService:
         except Exception:
             logger.debug("learning record failed for %s", task_type, exc_info=True)
 
+    def _maybe_wiki_ingest(self, title: str, content: str, *, source_type: str = "article") -> None:
+        """Auto-ingest content into the wiki if available. Runs in a background thread."""
+        if self.wiki is None or not content or len(content) < 100:
+            return
+        def _do_ingest():
+            try:
+                result = self.wiki.ingest(title, content, source_type=source_type)
+                logger.info(
+                    "Wiki auto-ingest '%s': %d pages written", title, result["pages_written"]
+                )
+            except Exception:
+                logger.debug("Wiki auto-ingest failed for '%s'", title, exc_info=True)
+        threading.Thread(target=_do_ingest, daemon=True).start()
+
     def _tokens_info_response(self, session_id: str) -> str:
         message_count = self.brain.memory.count_messages(session_id)
 
@@ -1378,8 +1429,8 @@ class BotService:
         if session is None:
             return "no active computer session"
         try:
-            client = self._get_computer_client()
             gate = self._get_computer_gate()
+            client = None if self.computer.codex_backend is not None else self._get_computer_client()
             result = self.computer.run_agent_loop(
                 session=session,
                 client=client,
@@ -1510,6 +1561,50 @@ class BotService:
         if not hasattr(self, "buddy") or self.buddy is None:
             return "buddy service not available"
         return self.buddy.rename(user_id, new_name)
+
+    def _wiki_stats_response(self) -> str:
+        if self.wiki is None:
+            return "wiki service not available"
+        stats = self.wiki.stats()
+        return (
+            f"Wiki: {stats['wiki_pages']} pages, {stats['raw_sources']} raw sources\n"
+            f"Root: {stats['wiki_root']}"
+        )
+
+    def _wiki_lint_response(self) -> str:
+        if self.wiki is None:
+            return "wiki service not available"
+        result = self.wiki.lint()
+        parts = [f"Pages: {result.get('total_pages', 0)}, Issues: {result['issues']}"]
+        if result["orphans"]:
+            parts.append(f"Orphans: {', '.join(result['orphans'][:10])}")
+        if result["missing"]:
+            parts.append(f"Missing: {', '.join(result['missing'][:10])}")
+        return "\n".join(parts)
+
+    def _wiki_ingest_response(self, title: str, session_id: str) -> str:
+        if self.wiki is None:
+            return "wiki service not available"
+        # Use recent assistant message as content to ingest
+        recent = self.brain.memory.get_recent_messages(session_id, limit=2)
+        content = ""
+        for msg in reversed(recent):
+            if msg.get("role") == "assistant" and msg.get("content"):
+                content = msg["content"]
+                break
+        if not content:
+            return "No recent content to ingest. Send content first, then /wiki ingest <title>"
+        result = self.wiki.ingest(title, content)
+        return (
+            f"Ingested: {title}\n"
+            f"Pages written: {result['pages_written']}, Updates: {result['updates']}, New: {result['new_pages']}"
+        )
+
+    def _wiki_query_response(self, question: str) -> str:
+        if self.wiki is None:
+            return "wiki service not available"
+        answer = self.wiki.query(question, archive=True)
+        return answer or "No relevant information found in the wiki."
 
     def _computer_abort_response(self, session_id: str) -> str:
         session = self._computer_sessions.pop(session_id, None)
@@ -1797,11 +1892,16 @@ def _read_env_var_from_shell_files(name: str) -> str | None:
 
 
 def _computer_instruction_requires_actions(text: str) -> bool:
+    # Long texts are pasted content, not computer commands.
+    if len(text) > 300:
+        return False
     normalized = _normalize_command_text(text)
     return any(token in normalized for token in _COMPUTER_ACTION_TOKENS)
 
 
 def _looks_like_computer_read_request(normalized: str) -> bool:
+    if len(normalized) > 300:
+        return False
     return any(token in normalized for token in _COMPUTER_READ_TOKENS)
 
 
@@ -1950,6 +2050,43 @@ def _format_runtime_capability_prompt(text: str) -> str:
     )
 
 
+def _has_runtime_capability_sections(text: str) -> bool:
+    return all(re.search(rf"(?m)^##\s+{re.escape(title)}\s*$", text) for title in _RUNTIME_CAPABILITY_SECTION_TITLES)
+
+
+def _bulletize_runtime_capability_body(text: str) -> str:
+    bullets: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            line = re.sub(r"^#+\s*", "", line).strip()
+            if not line:
+                continue
+        if not line.startswith(("-", "*")):
+            line = f"- {line}"
+        bullets.append(line)
+    if not bullets:
+        bullets.append("- La respuesta original no separó hechos verificados de inferencias.")
+    return "\n".join(bullets[:8])
+
+
+def _enforce_runtime_capability_sections(text: str) -> str:
+    if _has_runtime_capability_sections(text):
+        return text
+    partial_body = _bulletize_runtime_capability_body(text)
+    return (
+        "## Implementado hoy\n"
+        "- La respuesta original no identificó con suficiente rigor qué capacidades están verificadas hoy.\n\n"
+        "## Parcial\n"
+        f"{partial_body}\n\n"
+        "## Sugerencia\n"
+        "- Reescribe la respuesta separando hechos verificados, límites actuales e inferencias.\n"
+        "- Antes de afirmar capacidades internas, apóyate en código, tests o telemetría reciente."
+    )
+
+
 def _is_tweet_url(url: str) -> bool:
     try:
         parsed = urlsplit(url)
@@ -2014,6 +2151,16 @@ def _normalize_url(value: str) -> str:
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError("invalid url")
     return candidate
+
+
+def _extract_title_from_url(url: str) -> str:
+    """Derive a short title from a URL for wiki ingest."""
+    parsed = urlsplit(url)
+    path = parsed.path.strip("/").split("/")
+    if _is_tweet_url(url):
+        return f"Tweet {path[-1][:12]}" if path else "Tweet"
+    slug = path[-1] if path and path[-1] else parsed.netloc
+    return slug.replace("-", " ").replace("_", " ")[:60] or parsed.netloc
 
 
 def _format_computer_pending_summary(task: str, pending_action: dict[str, Any]) -> str:
