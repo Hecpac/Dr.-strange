@@ -27,6 +27,7 @@ from claw_v2.social import SocialPublisher
 @dataclass(slots=True)
 class _BrainShortcut:
     text: str
+    memory_text: str | None = None
 
 _BROWSE_SHORTCUT_TOKENS = (
     "abre",
@@ -55,6 +56,7 @@ _TWEET_ANALYSIS_SHORTCUT_TOKENS = (
     "analiza",
     "analyze",
 )
+_LINK_ANALYSIS_SHORTCUT_TOKENS = _TWEET_ANALYSIS_SHORTCUT_TOKENS
 _COMPUTER_ACTION_TOKENS = (
     "haz click",
     "haz clic",
@@ -333,7 +335,11 @@ class BotService:
             return self._wiki_query_response(parts[2])
         shortcut_response = self._maybe_handle_shortcut(stripped, session_id=session_id)
         if isinstance(shortcut_response, _BrainShortcut):
-            return self._brain_text_response(session_id, shortcut_response.text)
+            return self._brain_text_response(
+                session_id,
+                shortcut_response.text,
+                memory_text=shortcut_response.memory_text,
+            )
         if shortcut_response is not None:
             # Store the exchange so the brain has context on subsequent messages.
             self.brain.memory.store_message(session_id, "user", stripped)
@@ -451,6 +457,28 @@ class BotService:
             return self._run_agent_response(parts[1], max_experiments=max_experiments)
         if stripped == "/approvals":
             return json.dumps(self.approvals.list_pending(), indent=2, sort_keys=True)
+        if stripped == "/traces":
+            return self._traces_response(limit=10)
+        if stripped.startswith("/traces "):
+            parts = stripped.split(maxsplit=1)
+            if len(parts) != 2:
+                return "usage: /traces [limit]"
+            try:
+                limit = _parse_positive_int(parts[1], field_name="limit")
+            except ValueError as exc:
+                return str(exc)
+            return self._traces_response(limit=limit)
+        if stripped.startswith("/trace "):
+            parts = stripped.split(maxsplit=2)
+            if len(parts) < 2:
+                return "usage: /trace <trace_id> [limit]"
+            limit = 100
+            if len(parts) == 3:
+                try:
+                    limit = _parse_positive_int(parts[2], field_name="limit")
+                except ValueError as exc:
+                    return str(exc)
+            return self._trace_replay_response(parts[1], limit=limit)
         if stripped.startswith("/approval_status "):
             parts = stripped.split(maxsplit=1)
             if len(parts) != 2:
@@ -564,6 +592,8 @@ class BotService:
                 "Comandos principales:\n"
                 "/status - salud general del bot\n"
                 "/approvals - aprobaciones pendientes\n"
+                "/traces [limit] - traces recientes\n"
+                "/trace <trace_id> [limit] - replay de una traza\n"
                 "/pipeline_status - pipelines activos\n"
                 "/agents - estado de agentes\n"
                 "/browse <url> - revisar una URL\n"
@@ -577,6 +607,7 @@ class BotService:
                 "/help approvals\n"
                 "/help pipeline\n"
                 "/help agents\n"
+                "/help traces\n"
                 "/help terminal\n"
                 "/help browser\n"
                 "/help social\n"
@@ -600,6 +631,12 @@ class BotService:
                 "/pipeline_status - ver runs activos\n"
                 "/pipeline_approve <approval_id> <token> - aprobar y completar pipeline\n"
                 "/pipeline_merge <issue_id> - merge y cierre"
+            )
+        if normalized in {"trace", "traces", "replay"}:
+            return (
+                "Trazas:\n"
+                "/traces [limit] - listar traces recientes\n"
+                "/trace <trace_id> [limit] - ver replay de eventos para una traza"
             )
         if normalized in {"agent", "agents"}:
             return (
@@ -661,15 +698,21 @@ class BotService:
             "Prueba con: approvals, pipeline, agents, terminal, browser, social, notebooklm."
         )
 
-    def _brain_text_response(self, session_id: str, text: str) -> str:
+    def _brain_text_response(self, session_id: str, text: str, *, memory_text: str | None = None) -> str:
         prompt_text = text
+        source_text = memory_text or text
         runtime_capability_question = _looks_like_runtime_capability_question(text)
         enriched = _enrich_tweet_urls(text)
         if enriched != text:
             prompt_text = _format_tweet_analysis_prompt(text, enriched)
         if runtime_capability_question:
             prompt_text = _format_runtime_capability_prompt(prompt_text)
-        response = self.brain.handle_message(session_id, prompt_text, memory_text=text)
+        response = self.brain.handle_message(
+            session_id,
+            prompt_text,
+            memory_text=source_text,
+            task_type="telegram_message",
+        )
 
         raw_content = response.content or ""
         content = raw_content.strip()
@@ -683,11 +726,20 @@ class BotService:
             self._record_learning_outcome(
                 task_type="telegram_message",
                 session_id=session_id,
-                description=f"Bot returned fallback for message: {text[:200]}",
+                description=f"Bot returned fallback for message: {source_text[:200]}",
                 approach="brain.handle_message",
                 outcome="failure",
                 error_snippet=(raw_content or "empty_response")[:500],
                 lesson="When the brain returns empty output, ask a clarifying question and inspect prompt/context assembly.",
+            )
+        else:
+            self._record_learning_outcome(
+                task_type="telegram_message",
+                session_id=session_id,
+                description=f"Handled message: {source_text[:200]}",
+                approach="brain.handle_message",
+                outcome="success",
+                lesson="The brain produced a usable reply for this conversational request.",
             )
         return content
 
@@ -707,6 +759,7 @@ class BotService:
             session_id,
             content_blocks,
             memory_text=memory_text,
+            task_type="telegram_message",
         ).content
 
     def _list_agents_payload(self) -> list[dict]:
@@ -1244,6 +1297,60 @@ class BotService:
             "recommendation": recommendation,
         }, indent=2, sort_keys=True)
 
+    def _traces_response(self, *, limit: int) -> str:
+        if self.observe is None:
+            return "observe stream unavailable"
+        events = self.observe.recent_events(limit=max(limit * 10, 50))
+        traces: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for event in events:
+            trace_id = event.get("trace_id")
+            if not trace_id or trace_id in seen:
+                continue
+            seen.add(trace_id)
+            traces.append(
+                {
+                    "trace_id": trace_id,
+                    "timestamp": event.get("timestamp"),
+                    "last_event_type": event.get("event_type"),
+                    "lane": event.get("lane"),
+                    "provider": event.get("provider"),
+                    "model": event.get("model"),
+                    "artifact_id": event.get("artifact_id"),
+                    "job_id": event.get("job_id"),
+                }
+            )
+            if len(traces) >= limit:
+                break
+        return json.dumps({"traces": traces}, indent=2, sort_keys=True)
+
+    def _trace_replay_response(self, trace_id: str, *, limit: int) -> str:
+        if self.observe is None:
+            return "observe stream unavailable"
+        events = self.observe.trace_events(trace_id, limit=limit)
+        if not events:
+            return f"trace not found: {trace_id}"
+        replay = [
+            {
+                "timestamp": event["timestamp"],
+                "event_type": event["event_type"],
+                "lane": event["lane"],
+                "provider": event["provider"],
+                "model": event["model"],
+                "span_id": event["span_id"],
+                "parent_span_id": event["parent_span_id"],
+                "artifact_id": event["artifact_id"],
+                "job_id": event["job_id"],
+                "payload": event["payload"],
+            }
+            for event in events
+        ]
+        return json.dumps(
+            {"trace_id": trace_id, "event_count": len(replay), "events": replay},
+            indent=2,
+            sort_keys=True,
+        )
+
     def _terminal_list_response(self) -> str:
         if self.terminal_bridge is None:
             return "terminal bridge unavailable"
@@ -1634,8 +1741,12 @@ class BotService:
                 and any(token in normalized for token in _TWEET_ANALYSIS_SHORTCUT_TOKENS)
             ):
                 return _BrainShortcut(text)
+            if normalized_url is not None and _is_tweet_url(normalized_url) and _looks_like_standalone_url(text, extracted_url):
+                return self._browse_response(extracted_url, session_id=session_id)
             if "chrome" in normalized and (any(token in normalized for token in _BROWSE_SHORTCUT_TOKENS) or _looks_like_standalone_url(text, extracted_url)):
                 return self._chrome_browse_response(extracted_url, session_id=session_id)
+            if any(token in normalized for token in _LINK_ANALYSIS_SHORTCUT_TOKENS) or _looks_like_standalone_url(text, extracted_url):
+                return self._link_review_shortcut(text, extracted_url, session_id=session_id)
             if any(token in normalized for token in _BROWSE_SHORTCUT_TOKENS) or _looks_like_standalone_url(text, extracted_url):
                 return self._browse_response(extracted_url, session_id=session_id)
 
@@ -1661,6 +1772,17 @@ class BotService:
                 return self._chrome_browse_response("https://ads.google.com", session_id=session_id)
 
         return None
+
+    def _link_review_shortcut(self, text: str, url: str, *, session_id: str) -> _BrainShortcut:
+        try:
+            normalized_url = _normalize_url(url)
+        except ValueError:
+            normalized_url = url
+        fetched_content = self._browse_response(url, session_id=session_id)
+        return _BrainShortcut(
+            text=_format_link_analysis_prompt(text, normalized_url, fetched_content),
+            memory_text=text,
+        )
 
     def _remember_recent_browse_url(self, session_id: str | None, url: str) -> None:
         if session_id:
@@ -2010,6 +2132,23 @@ def _format_tweet_analysis_prompt(original_text: str, enriched_text: str) -> str
         "- Incluye solo inferencias, recomendaciones o ideas prácticas tuyas.\n"
         "- Si no hay una recomendación útil, escribe: Ninguna por ahora.\n\n"
         f"{enriched_text}"
+    )
+
+
+def _format_link_analysis_prompt(original_text: str, url: str, fetched_content: str) -> str:
+    return (
+        f"{original_text}\n\n"
+        "[Instrucción de formato]\n"
+        "Si respondes sobre este enlace, separa SIEMPRE la respuesta en dos secciones exactas:\n"
+        "## Fuente\n"
+        "- Resume únicamente lo que sí fue leído del enlace.\n"
+        "- Si el contenido vino incompleto, estaba detrás de login o hubo limitaciones de lectura, dilo explícitamente.\n"
+        "- No mezcles inferencias, recomendaciones o juicio propio con la fuente.\n\n"
+        "## Aplicación sugerida\n"
+        "- Incluye solo inferencias, recomendaciones, riesgos o siguientes pasos tuyos.\n"
+        "- Si no hay una sugerencia útil, escribe: Ninguna por ahora.\n\n"
+        f"[URL analizada]: {url}\n\n"
+        f"[Contenido del enlace pre-cargado]:\n{fetched_content}"
     )
 
 

@@ -53,8 +53,52 @@ class BotTests(unittest.TestCase):
                 self.assertIn("/agent_create", agents_help)
                 self.assertIn("/agent_pr", agents_help)
 
+                traces_help = runtime.bot.handle_text(user_id="123", session_id="s1", text="/help traces")
+                self.assertIn("/traces [limit]", traces_help)
+                self.assertIn("/trace <trace_id> [limit]", traces_help)
+
                 unknown = runtime.bot.handle_text(user_id="123", session_id="s1", text="/help desconocido")
                 self.assertIn("Tema de ayuda no reconocido", unknown)
+
+    def test_trace_commands_return_recent_index_and_replay(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.handle_text(user_id="123", session_id="s1", text="hola")
+
+                traces = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/traces 5"))
+                self.assertGreaterEqual(len(traces["traces"]), 1)
+                trace_id = traces["traces"][0]["trace_id"]
+
+                replay = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text=f"/trace {trace_id}"))
+                self.assertEqual(replay["trace_id"], trace_id)
+                self.assertGreaterEqual(replay["event_count"], 1)
+                self.assertTrue(any(event["event_type"] == "llm_response" for event in replay["events"]))
+
+    def test_trace_command_reports_missing_trace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/trace missing-trace")
+                self.assertEqual(reply, "trace not found: missing-trace")
 
     def test_bot_persists_visible_fallback_instead_of_no_result(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -87,6 +131,27 @@ class BotTests(unittest.TestCase):
                 self.assertEqual(len(outcomes), 1)
                 self.assertEqual(outcomes[0]["outcome"], "failure")
                 self.assertIn("clarifying question", outcomes[0]["lesson"])
+
+    def test_bot_records_successful_natural_language_outcome(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="explícame el login")
+
+                self.assertEqual(reply, "handled")
+                outcomes = runtime.memory.search_past_outcomes("login", task_type="telegram_message")
+                self.assertEqual(len(outcomes), 1)
+                self.assertEqual(outcomes[0]["outcome"], "success")
+                self.assertIn("usable reply", outcomes[0]["lesson"])
 
     @patch("claw_v2.bot._jina_read")
     def test_browse_failure_records_learning_outcome(self, mock_jina) -> None:
@@ -709,13 +774,25 @@ class BotTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False):
                 mock_jina.return_value = "# Pricing\n\nOpenAI API Pricing — pay per token for GPT models. " + "x" * 200
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
-                result = runtime.bot.handle_text(
-                    user_id="123",
-                    session_id="s1",
-                    text="Revisa https://openai.com/pricing",
-                )
-                self.assertIn("Pricing", result)
+                with patch.object(type(runtime.bot.brain), "handle_message") as mock_handle_message:
+                    mock_handle_message.return_value = LLMResponse(
+                        content="handled",
+                        lane="brain",
+                        provider="anthropic",
+                        model="claude-opus-4-6",
+                    )
+                    result = runtime.bot.handle_text(
+                        user_id="123",
+                        session_id="s1",
+                        text="Revisa https://openai.com/pricing",
+                    )
+                self.assertEqual(result, "handled")
                 mock_jina.assert_called_once_with("https://openai.com/pricing")
+                args, kwargs = mock_handle_message.call_args
+                self.assertIn("## Fuente", args[1])
+                self.assertIn("## Aplicación sugerida", args[1])
+                self.assertIn("[Contenido del enlace pre-cargado]", args[1])
+                self.assertEqual(kwargs["memory_text"], "Revisa https://openai.com/pricing")
 
     @patch("claw_v2.bot._jina_read")
     def test_natural_language_bare_domain_is_normalized_for_browse(self, mock_jina) -> None:
@@ -732,13 +809,59 @@ class BotTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False):
                 mock_jina.return_value = "# Docs\n\ndocumentation content here " + "x" * 200
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
-                result = runtime.bot.handle_text(
-                    user_id="123",
-                    session_id="s1",
-                    text="revisa example.com/docs",
-                )
-                self.assertIn("Docs", result)
+                with patch.object(type(runtime.bot.brain), "handle_message") as mock_handle_message:
+                    mock_handle_message.return_value = LLMResponse(
+                        content="handled",
+                        lane="brain",
+                        provider="anthropic",
+                        model="claude-opus-4-6",
+                    )
+                    result = runtime.bot.handle_text(
+                        user_id="123",
+                        session_id="s1",
+                        text="revisa example.com/docs",
+                    )
+                self.assertEqual(result, "handled")
                 mock_jina.assert_called_once_with("https://example.com/docs")
+                args, kwargs = mock_handle_message.call_args
+                self.assertIn("[URL analizada]: https://example.com/docs", args[1])
+                self.assertEqual(kwargs["memory_text"], "revisa example.com/docs")
+
+    @patch("claw_v2.bot._jina_read")
+    def test_standalone_url_uses_brain_link_analysis_prompt(self, mock_jina) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                url = "https://example.com/post"
+                mock_jina.return_value = "# Post\n\ncontenido del post " + "x" * 200
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                with patch.object(type(runtime.bot.brain), "handle_message") as mock_handle_message:
+                    mock_handle_message.return_value = LLMResponse(
+                        content="handled",
+                        lane="brain",
+                        provider="anthropic",
+                        model="claude-opus-4-6",
+                    )
+                    result = runtime.bot.handle_text(
+                        user_id="123",
+                        session_id="s1",
+                        text=url,
+                    )
+                self.assertEqual(result, "handled")
+                mock_jina.assert_called_once_with(url)
+                args, kwargs = mock_handle_message.call_args
+                self.assertIn("## Fuente", args[1])
+                self.assertIn("## Aplicación sugerida", args[1])
+                self.assertIn("[URL analizada]: https://example.com/post", args[1])
+                self.assertEqual(kwargs["memory_text"], url)
 
     @patch("claw_v2.bot._tweet_fxtwitter_read")
     def test_natural_language_review_tweet_reuses_recent_tweet_url(self, mock_tweet_read) -> None:
@@ -891,13 +1014,48 @@ class BotTests(unittest.TestCase):
                         text="Que aportará al bot ?",
                     )
 
-                self.assertEqual(result, "handled")
+                self.assertIn("## Implementado hoy", result)
+                self.assertIn("## Parcial", result)
+                self.assertIn("## Sugerencia", result)
+                self.assertIn("handled", result)
                 args, kwargs = mock_handle_message.call_args
                 self.assertIn("[Instrucción de rigor sobre el sistema]", args[1])
                 self.assertIn("## Implementado hoy", args[1])
                 self.assertIn("## Parcial", args[1])
                 self.assertIn("## Sugerencia", args[1])
                 self.assertEqual(kwargs["memory_text"], "Que aportará al bot ?")
+
+    def test_runtime_capability_question_enforces_response_sections(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                with patch.object(type(runtime.bot.brain), "handle_message") as mock_handle_message:
+                    mock_handle_message.return_value = LLMResponse(
+                        content="Fallas críticas\nLa búsqueda semántica está limitada.\nSugiero embeddings reales.",
+                        lane="brain",
+                        provider="anthropic",
+                        model="claude-opus-4-6",
+                    )
+
+                    result = runtime.bot.handle_text(
+                        user_id="123",
+                        session_id="s1",
+                        text="Que aportará al bot ?",
+                    )
+
+                self.assertIn("## Implementado hoy", result)
+                self.assertIn("## Parcial", result)
+                self.assertIn("## Sugerencia", result)
+                self.assertIn("Fallas críticas", result)
 
     def test_natural_language_review_request_uses_computer_read(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -951,6 +1109,7 @@ class BotTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 runtime.bot.computer = MagicMock()
+                runtime.bot.browser_use = None  # prevent real OpenAI calls
                 runtime.bot.computer_client_factory = lambda: object()
                 runtime.bot.computer_gate = MagicMock()
 
@@ -1189,6 +1348,7 @@ class BotTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 runtime.bot.computer = MagicMock()
+                runtime.bot.browser_use = None  # prevent real OpenAI calls
                 runtime.bot.computer_client_factory = lambda: object()
                 runtime.bot.computer_gate = MagicMock()
 
@@ -1230,6 +1390,7 @@ class BotTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 runtime.bot.computer = MagicMock()
+                runtime.bot.browser_use = None  # prevent real OpenAI calls
                 runtime.bot.computer_client_factory = lambda: object()
                 runtime.bot.computer_gate = MagicMock()
                 call_count = {"value": 0}
