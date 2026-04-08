@@ -136,6 +136,10 @@ _RUNTIME_CAPABILITY_SECTION_TITLES = (
     "Parcial",
     "Sugerencia",
 )
+_LINK_ANALYSIS_SECTION_TITLES = (
+    "Fuente",
+    "Aplicación sugerida",
+)
 
 
 class BotService:
@@ -702,6 +706,7 @@ class BotService:
         prompt_text = text
         source_text = memory_text or text
         runtime_capability_question = _looks_like_runtime_capability_question(text)
+        link_analysis_context = _extract_link_analysis_context(text)
         enriched = _enrich_tweet_urls(text)
         if enriched != text:
             prompt_text = _format_tweet_analysis_prompt(text, enriched)
@@ -720,6 +725,12 @@ class BotService:
             content = "Recibido. ¿Qué quieres que haga con esto?"
         elif runtime_capability_question:
             content = _enforce_runtime_capability_sections(content)
+        elif link_analysis_context is not None:
+            content = _enforce_link_analysis_sections(
+                content,
+                url=link_analysis_context["url"],
+                fetched_content=link_analysis_context["fetched_content"],
+            )
         if content != raw_content:
             self.brain.memory.replace_latest_assistant_message(session_id, raw_content, content)
         if content == "Recibido. ¿Qué quieres que haga con esto?":
@@ -2152,6 +2163,17 @@ def _format_link_analysis_prompt(original_text: str, url: str, fetched_content: 
     )
 
 
+def _extract_link_analysis_context(text: str) -> dict[str, str] | None:
+    url_match = re.search(r"(?m)^\[URL analizada\]:\s*(\S+)\s*$", text)
+    content_match = re.search(r"(?ms)^\[Contenido del enlace pre-cargado\]:\n(.*)$", text)
+    if url_match is None or content_match is None:
+        return None
+    return {
+        "url": url_match.group(1).strip(),
+        "fetched_content": content_match.group(1).strip(),
+    }
+
+
 def _looks_like_runtime_capability_question(text: str) -> bool:
     normalized = _normalize_command_text(text)
     if not any(token in normalized for token in ("bot", "claw", "sistema", "runtime")):
@@ -2193,6 +2215,10 @@ def _has_runtime_capability_sections(text: str) -> bool:
     return all(re.search(rf"(?m)^##\s+{re.escape(title)}\s*$", text) for title in _RUNTIME_CAPABILITY_SECTION_TITLES)
 
 
+def _has_link_analysis_sections(text: str) -> bool:
+    return all(re.search(rf"(?m)^##\s+{re.escape(title)}\s*$", text) for title in _LINK_ANALYSIS_SECTION_TITLES)
+
+
 def _bulletize_runtime_capability_body(text: str) -> str:
     bullets: list[str] = []
     for raw_line in text.splitlines():
@@ -2211,6 +2237,45 @@ def _bulletize_runtime_capability_body(text: str) -> str:
     return "\n".join(bullets[:8])
 
 
+def _bulletize_link_analysis_body(text: str) -> str:
+    bullets: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            line = re.sub(r"^#+\s*", "", line).strip()
+            if not line:
+                continue
+        if not line.startswith(("-", "*")):
+            line = f"- {line}"
+        bullets.append(line)
+    return "\n".join(bullets[:6]) if bullets else ""
+
+
+def _summarize_prefetched_link_content(fetched_content: str) -> str:
+    bullets: list[str] = []
+    for raw_line in fetched_content.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            continue
+        if line.startswith("**") and line.endswith("**"):
+            line = line.strip("*").strip()
+        line = re.sub(r"^#+\s*", "", line).strip()
+        if not line:
+            continue
+        if not line.startswith(("-", "*")):
+            line = f"- {line}"
+        bullets.append(line)
+        if len(bullets) >= 4:
+            break
+    if not bullets:
+        bullets.append("- El enlace fue leído, pero no se pudo extraer un resumen claro del contenido pre-cargado.")
+    return "\n".join(bullets)
+
+
 def _enforce_runtime_capability_sections(text: str) -> str:
     if _has_runtime_capability_sections(text):
         return text
@@ -2223,6 +2288,26 @@ def _enforce_runtime_capability_sections(text: str) -> str:
         "## Sugerencia\n"
         "- Reescribe la respuesta separando hechos verificados, límites actuales e inferencias.\n"
         "- Antes de afirmar capacidades internas, apóyate en código, tests o telemetría reciente."
+    )
+
+
+def _is_url_echo(text: str, url: str) -> bool:
+    normalized = text.strip().strip("<>[]{}\"'")
+    return normalized == url or normalized == f"- {url}"
+
+
+def _enforce_link_analysis_sections(text: str, *, url: str, fetched_content: str) -> str:
+    if _has_link_analysis_sections(text):
+        return text
+    source_body = _bulletize_link_analysis_body(text)
+    if not source_body or _is_url_echo(text, url):
+        source_body = _summarize_prefetched_link_content(fetched_content)
+    return (
+        "## Fuente\n"
+        f"{source_body}\n\n"
+        "## Aplicación sugerida\n"
+        "- Propón una acción, riesgo o siguiente paso usando lo anterior.\n"
+        "- Si no aplica nada más, Ninguna por ahora."
     )
 
 

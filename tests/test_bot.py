@@ -786,7 +786,9 @@ class BotTests(unittest.TestCase):
                         session_id="s1",
                         text="Revisa https://openai.com/pricing",
                     )
-                self.assertEqual(result, "handled")
+                self.assertIn("## Fuente", result)
+                self.assertIn("## Aplicación sugerida", result)
+                self.assertIn("handled", result)
                 mock_jina.assert_called_once_with("https://openai.com/pricing")
                 args, kwargs = mock_handle_message.call_args
                 self.assertIn("## Fuente", args[1])
@@ -821,7 +823,9 @@ class BotTests(unittest.TestCase):
                         session_id="s1",
                         text="revisa example.com/docs",
                     )
-                self.assertEqual(result, "handled")
+                self.assertIn("## Fuente", result)
+                self.assertIn("## Aplicación sugerida", result)
+                self.assertIn("handled", result)
                 mock_jina.assert_called_once_with("https://example.com/docs")
                 args, kwargs = mock_handle_message.call_args
                 self.assertIn("[URL analizada]: https://example.com/docs", args[1])
@@ -855,13 +859,48 @@ class BotTests(unittest.TestCase):
                         session_id="s1",
                         text=url,
                     )
-                self.assertEqual(result, "handled")
+                self.assertIn("## Fuente", result)
+                self.assertIn("## Aplicación sugerida", result)
+                self.assertIn("handled", result)
                 mock_jina.assert_called_once_with(url)
                 args, kwargs = mock_handle_message.call_args
                 self.assertIn("## Fuente", args[1])
                 self.assertIn("## Aplicación sugerida", args[1])
                 self.assertIn("[URL analizada]: https://example.com/post", args[1])
                 self.assertEqual(kwargs["memory_text"], url)
+
+    @patch("claw_v2.bot._jina_read")
+    def test_standalone_url_echo_is_rewritten_into_structured_analysis(self, mock_jina) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                url = "https://example.com/post"
+                mock_jina.return_value = "# Post\n\ncontenido del post"
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                with patch.object(type(runtime.bot.brain), "handle_message") as mock_handle_message:
+                    mock_handle_message.return_value = LLMResponse(
+                        content=url,
+                        lane="brain",
+                        provider="anthropic",
+                        model="claude-opus-4-6",
+                    )
+                    result = runtime.bot.handle_text(
+                        user_id="123",
+                        session_id="s1",
+                        text=url,
+                    )
+                self.assertIn("## Fuente", result)
+                self.assertIn("## Aplicación sugerida", result)
+                self.assertIn("contenido del post", result)
+                self.assertNotEqual(result.strip(), url)
 
     @patch("claw_v2.bot._tweet_fxtwitter_read")
     def test_natural_language_review_tweet_reuses_recent_tweet_url(self, mock_tweet_read) -> None:
