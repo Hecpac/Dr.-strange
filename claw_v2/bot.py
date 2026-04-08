@@ -1752,8 +1752,6 @@ class BotService:
                 and any(token in normalized for token in _TWEET_ANALYSIS_SHORTCUT_TOKENS)
             ):
                 return _BrainShortcut(text)
-            if normalized_url is not None and _is_tweet_url(normalized_url) and _looks_like_standalone_url(text, extracted_url):
-                return self._browse_response(extracted_url, session_id=session_id)
             if "chrome" in normalized and (any(token in normalized for token in _BROWSE_SHORTCUT_TOKENS) or _looks_like_standalone_url(text, extracted_url)):
                 return self._chrome_browse_response(extracted_url, session_id=session_id)
             if any(token in normalized for token in _LINK_ANALYSIS_SHORTCUT_TOKENS) or _looks_like_standalone_url(text, extracted_url):

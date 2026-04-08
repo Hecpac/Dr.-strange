@@ -940,7 +940,9 @@ class BotTests(unittest.TestCase):
                     text="Revisa el último tweet",
                 )
 
-                self.assertIn("Texto limpio del tweet", first)
+                self.assertIn("## Fuente", first)
+                self.assertIn("## Aplicación sugerida", first)
+                self.assertIn("handled", first)
                 self.assertEqual(second, "handled")
                 self.assertEqual(runtime.bot.browser.chrome_navigate.call_count, 1)
 
@@ -982,7 +984,9 @@ class BotTests(unittest.TestCase):
                     text="Revisa el tweet de X",
                 )
 
-                self.assertIn("Texto limpio del tweet", first)
+                self.assertIn("## Fuente", first)
+                self.assertIn("## Aplicación sugerida", first)
+                self.assertIn("handled", first)
                 self.assertEqual(second, "handled")
                 self.assertEqual(runtime.bot.browser.chrome_navigate.call_count, 1)
 
