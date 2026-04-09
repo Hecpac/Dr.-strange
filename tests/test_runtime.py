@@ -97,9 +97,9 @@ class RuntimeTests(unittest.TestCase):
                 self.assertTrue(runtime.heartbeat.registry_path.exists())
 
                 hex_def = runtime.sub_agents.get_agent("hex")
-                lux_def = runtime.sub_agents.get_agent("lux")
+                eval_def = runtime.sub_agents.get_agent("eval")
                 self.assertEqual((hex_def.provider, hex_def.model), ("codex", "codex-mini-latest"))
-                self.assertEqual((lux_def.provider, lux_def.model), ("openai", "gpt-5.4"))
+                self.assertEqual((eval_def.provider, eval_def.model), ("anthropic", "claude-sonnet-4-6"))
 
     def test_daemon_tick_runs_scheduled_jobs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -8,7 +8,7 @@ from typing import Any, Literal
 
 logger = logging.getLogger(__name__)
 
-KNOWN_AGENTS = ("hex", "rook", "alma", "lux")
+KNOWN_AGENTS = ("hex", "rook", "alma", "eval")
 
 
 @dataclass(slots=True)

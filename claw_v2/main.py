@@ -33,6 +33,7 @@ from claw_v2.pipeline import PipelineService
 from claw_v2.computer import ComputerUseService, BrowserUseService, CodexComputerBackend
 from claw_v2.coordinator import CoordinatorService
 from claw_v2.dream import AutoDreamService
+from claw_v2.task_board import TaskBoard
 from claw_v2.buddy import BuddyService
 from claw_v2.kairos import KairosService
 from claw_v2.terminal_bridge import TerminalBridgeService
@@ -53,6 +54,7 @@ class ClawRuntime:
     auto_research: AutoResearchAgentService
     sub_agents: SubAgentService
     coordinator: CoordinatorService
+    task_board: TaskBoard
     kairos: KairosService
     buddy: BuddyService
     heartbeat: HeartbeatService
@@ -181,6 +183,7 @@ def build_runtime(
         scratch_root=config.agent_state_root / "_scratch",
         agent_registry=agent_registry,
     )
+    task_board = TaskBoard(board_root=config.agent_state_root / "_board")
     registry_path = config.workspace_root / "claw_v2" / "AGENTS.md"
     if not registry_path.parent.exists():
         registry_path = config.agent_state_root / "AGENTS.md"
@@ -202,6 +205,7 @@ def build_runtime(
         approvals=approvals,
         sub_agents=sub_agents,
         auto_research=auto_research,
+        task_board=task_board,
     )
     buddy = BuddyService(config.db_path.parent / "buddy.db")
 
@@ -393,10 +397,10 @@ def build_runtime(
             name="alma_morning_brief", interval_seconds=86400,
             handler=lambda: _sub_agent_handler("alma", "daily-brief"),
         ))
-    if sub_agents.get_agent("lux"):
+    if sub_agents.get_agent("alma"):
         scheduler.register(ScheduledJob(
-            name="lux_content_radar", interval_seconds=43200,
-            handler=lambda: _sub_agent_handler("lux", "content-radar"),
+            name="alma_content_radar", interval_seconds=43200,
+            handler=lambda: _sub_agent_handler("alma", "content-radar"),
         ))
     if sub_agents.get_agent("hex"):
         scheduler.register(ScheduledJob(
@@ -408,6 +412,10 @@ def build_runtime(
             name="rook_health_audit", interval_seconds=21600,
             handler=lambda: _sub_agent_handler("rook", "health-audit"),
         ))
+    scheduler.register(ScheduledJob(
+        name="task_board_cleanup", interval_seconds=86400,
+        handler=lambda: task_board.cleanup(max_age_seconds=86400 * 7),
+    ))
     scheduler.restore()
     from claw_v2.content import ContentEngine
     from claw_v2.social import SocialPublisher
@@ -428,6 +436,7 @@ def build_runtime(
         auto_research=auto_research,
         sub_agents=sub_agents,
         coordinator=coordinator,
+        task_board=task_board,
         kairos=kairos,
         buddy=buddy,
         heartbeat=heartbeat,

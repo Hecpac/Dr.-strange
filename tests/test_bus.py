@@ -75,7 +75,7 @@ class SendTests(unittest.TestCase):
             payload={"pr": 42},
         )
         self.bus.send(msg)
-        for agent in ("rook", "alma", "lux"):
+        for agent in ("rook", "alma", "eval"):
             inbox = self.tmpdir / "inbox" / agent
             files = list(inbox.glob("*.json"))
             self.assertEqual(len(files), 1, f"Expected 1 message in {agent} inbox")

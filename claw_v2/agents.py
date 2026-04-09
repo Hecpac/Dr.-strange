@@ -1083,6 +1083,16 @@ class SubAgentService:
         parts = [defn.soul]
         if defn.user_context:
             parts.append(f"\n\n## User Context\n\n{defn.user_context}")
+        # Context isolation boundary — prevent cross-agent contamination
+        parts.append(
+            f"\n\n## Context Isolation\n\n"
+            f"You are **{defn.display_name}** ({defn.name}). "
+            f"You operate in an isolated context window. "
+            f"Do NOT attempt tasks listed in your Weaknesses section — "
+            f"report them back so the coordinator can route to the right agent. "
+            f"If you receive information that belongs to another agent's domain, "
+            f"acknowledge it but do not act on it."
+        )
         return "\n".join(parts)
 
 

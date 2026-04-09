@@ -59,6 +59,7 @@ class KairosService:
         sub_agents: Any | None = None,
         auto_research: Any | None = None,
         wiki: Any | None = None,
+        task_board: Any | None = None,
         action_budget: float = DEFAULT_ACTION_BUDGET,
         brief: bool = True,
     ) -> None:
@@ -70,6 +71,7 @@ class KairosService:
         self.sub_agents = sub_agents
         self.auto_research = auto_research
         self.wiki = wiki
+        self.task_board = task_board
         self.action_budget = action_budget
         self.brief = brief
         self.state = KairosState()
@@ -205,6 +207,19 @@ class KairosService:
         except Exception:
             logger.debug("Failed to retrieve cost data", exc_info=True)
 
+        # Task board status
+        if self.task_board is not None:
+            try:
+                summary = self.task_board.summary()
+                if summary:
+                    parts.append(f"Task board: {summary}")
+                pending = self.task_board.pending()
+                if pending:
+                    task_lines = [f"  [{t.id}] {t.title} (lane={t.required_lane}, by={t.created_by})" for t in pending[:5]]
+                    parts.append("Pending tasks:\n" + "\n".join(task_lines))
+            except Exception:
+                parts.append("Task board: unavailable")
+
         parts.append(f"Ticks so far: {self.state.ticks}, actions taken: {self.state.actions_taken}")
         return "\n".join(parts)
 
@@ -221,7 +236,11 @@ class KairosService:
             "- Prefer 'none' over noisy or speculative actions.\n"
             "- Actions must complete in under 15 seconds.\n"
             "- Available actions: none, notify_user, dispatch_to_agent, approve_pending, "
-            "run_skill, pause_agent, escalate_to_human, wiki_deep_lint.\n"
+            "run_skill, pause_agent, escalate_to_human, wiki_deep_lint, publish_task, claim_task.\n"
+            "- publish_task: add a task to the shared board for any agent to claim. "
+            "detail = JSON {\"title\": \"...\", \"instruction\": \"...\", \"required_lane\": \"worker\", \"tags\": [...]}\n"
+            "- claim_task: claim and execute a pending task from the board. "
+            "detail = JSON {\"agent\": \"...\", \"lane\": \"worker\"}\n"
             "- wiki_deep_lint: run when wiki has accumulated changes since last audit.\n"
             f"{brevity}\n\n"
             "Respond with ONLY a JSON object:\n"
@@ -269,6 +288,8 @@ class KairosService:
             "pause_agent": self._handle_pause_agent,
             "escalate_to_human": self._handle_escalate_to_human,
             "wiki_deep_lint": self._handle_wiki_deep_lint,
+            "publish_task": self._handle_publish_task,
+            "claim_task": self._handle_claim_task,
         }
         handler = handlers.get(decision.action)
         if handler is None:
@@ -381,6 +402,59 @@ class KairosService:
             job_id=trace_context.get("job_id") if trace_context else None,
             artifact_id=trace_context.get("artifact_id") if trace_context else None,
             payload={"message": decision.detail},
+        )
+
+    def _handle_publish_task(self, decision: TickDecision, trace_context: dict[str, Any] | None = None) -> None:
+        if self.task_board is None:
+            raise RuntimeError("TaskBoard not configured")
+        data = json.loads(decision.detail)
+        task = self.task_board.publish(
+            title=data["title"],
+            instruction=data.get("instruction", ""),
+            created_by="kairos",
+            priority=data.get("priority", 0),
+            required_lane=data.get("required_lane", "worker"),
+            tags=data.get("tags", []),
+        )
+        self.observe.emit(
+            "kairos_publish_task",
+            trace_id=trace_context.get("trace_id") if trace_context else None,
+            root_trace_id=trace_context.get("root_trace_id") if trace_context else None,
+            span_id=trace_context.get("span_id") if trace_context else None,
+            parent_span_id=trace_context.get("parent_span_id") if trace_context else None,
+            job_id=trace_context.get("job_id") if trace_context else None,
+            artifact_id=trace_context.get("artifact_id") if trace_context else None,
+            payload={"task_id": task.id, "title": task.title},
+        )
+
+    def _handle_claim_task(self, decision: TickDecision, trace_context: dict[str, Any] | None = None) -> None:
+        if self.task_board is None:
+            raise RuntimeError("TaskBoard not configured")
+        if self.sub_agents is None:
+            raise RuntimeError("SubAgentService not configured")
+        data = json.loads(decision.detail)
+        agent_name = data.get("agent", "alma")
+        lane = data.get("lane", "worker")
+        task = self.task_board.claim(agent_name, lane=lane)
+        if task is None:
+            decision.error = "no pending tasks matching criteria"
+            return
+        self.task_board.start(task.id)
+        try:
+            result = self.sub_agents.dispatch(agent_name, task.instruction, lane=lane)
+            self.task_board.complete(task.id, result)
+        except Exception as exc:
+            self.task_board.fail(task.id, str(exc))
+            raise
+        self.observe.emit(
+            "kairos_claim_task",
+            trace_id=trace_context.get("trace_id") if trace_context else None,
+            root_trace_id=trace_context.get("root_trace_id") if trace_context else None,
+            span_id=trace_context.get("span_id") if trace_context else None,
+            parent_span_id=trace_context.get("parent_span_id") if trace_context else None,
+            job_id=trace_context.get("job_id") if trace_context else None,
+            artifact_id=trace_context.get("artifact_id") if trace_context else None,
+            payload={"task_id": task.id, "agent": agent_name, "title": task.title},
         )
 
     def _handle_wiki_deep_lint(self, decision: TickDecision, trace_context: dict[str, Any] | None = None) -> None:
