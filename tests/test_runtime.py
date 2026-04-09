@@ -5,7 +5,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from claw_v2.adapters.base import LLMRequest
 from claw_v2.main import build_runtime
@@ -71,6 +71,36 @@ class RuntimeTests(unittest.TestCase):
                 parsed = json.loads(payload)
                 self.assertIn("brain:anthropic:claude-opus-4-6", parsed["lane_metrics"])
 
+    def test_build_runtime_wires_agent_infrastructure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+
+                self.assertIs(runtime.kairos.bus, runtime.bus)
+                self.assertIs(runtime.kairos.approvals, runtime.approvals)
+                self.assertIs(runtime.kairos.sub_agents, runtime.sub_agents)
+                self.assertIs(runtime.kairos.auto_research, runtime.auto_research)
+                self.assertTrue(runtime.coordinator.agent_registry)
+                self.assertIn("hex", runtime.coordinator.agent_registry)
+                self.assertIsNotNone(runtime.heartbeat.registry_path)
+
+                snapshot = runtime.heartbeat.emit()
+                self.assertIn("hex", snapshot.agents)
+                self.assertTrue(runtime.heartbeat.registry_path.exists())
+
+                hex_def = runtime.sub_agents.get_agent("hex")
+                lux_def = runtime.sub_agents.get_agent("lux")
+                self.assertEqual((hex_def.provider, hex_def.model), ("codex", "codex-mini-latest"))
+                self.assertEqual((lux_def.provider, lux_def.model), ("openai", "gpt-5.4"))
+
     def test_daemon_tick_runs_scheduled_jobs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -80,6 +110,7 @@ class RuntimeTests(unittest.TestCase):
                 "AGENT_STATE_ROOT": str(root / "agents"),
                 "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
                 "APPROVALS_ROOT": str(root / "approvals"),
+                "WORKER_PROVIDER": "anthropic",  # isolate from host env
             }
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
@@ -146,6 +177,7 @@ class RuntimeTests(unittest.TestCase):
 
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=multimodal_anthropic)
+                runtime.brain.wiki = None
                 response = runtime.bot.handle_multimodal(
                     user_id="123",
                     session_id="session-1",
@@ -174,6 +206,93 @@ class RuntimeTests(unittest.TestCase):
 
                 recent = runtime.memory.get_recent_messages("session-1")
                 self.assertEqual(recent[-2]["content"], "[Imagen adjunta]\nque ves en esta imagen?")
+
+    def test_brain_uses_telegram_scoped_lessons_for_natural_language_messages(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            seen_prompts: list[object] = []
+
+            def capture_anthropic(request: LLMRequest) -> LLMResponse:
+                seen_prompts.append(request.prompt)
+                return LLMResponse(
+                    content="handled",
+                    lane=request.lane,
+                    provider="anthropic",
+                    model=request.model,
+                )
+
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=capture_anthropic)
+                runtime.brain.wiki = None
+                runtime.brain.learning.record(
+                    task_type="telegram_message",
+                    task_id="tg:1",
+                    description="Handled refund request",
+                    approach="brain.handle_message",
+                    outcome="success",
+                    lesson="Mention the refund flow first.",
+                )
+                runtime.brain.learning.record(
+                    task_type="browse",
+                    task_id="br:1",
+                    description="Browse refund docs failed",
+                    approach="strategy=public",
+                    outcome="failure",
+                    lesson="Retry with a different backend.",
+                )
+
+                runtime.bot.handle_text(user_id="123", session_id="s1", text="refund status")
+
+                prompt = seen_prompts[-1]
+                self.assertIsInstance(prompt, str)
+                self.assertIn("Mention the refund flow first.", prompt)
+                self.assertNotIn("Retry with a different backend.", prompt)
+
+    def test_brain_uses_wiki_query_for_strong_question_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            seen_prompts: list[object] = []
+
+            def capture_anthropic(request: LLMRequest) -> LLMResponse:
+                seen_prompts.append(request.prompt)
+                return LLMResponse(
+                    content="handled",
+                    lane=request.lane,
+                    provider="anthropic",
+                    model=request.model,
+                )
+
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=capture_anthropic)
+                runtime.brain.wiki = MagicMock()
+                runtime.brain.wiki.search.return_value = [
+                    {"title": "Refund Policy", "similarity": 0.61, "snippet": "Refunds take 5 days."},
+                ]
+                runtime.brain.wiki.query.return_value = "Use [[refund-policy]] for the canonical answer."
+
+                runtime.bot.handle_text(user_id="123", session_id="s1", text="¿Cuál es la política de refund?")
+
+                prompt = seen_prompts[-1]
+                self.assertIsInstance(prompt, str)
+                self.assertIn("# Wiki answer", prompt)
+                self.assertIn("[[refund-policy]]", prompt)
+                runtime.brain.wiki.query.assert_called_once_with("¿Cuál es la política de refund?", archive=False)
 
     def test_brain_resume_only_catches_up_unsynced_shortcuts(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

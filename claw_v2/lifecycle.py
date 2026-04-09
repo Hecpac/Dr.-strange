@@ -8,9 +8,11 @@ import sys
 from pathlib import Path
 
 from claw_v2.chrome import ManagedChrome
+from claw_v2.chat_api import LocalChatAPI
 from claw_v2.main import build_runtime
 from claw_v2.notebooklm import NotebookLMService
 from claw_v2.telegram import TelegramTransport
+from claw_v2.web_transport import WebTransport
 
 logger = logging.getLogger(__name__)
 
@@ -68,8 +70,18 @@ async def run() -> int:
             allowed_user_id=runtime.config.telegram_allowed_user_id,
             voice_api_key=runtime.config.openai_api_key,
         )
+        web_transport = WebTransport(
+            chat_api=LocalChatAPI(
+                bot_service=runtime.bot,
+                default_user_id=runtime.config.telegram_allowed_user_id,
+            ),
+            host=runtime.config.web_chat_host,
+            port=runtime.config.web_chat_port,
+        )
 
         await transport.start()
+        if runtime.config.web_chat_enabled:
+            await web_transport.start()
 
         # Wire NotebookLM with Telegram notify callback
         _loop = asyncio.get_running_loop()
@@ -108,6 +120,7 @@ async def run() -> int:
         finally:
             if managed_chrome is not None:
                 managed_chrome.stop()
+            await web_transport.stop()
             await transport.stop()
     finally:
         pid_lock.release()

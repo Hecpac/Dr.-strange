@@ -216,6 +216,7 @@ class AutoResearchAgentService:
             "instruction": definition.instruction,
             "lane": definition.lane,
             "allowed_tools": allowed_tools,
+            "last_action": "created",
             "promote_on_improvement": False,
             "commit_on_promotion": False,
             "branch_on_promotion": False,
@@ -251,10 +252,12 @@ class AutoResearchAgentService:
             last_metric = record.metric_value
             state["experiments_today"] = state.get("experiments_today", 0) + 1
             state["last_verified_state"] = {"metric": record.metric_value}
+            state["last_action"] = f"experiment_{experiment_number}:{record.status}"
             self.store.save_state(agent_name, state)
             stagnation = self.detector.evaluate(history)
             if stagnation == "stagnating":
                 state["paused"] = True
+                state["last_action"] = "paused:stagnating"
                 self.store.save_state(agent_name, state)
                 return LoopResult(experiment_number, True, "stagnating", record.metric_value)
         return LoopResult(max_experiments, False, "completed", last_metric)
@@ -272,12 +275,14 @@ class AutoResearchAgentService:
             last_metric = record.metric_value
             state["experiments_today"] = state.get("experiments_today", 0) + 1
             state["last_verified_state"] = {"metric": record.metric_value}
+            state["last_action"] = f"experiment_{experiment_number}:{record.status}"
             self.store.save_state(agent_name, state)
             if record.metric_value >= target_metric:
                 return LoopResult(experiment_number, False, "target_reached", record.metric_value)
             stagnation = self.detector.evaluate(history)
             if stagnation == "stagnating":
                 state["paused"] = True
+                state["last_action"] = "paused:stagnating"
                 self.store.save_state(agent_name, state)
                 return LoopResult(experiment_number, True, "stagnating", record.metric_value)
         return LoopResult(max_experiments, False, "budget_exhausted", last_metric)
@@ -313,12 +318,14 @@ class AutoResearchAgentService:
     def pause(self, agent_name: str) -> dict:
         state = self.store.load_state(agent_name)
         state["paused"] = True
+        state["last_action"] = "paused"
         self.store.save_state(agent_name, state)
         return state
 
     def resume(self, agent_name: str) -> dict:
         state = self.store.load_state(agent_name)
         state["paused"] = False
+        state["last_action"] = "resumed"
         self.store.save_state(agent_name, state)
         return state
 
@@ -351,6 +358,7 @@ class AutoResearchAgentService:
                 state["promotion_branch_name"] = branch_name
             else:
                 state.pop("promotion_branch_name", None)
+        state["last_action"] = "controls_updated"
         self.store.save_state(agent_name, state)
         return state
 
@@ -959,15 +967,30 @@ class SubAgentService:
 
     @staticmethod
     def _parse_model_from_soul(soul: str) -> tuple[str, str]:
-        text = soul.lower()
+        model_line = ""
+        for line in soul.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("- **Model:**"):
+                model_line = stripped.split("**Model:**", maxsplit=1)[-1].strip()
+                break
+
+        text = (model_line or soul).lower()
+        if "codex" in text:
+            return ("codex", "codex-mini-latest")
         if "claude opus" in text:
             return ("anthropic", "claude-opus-4-6")
         if "claude sonnet" in text:
             return ("anthropic", "claude-sonnet-4-6")
         if "gemini" in text:
             return ("google", "gemini-2.5-pro")
-        if "gpt" in text or "codex" in text:
+        if "gpt-5.4" in text:
+            return ("openai", "gpt-5.4")
+        if "gpt-5.4-mini" in text:
+            return ("openai", "gpt-5.4-mini")
+        if "gpt-4.1" in text:
             return ("openai", "gpt-4.1")
+        if "gpt" in text:
+            return ("openai", "gpt-5.4")
         return ("anthropic", "claude-sonnet-4-6")
 
     @staticmethod
@@ -1042,6 +1065,18 @@ class SubAgentService:
         if defn is None:
             return []
         return list(defn.skills.keys())
+
+    def registry(self) -> dict[str, dict[str, Any]]:
+        registry: dict[str, dict[str, Any]] = {}
+        for name, defn in self._agents.items():
+            registry[name] = {
+                "display_name": defn.display_name,
+                "provider": defn.provider,
+                "model": defn.model,
+                "soul_text": self._build_system_prompt(defn),
+                "skills": list(defn.skills.keys()),
+            }
+        return registry
 
     @staticmethod
     def _build_system_prompt(defn: SubAgentDefinition) -> str:

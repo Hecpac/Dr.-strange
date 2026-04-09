@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from claw_v2.tracing import attach_trace, child_trace_context, new_trace_context
+
 logger = logging.getLogger(__name__)
 
 
@@ -82,39 +84,59 @@ class CoordinatorService:
         start = time.time()
         scratch = self._ensure_scratch(task_id)
         result = CoordinatorResult(task_id=task_id)
+        trace = new_trace_context(job_id=task_id, artifact_id=task_id)
 
         try:
+            self.observe.emit(
+                "coordinator_start",
+                trace_id=trace["trace_id"],
+                root_trace_id=trace["root_trace_id"],
+                span_id=trace["span_id"],
+                parent_span_id=trace["parent_span_id"],
+                job_id=trace["job_id"],
+                artifact_id=trace["artifact_id"],
+                payload={"task_id": task_id, "objective": objective},
+            )
             # Phase 1: Research
-            research_results = self._dispatch_parallel(research_tasks)
+            research_results = self._dispatch_parallel(research_tasks, trace)
             result.phase_results["research"] = research_results
             self._write_scratch(scratch, "research", research_results)
 
             # Phase 2: Synthesis
-            synthesis = self._synthesize(objective, research_results)
+            synthesis = self._synthesize(objective, research_results, trace)
             result.synthesis = synthesis
             self._write_scratch_text(scratch, "synthesis.md", synthesis)
 
             # Phase 3: Implementation (optional)
             if implementation_tasks:
                 impl_tasks = self._inject_context(implementation_tasks, synthesis)
-                impl_results = self._dispatch_parallel(impl_tasks)
+                impl_results = self._dispatch_parallel(impl_tasks, trace)
                 result.phase_results["implementation"] = impl_results
                 self._write_scratch(scratch, "implementation", impl_results)
 
             # Phase 4: Verification (optional)
             if verification_tasks:
                 verify_tasks = self._inject_context(verification_tasks, synthesis)
-                verify_results = self._dispatch_parallel(verify_tasks)
+                verify_results = self._dispatch_parallel(verify_tasks, trace)
                 result.phase_results["verification"] = verify_results
                 self._write_scratch(scratch, "verification", verify_results)
 
             result.duration_seconds = time.time() - start
-            self.observe.emit("coordinator_complete", payload={
-                "task_id": task_id,
-                "phases": list(result.phase_results.keys()),
-                "duration": result.duration_seconds,
-                "workers_total": sum(len(v) for v in result.phase_results.values()),
-            })
+            self.observe.emit(
+                "coordinator_complete",
+                trace_id=trace["trace_id"],
+                root_trace_id=trace["root_trace_id"],
+                span_id=trace["span_id"],
+                parent_span_id=trace["parent_span_id"],
+                job_id=trace["job_id"],
+                artifact_id=trace["artifact_id"],
+                payload={
+                    "task_id": task_id,
+                    "phases": list(result.phase_results.keys()),
+                    "duration": result.duration_seconds,
+                    "workers_total": sum(len(v) for v in result.phase_results.values()),
+                },
+            )
             return result
 
         except Exception as exc:
@@ -123,7 +145,7 @@ class CoordinatorService:
             result.duration_seconds = time.time() - start
             return result
 
-    def _dispatch_parallel(self, tasks: list[WorkerTask]) -> list[WorkerResult]:
+    def _dispatch_parallel(self, tasks: list[WorkerTask], trace_context: dict[str, Any] | None = None) -> list[WorkerResult]:
         """Run multiple worker tasks in parallel using a thread pool."""
         if not tasks:
             return []
@@ -131,7 +153,7 @@ class CoordinatorService:
         results: list[WorkerResult] = []
         with ThreadPoolExecutor(max_workers=min(self.max_workers, len(tasks))) as pool:
             futures = {
-                pool.submit(self._execute_worker, task): task
+                pool.submit(self._execute_worker, task, trace_context): task
                 for task in tasks
             }
             for future in as_completed(futures):
@@ -147,11 +169,15 @@ class CoordinatorService:
                     ))
         return results
 
-    def _execute_worker(self, task: WorkerTask) -> WorkerResult:
+    def _execute_worker(self, task: WorkerTask, trace_context: dict[str, Any] | None = None) -> WorkerResult:
         """Execute a single worker task via the LLM router."""
         start = time.time()
         try:
-            kwargs: dict[str, Any] = {"lane": task.lane, "evidence_pack": {"coordinator_task": task.name}}
+            task_trace = child_trace_context(trace_context, artifact_id=task.name)
+            kwargs: dict[str, Any] = {
+                "lane": task.lane,
+                "evidence_pack": attach_trace({"coordinator_task": task.name}, task_trace),
+            }
             if task.assigned_agent and task.assigned_agent in self.agent_registry:
                 agent = self.agent_registry[task.assigned_agent]
                 kwargs["provider"] = agent["provider"]
@@ -171,7 +197,7 @@ class CoordinatorService:
                 error=str(exc),
             )
 
-    def _synthesize(self, objective: str, research_results: list[WorkerResult]) -> str:
+    def _synthesize(self, objective: str, research_results: list[WorkerResult], trace_context: dict[str, Any] | None = None) -> str:
         """Merge research findings into a coherent plan."""
         findings = "\n\n".join(
             f"### {r.task_name}\n{r.content}" if not r.error
@@ -198,10 +224,14 @@ class CoordinatorService:
         )
 
         try:
+            synthesis_trace = child_trace_context(trace_context, artifact_id="coordinator_synthesis")
             response = self.router.ask(
                 prompt,
                 lane="research",
-                evidence_pack={"coordinator_phase": "synthesis", "objective": objective},
+                evidence_pack=attach_trace(
+                    {"coordinator_phase": "synthesis", "objective": objective},
+                    synthesis_trace,
+                ),
             )
             return response.content
         except Exception:

@@ -17,6 +17,7 @@ from claw_v2.approval import ApprovalManager
 from claw_v2.brain import BrainService
 from claw_v2.bot import BotService
 from claw_v2.browser import DevBrowserService
+from claw_v2.bus import AgentBus
 from claw_v2.config import AppConfig
 from claw_v2.cron import CronScheduler, ScheduledJob
 from claw_v2.daemon import ClawDaemon
@@ -45,6 +46,7 @@ class ClawRuntime:
     observe: ObserveStream
     metrics: MetricsTracker
     approvals: ApprovalManager
+    bus: AgentBus
     agent_store: FileAgentStore
     router: LLMRouter
     brain: BrainService
@@ -100,6 +102,7 @@ def build_runtime(
     observe = ObserveStream(config.db_path)
     metrics = MetricsTracker()
     approvals = ApprovalManager(config.approvals_root, config.approval_secret)
+    bus = AgentBus(config.agent_state_root / "_bus")
     agent_store = FileAgentStore(config.agent_state_root)
 
     def audit_sink(event: dict) -> None:
@@ -108,6 +111,12 @@ def build_runtime(
             lane=event["lane"],
             provider=event["provider"],
             model=event["model"],
+            trace_id=event["metadata"].get("trace_id"),
+            root_trace_id=event["metadata"].get("root_trace_id"),
+            span_id=event["metadata"].get("span_id"),
+            parent_span_id=event["metadata"].get("parent_span_id"),
+            job_id=event["metadata"].get("job_id"),
+            artifact_id=event["metadata"].get("artifact_id"),
             payload={
                 "confidence": event["confidence"],
                 "cost_estimate": event["cost_estimate"],
@@ -165,13 +174,35 @@ def build_runtime(
     discovered = sub_agents.discover()
     if discovered:
         observe.emit("sub_agents_discovered", payload={"agents": discovered})
+    agent_registry = sub_agents.registry()
     coordinator = CoordinatorService(
         router=router,
         observe=observe,
         scratch_root=config.agent_state_root / "_scratch",
+        agent_registry=agent_registry,
     )
-    heartbeat = HeartbeatService(metrics=metrics, approvals=approvals, agent_store=agent_store, observe=observe)
-    kairos = KairosService(router=router, heartbeat=heartbeat, observe=observe)
+    registry_path = config.workspace_root / "claw_v2" / "AGENTS.md"
+    if not registry_path.parent.exists():
+        registry_path = config.agent_state_root / "AGENTS.md"
+    heartbeat = HeartbeatService(
+        metrics=metrics,
+        approvals=approvals,
+        agent_store=agent_store,
+        observe=observe,
+        registry_path=registry_path,
+        sub_agents=sub_agents,
+        default_agent_model=config.worker_model,
+        default_daily_budget=config.daily_cost_limit or 10.0,
+    )
+    kairos = KairosService(
+        router=router,
+        heartbeat=heartbeat,
+        observe=observe,
+        bus=bus,
+        approvals=approvals,
+        sub_agents=sub_agents,
+        auto_research=auto_research,
+    )
     buddy = BuddyService(config.db_path.parent / "buddy.db")
 
     def _self_improve_handler() -> None:
@@ -390,6 +421,7 @@ def build_runtime(
         observe=observe,
         metrics=metrics,
         approvals=approvals,
+        bus=bus,
         agent_store=agent_store,
         router=router,
         brain=brain,

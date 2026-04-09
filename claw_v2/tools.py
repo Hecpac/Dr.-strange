@@ -23,6 +23,10 @@ DEFAULT_TOOL_AGENT_CLASSES: dict[str, tuple[AgentClass, ...]] = {
     "WebSearch": ("researcher",),
     "WebFetch": ("researcher",),
     "SearchMemory": ("researcher", "operator", "deployer"),
+    "WikiSearch": ("researcher", "operator", "deployer"),
+    "WikiLint": ("researcher", "operator", "deployer"),
+    "WikiDelete": ("operator", "deployer"),
+    "WikiGraph": ("researcher", "operator", "deployer"),
 }
 
 
@@ -92,7 +96,13 @@ class ToolRegistry:
         return definition.handler(args)
 
     @classmethod
-    def default(cls, *, workspace_root: Path | str, memory: MemoryStore | None = None) -> "ToolRegistry":
+    def default(
+        cls,
+        *,
+        workspace_root: Path | str,
+        memory: MemoryStore | None = None,
+        wiki: object | None = None,
+    ) -> "ToolRegistry":
         registry = cls(workspace_root=workspace_root, memory=memory)
 
         def read_file(args: dict) -> dict:
@@ -226,6 +236,75 @@ class ToolRegistry:
                 description="Search stored semantic facts.",
                 allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["SearchMemory"],
                 handler=search_memory,
+            )
+        )
+
+        def wiki_search(args: dict) -> dict:
+            if wiki is None:
+                raise RuntimeError("WikiService not configured")
+            return {"results": wiki.search(args.get("query", ""), limit=int(args.get("limit", 5)))}  # type: ignore[union-attr]
+
+        def wiki_lint(args: dict) -> dict:
+            if wiki is None:
+                raise RuntimeError("WikiService not configured")
+            deep = args.get("deep", False)
+            if deep:
+                return wiki.deep_lint()  # type: ignore[union-attr]
+            return wiki.lint()  # type: ignore[union-attr]
+
+        registry.register(
+            ToolDefinition(
+                name="WikiSearch",
+                description="Semantic search across wiki pages. Args: query (str), limit (int, default 5).",
+                allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["WikiSearch"],
+                handler=wiki_search,
+            )
+        )
+        registry.register(
+            ToolDefinition(
+                name="WikiLint",
+                description="Audit wiki health. Args: deep (bool) for LLM-powered analysis of contradictions, stale content, and gaps.",
+                allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["WikiLint"],
+                handler=wiki_lint,
+            )
+        )
+
+        def wiki_delete(args: dict) -> dict:
+            if wiki is None:
+                raise RuntimeError("WikiService not configured")
+            slug = args.get("slug", "")
+            if not slug:
+                return {"error": "slug is required"}
+            return wiki.delete(slug)
+
+        def wiki_graph(args: dict) -> dict:
+            if wiki is None:
+                raise RuntimeError("WikiService not configured")
+            slug = args.get("slug", "")
+            if slug:
+                edges = wiki._graph.get(slug, [])
+                neighbors = wiki._graph_neighbors(slug, depth=int(args.get("depth", 1)))
+                return {"slug": slug, "edges": edges, "neighbors": neighbors}
+            # Full graph summary
+            nodes = list(wiki._graph.keys())
+            total_edges = sum(len(v) for v in wiki._graph.values())
+            return {"nodes": len(nodes), "total_edges": total_edges, "top_nodes": nodes[:20]}
+
+        registry.register(
+            ToolDefinition(
+                name="WikiDelete",
+                description="Cascade-delete a wiki entry. Removes raw source, wiki page, embeddings, graph edges, and index references. Args: slug (str).",
+                allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["WikiDelete"],
+                handler=wiki_delete,
+                mutates_state=True,
+            )
+        )
+        registry.register(
+            ToolDefinition(
+                name="WikiGraph",
+                description="Query the knowledge graph. Args: slug (str, optional) for a node's edges & neighbors, depth (int, default 1). Without slug returns graph summary.",
+                allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["WikiGraph"],
+                handler=wiki_graph,
             )
         )
         return registry

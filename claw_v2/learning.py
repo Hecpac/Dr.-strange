@@ -63,6 +63,22 @@ class LearningLoop:
         keywords = " ".join(lines[-1].split()[:20]) if lines else " ".join(context.split()[:20])
         outcomes = self.memory.search_past_outcomes(keywords, task_type=task_type, limit=limit)
         if not outcomes:
+            seen_task_ids: set[str] = set()
+            token_matches: list[dict] = []
+            tokens = [token for token in keywords.split() if len(token) >= 4]
+            for token in tokens:
+                for match in self.memory.search_past_outcomes(token, task_type=task_type, limit=limit):
+                    task_id = match.get("task_id")
+                    if task_id in seen_task_ids:
+                        continue
+                    seen_task_ids.add(task_id)
+                    token_matches.append(match)
+                    if len(token_matches) >= limit:
+                        break
+                if len(token_matches) >= limit:
+                    break
+            outcomes = token_matches
+        if not outcomes:
             outcomes = self.memory.recent_failures(task_type=task_type, limit=limit)
         if not outcomes:
             return ""

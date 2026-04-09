@@ -73,17 +73,25 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
                     with patch("claw_v2.lifecycle.TelegramTransport") as mock_transport_cls:
                         mock_transport = AsyncMock()
                         mock_transport_cls.return_value = mock_transport
-                        with patch("claw_v2.lifecycle.build_runtime") as mock_build:
-                            mock_runtime = MagicMock()
-                            mock_runtime.config.telegram_bot_token = None
-                            mock_runtime.config.telegram_allowed_user_id = None
-                            mock_runtime.config.openai_api_key = None
-                            mock_runtime.daemon.run_loop = AsyncMock()
-                            mock_build.return_value = mock_runtime
-                            result = await run()
-                            self.assertEqual(result, 0)
-                            mock_lock.acquire.assert_called_once()
-                            mock_lock.release.assert_called_once()
+                        with patch("claw_v2.lifecycle.WebTransport") as mock_web_transport_cls:
+                            mock_web_transport = AsyncMock()
+                            mock_web_transport_cls.return_value = mock_web_transport
+                            with patch("claw_v2.lifecycle.build_runtime") as mock_build:
+                                mock_runtime = MagicMock()
+                                mock_runtime.config.telegram_bot_token = None
+                                mock_runtime.config.telegram_allowed_user_id = None
+                                mock_runtime.config.openai_api_key = None
+                                mock_runtime.config.web_chat_enabled = True
+                                mock_runtime.config.web_chat_host = "127.0.0.1"
+                                mock_runtime.config.web_chat_port = 8765
+                                mock_runtime.daemon.run_loop = AsyncMock()
+                                mock_build.return_value = mock_runtime
+                                result = await run()
+                                self.assertEqual(result, 0)
+                                mock_lock.acquire.assert_called_once()
+                                mock_lock.release.assert_called_once()
+                                mock_web_transport.start.assert_awaited_once()
+                                mock_web_transport.stop.assert_awaited_once()
 
     async def test_run_skips_telegram_when_no_token(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -100,17 +108,25 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
                     with patch("claw_v2.lifecycle.TelegramTransport") as mock_transport_cls:
                         mock_transport = AsyncMock()
                         mock_transport_cls.return_value = mock_transport
-                        with patch("claw_v2.lifecycle.build_runtime") as mock_build:
-                            mock_runtime = MagicMock()
-                            mock_runtime.config.telegram_bot_token = None
-                            mock_runtime.config.telegram_allowed_user_id = None
-                            mock_runtime.config.openai_api_key = None
-                            mock_runtime.daemon.run_loop = AsyncMock()
-                            mock_build.return_value = mock_runtime
-                            await run()
-                            mock_transport_cls.assert_called_once()
-                            args = mock_transport_cls.call_args
-                            self.assertIsNone(args.kwargs.get("token") or args[1].get("token"))
+                        with patch("claw_v2.lifecycle.WebTransport") as mock_web_transport_cls:
+                            mock_web_transport = AsyncMock()
+                            mock_web_transport_cls.return_value = mock_web_transport
+                            with patch("claw_v2.lifecycle.build_runtime") as mock_build:
+                                mock_runtime = MagicMock()
+                                mock_runtime.config.telegram_bot_token = None
+                                mock_runtime.config.telegram_allowed_user_id = None
+                                mock_runtime.config.openai_api_key = None
+                                mock_runtime.config.web_chat_enabled = False
+                                mock_runtime.config.web_chat_host = "127.0.0.1"
+                                mock_runtime.config.web_chat_port = 8765
+                                mock_runtime.daemon.run_loop = AsyncMock()
+                                mock_build.return_value = mock_runtime
+                                await run()
+                                mock_transport_cls.assert_called_once()
+                                args = mock_transport_cls.call_args
+                                self.assertIsNone(args.kwargs.get("token") or args[1].get("token"))
+                                mock_web_transport.start.assert_not_awaited()
+                                mock_web_transport.stop.assert_awaited_once()
 
     async def test_run_skips_managed_chrome_autostart_for_playwright_local_backend(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -127,20 +143,26 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
                     with patch("claw_v2.lifecycle.TelegramTransport") as mock_transport_cls:
                         mock_transport = AsyncMock()
                         mock_transport_cls.return_value = mock_transport
-                        with patch("claw_v2.lifecycle.ManagedChrome") as mock_managed_chrome_cls:
-                            with patch("claw_v2.lifecycle.build_runtime") as mock_build:
-                                mock_runtime = MagicMock()
-                                mock_runtime.config.telegram_bot_token = None
-                                mock_runtime.config.telegram_allowed_user_id = None
-                                mock_runtime.config.openai_api_key = None
-                                mock_runtime.config.chrome_cdp_enabled = True
-                                mock_runtime.config.browse_backend = "playwright_local"
-                                mock_runtime.daemon.run_loop = AsyncMock()
-                                mock_build.return_value = mock_runtime
+                        with patch("claw_v2.lifecycle.WebTransport") as mock_web_transport_cls:
+                            mock_web_transport = AsyncMock()
+                            mock_web_transport_cls.return_value = mock_web_transport
+                            with patch("claw_v2.lifecycle.ManagedChrome") as mock_managed_chrome_cls:
+                                with patch("claw_v2.lifecycle.build_runtime") as mock_build:
+                                    mock_runtime = MagicMock()
+                                    mock_runtime.config.telegram_bot_token = None
+                                    mock_runtime.config.telegram_allowed_user_id = None
+                                    mock_runtime.config.openai_api_key = None
+                                    mock_runtime.config.web_chat_enabled = False
+                                    mock_runtime.config.web_chat_host = "127.0.0.1"
+                                    mock_runtime.config.web_chat_port = 8765
+                                    mock_runtime.config.chrome_cdp_enabled = True
+                                    mock_runtime.config.browse_backend = "playwright_local"
+                                    mock_runtime.daemon.run_loop = AsyncMock()
+                                    mock_build.return_value = mock_runtime
 
-                                await run()
+                                    await run()
 
-                                mock_managed_chrome_cls.assert_not_called()
+                                    mock_managed_chrome_cls.assert_not_called()
 
     async def test_run_skips_managed_chrome_autostart_for_browserbase_backend(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -157,20 +179,26 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
                     with patch("claw_v2.lifecycle.TelegramTransport") as mock_transport_cls:
                         mock_transport = AsyncMock()
                         mock_transport_cls.return_value = mock_transport
-                        with patch("claw_v2.lifecycle.ManagedChrome") as mock_managed_chrome_cls:
-                            with patch("claw_v2.lifecycle.build_runtime") as mock_build:
-                                mock_runtime = MagicMock()
-                                mock_runtime.config.telegram_bot_token = None
-                                mock_runtime.config.telegram_allowed_user_id = None
-                                mock_runtime.config.openai_api_key = None
-                                mock_runtime.config.chrome_cdp_enabled = True
-                                mock_runtime.config.browse_backend = "browserbase_cdp"
-                                mock_runtime.daemon.run_loop = AsyncMock()
-                                mock_build.return_value = mock_runtime
+                        with patch("claw_v2.lifecycle.WebTransport") as mock_web_transport_cls:
+                            mock_web_transport = AsyncMock()
+                            mock_web_transport_cls.return_value = mock_web_transport
+                            with patch("claw_v2.lifecycle.ManagedChrome") as mock_managed_chrome_cls:
+                                with patch("claw_v2.lifecycle.build_runtime") as mock_build:
+                                    mock_runtime = MagicMock()
+                                    mock_runtime.config.telegram_bot_token = None
+                                    mock_runtime.config.telegram_allowed_user_id = None
+                                    mock_runtime.config.openai_api_key = None
+                                    mock_runtime.config.web_chat_enabled = False
+                                    mock_runtime.config.web_chat_host = "127.0.0.1"
+                                    mock_runtime.config.web_chat_port = 8765
+                                    mock_runtime.config.chrome_cdp_enabled = True
+                                    mock_runtime.config.browse_backend = "browserbase_cdp"
+                                    mock_runtime.daemon.run_loop = AsyncMock()
+                                    mock_build.return_value = mock_runtime
 
-                                await run()
+                                    await run()
 
-                                mock_managed_chrome_cls.assert_not_called()
+                                    mock_managed_chrome_cls.assert_not_called()
 
 
 if __name__ == "__main__":

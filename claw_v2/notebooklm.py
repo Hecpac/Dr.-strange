@@ -207,8 +207,17 @@ class NotebookLMService:
                 if poll.get("status") == "completed":
                     sources = poll.get("sources", [])
                     if sources:
-                        imported = await client.research.import_sources(notebook_id, task_id, sources)
-                        return len(imported)
+                        # Retry import up to 3 times — Google API can be slow
+                        last_exc: Exception | None = None
+                        for attempt in range(3):
+                            try:
+                                imported = await client.research.import_sources(notebook_id, task_id, sources)
+                                return len(imported)
+                            except Exception as exc:
+                                last_exc = exc
+                                logger.warning("import_sources attempt %d failed: %s", attempt + 1, exc)
+                                await asyncio.sleep(5 * (attempt + 1))
+                        raise last_exc  # type: ignore[misc]
                     return 0
                 await asyncio.sleep(15)
             raise TimeoutError("Research did not complete within 10 minutes")

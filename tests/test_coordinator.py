@@ -110,7 +110,7 @@ class FullRunTests(unittest.TestCase):
         self.assertEqual(len(result.phase_results["research"]), 1)
         self.assertGreater(result.duration_seconds, 0)
         self.assertEqual(result.error, "")
-        observe.emit.assert_called_once()
+        self.assertEqual(observe.emit.call_count, 2)
 
     def test_full_four_phase_run(self) -> None:
         svc, router, observe, tmpdir = _make_service()

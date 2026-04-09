@@ -9,6 +9,10 @@ def make_config(root: Path) -> AppConfig:
     config = AppConfig(
         telegram_bot_token=None,
         telegram_allowed_user_id="123",
+        web_chat_enabled=False,
+        web_chat_host="127.0.0.1",
+        web_chat_port=8765,
+        web_chat_token=None,
         openai_api_key=None,
         google_api_key=None,
         linear_api_key=None,

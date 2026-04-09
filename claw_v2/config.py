@@ -48,6 +48,10 @@ _SECONDARY_PROVIDER_DEFAULT_MODELS: dict[str, str] = {
 class AppConfig:
     telegram_bot_token: str | None
     telegram_allowed_user_id: str | None
+    web_chat_enabled: bool
+    web_chat_host: str
+    web_chat_port: int
+    web_chat_token: str | None
     openai_api_key: str | None
     google_api_key: str | None
     linear_api_key: str | None
@@ -124,6 +128,10 @@ class AppConfig:
         return cls(
             telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN"),
             telegram_allowed_user_id=os.getenv("TELEGRAM_ALLOWED_USER_ID"),
+            web_chat_enabled=_env_bool("WEB_CHAT_ENABLED", True),
+            web_chat_host=os.getenv("WEB_CHAT_HOST", "127.0.0.1"),
+            web_chat_port=_env_int("WEB_CHAT_PORT", 8765),
+            web_chat_token=os.getenv("WEB_CHAT_TOKEN"),
             openai_api_key=os.getenv("OPENAI_API_KEY"),
             linear_api_key=os.getenv("LINEAR_API_KEY"),
             google_api_key=os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"),
@@ -226,6 +234,8 @@ class AppConfig:
             raise ValueError(f"browse_backend must be one of {sorted(supported_browse_backends)}.")
         if self.computer_use_backend not in {"openai", "codex"}:
             raise ValueError("computer_use_backend must be 'openai' or 'codex'.")
+        if self.web_chat_port <= 0:
+            raise ValueError("web_chat_port must be positive.")
 
     def provider_for_lane(self, lane: Lane) -> str:
         mapping = {

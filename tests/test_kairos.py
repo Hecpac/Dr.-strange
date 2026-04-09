@@ -6,7 +6,7 @@ import time
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 from claw_v2.bus import AgentBus, _new_message
 from claw_v2.kairos import KairosService, TickDecision, KairosState
@@ -212,7 +212,8 @@ class ExecuteActionTests(unittest.TestCase):
         self.assertEqual(bus.pending_count("hex"), 1)
 
     def test_pause_agent_emits_event(self) -> None:
-        svc, _, _, observe = _make_service(bus=MagicMock(), approvals=MagicMock())
+        auto_research = MagicMock()
+        svc, _, _, observe = _make_service(bus=MagicMock(), approvals=MagicMock(), auto_research=auto_research)
         decision = TickDecision(
             action="pause_agent",
             reason="budget exceeded",
@@ -220,7 +221,63 @@ class ExecuteActionTests(unittest.TestCase):
         )
         result = svc._execute(decision, budget=10.0)
         self.assertEqual(result.action, "pause_agent")
-        observe.emit.assert_any_call("agent_paused", payload={"agent_name": "lux", "reason": "cost limit"})
+        auto_research.pause.assert_called_once_with("lux")
+        observe.emit.assert_any_call(
+            "agent_paused",
+            trace_id=ANY,
+            root_trace_id=ANY,
+            span_id=ANY,
+            parent_span_id=ANY,
+            job_id=None,
+            artifact_id="pause_agent",
+            payload={"agent_name": "lux", "reason": "cost limit"},
+        )
+
+    def test_run_skill_executes_sub_agent_skill(self) -> None:
+        sub_agents = MagicMock()
+        sub_agents.run_skill.return_value = "skill-output"
+        svc, _, _, observe = _make_service(sub_agents=sub_agents)
+        decision = TickDecision(
+            action="run_skill",
+            reason="ops audit due",
+            detail=json.dumps({"agent": "rook", "skill": "health-audit"}),
+        )
+        result = svc._execute(decision, budget=10.0)
+        self.assertEqual(result.error, "")
+        sub_agents.run_skill.assert_called_once_with("rook", "health-audit", "", lane="worker")
+        observe.emit.assert_any_call(
+            "kairos_run_skill",
+            trace_id=ANY,
+            root_trace_id=ANY,
+            span_id=ANY,
+            parent_span_id=ANY,
+            job_id=None,
+            artifact_id="run_skill",
+            payload={"agent": "rook", "skill": "health-audit", "lane": "worker", "result": "skill-output"},
+        )
+
+    def test_approve_pending_uses_internal_approval_path(self) -> None:
+        approvals = MagicMock()
+        approvals.approve_internal.return_value = True
+        svc, _, _, observe = _make_service(approvals=approvals)
+        decision = TickDecision(
+            action="approve_pending",
+            reason="low risk",
+            detail=json.dumps({"approval_id": "abc123"}),
+        )
+        result = svc._execute(decision, budget=10.0)
+        self.assertEqual(result.error, "")
+        approvals.approve_internal.assert_called_once_with("abc123")
+        observe.emit.assert_any_call(
+            "kairos_auto_approved",
+            trace_id=ANY,
+            root_trace_id=ANY,
+            span_id=ANY,
+            parent_span_id=ANY,
+            job_id=None,
+            artifact_id="approve_pending",
+            payload={"approval_id": "abc123"},
+        )
 
     def test_unknown_action_returns_error(self) -> None:
         svc, _, _, observe = _make_service(bus=MagicMock(), approvals=MagicMock())

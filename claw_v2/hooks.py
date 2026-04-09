@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from typing import Any
 
 from claw_v2.adapters.base import LLMRequest, PreLLMHook, PostLLMHook
 from claw_v2.observe import ObserveStream
+from claw_v2.tracing import current_llm_trace, trace_metadata
 from claw_v2.types import LLMResponse
 
 logger = logging.getLogger(__name__)
@@ -56,12 +58,19 @@ def make_daily_cost_gate(observe: ObserveStream, daily_limit: float = 10.0) -> P
 
 def make_decision_logger(observe: ObserveStream) -> PostLLMHook:
     def decision_logger(request: LLMRequest, response: LLMResponse) -> LLMResponse:
+        evidence = request.evidence_pack or {}
+        agent_name = evidence.get("agent_name") or evidence.get("sub_agent")
+        trace = trace_metadata(request.evidence_pack)
+        if not trace:
+            trace = {k: v for k, v in current_llm_trace(request.evidence_pack).items() if v is not None}
         observe.emit(
             "llm_decision",
             lane=response.lane,
             provider=response.provider,
             model=response.model,
+            **trace,
             payload={
+                "agent_name": agent_name,
                 "session_id": request.session_id,
                 "confidence": response.confidence,
                 "cost_estimate": response.cost_estimate,
@@ -70,6 +79,9 @@ def make_decision_logger(observe: ObserveStream) -> PostLLMHook:
                 "response_length": len(response.content),
                 "effort": request.effort,
                 "has_evidence_pack": request.evidence_pack is not None,
+                "prompt_snapshot": _snapshot_prompt(request.prompt),
+                "system_prompt_snapshot": request.system_prompt,
+                "evidence_pack_snapshot": request.evidence_pack or {},
             },
         )
         return response
@@ -97,6 +109,14 @@ def _select_decoys(session_id: str | None, count: int = 2) -> list[str]:
                 indices.append(j)
                 break
     return [_DECOY_POOL[i] for i in indices]
+
+
+def _snapshot_prompt(prompt: Any) -> Any:
+    if isinstance(prompt, str):
+        return prompt
+    if isinstance(prompt, list):
+        return prompt
+    return str(prompt)
 
 
 def make_anti_distillation_hook(enabled: bool = True) -> PreLLMHook:

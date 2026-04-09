@@ -72,3 +72,39 @@ class RegistryWriteTests(unittest.TestCase):
         )
         snapshot = svc.emit()
         self.assertIsNotNone(snapshot)
+
+    def test_collect_merges_sub_agents_and_costs(self) -> None:
+        metrics = MagicMock()
+        metrics.snapshot.return_value = {}
+        approvals = MagicMock()
+        approvals.list_pending.return_value = []
+        agent_store = MagicMock()
+        agent_store.list_agents.return_value = ["self-improve"]
+        agent_store.load_state.return_value = {
+            "agent_class": "operator",
+            "paused": False,
+            "last_verified_state": {"metric": 0.42},
+            "last_action": "experiment_1:improved",
+        }
+        observe = MagicMock()
+        observe.cost_per_agent_today.return_value = {"self-improve": 0.12, "hex": 0.07}
+        sub_agents = MagicMock()
+        sub_agents.list_agents.return_value = ["hex"]
+        sub_agents.get_agent.return_value = MagicMock(model="codex-mini-latest")
+
+        svc = HeartbeatService(
+            metrics=metrics,
+            approvals=approvals,
+            agent_store=agent_store,
+            observe=observe,
+            sub_agents=sub_agents,
+            default_agent_model="claude-sonnet-4-6",
+            default_daily_budget=5.0,
+        )
+
+        snapshot = svc.collect()
+
+        self.assertEqual(snapshot.agents["self-improve"]["cost_today"], 0.12)
+        self.assertEqual(snapshot.agents["self-improve"]["last_action"], "experiment_1:improved")
+        self.assertEqual(snapshot.agents["hex"]["model"], "codex-mini-latest")
+        self.assertEqual(snapshot.agents["hex"]["cost_today"], 0.07)

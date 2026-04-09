@@ -41,7 +41,13 @@ def echo_response(provider_name: str) -> Callable[[LLMRequest], LLMResponse]:
     return responder
 
 
-def build_test_router(config: AppConfig) -> LLMRouter:
+def build_test_router(
+    config: AppConfig,
+    *,
+    audit_sink: Callable[[dict], None] | None = None,
+    pre_hooks: list | None = None,
+    post_hooks: list | None = None,
+) -> LLMRouter:
     return LLMRouter(
         config=config,
         adapters={
@@ -49,6 +55,9 @@ def build_test_router(config: AppConfig) -> LLMRouter:
             "openai": StaticAdapter("openai", tool_capable=False, responder=echo_response("openai")),
             "google": StaticAdapter("google", tool_capable=False, responder=echo_response("google")),
         },
+        audit_sink=audit_sink,
+        pre_hooks=pre_hooks,
+        post_hooks=post_hooks,
     )
 
 

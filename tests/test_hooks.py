@@ -26,6 +26,7 @@ def _make_router(
     *,
     pre_hooks: list[PreLLMHook] | None = None,
     post_hooks: list[PostLLMHook] | None = None,
+    audit_sink=None,
 ) -> LLMRouter:
     from tests.helpers import make_config
     from pathlib import Path
@@ -38,6 +39,7 @@ def _make_router(
         anthropic_executor=_fake_adapter_complete,
         pre_hooks=pre_hooks,
         post_hooks=post_hooks,
+        audit_sink=audit_sink,
     )
 
 
@@ -250,6 +252,40 @@ class DecisionLoggerTests(unittest.TestCase):
             self.assertEqual(payload["response_length"], len("hello world"))
             self.assertEqual(payload["effort"], "high")
             self.assertFalse(payload["has_evidence_pack"])
+            self.assertIsNotNone(decision_events[0]["trace_id"])
+            self.assertIsNotNone(decision_events[0]["span_id"])
+
+    def test_emits_agent_name_for_agent_scoped_requests(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "test.db")
+            hook = make_decision_logger(observe)
+            request = LLMRequest(
+                prompt="fix issue",
+                system_prompt=None,
+                lane="worker",
+                provider="anthropic",
+                model="claude-sonnet-4-6",
+                effort="high",
+                session_id="sess-2",
+                max_budget=0.5,
+                evidence_pack={"agent_name": "self-improve"},
+                allowed_tools=["Read"],
+                agents=None,
+                hooks=None,
+                timeout=30.0,
+            )
+            response = LLMResponse(
+                content="done",
+                lane="worker",
+                provider="anthropic",
+                model="claude-sonnet-4-6",
+                confidence=0.8,
+                cost_estimate=0.02,
+            )
+
+            hook(request, response)
+
+            self.assertEqual(observe.cost_per_agent_today(), {"self-improve": 0.02})
 
     def test_handles_multimodal_prompt_length(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -285,6 +321,42 @@ class DecisionLoggerTests(unittest.TestCase):
             payload = decision_events[0]["payload"]
             self.assertEqual(payload["prompt_length"], 2)
             self.assertTrue(payload["has_evidence_pack"])
+
+    def test_router_uses_shared_trace_for_decision_and_response_events(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "test.db")
+
+            def audit_sink(event: dict) -> None:
+                observe.emit(
+                    event["action"],
+                    lane=event["lane"],
+                    provider=event["provider"],
+                    model=event["model"],
+                    trace_id=event["metadata"].get("trace_id"),
+                    root_trace_id=event["metadata"].get("root_trace_id"),
+                    span_id=event["metadata"].get("span_id"),
+                    parent_span_id=event["metadata"].get("parent_span_id"),
+                    job_id=event["metadata"].get("job_id"),
+                    artifact_id=event["metadata"].get("artifact_id"),
+                    payload={"cost_estimate": event["cost_estimate"]},
+                )
+
+            router = _make_router(post_hooks=[make_decision_logger(observe)], audit_sink=audit_sink)
+            router.ask(
+                "hello",
+                lane="brain",
+                system_prompt="test",
+                evidence_pack={"agent_name": "hex", "artifact_id": "brain-turn"},
+            )
+
+            events = observe.recent_events(limit=5)
+            response_event = next(event for event in events if event["event_type"] == "llm_response")
+            decision_event = next(event for event in events if event["event_type"] == "llm_decision")
+            self.assertEqual(response_event["trace_id"], decision_event["trace_id"])
+            self.assertEqual(response_event["span_id"], decision_event["span_id"])
+            self.assertEqual(response_event["artifact_id"], "brain-turn")
+            replay = observe.trace_events(response_event["trace_id"])
+            self.assertEqual([event["event_type"] for event in replay], ["llm_decision", "llm_response"])
 
 
 class AntiDistillationTests(unittest.TestCase):

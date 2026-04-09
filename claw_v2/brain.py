@@ -12,6 +12,7 @@ from claw_v2.learning import LearningLoop
 from claw_v2.llm import LLMRouter
 from claw_v2.memory import MemoryStore
 from claw_v2.observe import ObserveStream
+from claw_v2.tracing import attach_trace, new_trace_context, child_trace_context
 from claw_v2.types import CriticalActionExecution, CriticalActionVerification, LLMResponse
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,7 @@ class BrainService:
     approvals: ApprovalManager | None = None
     observe: ObserveStream | None = None
     learning: LearningLoop | None = None
+    wiki: object | None = None  # WikiService, injected after init
 
     def handle_message(
         self,
@@ -52,8 +54,10 @@ class BrainService:
         message: UserPrompt,
         *,
         memory_text: str | None = None,
+        task_type: str | None = None,
     ) -> LLMResponse:
         stored_user_message = memory_text or _summarize_user_prompt(message)
+        trace = new_trace_context(artifact_id=session_id)
         provider_session_id = self.memory.get_provider_session(session_id, "anthropic")
         provider_cursor = self.memory.get_provider_session_cursor(session_id, "anthropic")
         # When resuming a provider session, skip message history — the SDK already has it.
@@ -65,14 +69,25 @@ class BrainService:
             stored_user_message=stored_user_message,
             include_history=not resuming,
             catchup_after_id=provider_cursor,
+            task_type=task_type,
         )
         try:
+            if self.observe is not None:
+                self.observe.emit(
+                    "brain_turn_start",
+                    trace_id=trace["trace_id"],
+                    root_trace_id=trace["root_trace_id"],
+                    span_id=trace["span_id"],
+                    parent_span_id=trace["parent_span_id"],
+                    artifact_id=trace["artifact_id"],
+                    payload={"app_session_id": session_id},
+                )
             response = self.router.ask(
                 prompt,
                 system_prompt=self.system_prompt,
                 lane="brain",
                 session_id=provider_session_id,
-                evidence_pack={"app_session_id": session_id},
+                evidence_pack=attach_trace({"app_session_id": session_id}, trace),
                 max_budget=2.0,
                 timeout=300.0,
             )
@@ -86,6 +101,11 @@ class BrainService:
                     "session_resume_failed",
                     lane="brain",
                     provider="anthropic",
+                    trace_id=trace["trace_id"],
+                    root_trace_id=trace["root_trace_id"],
+                    span_id=trace["span_id"],
+                    parent_span_id=trace["parent_span_id"],
+                    artifact_id=trace["artifact_id"],
                     payload={"app_session_id": session_id, "stale_session": provider_session_id},
                 )
             self.memory.clear_provider_session(session_id, "anthropic")
@@ -95,13 +115,14 @@ class BrainService:
                 stored_user_message=stored_user_message,
                 include_history=True,
                 catchup_after_id=None,
+                task_type=task_type,
             )
             response = self.router.ask(
                 prompt,
                 system_prompt=self.system_prompt,
                 lane="brain",
                 session_id=None,
-                evidence_pack={"app_session_id": session_id},
+                evidence_pack=attach_trace({"app_session_id": session_id}, trace),
                 max_budget=2.0,
                 timeout=300.0,
             )
@@ -115,6 +136,24 @@ class BrainService:
                 provider_session_artifact,
                 last_message_id=self.memory.last_message_id(session_id),
             )
+        if self.observe is not None:
+            completion = child_trace_context(trace, artifact_id=session_id)
+            self.observe.emit(
+                "brain_turn_complete",
+                lane=response.lane,
+                provider=response.provider,
+                model=response.model,
+                trace_id=completion["trace_id"],
+                root_trace_id=completion["root_trace_id"],
+                span_id=completion["span_id"],
+                parent_span_id=completion["parent_span_id"],
+                artifact_id=completion["artifact_id"],
+                payload={
+                    "app_session_id": session_id,
+                    "provider_session_id": provider_session_artifact,
+                    "response_length": len(response.content),
+                },
+            )
         return response
 
     def _build_prompt(
@@ -125,10 +164,15 @@ class BrainService:
         stored_user_message: str,
         include_history: bool,
         catchup_after_id: int | None,
+        task_type: str | None,
     ) -> UserPrompt:
         lessons = ""
         if self.learning:
-            lessons = self.learning.retrieve_lessons(stored_user_message)
+            lessons = self.learning.retrieve_lessons(stored_user_message, task_type=task_type)
+        # Enrich with wiki context when available
+        wiki_context = self._wiki_context(stored_user_message)
+        if wiki_context:
+            lessons = f"{lessons}\n{wiki_context}" if lessons else wiki_context
         if isinstance(message, str):
             if not include_history:
                 # Include recent messages the SDK session might have missed
@@ -153,6 +197,30 @@ class BrainService:
         blocks.append({"type": "text", "text": marker_text})
         blocks.extend(message)
         return blocks
+
+    def _wiki_context(self, message: str) -> str:
+        """Query the wiki for relevant pages and return a compact context section."""
+        if self.wiki is None:
+            return ""
+        try:
+            results = self.wiki.search(message, limit=3)
+        except Exception:
+            logger.debug("Wiki search failed", exc_info=True)
+            return ""
+        if not results:
+            return ""
+        if _looks_like_knowledge_question(message) and float(results[0].get("similarity", 0.0)) >= 0.35:
+            try:
+                answer = self.wiki.query(message, archive=False)
+            except Exception:
+                logger.debug("Wiki query failed", exc_info=True)
+                answer = ""
+            if answer:
+                return "\n".join(["# Wiki answer", answer[:1200]])
+        lines = ["# Wiki context"]
+        for r in results:
+            lines.append(f"- **{r['title']}** (sim={r['similarity']}): {r['snippet'][:150]}")
+        return "\n".join(lines)
 
     def _build_catchup(self, session_id: str, *, after_id: int | None) -> str:
         """Return recent messages that shortcuts stored but the SDK session hasn't seen."""
@@ -429,6 +497,31 @@ def _parse_verifier_payload(content: str) -> dict:
         "missing_checks": missing_checks,
         "confidence": confidence,
     }
+
+
+def _looks_like_knowledge_question(message: str) -> bool:
+    stripped = message.strip().lower()
+    if "?" in stripped:
+        return True
+    starters = (
+        "que ",
+        "qué ",
+        "como ",
+        "cómo ",
+        "cual ",
+        "cuál ",
+        "donde ",
+        "dónde ",
+        "when ",
+        "what ",
+        "how ",
+        "why ",
+        "where ",
+        "who ",
+        "explain ",
+        "explica ",
+    )
+    return any(stripped.startswith(prefix) for prefix in starters)
 
 
 def _try_parse_json_object(content: str) -> dict | None:

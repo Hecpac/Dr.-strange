@@ -57,28 +57,69 @@ class HeartbeatService:
         agent_store: FileAgentStore,
         observe: ObserveStream | None = None,
         registry_path: Path | None = None,
+        sub_agents: object | None = None,
+        default_agent_model: str | None = None,
+        default_daily_budget: float = 10.0,
     ) -> None:
         self.metrics = metrics
         self.approvals = approvals
         self.agent_store = agent_store
         self.observe = observe
         self.registry_path = registry_path
+        self.sub_agents = sub_agents
+        self.default_agent_model = default_agent_model
+        self.default_daily_budget = default_daily_budget
 
     def collect(self) -> HeartbeatSnapshot:
         pending = self.approvals.list_pending()
         agents: dict[str, dict] = {}
+        cost_by_agent: dict[str, float] = {}
+        if self.observe is not None:
+            try:
+                observed_costs = self.observe.cost_per_agent_today()
+                if isinstance(observed_costs, dict):
+                    cost_by_agent = observed_costs
+            except Exception:
+                cost_by_agent = {}
         for agent_name in self.agent_store.list_agents():
             state = self.agent_store.load_state(agent_name)
             agents[agent_name] = {
                 "agent_class": state.get("agent_class"),
+                "model": state.get("model", self.default_agent_model or "-"),
                 "trust_level": state.get("trust_level", 1),
                 "experiments_today": state.get("experiments_today", 0),
                 "paused": state.get("paused", False),
+                "last_action": state.get("last_action", "-"),
                 "last_metric": state.get("last_verified_state", {}).get("metric"),
+                "cost_today": cost_by_agent.get(agent_name, 0.0),
+                "has_errors": state.get("has_errors", False),
+                "daily_budget": state.get("daily_budget", self.default_daily_budget),
                 "promote_on_improvement": state.get("promote_on_improvement", False),
                 "commit_on_promotion": state.get("commit_on_promotion", False),
                 "branch_on_promotion": state.get("branch_on_promotion", False),
             }
+        if self.sub_agents is not None:
+            for agent_name in self.sub_agents.list_agents():
+                if agent_name in agents:
+                    continue
+                definition = self.sub_agents.get_agent(agent_name)
+                if definition is None:
+                    continue
+                agents[agent_name] = {
+                    "agent_class": "specialist",
+                    "model": definition.model,
+                    "trust_level": 1,
+                    "experiments_today": 0,
+                    "paused": False,
+                    "last_action": "-",
+                    "last_metric": None,
+                    "cost_today": cost_by_agent.get(agent_name, 0.0),
+                    "has_errors": False,
+                    "daily_budget": self.default_daily_budget,
+                    "promote_on_improvement": False,
+                    "commit_on_promotion": False,
+                    "branch_on_promotion": False,
+                }
         return HeartbeatSnapshot(
             timestamp=datetime.now(UTC).isoformat(),
             pending_approvals=len(pending),

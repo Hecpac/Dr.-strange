@@ -10,6 +10,7 @@ from claw_v2.adapters.google import GoogleAdapter
 from claw_v2.adapters.ollama import OllamaAdapter
 from claw_v2.adapters.openai import OpenAIAdapter
 from claw_v2.config import AppConfig
+from claw_v2.tracing import current_llm_trace, trace_metadata
 from claw_v2.types import Lane, LLMResponse
 
 
@@ -72,6 +73,10 @@ class LLMRouter:
             cwd=cwd,
             cache_ttl=self.config.cache_prefix_ttl if self.config.cache_prefix_ttl > 0 else None,
         )
+        request.evidence_pack = {
+            **(request.evidence_pack or {}),
+            **current_llm_trace(request.evidence_pack),
+        }
         # --- Pre-hooks ---
         for hook in self.pre_hooks:
             result = hook(request)
@@ -105,9 +110,15 @@ class LLMRouter:
                 response = self._adapter_for("anthropic").complete(fallback_request)
                 response.degraded_mode = True
                 response.artifacts["fallback_reason"] = str(exc)
+                response.artifacts.update(trace_metadata(request.evidence_pack))
                 for hook in self.post_hooks:
                     response = hook(request, response)
-                self._audit("llm_fallback", response, {"requested_provider": selected_provider})
+                self._audit(
+                    "llm_fallback",
+                    response,
+                    {"requested_provider": selected_provider, "response_text": response.content},
+                    request=request,
+                )
                 return response
             raise
 
@@ -115,7 +126,13 @@ class LLMRouter:
         for hook in self.post_hooks:
             response = hook(request, response)
 
-        self._audit("llm_response", response, {"session_id": session_id})
+        response.artifacts.update(trace_metadata(request.evidence_pack))
+        self._audit(
+            "llm_response",
+            response,
+            {"session_id": session_id, "response_text": response.content},
+            request=request,
+        )
         return response
 
     def _adapter_for(self, provider: str) -> ProviderAdapter:
@@ -123,7 +140,8 @@ class LLMRouter:
             raise AdapterError(f"No adapter registered for provider '{provider}'.")
         return self.adapters[provider]
 
-    def _audit(self, action: str, response: LLMResponse, metadata: dict) -> None:
+    def _audit(self, action: str, response: LLMResponse, metadata: dict, *, request: LLMRequest | None = None) -> None:
+        trace = (request.evidence_pack or {}) if request is not None else {}
         self.audit_sink(
             {
                 "action": action,
@@ -133,7 +151,15 @@ class LLMRouter:
                 "cost_estimate": response.cost_estimate,
                 "confidence": response.confidence,
                 "degraded_mode": response.degraded_mode,
-                "metadata": metadata,
+                "metadata": {
+                    **metadata,
+                    "trace_id": trace.get("trace_id"),
+                    "root_trace_id": trace.get("root_trace_id"),
+                    "span_id": trace.get("span_id"),
+                    "parent_span_id": trace.get("parent_span_id"),
+                    "job_id": trace.get("job_id"),
+                    "artifact_id": trace.get("artifact_id"),
+                },
             }
         )
 

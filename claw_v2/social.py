@@ -17,17 +17,59 @@ class PublishResult:
 
 
 class XAdapter:
-    def __init__(self, bearer_token: str, handle: str, client: Any | None = None) -> None:
+    """X (Twitter) API v2 adapter.
+
+    Uses OAuth 1.0a (user context) for posting and OAuth 2.0 Bearer for reading.
+    """
+
+    def __init__(
+        self,
+        bearer_token: str,
+        handle: str,
+        *,
+        api_key: str | None = None,
+        api_secret: str | None = None,
+        access_token: str | None = None,
+        access_token_secret: str | None = None,
+        client: Any | None = None,
+    ) -> None:
         self.bearer_token = bearer_token
         self.handle = handle
-        self.client = client or self._default_client()
+        self.api_key = api_key
+        self.api_secret = api_secret
+        self.access_token = access_token
+        self.access_token_secret = access_token_secret
+        self._client = client
+
+    def _read_client(self) -> Any:
+        """Client for read operations (Bearer token)."""
+        if self._client is not None:
+            return self._client
+        import httpx
+        return httpx.Client(timeout=30)
+
+    def _write_session(self) -> Any:
+        """Return a requests.Session with OAuth 1.0a for write operations."""
+        if self._client is not None:
+            return self._client
+        if not all([self.api_key, self.api_secret, self.access_token, self.access_token_secret]):
+            raise ValueError(
+                "X posting requires OAuth 1.0a credentials: "
+                "api_key, api_secret, access_token, access_token_secret"
+            )
+        import requests
+        from requests_oauthlib import OAuth1
+
+        auth = OAuth1(self.api_key, self.api_secret, self.access_token, self.access_token_secret)
+        session = requests.Session()
+        session.auth = auth
+        return session
 
     def publish(self, text: str, *, media_path: Path | None = None) -> PublishResult:
-        response = self.client.post(
-            "https://api.x.com/2/tweets",
-            json={"text": text},
-            headers={"Authorization": f"Bearer {self.bearer_token}"},
-        )
+        url = "https://api.x.com/2/tweets"
+        session = self._write_session()
+        response = session.post(url, json={"text": text})
+        response.raise_for_status()
         data = response.json().get("data", {})
         return PublishResult(
             platform="x", account=self.handle, post_id=data.get("id", ""),
@@ -35,17 +77,14 @@ class XAdapter:
         )
 
     def get_engagement(self, post_id: str) -> dict:
-        response = self.client.get(
+        client = self._read_client()
+        response = client.get(
             f"https://api.x.com/2/tweets/{post_id}",
             params={"tweet.fields": "public_metrics"},
             headers={"Authorization": f"Bearer {self.bearer_token}"},
         )
         return response.json().get("data", {}).get("public_metrics", {})
 
-    @staticmethod
-    def _default_client() -> Any:
-        import httpx
-        return httpx.Client(timeout=30)
 
 
 class LinkedInAdapter:
@@ -140,3 +179,16 @@ def _load_keychain_credential(service_name: str) -> str | None:
     if result.returncode != 0:
         return None
     return result.stdout.strip()
+
+
+def x_adapter_from_keychain(handle: str = "haborpachano") -> XAdapter:
+    """Create an XAdapter with credentials loaded from macOS Keychain."""
+    bearer = _load_keychain_credential("x-bearer-token") or ""
+    return XAdapter(
+        bearer_token=bearer,
+        handle=handle,
+        api_key=_load_keychain_credential("x-api-key"),
+        api_secret=_load_keychain_credential("x-api-secret"),
+        access_token=_load_keychain_credential("x-access-token"),
+        access_token_secret=_load_keychain_credential("x-access-token-secret"),
+    )

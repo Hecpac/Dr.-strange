@@ -24,6 +24,7 @@ from claw_v2.config import AppConfig
 from claw_v2.network_proxy import DomainAllowlistEnforcer
 from claw_v2.observe import ObserveStream
 from claw_v2.sandbox import SandboxPolicy, sandbox_hook
+from claw_v2.tracing import trace_metadata
 from claw_v2.types import LLMResponse
 
 logger = logging.getLogger(__name__)
@@ -98,13 +99,21 @@ class ClaudeSDKExecutor:
                         if message.is_error:
                             raise AdapterError(message.result or "Claude SDK execution failed.")
         except Exception as exc:  # pragma: no cover - runtime integration path
+            stderr_excerpt = " | ".join(stderr_lines[-5:]).strip()
+            self._emit_runtime_error(
+                request=request,
+                query_session_id=query_session_id,
+                result_session_id=result_session_id,
+                exc=exc,
+                stderr_excerpt=stderr_excerpt,
+                partial_text=_coalesce_content(assistant_text_chunks, result_text),
+            )
             if exc.__class__.__name__ == "CLINotFoundError":
                 raise AdapterUnavailableError(
                     f"Claude CLI not found at '{self.config.claude_cli_path}'."
                 ) from exc
             if isinstance(exc, AdapterError):
                 raise
-            stderr_excerpt = " | ".join(stderr_lines[-5:]).strip()
             if stderr_excerpt:
                 logger.error("Claude CLI stderr before failure: %s", stderr_excerpt)
                 raise AdapterError(f"Claude SDK execution failed: {exc}. Claude stderr: {stderr_excerpt}") from exc
@@ -130,6 +139,7 @@ class ClaudeSDKExecutor:
                 lane=request.lane,
                 provider="anthropic",
                 model=model_name,
+                **trace_metadata(request.evidence_pack),
                 payload={
                     "cache_read_tokens": cache_read,
                     "cache_create_tokens": cache_create,
@@ -146,6 +156,36 @@ class ClaudeSDKExecutor:
             confidence=0.75 if content else 0.0,
             cost_estimate=total_cost,
             artifacts=artifacts,
+        )
+
+    def _emit_runtime_error(
+        self,
+        *,
+        request: LLMRequest,
+        query_session_id: str,
+        result_session_id: str | None,
+        exc: Exception,
+        stderr_excerpt: str,
+        partial_text: str,
+    ) -> None:
+        if self.observe is None:
+            return
+        payload = {
+            "session_id": request.session_id,
+            "query_session_id": query_session_id,
+            "result_session_id": result_session_id,
+            "error_type": exc.__class__.__name__,
+            "error": str(exc)[:1000],
+            "stderr_excerpt": stderr_excerpt[:1000],
+            "partial_text_preview": partial_text[:500],
+        }
+        self.observe.emit(
+            "llm_error",
+            lane=request.lane,
+            provider="anthropic",
+            model=request.model,
+            **trace_metadata(request.evidence_pack),
+            payload=payload,
         )
 
     def _build_options(
@@ -288,6 +328,7 @@ class ClaudeSDKExecutor:
                     lane=request.lane,
                     provider="anthropic",
                     model=request.model,
+                    **trace_metadata(request.evidence_pack),
                     payload={
                         "tool_name": input_data.get("tool_name"),
                         "tool_use_id": tool_use_id,
@@ -305,6 +346,7 @@ class ClaudeSDKExecutor:
                     lane=request.lane,
                     provider="anthropic",
                     model=request.model,
+                    **trace_metadata(request.evidence_pack),
                     payload={
                         "tool_name": input_data.get("tool_name"),
                         "tool_use_id": tool_use_id,
@@ -320,6 +362,7 @@ class ClaudeSDKExecutor:
                     lane=request.lane,
                     provider="anthropic",
                     model=request.model,
+                    **trace_metadata(request.evidence_pack),
                     payload={"session_id": input_data.get("session_id")},
                 )
             return {}
@@ -331,6 +374,7 @@ class ClaudeSDKExecutor:
                     lane=request.lane,
                     provider="anthropic",
                     model=request.model,
+                    **trace_metadata(request.evidence_pack),
                     payload={"agent_id": input_data.get("agent_id"), "tool_use_id": tool_use_id},
                 )
             return {}
@@ -342,6 +386,7 @@ class ClaudeSDKExecutor:
                     lane=request.lane,
                     provider="anthropic",
                     model=request.model,
+                    **trace_metadata(request.evidence_pack),
                     payload={"agent_id": input_data.get("agent_id"), "tool_use_id": tool_use_id},
                 )
             return {}
