@@ -63,7 +63,7 @@ class NotebookLMService:
         @contextlib.asynccontextmanager
         async def _real():
             from notebooklm import NotebookLMClient
-            async with await NotebookLMClient.from_storage() as client:
+            async with await NotebookLMClient.from_storage(timeout=120) as client:
                 yield client
 
         return _real()

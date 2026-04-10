@@ -99,7 +99,8 @@ _COMPUTER_READ_TOKENS = (
 )
 _NLM_CREATE_RE = re.compile(
     r"^\s*(?:por favor\s+)?(?:(?:cr[eé]a(?:me)?)|(?:genera(?:me)?)|(?:haz(?:me)?)|quiero|necesito)\s+"
-    r"(?:un\s+)?(?:cuaderno|notebook)(?:\s+(?:sobre|de))?\s+(.+?)\s*$",
+    r"(?:un\s+)?(?:cuaderno|notebook)(?:\s+(?:en\s+notebooklm))?"
+    r"(?:\s+(?:sobre|de(?:l)?))?\s+(.+?)\s*$",
     re.IGNORECASE,
 )
 _NLM_ARTIFACT_KINDS = {
