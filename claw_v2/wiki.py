@@ -14,7 +14,7 @@ import math
 import re
 import textwrap
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -161,12 +161,28 @@ class WikiService:
         self._update_graph_from_analysis(slug, analysis)
         self._save_embeddings()
         self._save_graph()
+
+        # Confidence scoring: auto-calculate and store in frontmatter
+        confidence = self._compute_confidence(slug)
+        summary_path = self.wiki_dir / f"{slug}.md"
+        if summary_path.exists():
+            self._set_frontmatter_field(summary_path, "confidence", str(confidence))
+
+        # Supersession: mark pages with contradicted claims
+        for sup in analysis.get("supersedes", []):
+            target_slug = _slugify(sup.get("page", ""))
+            target_path = self.wiki_dir / f"{target_slug}.md"
+            if target_path.exists():
+                self._set_frontmatter_field(target_path, "superseded_by", f"[[{slug}]]")
+                logger.info("Marked %s as superseded by %s", target_slug, slug)
+
         self._append_log("ingest", title, pages_written)
 
         return {
             "slug": slug, "raw_path": str(raw_path), "pages_written": pages_written,
             "updates": len(result.get("updates", [])), "new_pages": len(result.get("new_pages", [])),
             "entities": len(analysis.get("entities", [])), "relations": len(analysis.get("relations", [])),
+            "confidence": confidence,
         }
 
     def _ingest_analyze(self, title, content, source_type, existing_summaries, schema_text) -> dict:
@@ -192,8 +208,11 @@ class WikiService:
               "category": "best category",
               "tags": ["tag1", "tag2"],
               "pages_to_update": ["slug"],
-              "new_concepts": ["concept"]
+              "new_concepts": ["concept"],
+              "supersedes": [{{"page": "existing-slug", "claim": "what old claim is now outdated", "replacement": "what the new info says"}}]
             }}
+
+            For "supersedes": identify existing wiki pages whose claims are contradicted or made obsolete by this new source. Only flag clear factual supersessions, not minor differences.
         """)
         try:
             resp = self.router.ask(prompt, lane=self.lane, max_budget=0.25, timeout=90.0,
@@ -349,8 +368,12 @@ class WikiService:
     # Deep Lint (LLM-powered)
     # ------------------------------------------------------------------
 
-    def deep_lint(self) -> dict:
-        """LLM-powered audit: contradictions, stale content, concept gaps, research suggestions."""
+    def deep_lint(self, *, auto_fix: bool = False) -> dict:
+        """LLM-powered audit: contradictions, stale content, concept gaps, research suggestions.
+
+        Args:
+            auto_fix: When True, automatically deprecate stale pages and create stubs for gaps.
+        """
         pages = self._list_wiki_pages()
         if not pages:
             return {"contradictions": [], "stale": [], "gaps": [], "suggestions": [], "issues": 0}
@@ -439,11 +462,66 @@ class WikiService:
         suggestions = result.get("suggestions", [])
         total_issues = len(contradictions) + len(stale) + len(gaps) + structural["issues"]
 
+        # Self-curating: auto-fix stale pages and gap stubs
+        auto_fixed: list[str] = []
+        if auto_fix:
+            now = _now_iso()
+            for item in stale:
+                page_slug = _slugify(item.get("page", ""))
+                page_path = self.wiki_dir / f"{page_slug}.md"
+                if page_path.exists():
+                    self._set_frontmatter_field(page_path, "deprecated", "true")
+                    auto_fixed.append(f"deprecated:{page_slug}")
+
+            for gap in gaps:
+                gap_slug = _slugify(gap.get("topic", ""))
+                if not gap_slug:
+                    continue
+                gap_path = self.wiki_dir / f"{gap_slug}.md"
+                if not gap_path.exists():
+                    mentioned = ", ".join(f"[[{s}]]" for s in gap.get("mentioned_in", []))
+                    stub = (
+                        f"---\ntitle: {gap.get('topic', gap_slug)}\n"
+                        f"tags: [stub, gap]\ncategory: Research\nsources: []\n"
+                        f"created: {now}\nupdated: {now}\nconfidence: 0.1\n---\n\n"
+                        f"# {gap.get('topic', gap_slug)}\n\n"
+                        f"*Stub — this page was auto-created by deep_lint.*\n\n"
+                        f"{gap.get('description', '')}\n\n"
+                        f"Mentioned in: {mentioned}\n"
+                    )
+                    gap_path.write_text(stub, encoding="utf-8")
+                    self._index_page_embedding(gap_slug, stub)
+                    self._update_index("Research", f"- [[{gap_slug}]] — {gap.get('topic', '')} (stub)")
+                    auto_fixed.append(f"stub:{gap_slug}")
+
+            if auto_fixed:
+                self._save_embeddings()
+
+            # Auto-fill: enrich stubs with synthesized content from existing pages
+            for fix in auto_fixed:
+                if fix.startswith("stub:"):
+                    stub_slug = fix[5:]
+                    try:
+                        answer = self.query(
+                            f"¿Qué información tenemos sobre {stub_slug.replace('-', ' ')}?",
+                            archive=False, token_budget=3000,
+                        )
+                        if answer and len(answer) > 100:
+                            stub_path = self.wiki_dir / f"{stub_slug}.md"
+                            if stub_path.exists():
+                                text = stub_path.read_text(encoding="utf-8")
+                                text += f"\n\n## Síntesis automática\n\n{answer}\n"
+                                stub_path.write_text(text, encoding="utf-8")
+                                self._index_page_embedding(stub_slug, text)
+                                self._set_frontmatter_field(stub_path, "confidence", "0.3")
+                    except Exception:
+                        logger.debug("Auto-fill failed for stub %s", stub_slug, exc_info=True)
+
         self._append_log(
             "deep_lint",
             f"pages={len(pages)} contradictions={len(contradictions)} stale={len(stale)} "
-            f"gaps={len(gaps)} suggestions={len(suggestions)}",
-            0,
+            f"gaps={len(gaps)} suggestions={len(suggestions)} auto_fixed={len(auto_fixed)}",
+            len(auto_fixed),
         )
 
         return {
@@ -453,6 +531,7 @@ class WikiService:
             "gaps": gaps,
             "suggestions": suggestions,
             "issues": total_issues,
+            "auto_fixed": auto_fixed,
         }
 
     # ------------------------------------------------------------------
@@ -519,6 +598,110 @@ class WikiService:
         return {"slug": slug, "removed": removed}
 
     # ------------------------------------------------------------------
+    # Confidence & time decay (Karpathy v2 upgrades)
+    # ------------------------------------------------------------------
+
+    def recompute_confidence(self) -> dict:
+        """Recalculate confidence scores for all wiki pages. Designed for periodic scheduling."""
+        pages = self._list_wiki_pages()
+        updated = 0
+        for page in pages:
+            slug = page.stem
+            score = self._compute_confidence(slug)
+            self._set_frontmatter_field(page, "confidence", str(score))
+            updated += 1
+        self._append_log("recompute_confidence", f"pages={updated}", updated)
+        return {"pages_updated": updated}
+
+    def _extract_updated_date(self, page: Path) -> datetime | None:
+        """Parse the `updated:` field from frontmatter."""
+        try:
+            text = page.read_text(encoding="utf-8")[:600]
+            m = _FRONTMATTER_RE.match(text)
+            if m:
+                for line in m.group(1).splitlines():
+                    if line.strip().startswith("updated:"):
+                        val = line.split(":", 1)[1].strip().strip('"').strip("'")
+                        return datetime.fromisoformat(val)
+        except Exception:
+            pass
+        return None
+
+    def _compute_confidence(self, slug: str) -> float:
+        """Auto-calculate confidence score (0.0-1.0) based on source count, inbound links, and recency."""
+        score = 0.3  # base
+
+        # Source count: more edges referencing this slug = higher confidence
+        inbound = sum(
+            1 for edges in self._graph.values()
+            for e in edges if e.get("target") == slug
+        )
+        score += min(inbound * 0.1, 0.3)  # cap at 0.3
+
+        # Inbound wikilinks from other pages
+        page_path = self.wiki_dir / f"{slug}.md"
+        link_count = 0
+        for p in self._list_wiki_pages()[:40]:
+            if p.stem == slug:
+                continue
+            try:
+                if f"[[{slug}]]" in p.read_text(encoding="utf-8")[:2000]:
+                    link_count += 1
+            except Exception:
+                pass
+        score += min(link_count * 0.05, 0.2)  # cap at 0.2
+
+        # Recency bonus
+        updated = self._extract_updated_date(page_path) if page_path.exists() else None
+        if updated:
+            days_old = (datetime.now(timezone.utc) - updated).days
+            if days_old < 7:
+                score += 0.2
+            elif days_old < 30:
+                score += 0.1
+            elif days_old > 90:
+                score -= 0.1
+
+        return max(0.0, min(1.0, round(score, 2)))
+
+    def _time_decay(self, page: Path) -> float:
+        """Return a decay multiplier (0.5-1.0) based on page age.
+
+        Pages tagged 'evergreen' are exempt from decay (always 1.0).
+        """
+        try:
+            text = page.read_text(encoding="utf-8")[:600]
+            m = _FRONTMATTER_RE.match(text)
+            if m and "evergreen" in m.group(1):
+                return 1.0
+        except Exception:
+            pass
+        updated = self._extract_updated_date(page)
+        if not updated:
+            return 0.8
+        days_old = max(0, (datetime.now(timezone.utc) - updated).days)
+        return max(0.5, 1.0 / (1 + days_old / 180))
+
+    def _set_frontmatter_field(self, page: Path, field: str, value: str) -> None:
+        """Update or insert a single field in a page's YAML frontmatter."""
+        try:
+            text = page.read_text(encoding="utf-8")
+        except Exception:
+            return
+        m = _FRONTMATTER_RE.match(text)
+        if not m:
+            return
+        fm = m.group(1)
+        body = text[m.end():]
+        # Update or append field
+        field_re = re.compile(rf"^{re.escape(field)}:.*$", re.MULTILINE)
+        if field_re.search(fm):
+            fm = field_re.sub(f"{field}: {value}", fm)
+        else:
+            fm += f"\n{field}: {value}"
+        page.write_text(f"---\n{fm}\n---{body}", encoding="utf-8")
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
@@ -571,6 +754,8 @@ class WikiService:
                 self._save_embeddings()
             sim = _cosine(query_vec, page_vec)
             if sim > 0.15:
+                # Apply time decay: newer pages rank higher
+                sim *= self._time_decay(page)
                 scored[slug] = (sim, page)
 
         # Graph expansion: boost neighbors of top hits

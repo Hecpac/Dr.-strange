@@ -249,7 +249,7 @@ class ToolRegistry:
                 raise RuntimeError("WikiService not configured")
             deep = args.get("deep", False)
             if deep:
-                return wiki.deep_lint()  # type: ignore[union-attr]
+                return wiki.deep_lint(auto_fix=bool(args.get("auto_fix", False)))  # type: ignore[union-attr]
             return wiki.lint()  # type: ignore[union-attr]
 
         registry.register(
@@ -263,7 +263,7 @@ class ToolRegistry:
         registry.register(
             ToolDefinition(
                 name="WikiLint",
-                description="Audit wiki health. Args: deep (bool) for LLM-powered analysis of contradictions, stale content, and gaps.",
+                description="Audit wiki health. Args: deep (bool) for LLM-powered analysis, auto_fix (bool) to auto-deprecate stale pages and create gap stubs.",
                 allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["WikiLint"],
                 handler=wiki_lint,
             )

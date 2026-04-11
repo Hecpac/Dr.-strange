@@ -325,6 +325,7 @@ def build_runtime(
     from claw_v2.wiki import WikiService
     wiki = WikiService(router=router)
     scheduler.register(ScheduledJob(name="wiki_lint", interval_seconds=86400, handler=wiki.lint))
+    scheduler.register(ScheduledJob(name="wiki_confidence", interval_seconds=604800, handler=wiki.recompute_confidence))
     daemon = ClawDaemon(scheduler=scheduler, heartbeat=heartbeat, observe=observe)
     browser = DevBrowserService(
         dev_browser_path=config.dev_browser_path,
