@@ -96,6 +96,11 @@ class InjectContextTests(unittest.TestCase):
         self.assertIn("write code", result[0].instruction)
         self.assertEqual(result[0].name, "impl1")
 
+    def test_preserves_assigned_agent(self) -> None:
+        tasks = [WorkerTask(name="impl1", instruction="write code", assigned_agent="hex")]
+        result = CoordinatorService._inject_context(tasks, "the plan")
+        self.assertEqual(result[0].assigned_agent, "hex")
+
 
 class FullRunTests(unittest.TestCase):
     def test_research_only_run(self) -> None:

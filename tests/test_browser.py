@@ -136,6 +136,12 @@ class TestBrowserCli(unittest.TestCase):
 
 
 class TestChromeCDP(unittest.TestCase):
+    def test_connect_to_chrome_requires_playwright_dependency(self) -> None:
+        with mock.patch("claw_v2.browser.sync_playwright", None):
+            svc = DevBrowserService()
+            with self.assertRaises(BrowserError):
+                svc.connect_to_chrome()
+
     def test_connect_to_chrome_returns_page_list(self) -> None:
         mock_page_1 = mock.MagicMock()
         mock_page_1.url = "https://ads.google.com/campaigns"

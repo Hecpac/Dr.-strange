@@ -246,6 +246,7 @@ class CoordinatorService:
                 name=t.name,
                 instruction=f"## Context from coordinator\n{synthesis}\n\n## Your task\n{t.instruction}",
                 lane=t.lane,
+                assigned_agent=t.assigned_agent,
             )
             for t in tasks
         ]

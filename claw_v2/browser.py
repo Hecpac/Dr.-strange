@@ -8,7 +8,10 @@ from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from playwright.sync_api import sync_playwright
+try:
+    from playwright.sync_api import sync_playwright
+except ModuleNotFoundError:  # pragma: no cover - handled by runtime guard
+    sync_playwright = None
 
 
 class BrowserError(Exception):
@@ -195,7 +198,7 @@ console.log(JSON.stringify({{
         return _parse_browse_result(result, action_name="interact")
 
     def connect_to_chrome(self, *, cdp_url: str = "http://localhost:9250") -> list[dict[str, str]]:
-        with sync_playwright() as pw:
+        with _require_sync_playwright() as pw:
             browser = _cdp_connect(pw, cdp_url)
             context = browser.contexts[0] if browser.contexts else None
             if context is None:
@@ -217,7 +220,7 @@ console.log(JSON.stringify({{
         page_title: str | None = None,
         page_url_pattern: str | None = None,
     ) -> BrowseResult:
-        with sync_playwright() as pw:
+        with _require_sync_playwright() as pw:
             browser = _cdp_connect(pw, cdp_url)
             context = browser.contexts[0]
             page = _select_cdp_page(context, page_index=page_index, page_title=page_title, page_url_pattern=page_url_pattern)
@@ -241,7 +244,7 @@ console.log(JSON.stringify({{
         safe_name = Path(name).name  # strip directory components
         if not safe_name:
             safe_name = "chrome.png"
-        with sync_playwright() as pw:
+        with _require_sync_playwright() as pw:
             browser = _cdp_connect(pw, cdp_url)
             context = browser.contexts[0]
             page = _select_cdp_page(context, page_index=page_index, page_title=page_title, page_url_pattern=page_url_pattern)
@@ -284,7 +287,7 @@ console.log(JSON.stringify({{
         session_id = str(session["id"])
         connect_url = str(session["connectUrl"])
         try:
-            with sync_playwright() as pw:
+            with _require_sync_playwright() as pw:
                 browser = pw.chromium.connect_over_cdp(connect_url, timeout=10_000)
                 context = browser.contexts[0] if browser.contexts else None
                 if context is None:
@@ -350,6 +353,14 @@ _CDP_MAX_RETRIES = 2
 _JS_HEAVY_DOMAINS = ("x.com", "twitter.com", "instagram.com", "facebook.com", "linkedin.com", "reddit.com")
 
 _CONTENT_LIMIT = 8000
+
+
+def _require_sync_playwright():
+    if sync_playwright is None:
+        raise BrowserError(
+            "playwright is not installed. Install the 'playwright' Python package to enable CDP/browserbase flows."
+        )
+    return sync_playwright()
 
 
 def _cdp_connect(pw, cdp_url: str, *, retries: int = _CDP_MAX_RETRIES):
