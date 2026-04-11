@@ -622,7 +622,10 @@ class WikiService:
                 for line in m.group(1).splitlines():
                     if line.strip().startswith("updated:"):
                         val = line.split(":", 1)[1].strip().strip('"').strip("'")
-                        return datetime.fromisoformat(val)
+                        parsed = datetime.fromisoformat(val)
+                        if parsed.tzinfo is None:
+                            parsed = parsed.replace(tzinfo=timezone.utc)
+                        return parsed
         except Exception:
             pass
         return None

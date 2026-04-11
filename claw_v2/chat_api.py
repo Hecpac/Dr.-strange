@@ -36,17 +36,35 @@ class LocalChatAPI:
         bot_service: BotService,
         default_user_id: str | None = None,
         observe: ObserveStream | None = None,
+        auth_token: str | None = None,
     ) -> None:
         self._bot_service = bot_service
         self._default_user_id = default_user_id or bot_service.allowed_user_id or "local-user"
         self._observe = observe or getattr(bot_service, "observe", None)
+        self._auth_token = auth_token.strip() if isinstance(auth_token, str) and auth_token.strip() else None
 
-    def handle_http(self, *, method: str, path: str, body: bytes | None = None) -> tuple[int, dict[str, str], bytes]:
-        response = self.dispatch(method=method, path=path, body=body)
+    def handle_http(
+        self,
+        *,
+        method: str,
+        path: str,
+        body: bytes | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[int, dict[str, str], bytes]:
+        response = self.dispatch(method=method, path=path, body=body, headers=headers)
         return response.to_http()
 
-    def dispatch(self, *, method: str, path: str, body: bytes | None = None) -> ChatAPIResponse:
+    def dispatch(
+        self,
+        *,
+        method: str,
+        path: str,
+        body: bytes | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> ChatAPIResponse:
         normalized_path = path.split("?", 1)[0]
+        if normalized_path.startswith("/api/") and not self._is_authorized(headers):
+            return ChatAPIResponse(status_code=401, payload={"error": "unauthorized"})
         if normalized_path == "/api/traces":
             return self._dispatch_traces(method=method, path=path)
         if normalized_path.startswith("/api/traces/"):
@@ -146,16 +164,48 @@ class LocalChatAPI:
     def wsgi_app(self, environ: dict[str, Any], start_response: StartResponse) -> list[bytes]:
         method = str(environ.get("REQUEST_METHOD", "GET"))
         path = str(environ.get("PATH_INFO", "/"))
+        headers = self._headers_from_environ(environ)
         try:
             content_length = int(environ.get("CONTENT_LENGTH") or 0)
         except (TypeError, ValueError):
             content_length = 0
         body_stream = environ.get("wsgi.input")
         body = body_stream.read(content_length) if body_stream is not None and content_length > 0 else b""
-        status_code, headers, response_body = self.handle_http(method=method, path=path, body=body)
+        status_code, response_headers, response_body = self.handle_http(
+            method=method,
+            path=path,
+            body=body,
+            headers=headers,
+        )
         status_line = f"{status_code} {self._reason_phrase(status_code)}"
-        start_response(status_line, list(headers.items()))
+        start_response(status_line, list(response_headers.items()))
         return [response_body]
+
+    def _is_authorized(self, headers: dict[str, str] | None) -> bool:
+        if self._auth_token is None:
+            return True
+        normalized = {key.lower(): value for key, value in (headers or {}).items()}
+        direct = normalized.get("x-chat-token") or normalized.get("x-web-chat-token")
+        if direct == self._auth_token:
+            return True
+        auth = normalized.get("authorization", "")
+        if auth.startswith("Bearer ") and auth[7:].strip() == self._auth_token:
+            return True
+        return False
+
+    @staticmethod
+    def _headers_from_environ(environ: dict[str, Any]) -> dict[str, str]:
+        headers: dict[str, str] = {}
+        for key, value in environ.items():
+            if not isinstance(value, str):
+                continue
+            if key.startswith("HTTP_"):
+                header_name = key[5:].replace("_", "-").title()
+                headers[header_name] = value
+            elif key in {"CONTENT_TYPE", "CONTENT_LENGTH"}:
+                header_name = key.replace("_", "-").title()
+                headers[header_name] = value
+        return headers
 
     def _decode_json(self, body: bytes | None) -> JsonDict:
         raw = (body or b"").strip()
@@ -191,6 +241,7 @@ class LocalChatAPI:
     def _reason_phrase(status_code: int) -> str:
         mapping = {
             200: "OK",
+            401: "Unauthorized",
             400: "Bad Request",
             404: "Not Found",
             405: "Method Not Allowed",

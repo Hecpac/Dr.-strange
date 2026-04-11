@@ -6,6 +6,22 @@ const traceDetail = document.getElementById("trace-detail");
 const refreshTracesButton = document.getElementById("refresh-traces");
 const sessionId = "mac-main";
 
+function resolveAuthToken() {
+  const params = new URLSearchParams(window.location.search);
+  const queryToken = params.get("token");
+  if (queryToken) {
+    window.localStorage.setItem("claw.webChatToken", queryToken);
+    return queryToken;
+  }
+  return window.localStorage.getItem("claw.webChatToken") || "";
+}
+
+function authHeaders(base = {}) {
+  const token = resolveAuthToken();
+  if (!token) return base;
+  return {...base, "X-Chat-Token": token};
+}
+
 function append(role, text) {
   const item = document.createElement("article");
   item.className = `message ${role}`;
@@ -25,7 +41,7 @@ form.addEventListener("submit", async (event) => {
   try {
     const response = await fetch("/api/chat", {
       method: "POST",
-      headers: {"Content-Type": "application/json"},
+      headers: authHeaders({"Content-Type": "application/json"}),
       body: JSON.stringify({session_id: sessionId, text}),
     });
     const payload = await response.json();
@@ -38,7 +54,7 @@ form.addEventListener("submit", async (event) => {
 async function loadTraces() {
   traceList.innerHTML = "";
   try {
-    const response = await fetch("/api/traces?limit=10");
+    const response = await fetch("/api/traces?limit=10", {headers: authHeaders()});
     const payload = await response.json();
     const traces = payload.traces || [];
     if (!traces.length) {
@@ -61,7 +77,7 @@ async function loadTraces() {
 async function loadTraceDetail(traceId) {
   traceDetail.textContent = "Loading...";
   try {
-    const response = await fetch(`/api/traces/${encodeURIComponent(traceId)}`);
+    const response = await fetch(`/api/traces/${encodeURIComponent(traceId)}`, {headers: authHeaders()});
     const payload = await response.json();
     traceDetail.textContent = JSON.stringify(payload, null, 2);
   } catch (error) {

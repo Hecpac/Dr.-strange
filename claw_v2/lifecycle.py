@@ -74,6 +74,7 @@ async def run() -> int:
             chat_api=LocalChatAPI(
                 bot_service=runtime.bot,
                 default_user_id=runtime.config.telegram_allowed_user_id,
+                auth_token=runtime.config.web_chat_token,
             ),
             host=runtime.config.web_chat_host,
             port=runtime.config.web_chat_port,

@@ -1755,6 +1755,11 @@ class BotService:
                 return _BrainShortcut(text)
             if "chrome" in normalized and (any(token in normalized for token in _BROWSE_SHORTCUT_TOKENS) or _looks_like_standalone_url(text, extracted_url)):
                 return self._chrome_browse_response(extracted_url, session_id=session_id)
+            if normalized_url is not None and (
+                _is_local_url(normalized_url)
+                or (_has_url_query(normalized_url) and "://" not in extracted_url)
+            ):
+                return self._browse_response(extracted_url, session_id=session_id)
             if any(token in normalized for token in _LINK_ANALYSIS_SHORTCUT_TOKENS) or _looks_like_standalone_url(text, extracted_url):
                 return self._link_review_shortcut(text, extracted_url, session_id=session_id)
             if any(token in normalized for token in _BROWSE_SHORTCUT_TOKENS) or _looks_like_standalone_url(text, extracted_url):
@@ -2374,6 +2379,21 @@ def _normalize_url(value: str) -> str:
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError("invalid url")
     return candidate
+
+
+def _has_url_query(url: str) -> bool:
+    try:
+        return bool(urlsplit(url).query)
+    except Exception:
+        return False
+
+
+def _is_local_url(url: str) -> bool:
+    try:
+        host = urlsplit(url).hostname or ""
+    except Exception:
+        return False
+    return host in {"localhost", "127.0.0.1", "0.0.0.0"} or host.endswith(".local")
 
 
 def _extract_title_from_url(url: str) -> str:

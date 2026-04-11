@@ -108,6 +108,40 @@ class LocalChatAPITests(unittest.TestCase):
         payload = json.loads(body.decode("utf-8"))
         self.assertEqual(payload["allowed"], ["POST"])
 
+    def test_rejects_missing_auth_token_when_configured(self) -> None:
+        bot_service = MagicMock()
+        bot_service.allowed_user_id = "123"
+        api = LocalChatAPI(bot_service=bot_service, auth_token="secret-token")
+
+        status_code, _, body = api.handle_http(
+            method="POST",
+            path="/api/chat",
+            body=json.dumps({"session_id": "mac-main", "text": "hola"}).encode("utf-8"),
+        )
+
+        self.assertEqual(status_code, 401)
+        payload = json.loads(body.decode("utf-8"))
+        self.assertEqual(payload["error"], "unauthorized")
+        bot_service.handle_text.assert_not_called()
+
+    def test_accepts_auth_token_header_when_configured(self) -> None:
+        bot_service = MagicMock()
+        bot_service.allowed_user_id = "123"
+        bot_service.handle_text.return_value = "reply text"
+        api = LocalChatAPI(bot_service=bot_service, auth_token="secret-token")
+
+        status_code, _, body = api.handle_http(
+            method="POST",
+            path="/api/chat",
+            body=json.dumps({"session_id": "mac-main", "text": "hola"}).encode("utf-8"),
+            headers={"X-Chat-Token": "secret-token"},
+        )
+
+        self.assertEqual(status_code, 200)
+        payload = json.loads(body.decode("utf-8"))
+        self.assertEqual(payload["reply"], "reply text")
+        bot_service.handle_text.assert_called_once()
+
     def test_wsgi_app_wraps_http_handler(self) -> None:
         bot_service = MagicMock()
         bot_service.allowed_user_id = "123"
@@ -117,6 +151,31 @@ class LocalChatAPITests(unittest.TestCase):
             "REQUEST_METHOD": "POST",
             "PATH_INFO": "/api/chat",
             "CONTENT_LENGTH": "43",
+            "wsgi.input": io.BytesIO(b'{"session_id":"mac-main","text":"hola"}'),
+        }
+        captured: dict[str, object] = {}
+
+        def start_response(status: str, headers: list[tuple[str, str]]) -> None:
+            captured["status"] = status
+            captured["headers"] = headers
+
+        chunks = api.wsgi_app(environ, start_response)
+
+        self.assertEqual(captured["status"], "200 OK")
+        body = b"".join(chunks)
+        payload = json.loads(body.decode("utf-8"))
+        self.assertEqual(payload["reply"], "reply text")
+
+    def test_wsgi_app_reads_auth_header(self) -> None:
+        bot_service = MagicMock()
+        bot_service.allowed_user_id = "123"
+        bot_service.handle_text.return_value = "reply text"
+        api = LocalChatAPI(bot_service=bot_service, auth_token="secret-token")
+        environ = {
+            "REQUEST_METHOD": "POST",
+            "PATH_INFO": "/api/chat",
+            "CONTENT_LENGTH": "43",
+            "HTTP_X_CHAT_TOKEN": "secret-token",
             "wsgi.input": io.BytesIO(b'{"session_id":"mac-main","text":"hola"}'),
         }
         captured: dict[str, object] = {}

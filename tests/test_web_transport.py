@@ -75,3 +75,32 @@ class WebTransportTests(unittest.IsolatedAsyncioTestCase):
         await transport.start()
         await transport.stop()
         await transport.stop()
+
+    async def test_api_requires_token_when_chat_api_is_protected(self) -> None:
+        transport = WebTransport(
+            chat_api=LocalChatAPI(bot_service=_StubBotService(), auth_token="secret-token"),
+            host="127.0.0.1",
+            port=0,
+        )
+        await transport.start()
+        try:
+            unauthorized = Request(
+                f"{transport.base_url}/api/chat",
+                method="POST",
+                data=json.dumps({"session_id": "mac-main", "text": "hola"}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+            with self.assertRaises(Exception):
+                urlopen(unauthorized)
+
+            authorized = Request(
+                f"{transport.base_url}/api/chat",
+                method="POST",
+                data=json.dumps({"session_id": "mac-main", "text": "hola"}).encode("utf-8"),
+                headers={"Content-Type": "application/json", "X-Chat-Token": "secret-token"},
+            )
+            with urlopen(authorized) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(payload["reply"], "reply:123:mac-main:hola")
+        finally:
+            await transport.stop()
