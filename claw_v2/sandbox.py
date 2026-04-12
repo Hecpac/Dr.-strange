@@ -102,14 +102,12 @@ def sandbox_hook(
             return SandboxDecision(False, violation)
         tokens = shlex.split(command) if command else []
         for token in tokens:
-            if token.startswith("/") and not is_within_allowed(Path(token), policy):
+            if "/" in token and not is_within_allowed(Path(token), policy):
                 return SandboxDecision(False, "command references path outside allowed boundaries")
         return SandboxDecision(True)
 
     if tool_name in {"WebSearch", "WebFetch"} and network_enforcer is not None:
         url = tool_input.get("url") or tool_input.get("target") or ""
-        domains = tool_input.get("allowed_domains") or []
         if url:
-            network_policy = NetworkPolicy(allowed_domains=domains or ["*"], blocked_domains=[])
-            return network_enforcer.enforce_url(url, policy=network_policy, actor=actor)
+            return network_enforcer.enforce_url(url, policy=policy.network_policy if hasattr(policy, "network_policy") and isinstance(policy.network_policy, NetworkPolicy) else NetworkPolicy(allowed_domains=[], blocked_domains=[]), actor=actor)
     return SandboxDecision(True)

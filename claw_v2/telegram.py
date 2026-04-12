@@ -462,7 +462,7 @@ class TelegramTransport:
 
     def _is_authorized(self, update: Update) -> bool:
         if self._allowed_user_id is None:
-            return True
+            return False
         return str(update.effective_user.id) == self._allowed_user_id
 
     def _is_rate_limited(self, user_id: str) -> bool:

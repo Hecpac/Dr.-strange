@@ -24,7 +24,10 @@ class DomainAllowlistEnforcer:
     def enforce_url(self, url: str, *, policy: NetworkPolicy, actor: str = "default") -> SandboxDecision:
         if len(url) > policy.max_url_length:
             return SandboxDecision(False, "URL too long")
-        host = urlparse(url).netloc.lower()
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return SandboxDecision(False, f"Blocked scheme: {parsed.scheme or 'empty'}")
+        host = parsed.netloc.lower()
         if not host:
             return SandboxDecision(False, "Missing domain")
         if any(self._matches(host, blocked) for blocked in policy.blocked_domains):

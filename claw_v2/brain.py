@@ -219,10 +219,11 @@ class BrainService:
                 logger.debug("Wiki query failed", exc_info=True)
                 answer = ""
             if answer:
-                return "\n".join(["# Wiki answer", answer[:1200]])
-        lines = ["# Wiki context"]
+                return f"<wiki-context>\n# Wiki answer\n{answer[:1200]}\n</wiki-context>"
+        lines = ["<wiki-context>", "# Wiki context"]
         for r in results:
             lines.append(f"- **{r['title']}** (sim={r['similarity']}): {r['snippet'][:150]}")
+        lines.append("</wiki-context>")
         return "\n".join(lines)
 
     def _build_catchup(self, session_id: str, *, after_id: int | None) -> str:
@@ -379,6 +380,14 @@ class BrainService:
             action=action,
             create_approval=not approval_override,
         )
+
+        # Re-check approval status after LLM verification (prevent TOCTOU)
+        if approval_override and approval_id is not None and self.approvals is not None:
+            try:
+                approval_status = self.approvals.status(approval_id)
+            except FileNotFoundError:
+                approval_status = "missing"
+            approval_override = approval_status == "approved"
 
         # Pre-execution pause: caller can inspect verification and abort
         if pre_check is not None and not pre_check(verification):
@@ -583,11 +592,16 @@ def _try_parse_json_object(content: str) -> dict | None:
 
 
 def _first_json_object(content: str) -> str | None:
+    import json as _json
     start = content.find("{")
-    end = content.rfind("}")
-    if start == -1 or end == -1 or end <= start:
+    if start == -1:
         return None
-    return content[start : end + 1]
+    try:
+        decoder = _json.JSONDecoder()
+        obj, _ = decoder.raw_decode(content, start)
+        return _json.dumps(obj)
+    except _json.JSONDecodeError:
+        return None
 
 
 def _normalize_recommendation(value: object) -> str:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections import Counter
 from dataclasses import asdict, dataclass
 
@@ -34,25 +35,16 @@ class QuarantinedExtraction:
 
 
 def sanitize(content: str, source: str, target_agent_class: AgentClass) -> SanitizedContent:
-    lowered = content.lower()
+    normalized = unicodedata.normalize("NFKD", content)
+    lowered = normalized.lower()
     matches = [pattern for pattern in SUSPICIOUS_PATTERNS if pattern in lowered]
-    if len(matches) >= 2:
+    if matches:
         return SanitizedContent(
             verdict="malicious",
             content="",
             source=source,
             target_agent_class=target_agent_class,
-            reason="multiple suspicious patterns detected",
-        )
-    if len(matches) == 1:
-        extraction = extract_structured(content, source_url=None, reason=matches[0])
-        return SanitizedContent(
-            verdict="unsure",
-            content=f"[EXTERNAL:{source}] quarantined",
-            source=source,
-            target_agent_class=target_agent_class,
-            reason=matches[0],
-            structured_data=asdict(extraction),
+            reason=f"suspicious pattern: {matches[0]}",
         )
     cleaned = re.sub(r"\s+", " ", content).strip()
     return SanitizedContent(

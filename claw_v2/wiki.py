@@ -94,6 +94,7 @@ class WikiService:
         self.raw_dir.mkdir(parents=True, exist_ok=True)
         self.wiki_dir.mkdir(parents=True, exist_ok=True)
         # In-memory indices
+        self._lock = threading.Lock()
         self._embeddings: dict[str, list[float]] = self._load_embeddings()
         self._graph: dict[str, list[dict]] = self._load_graph()
 
@@ -742,6 +743,7 @@ class WikiService:
         """Find wiki pages relevant to a question using semantic similarity + graph expansion."""
         query_vec = _embed(question)
         scored: dict[str, tuple[float, Path]] = {}
+        embeddings_dirty = False
         for page in self._list_wiki_pages():
             slug = page.stem
             page_vec = self._embeddings.get(slug)
@@ -754,12 +756,15 @@ class WikiService:
                     pass
                 page_vec = _embed(text)
                 self._embeddings[slug] = page_vec
-                self._save_embeddings()
+                embeddings_dirty = True
             sim = _cosine(query_vec, page_vec)
             if sim > 0.15:
                 # Apply time decay: newer pages rank higher
                 sim *= self._time_decay(page)
                 scored[slug] = (sim, page)
+
+        if embeddings_dirty:
+            self._save_embeddings()
 
         # Graph expansion: boost neighbors of top hits
         top_slugs = sorted(scored, key=lambda s: scored[s][0], reverse=True)[:3]
@@ -783,6 +788,7 @@ class WikiService:
         """Semantic search across wiki pages. Returns [{slug, title, similarity, snippet}]."""
         query_vec = _embed(query)
         scored: list[tuple[float, Path]] = []
+        embeddings_dirty = False
         for page in self._list_wiki_pages():
             slug = page.stem
             page_vec = self._embeddings.get(slug)
@@ -794,10 +800,11 @@ class WikiService:
                     pass
                 page_vec = _embed(text)
                 self._embeddings[slug] = page_vec
+                embeddings_dirty = True
             sim = _cosine(query_vec, page_vec)
             if sim > 0.15:
                 scored.append((sim, page))
-        if scored:
+        if embeddings_dirty:
             self._save_embeddings()
         scored.sort(key=lambda x: x[0], reverse=True)
         results = []
@@ -827,12 +834,14 @@ class WikiService:
         return {}
 
     def _save_embeddings(self) -> None:
-        try:
-            self._embeddings_path.write_text(
-                json.dumps(self._embeddings), encoding="utf-8"
-            )
-        except Exception:
-            logger.warning("Failed to save wiki embeddings")
+        with self._lock:
+            try:
+                import os
+                tmp = self._embeddings_path.with_suffix(".tmp")
+                tmp.write_text(json.dumps(self._embeddings), encoding="utf-8")
+                os.replace(tmp, self._embeddings_path)
+            except Exception:
+                logger.warning("Failed to save wiki embeddings")
 
     # ------------------------------------------------------------------
     # Knowledge Graph persistence
@@ -847,12 +856,14 @@ class WikiService:
         return {}
 
     def _save_graph(self) -> None:
-        try:
-            self._graph_path.write_text(
-                json.dumps(self._graph, ensure_ascii=False, indent=1), encoding="utf-8"
-            )
-        except Exception:
-            logger.warning("Failed to save wiki graph")
+        with self._lock:
+            try:
+                import os
+                tmp = self._graph_path.with_suffix(".tmp")
+                tmp.write_text(json.dumps(self._graph, ensure_ascii=False, indent=1), encoding="utf-8")
+                os.replace(tmp, self._graph_path)
+            except Exception:
+                logger.warning("Failed to save wiki graph")
 
     def _update_graph_from_analysis(self, slug: str, analysis: dict) -> None:
         """Merge entities and relations from ingest analysis into the graph."""

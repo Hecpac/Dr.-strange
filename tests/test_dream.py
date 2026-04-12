@@ -96,7 +96,8 @@ class ConsolidateTests(unittest.TestCase):
         facts = [{"key": "old_fact", "value": "stale", "confidence": 0.5, "source": "user"}]
         result = svc._consolidate(facts, [])
         self.assertEqual(result, 2)
-        self.assertEqual(memory.store_fact.call_count, 2)
+        memory.delete_fact.assert_called_once_with("old_fact")
+        self.assertEqual(memory.store_fact.call_count, 1)
         # Verify router.ask was called with evidence_pack
         call_kwargs = router.ask.call_args
         self.assertIn("evidence_pack", call_kwargs.kwargs)
@@ -143,8 +144,8 @@ class PruneTests(unittest.TestCase):
         ]
         pruned = svc._prune()
         self.assertEqual(pruned, 1)
-        stored_key = memory.store_fact.call_args[0][0]
-        self.assertEqual(stored_key, "temp")
+        deleted_key = memory.delete_fact.call_args[0][0]
+        self.assertEqual(deleted_key, "temp")
 
 
 class RunTests(unittest.TestCase):

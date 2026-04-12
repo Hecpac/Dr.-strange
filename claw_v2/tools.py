@@ -104,19 +104,26 @@ class ToolRegistry:
         wiki: object | None = None,
     ) -> "ToolRegistry":
         registry = cls(workspace_root=workspace_root, memory=memory)
+        _ws = Path(workspace_root).resolve()
+
+        def _safe_path(raw: str | Path) -> Path:
+            resolved = Path(raw).resolve()
+            if not resolved.is_relative_to(_ws):
+                raise PermissionError(f"path {raw} is outside workspace root")
+            return resolved
 
         def read_file(args: dict) -> dict:
-            path = Path(args["path"])
+            path = _safe_path(args["path"])
             return {"path": str(path), "content": path.read_text(encoding="utf-8")}
 
         def write_file(args: dict) -> dict:
-            path = Path(args["path"])
+            path = _safe_path(args["path"])
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(args.get("content", ""), encoding="utf-8")
             return {"path": str(path), "written": len(args.get("content", ""))}
 
         def edit_file(args: dict) -> dict:
-            path = Path(args["path"])
+            path = _safe_path(args["path"])
             content = path.read_text(encoding="utf-8")
             old_text = args.get("old_text", "")
             new_text = args.get("new_text", "")
@@ -127,13 +134,13 @@ class ToolRegistry:
             return {"path": str(path), "replaced": True}
 
         def glob_files(args: dict) -> dict:
-            root = Path(args.get("root", registry.workspace_root))
+            root = _safe_path(args.get("root", registry.workspace_root))
             pattern = args.get("pattern", "**/*")
             matches = [str(path) for path in root.glob(pattern)]
             return {"matches": matches[:200]}
 
         def grep_files(args: dict) -> dict:
-            root = Path(args.get("root", "."))
+            root = _safe_path(args.get("root", registry.workspace_root))
             needle = args.get("query", "")
             matches: list[dict] = []
             for path in root.rglob("*"):

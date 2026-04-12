@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Protocol
 
+
+logger = logging.getLogger(__name__)
 
 JobHandler = Callable[[], object]
 
@@ -49,10 +52,16 @@ class CronScheduler:
         for job in self._jobs.values():
             if job.runs > 0 and current - job.last_run_at < job.interval_seconds:
                 continue
-            job.handler()
+            try:
+                job.handler()
+            except Exception:
+                logger.exception("cron job %s failed", job.name)
             job.last_run_at = current
             job.runs += 1
             executed.append(job.name)
             if self._persistence is not None:
-                self._persistence.save_cron_job(job.name, job.last_run_at, job.runs)
+                try:
+                    self._persistence.save_cron_job(job.name, job.last_run_at, job.runs)
+                except Exception:
+                    logger.exception("cron persistence failed for %s", job.name)
         return executed

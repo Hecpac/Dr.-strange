@@ -240,7 +240,7 @@ class AutoDreamService:
                 if not existing:
                     existing = self.memory.search_facts(key, limit=1)
                 if existing and existing[0].get("confidence", 1.0) < 0.6:
-                    self.memory.store_fact(key, "", source="dream", confidence=0.0)
+                    self.memory.delete_fact(key)
                     count += 1
                 else:
                     logger.info("autoDream: skipped delete of '%s' (not found or confidence >= 0.6)", key)
@@ -276,7 +276,7 @@ class AutoDreamService:
                 break
             key = fact.get("key", "")
             if key and not key.startswith("profile."):
-                self.memory.store_fact(key, "", source="dream_prune", confidence=0.0)
+                self.memory.delete_fact(key)
                 pruned += 1
         logger.info("autoDream prune: removed %d facts (had %d, max %d)", pruned, len(all_facts), self.max_facts)
         return pruned

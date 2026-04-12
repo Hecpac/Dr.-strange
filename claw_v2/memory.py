@@ -5,7 +5,7 @@ import math
 import sqlite3
 import threading
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Any, Callable, Iterable
 
 
 SCHEMA = """
@@ -370,68 +370,86 @@ class MemoryStore:
         last_checkpoint: dict | None = None,
         rolling_summary: str | None = None,
     ) -> dict:
-        current = self.get_session_state(session_id)
-        payload = {
-            "autonomy_mode": autonomy_mode if autonomy_mode is not None else current["autonomy_mode"],
-            "mode": mode if mode is not None else current["mode"],
-            "current_goal": current_goal if current_goal is not None else current["current_goal"],
-            "pending_action": pending_action if pending_action is not None else current["pending_action"],
-            "step_budget": step_budget if step_budget is not None else current["step_budget"],
-            "steps_taken": steps_taken if steps_taken is not None else current["steps_taken"],
-            "verification_status": verification_status if verification_status is not None else current["verification_status"],
-            "active_object_json": json.dumps(active_object if active_object is not None else current["active_object"]),
-            "last_options_json": json.dumps(last_options if last_options is not None else current["last_options"]),
-            "task_queue_json": json.dumps(task_queue if task_queue is not None else current["task_queue"]),
-            "pending_approvals_json": json.dumps(
-                pending_approvals if pending_approvals is not None else current["pending_approvals"]
-            ),
-            "last_checkpoint_json": json.dumps(last_checkpoint if last_checkpoint is not None else current["last_checkpoint"]),
-            "rolling_summary": rolling_summary if rolling_summary is not None else current["rolling_summary"],
-        }
         with self._lock:
-            self._conn.execute(
-                """
-                INSERT INTO session_state (
-                    session_id, autonomy_mode, mode, current_goal, pending_action,
-                    step_budget, steps_taken, verification_status,
-                    active_object_json, last_options_json, task_queue_json, pending_approvals_json, last_checkpoint_json, rolling_summary
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(session_id)
-                DO UPDATE SET
-                    autonomy_mode = excluded.autonomy_mode,
-                    mode = excluded.mode,
-                    current_goal = excluded.current_goal,
-                    pending_action = excluded.pending_action,
-                    step_budget = excluded.step_budget,
-                    steps_taken = excluded.steps_taken,
-                    verification_status = excluded.verification_status,
-                    active_object_json = excluded.active_object_json,
-                    last_options_json = excluded.last_options_json,
-                    task_queue_json = excluded.task_queue_json,
-                    pending_approvals_json = excluded.pending_approvals_json,
-                    last_checkpoint_json = excluded.last_checkpoint_json,
-                    rolling_summary = excluded.rolling_summary,
-                    updated_at = CURRENT_TIMESTAMP
-                """,
-                (
-                    session_id,
-                    payload["autonomy_mode"],
-                    payload["mode"],
-                    payload["current_goal"],
-                    payload["pending_action"],
-                    payload["step_budget"],
-                    payload["steps_taken"],
-                    payload["verification_status"],
-                    payload["active_object_json"],
-                    payload["last_options_json"],
-                    payload["task_queue_json"],
-                    payload["pending_approvals_json"],
-                    payload["last_checkpoint_json"],
-                    payload["rolling_summary"],
-                ),
+            current = self.get_session_state(session_id)
+            return self._update_session_state_locked(
+                session_id, current,
+                autonomy_mode=autonomy_mode, mode=mode, current_goal=current_goal,
+                pending_action=pending_action, step_budget=step_budget,
+                steps_taken=steps_taken, verification_status=verification_status,
+                active_object=active_object, last_options=last_options,
+                task_queue=task_queue, pending_approvals=pending_approvals,
+                last_checkpoint=last_checkpoint, rolling_summary=rolling_summary,
             )
-            self._conn.commit()
+
+    def _update_session_state_locked(
+        self,
+        session_id: str,
+        current: dict,
+        **kwargs: Any,
+    ) -> dict:
+        def _pick(key: str) -> Any:
+            v = kwargs.get(key)
+            return v if v is not None else current[key]
+
+        payload = {
+            "autonomy_mode": _pick("autonomy_mode"),
+            "mode": _pick("mode"),
+            "current_goal": _pick("current_goal"),
+            "pending_action": _pick("pending_action"),
+            "step_budget": _pick("step_budget"),
+            "steps_taken": _pick("steps_taken"),
+            "verification_status": _pick("verification_status"),
+            "active_object_json": json.dumps(_pick("active_object")),
+            "last_options_json": json.dumps(_pick("last_options")),
+            "task_queue_json": json.dumps(_pick("task_queue")),
+            "pending_approvals_json": json.dumps(_pick("pending_approvals")),
+            "last_checkpoint_json": json.dumps(_pick("last_checkpoint")),
+            "rolling_summary": _pick("rolling_summary"),
+        }
+        self._conn.execute(
+            """
+            INSERT INTO session_state (
+                session_id, autonomy_mode, mode, current_goal, pending_action,
+                step_budget, steps_taken, verification_status,
+                active_object_json, last_options_json, task_queue_json, pending_approvals_json, last_checkpoint_json, rolling_summary
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_id)
+            DO UPDATE SET
+                autonomy_mode = excluded.autonomy_mode,
+                mode = excluded.mode,
+                current_goal = excluded.current_goal,
+                pending_action = excluded.pending_action,
+                step_budget = excluded.step_budget,
+                steps_taken = excluded.steps_taken,
+                verification_status = excluded.verification_status,
+                active_object_json = excluded.active_object_json,
+                last_options_json = excluded.last_options_json,
+                task_queue_json = excluded.task_queue_json,
+                pending_approvals_json = excluded.pending_approvals_json,
+                last_checkpoint_json = excluded.last_checkpoint_json,
+                rolling_summary = excluded.rolling_summary,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                session_id,
+                payload["autonomy_mode"],
+                payload["mode"],
+                payload["current_goal"],
+                payload["pending_action"],
+                payload["step_budget"],
+                payload["steps_taken"],
+                payload["verification_status"],
+                payload["active_object_json"],
+                payload["last_options_json"],
+                payload["task_queue_json"],
+                payload["pending_approvals_json"],
+                payload["last_checkpoint_json"],
+                payload["rolling_summary"],
+            ),
+        )
+        self._conn.commit()
         return self.get_session_state(session_id)
 
     def store_fact(
@@ -467,6 +485,12 @@ class MemoryStore:
                 ),
             )
             self._conn.commit()
+
+    def delete_fact(self, key: str) -> bool:
+        with self._lock:
+            cursor = self._conn.execute("DELETE FROM facts WHERE key = ?", (key,))
+            self._conn.commit()
+            return cursor.rowcount > 0
 
     def search_facts(self, query: str, limit: int = 10, agent_name: str | None = None) -> list[dict]:
         if agent_name:

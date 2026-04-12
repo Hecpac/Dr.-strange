@@ -24,8 +24,8 @@ class SafetyTests(unittest.TestCase):
             source="web",
             target_agent_class="researcher",
         )
-        self.assertEqual(result.verdict, "unsure")
-        self.assertEqual(result.structured_data["quarantine_reason"], "system prompt")
+        self.assertEqual(result.verdict, "malicious")
+        self.assertIn("system prompt", result.reason)
 
     def test_domain_allowlist_enforces_patterns(self) -> None:
         enforcer = DomainAllowlistEnforcer()

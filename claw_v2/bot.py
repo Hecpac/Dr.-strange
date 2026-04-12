@@ -697,7 +697,7 @@ class BotService:
             repo_root = Path(parts[2]) if len(parts) == 3 else None
             try:
                 run = self.pipeline.process_issue(issue_id, repo_root=repo_root)
-                return json.dumps({"issue": run.issue_id, "status": run.status, "branch": run.branch_name, "approval_id": run.approval_id, "approval_token": run.approval_token}, indent=2)
+                return json.dumps({"issue": run.issue_id, "status": run.status, "branch": run.branch_name, "approval_id": run.approval_id, "approve_command": f"/pipeline_approve {run.approval_id}"}, indent=2)
             except Exception:
                 logger.exception("pipeline error for %s", issue_id)
                 return "pipeline error — check logs for details"
@@ -3494,9 +3494,10 @@ def _format_computer_pending_summary(task: str, pending_action: dict[str, Any]) 
 def _jina_read(url: str, *, timeout: float = 10) -> str:
     """Fetch URL content as markdown via Jina Reader."""
     import httpx
+    from urllib.parse import quote
     try:
         response = httpx.get(
-            f"https://r.jina.ai/{url}",
+            f"https://r.jina.ai/{quote(url, safe=':/')}",
             headers={"Accept": "text/markdown"},
             timeout=timeout,
             follow_redirects=True,

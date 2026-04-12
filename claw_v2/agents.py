@@ -523,6 +523,7 @@ class GitWorktreeExperimentRunner:
             except subprocess.TimeoutExpired:
                 return ExperimentEvaluation(metric_value=baseline, status="metric_failed", output="Docker timeout exceeded.")
         else:
+            logger.warning("Docker unavailable — running metric command on host without sandbox: %s", command)
             import shlex
             completed = subprocess.run(
                 shlex.split(command) if isinstance(command, str) else command,
@@ -761,7 +762,7 @@ class GitCommitPromotionExecutor:
         try:
             if not self._has_staged_changes(paths):
                 return result
-            self._git("commit", "-m", message, "--no-verify", "--", *paths)
+            self._git("commit", "-m", message, "--", *paths)
         except subprocess.CalledProcessError:
             self._unstage(paths)
             raise
