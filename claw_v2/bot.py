@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 from claw_v2.agents import AgentDefinition, AutoResearchAgentService
 from claw_v2.approval import ApprovalManager
 from claw_v2.brain import BrainService
+from claw_v2.coordinator import CoordinatorResult, CoordinatorService, WorkerTask
 from claw_v2.content import ContentEngine
 from claw_v2.github import GitHubPullRequestService
 from claw_v2.heartbeat import HeartbeatService
@@ -141,6 +142,77 @@ _LINK_ANALYSIS_SECTION_TITLES = (
     "Fuente",
     "Aplicación sugerida",
 )
+_AUTONOMY_MODES = ("manual", "assisted", "autonomous")
+_PROCEED_TOKENS = (
+    "procede",
+    "continue",
+    "continua",
+    "continuar",
+    "sigue",
+    "seguir",
+    "dale",
+    "hazlo",
+    "asi",
+)
+_OPTION_ORDINALS = {
+    "primera": 1,
+    "first": 1,
+    "segunda": 2,
+    "second": 2,
+    "tercera": 3,
+    "third": 3,
+    "cuarta": 4,
+    "fourth": 4,
+    "quinta": 5,
+    "fifth": 5,
+}
+_AUTONOMY_ACTION_PATTERNS: dict[str, tuple[str, ...]] = {
+    "push": (r"\bgit\s+push\b",),
+    "deploy": (r"\bdeploy\b", r"\bdespliega\b", r"\bproduction\b", r"\bprod\b"),
+    "publish": (r"\bpublica\b", r"\bpublish\b", r"\btweet\b", r"\bpost\b"),
+    "destructive": (r"\bdelete\b", r"\bborra\b", r"\belimina\b", r"\brm\s+-", r"\bdrop\s+table\b", r"\btruncate\b"),
+}
+_AUTONOMY_TASK_ACTION_PATTERNS: dict[str, tuple[str, ...]] = {
+    "inspect": (r"\brevisa\b", r"\binspect\b", r"\banaliza\b", r"\bdebug\b", r"\bcheck\b"),
+    "edit": (r"\bcorrige\b", r"\barregla\b", r"\bfix\b", r"\bimplementa\b", r"\bedit\b", r"\bpatch\b"),
+    "test": (r"\btest\b", r"\bpytest\b", r"\bverifica\b", r"\bverify\b"),
+    "commit": (r"\bcommit\b", r"\bcommitea\b"),
+    "research": (r"\binvestiga\b", r"\bresearch\b", r"\bfind\b", r"\bgather\b"),
+    "summarize": (r"\bresume\b", r"\bsummariza\b", r"\bsummary\b", r"\bsintetiza\b"),
+}
+_AUTONOMY_POLICY_MATRIX: dict[str, dict[str, Any]] = {
+    "manual": {
+        "automatic_coordinator_modes": [],
+        "blocked_actions": ("push", "deploy", "publish", "destructive"),
+        "approval_required_actions": ("commit",),
+        "allowed_task_actions": (),
+        "notes": [
+            "No coordinated execution runs automatically in manual mode.",
+            "Use this mode when you want explicit confirmation before non-trivial work.",
+        ],
+    },
+    "assisted": {
+        "automatic_coordinator_modes": [],
+        "blocked_actions": ("push", "deploy", "publish", "destructive"),
+        "approval_required_actions": ("commit",),
+        "allowed_task_actions": ("inspect", "edit", "test", "research", "summarize"),
+        "notes": [
+            "Coordinated runs require explicit `/task_run` in assisted mode.",
+            "Commit requires confirmation. Publish, deploy, push, and destructive actions remain blocked.",
+        ],
+    },
+    "autonomous": {
+        "automatic_coordinator_modes": ["coding", "research"],
+        "blocked_actions": ("push", "deploy", "publish", "destructive"),
+        "approval_required_actions": ("commit",),
+        "allowed_task_actions": ("inspect", "edit", "test", "research", "summarize"),
+        "notes": [
+            "Autonomous coordinator runs are limited to coding and research.",
+            "Operational/browser/authenticated flows stay outside the autonomous coordinator path.",
+            "Commit requires confirmation. Publish, deploy, push, and destructive actions remain blocked.",
+        ],
+    },
+}
 
 
 class BotService:
@@ -157,6 +229,7 @@ class BotService:
         content_engine: ContentEngine | None = None,
         social_publisher: SocialPublisher | None = None,
         config: object | None = None,
+        coordinator: CoordinatorService | None = None,
         browser: object | None = None,
         terminal_bridge: object | None = None,
         computer: object | None = None,
@@ -177,6 +250,7 @@ class BotService:
         self.content_engine = content_engine
         self.social_publisher = social_publisher
         self.config = config
+        self.coordinator = coordinator
         self.browser = browser
         self.terminal_bridge = terminal_bridge
         self.computer = computer
@@ -227,6 +301,55 @@ class BotService:
             return json.dumps({"lanes": lanes, "max_budget_usd": c.max_budget_usd, "daily_token_budget": c.daily_token_budget}, indent=2)
         if stripped == "/tokens":
             return self._tokens_info_response(session_id)
+        if stripped == "/task_run":
+            return "usage: /task_run <objective>"
+        if stripped.startswith("/task_run "):
+            parts = stripped.split(maxsplit=1)
+            if len(parts) != 2:
+                return "usage: /task_run <objective>"
+            return self._coordinated_task_response(session_id, parts[1], forced=True)
+        if stripped == "/autonomy":
+            return json.dumps(self.brain.memory.get_session_state(session_id), indent=2, sort_keys=True)
+        if stripped == "/autonomy_policy":
+            return json.dumps(_autonomy_policy_payload(self.brain.memory.get_session_state(session_id)), indent=2, sort_keys=True)
+        if stripped.startswith("/autonomy "):
+            parts = stripped.split(maxsplit=1)
+            if len(parts) != 2:
+                return "usage: /autonomy <manual|assisted|autonomous>"
+            try:
+                return self._set_autonomy_mode_response(session_id, parts[1])
+            except ValueError as exc:
+                return str(exc)
+        if stripped == "/task_loop":
+            return json.dumps(self.brain.memory.get_session_state(session_id), indent=2, sort_keys=True)
+        if stripped == "/task_queue":
+            state = self.brain.memory.get_session_state(session_id)
+            return json.dumps(state.get("task_queue") or [], indent=2, sort_keys=True)
+        if stripped.startswith("/task_queue "):
+            parts = stripped.split(maxsplit=1)
+            if len(parts) != 2:
+                return "usage: /task_queue [mode]"
+            state = self.brain.memory.get_session_state(session_id)
+            return json.dumps(_filter_task_queue_by_mode(state.get("task_queue") or [], parts[1]), indent=2, sort_keys=True)
+        if stripped == "/task_done":
+            return "usage: /task_done <task_id>"
+        if stripped.startswith("/task_done "):
+            parts = stripped.split(maxsplit=1)
+            if len(parts) != 2:
+                return "usage: /task_done <task_id>"
+            return self._task_queue_transition_response(session_id, parts[1], to_status="done")
+        if stripped == "/task_defer":
+            return "usage: /task_defer <task_id>"
+        if stripped.startswith("/task_defer "):
+            parts = stripped.split(maxsplit=1)
+            if len(parts) != 2:
+                return "usage: /task_defer <task_id>"
+            return self._task_queue_transition_response(session_id, parts[1], to_status="deferred")
+        if stripped == "/task_pending":
+            state = self.brain.memory.get_session_state(session_id)
+            return json.dumps(state.get("pending_approvals") or [], indent=2, sort_keys=True)
+        if stripped == "/session_state":
+            return json.dumps(self.brain.memory.get_session_state(session_id), indent=2, sort_keys=True)
         if stripped.startswith("/browse "):
             parts = stripped.split(maxsplit=1)
             if len(parts) != 2:
@@ -338,6 +461,19 @@ class BotService:
             if len(parts) != 3:
                 return "usage: /wiki query <question>"
             return self._wiki_query_response(parts[2])
+        self._remember_user_turn_state(session_id, stripped)
+        stateful_followup = self._maybe_resolve_stateful_followup(stripped, session_id=session_id)
+        if isinstance(stateful_followup, _BrainShortcut):
+            return self._brain_text_response(
+                session_id,
+                stateful_followup.text,
+                memory_text=stateful_followup.memory_text,
+            )
+        if stateful_followup is not None:
+            self.brain.memory.store_message(session_id, "user", stripped)
+            self.brain.memory.store_message(session_id, "assistant", stateful_followup[:2000])
+            self._remember_assistant_turn_state(session_id, stripped, stateful_followup)
+            return stateful_followup
         shortcut_response = self._maybe_handle_shortcut(stripped, session_id=session_id)
         if isinstance(shortcut_response, _BrainShortcut):
             return self._brain_text_response(
@@ -349,7 +485,14 @@ class BotService:
             # Store the exchange so the brain has context on subsequent messages.
             self.brain.memory.store_message(session_id, "user", stripped)
             self.brain.memory.store_message(session_id, "assistant", shortcut_response[:2000])
+            self._remember_assistant_turn_state(session_id, stripped, shortcut_response)
             return shortcut_response
+        coordinated_response = self._maybe_run_coordinated_task(session_id, stripped)
+        if coordinated_response is not None:
+            self.brain.memory.store_message(session_id, "user", stripped)
+            self.brain.memory.store_message(session_id, "assistant", coordinated_response[:4000])
+            self._remember_assistant_turn_state(session_id, stripped, coordinated_response)
+            return coordinated_response
         if stripped == "/agents":
             return json.dumps(self._list_agents_payload(), indent=2, sort_keys=True)
         if stripped.startswith("/agent_create "):
@@ -495,6 +638,16 @@ class BotService:
                 return "usage: /approve <approval_id> <token>"
             approved = self.approvals.approve(parts[1], parts[2])
             return "approval recorded" if approved else "approval rejected"
+        if stripped.startswith("/task_approve "):
+            parts = stripped.split(maxsplit=2)
+            if len(parts) != 3:
+                return "usage: /task_approve <approval_id> <token>"
+            return self._task_approve_response(parts[1], parts[2])
+        if stripped.startswith("/task_abort "):
+            parts = stripped.split(maxsplit=1)
+            if len(parts) != 2:
+                return "usage: /task_abort <approval_id>"
+            return self._task_abort_response(parts[1])
         if stripped.startswith("/pipeline_approve "):
             parts = stripped.split(maxsplit=2)
             if len(parts) != 3:
@@ -607,6 +760,15 @@ class BotService:
                 "/terminal_list - sesiones PTY abiertas\n"
                 "/nlm_create <tema> - crear cuaderno de NotebookLM\n"
                 "/nlm_list - listar cuadernos de NotebookLM\n"
+                "/autonomy [mode] - ver o ajustar autonomía de la sesión\n"
+                "/autonomy_policy - ver política efectiva de autonomía\n"
+                "/task_run <objetivo> - ejecutar ciclo coordinado\n"
+                "/task_loop - inspeccionar presupuesto y checkpoint actual\n"
+                "/task_queue [mode] - listar siguientes pasos pendientes de la sesión\n"
+                "/task_done <task_id> - marcar paso de la cola como completado\n"
+                "/task_defer <task_id> - posponer paso de la cola\n"
+                "/task_pending - listar aprobaciones/tareas pendientes de la sesión\n"
+                "/session_state - inspeccionar estado persistente de la sesión\n"
                 "\n"
                 "Ayuda por tema:\n"
                 "/help approvals\n"
@@ -616,7 +778,8 @@ class BotService:
                 "/help terminal\n"
                 "/help browser\n"
                 "/help social\n"
-                "/help notebooklm"
+                "/help notebooklm\n"
+                "/help autonomy"
             )
 
         normalized = topic.strip().lower().replace("-", "").replace("_", "")
@@ -626,6 +789,8 @@ class BotService:
                 "/approvals - listar pendientes\n"
                 "/approval_status <approval_id> - ver estado\n"
                 "/approve <approval_id> <token> - aprobar manualmente\n"
+                "/task_approve <approval_id> <token> - aprobar tarea coordinada pendiente\n"
+                "/task_abort <approval_id> - abortar tarea coordinada pendiente\n"
                 "/action_approve <approval_id> <token> - aprobar acción pendiente\n"
                 "/action_abort <approval_id> - abortar acción pendiente"
             )
@@ -698,6 +863,21 @@ class BotService:
                 "/nlm_podcast [notebook_id] - generar podcast\n"
                 "/nlm_chat <notebook_id> <pregunta> - chatear con el cuaderno"
             )
+        if normalized in {"autonomy", "sessionstate", "state"}:
+            return (
+                "Autonomía de sesión:\n"
+                "/autonomy - ver estado actual\n"
+                "/autonomy <manual|assisted|autonomous> - ajustar modo\n"
+                "/autonomy_policy - ver límites efectivos del modo actual\n"
+                "/task_run <objetivo> - disparar research/synthesis/implementation/verification\n"
+                "/task_loop - ver presupuesto, pasos y checkpoint\n"
+                "/task_queue [mode] - ver siguientes pasos persistidos, opcionalmente filtrados por mode\n"
+                "/task_done <task_id> - marcar un paso como done\n"
+                "/task_defer <task_id> - marcar un paso como deferred\n"
+                "/task_pending - ver aprobaciones pendientes en la sesión\n"
+                "/session_state - inspeccionar estado persistente\n"
+                "El estado guarda objetivo actual, acción pendiente, objeto activo y opciones recientes."
+            )
         return (
             f"Tema de ayuda no reconocido: {topic}\n"
             "Prueba con: approvals, pipeline, agents, terminal, browser, social, notebooklm."
@@ -753,6 +933,7 @@ class BotService:
                 outcome="success",
                 lesson="The brain produced a usable reply for this conversational request.",
             )
+        self._remember_assistant_turn_state(session_id, source_text, content)
         return content
 
     def handle_multimodal(
@@ -1658,6 +1839,58 @@ class BotService:
             return "computer action rejected"
         return "action rejected"
 
+    def _task_approve_response(self, approval_id: str, token: str) -> str:
+        if self.approvals is None:
+            return "approvals unavailable"
+        try:
+            valid = self.approvals.approve(approval_id, token)
+        except FileNotFoundError:
+            return f"approval {approval_id} not found"
+        if not valid:
+            return "approval rejected"
+        payload = self.approvals.read(approval_id)
+        metadata = payload.get("metadata", {})
+        if metadata.get("kind") != "coordinated_task":
+            return "approval recorded"
+        session_id = metadata.get("session_id")
+        objective = metadata.get("objective")
+        approved_actions = metadata.get("approved_actions") or []
+        if not isinstance(session_id, str) or not isinstance(objective, str):
+            return "approval recorded, but task metadata is incomplete"
+        self._remove_pending_task_approval(session_id, approval_id)
+        return self._coordinated_task_response(
+            session_id,
+            objective,
+            forced=True,
+            approved_actions=tuple(str(action) for action in approved_actions),
+        )
+
+    def _task_abort_response(self, approval_id: str) -> str:
+        if self.approvals is None:
+            return "approvals unavailable"
+        try:
+            payload = self.approvals.read(approval_id)
+            self.approvals.reject(approval_id)
+        except FileNotFoundError:
+            return f"approval {approval_id} not found"
+        metadata = payload.get("metadata", {})
+        if metadata.get("kind") != "coordinated_task":
+            return "task rejected"
+        session_id = metadata.get("session_id")
+        if isinstance(session_id, str):
+            self._remove_pending_task_approval(session_id, approval_id)
+            self.brain.memory.update_session_state(
+                session_id,
+                pending_action=None,
+                verification_status="blocked",
+                last_checkpoint={
+                    "summary": "Coordinated task rejected before approval.",
+                    "verification_status": "blocked",
+                    "reason": "task_rejected",
+                },
+            )
+        return "coordinated task rejected"
+
     # -- Buddy handlers --------------------------------------------------------
 
     def _buddy_hatch_response(self, user_id: str) -> str:
@@ -1732,6 +1965,410 @@ class BotService:
         session.status = "aborted"
         return "computer session aborted"
 
+    def _set_autonomy_mode_response(self, session_id: str, value: str) -> str:
+        mode = _parse_autonomy_mode(value)
+        state = self.brain.memory.update_session_state(
+            session_id,
+            autonomy_mode=mode,
+            step_budget=_default_step_budget(mode),
+        )
+        return json.dumps(state, indent=2, sort_keys=True)
+
+    def _remember_user_turn_state(self, session_id: str, text: str) -> None:
+        if not text or text.startswith("/"):
+            return
+        if _extract_option_reference(text) is not None or _looks_like_proceed_request(text):
+            return
+        inferred_mode = _infer_session_mode(text)
+        current_goal = text.strip()
+        if len(current_goal) < 8:
+            current_goal = None
+        elif len(current_goal) > 280:
+            current_goal = current_goal[:277] + "..."
+        current = self.brain.memory.get_session_state(session_id)
+        self.brain.memory.update_session_state(
+            session_id,
+            mode=inferred_mode,
+            current_goal=current_goal,
+            pending_action=None,
+            task_queue=[],
+            steps_taken=0,
+            verification_status="unknown",
+            last_checkpoint={},
+            step_budget=_default_step_budget(current.get("autonomy_mode", "assisted")),
+        )
+
+    def _remember_assistant_turn_state(self, session_id: str, user_text: str, reply_text: str) -> None:
+        state = self.brain.memory.get_session_state(session_id)
+        options = _extract_numbered_options(reply_text)
+        pending_action = state.get("pending_action")
+        extracted_pending_action = _extract_pending_action_from_reply(reply_text)
+        if extracted_pending_action is not None:
+            pending_action = extracted_pending_action
+        if options:
+            pending_action = None
+        rolling_summary = _compact_summary(reply_text)
+        verification_status = _extract_verification_status(reply_text) or state.get("verification_status", "unknown")
+        checkpoint = _build_checkpoint(reply_text, pending_action=pending_action, verification_status=verification_status)
+        steps_taken = state.get("steps_taken", 0)
+        is_followup_selection = _extract_option_reference(user_text) is not None
+        if state.get("mode") in {"coding", "research", "browse", "publish", "ops"} and not is_followup_selection:
+            steps_taken += 1
+        task_queue = state.get("task_queue") or []
+        if isinstance(pending_action, str) and pending_action.strip():
+            depends_on = self._derive_task_dependencies(task_queue, summary=pending_action)
+            task_queue = self._upsert_task_queue_entry(
+                task_queue,
+                summary=pending_action,
+                mode=_infer_session_mode(user_text, reply_text),
+                status="pending",
+                source="assistant",
+                priority=1,
+                depends_on=depends_on,
+            )
+        elif verification_status == "passed":
+            task_queue = self._mark_first_task_queue_entry(task_queue, from_status="in_progress", to_status="done")
+            task_queue = self._mark_first_task_queue_entry(task_queue, from_status="pending", to_status="done")
+        elif verification_status == "failed":
+            task_queue = self._mark_first_task_queue_entry(task_queue, from_status="in_progress", to_status="blocked")
+        self.brain.memory.update_session_state(
+            session_id,
+            mode=_infer_session_mode(user_text, reply_text),
+            pending_action=pending_action,
+            task_queue=task_queue,
+            steps_taken=steps_taken,
+            verification_status=verification_status,
+            last_options=options if options else state.get("last_options"),
+            last_checkpoint=checkpoint,
+            rolling_summary=rolling_summary,
+        )
+
+    def _maybe_resolve_stateful_followup(self, text: str, *, session_id: str) -> str | _BrainShortcut | None:
+        if not text or text.startswith("/"):
+            return None
+        state = self.brain.memory.get_session_state(session_id)
+        option_index = _extract_option_reference(text)
+        if option_index is not None:
+            options = state.get("last_options") or []
+            if 1 <= option_index <= len(options):
+                selected = options[option_index - 1]
+                self.brain.memory.update_session_state(
+                    session_id,
+                    pending_action=selected,
+                )
+                return _BrainShortcut(
+                    text=(
+                        f"El usuario seleccionó la opción {option_index}.\n"
+                        f"Opción elegida: {selected}"
+                    ),
+                    memory_text=text,
+                )
+        if _looks_like_proceed_request(text):
+            if state.get("verification_status") == "awaiting_approval":
+                pending_approvals = state.get("pending_approvals") or []
+                latest_pending = pending_approvals[-1] if pending_approvals else {}
+                approval_id = latest_pending.get("approval_id") or (state.get("last_checkpoint") or {}).get("approval_id")
+                if approval_id:
+                    return (
+                        "Hay una aprobación pendiente antes de continuar.\n"
+                        "Usa `/task_pending` para ver el comando `/task_approve <approval_id> <token>`, "
+                        f"o aborta con `/task_abort {approval_id}`."
+                    )
+                return "Hay una aprobación pendiente antes de continuar. Usa `/task_approve <approval_id> <token>`."
+            if state.get("steps_taken", 0) >= state.get("step_budget", 0):
+                checkpoint = state.get("last_checkpoint") or {}
+                summary = checkpoint.get("summary") or state.get("rolling_summary") or "sin checkpoint"
+                return (
+                    "step budget agotado para esta tarea.\n"
+                    f"Resumen actual: {summary}\n"
+                    "Ajusta el objetivo o aumenta la autonomía para seguir."
+                )
+            pending_action = state.get("pending_action")
+            if isinstance(pending_action, str) and pending_action.strip():
+                task_queue = self._mark_task_queue_in_progress(state.get("task_queue") or [], summary=pending_action)
+                self.brain.memory.update_session_state(session_id, task_queue=task_queue)
+                checkpoint = state.get("last_checkpoint") or {}
+                checkpoint_text = json.dumps(checkpoint, ensure_ascii=True, sort_keys=True) if checkpoint else "{}"
+                return _BrainShortcut(
+                    text=(
+                        f"Continúa con esta acción pendiente: {pending_action}\n"
+                        f"Checkpoint actual: {checkpoint_text}"
+                    ),
+                    memory_text=text,
+                )
+            task_queue = state.get("task_queue") or []
+            current_mode = state.get("mode") or "chat"
+            next_task = _select_next_task_queue_item(task_queue, preferred_mode=current_mode)
+            if next_task is not None:
+                task_queue = self._mark_task_queue_in_progress(task_queue, task_id=next_task.get("task_id"))
+                self.brain.memory.update_session_state(session_id, task_queue=task_queue)
+                checkpoint = state.get("last_checkpoint") or {}
+                checkpoint_text = json.dumps(checkpoint, ensure_ascii=True, sort_keys=True) if checkpoint else "{}"
+                return _BrainShortcut(
+                    text=(
+                        f"Continúa con este siguiente paso de la cola: {next_task['summary']}\n"
+                        f"Checkpoint actual: {checkpoint_text}"
+                    ),
+                    memory_text=text,
+                )
+        return None
+
+    def _maybe_run_coordinated_task(self, session_id: str, text: str) -> str | None:
+        if self.coordinator is None or not text or text.startswith("/"):
+            return None
+        state = self.brain.memory.get_session_state(session_id)
+        if state.get("autonomy_mode") != "autonomous":
+            return None
+        if _extract_option_reference(text) is not None or _looks_like_proceed_request(text):
+            return None
+        mode = _infer_session_mode(text)
+        policy = _evaluate_autonomy_policy(text, mode=mode, forced=False)
+        if not policy["allowed"] and policy["reason"] == "sensitive_action":
+            self.brain.memory.update_session_state(
+                session_id,
+                last_checkpoint={
+                    "summary": policy["summary"],
+                    "verification_status": "blocked",
+                    "reason": policy["reason"],
+                },
+                verification_status="blocked",
+                pending_action=None,
+            )
+            return _format_autonomy_policy_block(policy)
+        if mode not in {"coding", "research"}:
+            return None
+        return self._coordinated_task_response(session_id, text, forced=False)
+
+    def _coordinated_task_response(
+        self,
+        session_id: str,
+        objective: str,
+        *,
+        forced: bool,
+        approved_actions: tuple[str, ...] = (),
+    ) -> str:
+        if self.coordinator is None:
+            return "coordinator unavailable"
+        mode = _infer_session_mode(objective)
+        policy = _evaluate_autonomy_policy(
+            objective,
+            mode=mode,
+            forced=forced,
+            approved_actions=approved_actions,
+        )
+        if not policy["allowed"]:
+            if policy["reason"] == "approval_required_action":
+                approval_actions = tuple(str(action) for action in policy.get("matched_approval_actions", ()))
+                pending = self.approvals.create(
+                    action="coordinated_task",
+                    summary=_task_approval_summary(objective, approval_actions=approval_actions),
+                    metadata={
+                        "kind": "coordinated_task",
+                        "session_id": session_id,
+                        "objective": objective,
+                        "mode": mode,
+                        "forced": forced,
+                        "approved_actions": list(approval_actions),
+                    },
+                )
+                self.brain.memory.update_session_state(
+                    session_id,
+                    pending_action=f"/task_approve {pending.approval_id} <token>",
+                    verification_status="awaiting_approval",
+                    pending_approvals=self._updated_pending_task_approvals(
+                        session_id,
+                        {
+                            "approval_id": pending.approval_id,
+                            "action": "coordinated_task",
+                            "summary": pending.summary,
+                            "approve_command": f"/task_approve {pending.approval_id} {pending.token}",
+                            "abort_command": f"/task_abort {pending.approval_id}",
+                        },
+                    ),
+                    last_checkpoint={
+                        "summary": str(policy["summary"]),
+                        "verification_status": "awaiting_approval",
+                        "reason": str(policy["reason"]),
+                        "approval_id": pending.approval_id,
+                    },
+                )
+                return _format_task_approval_response(policy, pending)
+            self.brain.memory.update_session_state(
+                session_id,
+                last_checkpoint={
+                    "summary": policy["summary"],
+                    "verification_status": "blocked",
+                    "reason": policy["reason"],
+                },
+                verification_status="blocked",
+                pending_action=None,
+            )
+            return _format_autonomy_policy_block(policy)
+        task_id = f"{session_id}:{time.time_ns()}"
+        research_tasks, implementation_tasks, verification_tasks = _build_coordinator_tasks(mode, objective)
+        result = self.coordinator.run(
+            task_id,
+            objective,
+            research_tasks,
+            implementation_tasks=implementation_tasks,
+            verification_tasks=verification_tasks,
+        )
+        checkpoint = _coordinator_checkpoint(result, objective=objective)
+        self.brain.memory.update_session_state(
+            session_id,
+            mode=mode,
+            pending_action=checkpoint.get("pending_action"),
+            task_queue=self._upsert_task_queue_entry(
+                self.brain.memory.get_session_state(session_id).get("task_queue") or [],
+                summary=checkpoint.get("pending_action") or checkpoint.get("summary") or objective,
+                mode=mode,
+                status="pending" if checkpoint.get("pending_action") else checkpoint.get("verification_status", "unknown"),
+                source="coordinator",
+                priority=0,
+                depends_on=self._derive_task_dependencies(
+                    self.brain.memory.get_session_state(session_id).get("task_queue") or [],
+                    summary=checkpoint.get("pending_action") or checkpoint.get("summary") or objective,
+                ),
+            ) if checkpoint.get("pending_action") or checkpoint.get("summary") else self.brain.memory.get_session_state(session_id).get("task_queue") or [],
+            verification_status=checkpoint.get("verification_status", "unknown"),
+            last_checkpoint=checkpoint,
+        )
+        return _format_coordinator_response(result, checkpoint=checkpoint, forced=forced)
+
+    def _updated_pending_task_approvals(self, session_id: str, entry: dict[str, Any]) -> list[dict[str, Any]]:
+        state = self.brain.memory.get_session_state(session_id)
+        pending = [item for item in (state.get("pending_approvals") or []) if item.get("approval_id") != entry.get("approval_id")]
+        pending.append(entry)
+        return pending[-5:]
+
+    def _remove_pending_task_approval(self, session_id: str, approval_id: str) -> None:
+        state = self.brain.memory.get_session_state(session_id)
+        pending = [item for item in (state.get("pending_approvals") or []) if item.get("approval_id") != approval_id]
+        self.brain.memory.update_session_state(session_id, pending_approvals=pending)
+
+    def _task_queue_transition_response(self, session_id: str, task_id: str, *, to_status: str) -> str:
+        state = self.brain.memory.get_session_state(session_id)
+        task_queue = state.get("task_queue") or []
+        updated = self._set_task_queue_status(task_queue, task_id=task_id, to_status=to_status)
+        if updated == task_queue:
+            return f"task {task_id} not found"
+        next_pending = _select_next_task_queue_item(updated, preferred_mode=state.get("mode") or "chat")
+        self.brain.memory.update_session_state(
+            session_id,
+            task_queue=updated,
+            pending_action=next_pending.get("summary") if next_pending else "",
+        )
+        return json.dumps(updated, indent=2, sort_keys=True)
+
+    @staticmethod
+    def _upsert_task_queue_entry(
+        queue: list[dict[str, Any]],
+        *,
+        summary: str,
+        mode: str,
+        status: str,
+        source: str,
+        priority: int,
+        depends_on: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        compact = " ".join(summary.split()).strip()
+        if not compact:
+            return queue
+        existing = next((item for item in queue if item.get("summary") == compact), None)
+        updated = [item for item in queue if item.get("summary") != compact]
+        task_id = _stable_task_id(compact, mode=mode, source=source)
+        effective_status = status
+        if existing is not None and status == "pending" and existing.get("status") in {"in_progress", "done", "blocked"}:
+            effective_status = str(existing.get("status"))
+        updated.append(
+            {
+                "task_id": task_id,
+                "summary": compact,
+                "mode": mode,
+                "status": effective_status,
+                "source": source,
+                "priority": priority,
+                "depends_on": list(depends_on or []),
+            }
+        )
+        updated.sort(key=lambda item: (int(item.get("priority", 9)), item.get("task_id", "")))
+        return updated[-8:]
+
+    @staticmethod
+    def _mark_task_queue_in_progress(
+        queue: list[dict[str, Any]],
+        *,
+        task_id: str | None = None,
+        summary: str | None = None,
+    ) -> list[dict[str, Any]]:
+        updated: list[dict[str, Any]] = []
+        promoted = False
+        for item in queue:
+            current = dict(item)
+            matches = False
+            if task_id and current.get("task_id") == task_id:
+                matches = True
+            elif summary and current.get("summary") == summary:
+                matches = True
+            if not promoted and matches and current.get("status") == "pending":
+                current["status"] = "in_progress"
+                promoted = True
+            updated.append(current)
+        return updated
+
+    @staticmethod
+    def _mark_first_task_queue_entry(
+        queue: list[dict[str, Any]],
+        *,
+        from_status: str,
+        to_status: str,
+    ) -> list[dict[str, Any]]:
+        updated: list[dict[str, Any]] = []
+        transitioned = False
+        for item in queue:
+            current = dict(item)
+            if not transitioned and current.get("status") == from_status:
+                current["status"] = to_status
+                transitioned = True
+            updated.append(current)
+        return updated
+
+    @staticmethod
+    def _set_task_queue_status(
+        queue: list[dict[str, Any]],
+        *,
+        task_id: str,
+        to_status: str,
+    ) -> list[dict[str, Any]]:
+        updated: list[dict[str, Any]] = []
+        changed = False
+        for item in queue:
+            current = dict(item)
+            if current.get("task_id") == task_id:
+                current["status"] = to_status
+                changed = True
+            updated.append(current)
+        if changed:
+            updated.sort(key=lambda item: (int(item.get("priority", 9)), item.get("task_id", "")))
+        return updated
+
+    @staticmethod
+    def _derive_task_dependencies(queue: list[dict[str, Any]], *, summary: str) -> list[str]:
+        compact = " ".join(summary.split()).strip()
+        in_progress = next(
+            (
+                item for item in queue
+                if item.get("status") == "in_progress"
+                and item.get("summary")
+                and item.get("summary") != compact
+            ),
+            None,
+        )
+        if in_progress is None:
+            return []
+        task_id = in_progress.get("task_id")
+        return [str(task_id)] if isinstance(task_id, str) and task_id else []
+
     def _maybe_handle_shortcut(self, text: str, *, session_id: str) -> str | _BrainShortcut | None:
         if not text or text.startswith("/"):
             return None
@@ -1802,6 +2439,11 @@ class BotService:
     def _remember_recent_browse_url(self, session_id: str | None, url: str) -> None:
         if session_id:
             self._recent_browse_urls[session_id] = url
+            self.brain.memory.update_session_state(
+                session_id,
+                mode="browse",
+                active_object={"kind": "url", "url": url},
+            )
 
     def _recent_tweet_url(self, session_id: str) -> str | None:
         url = self._recent_browse_urls.get(session_id)
@@ -1951,10 +2593,16 @@ class BotService:
 
     def _set_active_notebook(self, session_id: str, notebook_id: str, title: str | None = None) -> None:
         current = self._active_notebooks.get(session_id, {})
-        self._active_notebooks[session_id] = {
+        notebook = {
             "id": notebook_id,
             "title": title or current.get("title", notebook_id[:8]),
         }
+        self._active_notebooks[session_id] = notebook
+        self.brain.memory.update_session_state(
+            session_id,
+            mode="research",
+            active_object={"kind": "notebook", **notebook},
+        )
 
     def _active_notebook_id(self, session_id: str) -> str | None:
         notebook = self._active_notebooks.get(session_id)
@@ -1970,6 +2618,21 @@ def _parse_toggle(value: str) -> bool:
     if normalized in {"off", "false", "0", "no"}:
         return False
     raise ValueError("toggle must be one of: on, off")
+
+
+def _parse_autonomy_mode(value: str) -> str:
+    normalized = _normalize_command_text(value).strip()
+    if normalized not in _AUTONOMY_MODES:
+        raise ValueError("autonomy mode must be one of: manual, assisted, autonomous")
+    return normalized
+
+
+def _default_step_budget(autonomy_mode: str) -> int:
+    if autonomy_mode == "manual":
+        return 1
+    if autonomy_mode == "autonomous":
+        return 4
+    return 2
 
 
 def _extract_nlm_create_topic(text: str) -> str | None:
@@ -1993,6 +2656,419 @@ def _extract_nlm_artifact_kind(text: str) -> str | None:
 def _normalize_command_text(text: str) -> str:
     folded = unicodedata.normalize("NFKD", text)
     return "".join(ch for ch in folded if not unicodedata.combining(ch)).lower()
+
+
+def _stable_task_id(summary: str, *, mode: str, source: str) -> str:
+    normalized = _normalize_command_text(summary)
+    slug = re.sub(r"[^a-z0-9]+", "-", normalized).strip("-")[:48] or "task"
+    return f"{mode}:{source}:{slug}"
+
+
+def _extract_option_reference(text: str) -> int | None:
+    normalized = _normalize_command_text(text).strip()
+    match = re.fullmatch(r"(?:opcion|option)\s+(\d+)", normalized)
+    if match:
+        return int(match.group(1))
+    match = re.fullmatch(r"(\d+)", normalized)
+    if match:
+        return int(match.group(1))
+    match = re.fullmatch(r"la\s+(\w+)", normalized)
+    if match:
+        return _OPTION_ORDINALS.get(match.group(1))
+    return _OPTION_ORDINALS.get(normalized)
+
+
+def _looks_like_proceed_request(text: str) -> bool:
+    normalized = _normalize_command_text(text).strip()
+    if not normalized:
+        return False
+    if normalized in _PROCEED_TOKENS:
+        return True
+    return any(normalized.startswith(f"{token} ") for token in _PROCEED_TOKENS)
+
+
+def _extract_numbered_options(text: str) -> list[str]:
+    options: list[str] = []
+    for line in text.splitlines():
+        match = re.match(r"^\s*(\d+)\.\s+(.+?)\s*$", line)
+        if not match:
+            continue
+        options.append(match.group(2).strip())
+    return options[:9]
+
+
+def _compact_summary(text: str, *, limit: int = 240) -> str | None:
+    collapsed = " ".join(text.split())
+    if not collapsed:
+        return None
+    if len(collapsed) <= limit:
+        return collapsed
+    return collapsed[: limit - 3] + "..."
+
+
+def _extract_pending_action_from_reply(text: str) -> str | None:
+    for line in text.splitlines():
+        match = re.match(r"^\s*(?:siguiente paso|next step|pendiente)\s*:\s*(.+?)\s*$", line, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+    return None
+
+
+def _filter_task_queue_by_mode(task_queue: list[dict[str, Any]], mode: str) -> list[dict[str, Any]]:
+    normalized_mode = _normalize_command_text(mode).strip()
+    if not normalized_mode:
+        return task_queue
+    return [item for item in task_queue if _normalize_command_text(str(item.get("mode", ""))) == normalized_mode]
+
+
+def _select_next_task_queue_item(task_queue: list[dict[str, Any]], *, preferred_mode: str) -> dict[str, Any] | None:
+    normalized_mode = _normalize_command_text(preferred_mode).strip()
+    preferred = [
+        item for item in task_queue
+        if item.get("status") == "pending"
+        and item.get("summary")
+        and _task_queue_item_ready(task_queue, item)
+        and _normalize_command_text(str(item.get("mode", ""))) == normalized_mode
+    ]
+    if preferred:
+        return preferred[0]
+    for item in task_queue:
+        if item.get("status") == "pending" and item.get("summary") and _task_queue_item_ready(task_queue, item):
+            return item
+    return None
+
+
+def _task_queue_item_ready(task_queue: list[dict[str, Any]], item: dict[str, Any]) -> bool:
+    dependency_ids = [str(dep) for dep in (item.get("depends_on") or []) if dep]
+    if not dependency_ids:
+        return True
+    statuses = {
+        str(entry.get("task_id")): str(entry.get("status"))
+        for entry in task_queue
+        if entry.get("task_id")
+    }
+    return all(statuses.get(dep_id) == "done" for dep_id in dependency_ids)
+
+
+def _extract_verification_status(text: str) -> str | None:
+    for line in text.splitlines():
+        match = re.match(
+            r"^\s*(?:verificado|verified|verification status)\s*:\s*(ok|passed|pending|failed|none|unknown)\s*$",
+            line,
+            re.IGNORECASE,
+        )
+        if match:
+            normalized = match.group(1).strip().lower()
+            if normalized in {"ok", "passed"}:
+                return "passed"
+            if normalized == "failed":
+                return "failed"
+            if normalized == "pending":
+                return "pending"
+            return "unknown"
+    return None
+
+
+def _build_checkpoint(text: str, *, pending_action: str | None, verification_status: str) -> dict[str, str]:
+    checkpoint = {
+        "summary": _compact_summary(text, limit=180) or "",
+        "verification_status": verification_status,
+    }
+    if pending_action:
+        checkpoint["pending_action"] = pending_action
+    return checkpoint
+
+
+def _build_coordinator_tasks(
+    mode: str,
+    objective: str,
+) -> tuple[list[WorkerTask], list[WorkerTask] | None, list[WorkerTask] | None]:
+    if mode == "coding":
+        research = [
+            WorkerTask(
+                name="scope_and_risks",
+                lane="research",
+                instruction=(
+                    "Inspect the request, identify the relevant files, likely risks, and the smallest viable implementation. "
+                    f"Objective: {objective}"
+                ),
+            )
+        ]
+        implementation = [
+            WorkerTask(
+                name="implement_change",
+                lane="worker",
+                instruction=(
+                    "Implement the requested change in the workspace. Keep edits minimal and explicit. "
+                    "Summarize files touched and what changed. "
+                    f"Objective: {objective}"
+                ),
+            )
+        ]
+        verification = [
+            WorkerTask(
+                name="verify_change",
+                lane="verifier",
+                instruction=(
+                    "Verify the implementation from the available evidence. "
+                    "Return a concise operational review and include a line `Verification Status: passed|pending|failed`. "
+                    "If more work is needed, include `Siguiente paso: ...`. "
+                    f"Objective: {objective}"
+                ),
+            )
+        ]
+        return research, implementation, verification
+
+    research = [
+        WorkerTask(
+            name="gather_findings",
+            lane="research",
+            instruction=(
+                "Gather the key facts, claims, and open questions for this request. "
+                f"Objective: {objective}"
+            ),
+        ),
+        WorkerTask(
+            name="challenge_findings",
+            lane="research",
+            instruction=(
+                "Challenge the assumptions, identify weak claims, and note what still needs verification. "
+                f"Objective: {objective}"
+            ),
+        ),
+    ]
+    verification = [
+        WorkerTask(
+            name="verify_findings",
+            lane="verifier",
+            instruction=(
+                "Review the synthesized findings and include `Verification Status: passed|pending|failed`. "
+                "If follow-up work is needed, include `Siguiente paso: ...`."
+            ),
+        )
+    ]
+    return research, None, verification
+
+
+def _coordinator_checkpoint(result: CoordinatorResult, *, objective: str) -> dict[str, str]:
+    verification_results = result.phase_results.get("verification", [])
+    implementation_results = result.phase_results.get("implementation", [])
+    verification_text = "\n".join(item.content for item in verification_results if item.content)
+    implementation_text = "\n".join(item.content for item in implementation_results if item.content)
+    pending_action = _extract_pending_action_from_reply(verification_text) or _extract_pending_action_from_reply(implementation_text)
+    verification_status = (
+        _extract_verification_status(verification_text)
+        or ("failed" if result.error else None)
+        or ("pending" if verification_results else "unknown")
+    )
+    summary = _compact_summary(result.synthesis or objective, limit=180) or objective
+    checkpoint = {
+        "summary": summary,
+        "verification_status": verification_status,
+    }
+    if pending_action:
+        checkpoint["pending_action"] = pending_action
+    if result.error:
+        checkpoint["error"] = result.error
+    return checkpoint
+
+
+def _format_worker_results(results: list[Any]) -> str:
+    lines: list[str] = []
+    for item in results:
+        if item.error:
+            lines.append(f"- {item.task_name}: ERROR {item.error}")
+        else:
+            lines.append(f"- {item.task_name}: {_compact_summary(item.content, limit=240) or '(no content)'}")
+    return "\n".join(lines) if lines else "- none"
+
+
+def _format_coordinator_response(result: CoordinatorResult, *, checkpoint: dict[str, str], forced: bool) -> str:
+    lines = [
+        f"Coordinator task: {result.task_id}",
+        f"Dispatch: {'manual' if forced else 'autonomous'}",
+    ]
+    if result.error:
+        lines.append(f"Error: {result.error}")
+    if result.synthesis:
+        lines.extend(["", "Plan:", result.synthesis])
+    if "implementation" in result.phase_results:
+        lines.extend(["", "Implementation:", _format_worker_results(result.phase_results["implementation"])])
+    if "verification" in result.phase_results:
+        lines.extend(["", "Verification:", _format_worker_results(result.phase_results["verification"])])
+    lines.extend(
+        [
+            "",
+            f"Verification Status: {checkpoint.get('verification_status', 'unknown')}",
+        ]
+    )
+    if checkpoint.get("pending_action"):
+        lines.append(f"Siguiente paso: {checkpoint['pending_action']}")
+    if checkpoint.get("summary"):
+        lines.append(f"Checkpoint: {checkpoint['summary']}")
+    return "\n".join(lines)
+
+
+def _autonomy_policy_payload(state: dict[str, Any]) -> dict[str, Any]:
+    autonomy_mode = state.get("autonomy_mode", "assisted")
+    policy = _policy_for_mode(autonomy_mode)
+    return {
+        "autonomy_mode": autonomy_mode,
+        "automatic_coordinator_modes": list(policy["automatic_coordinator_modes"]),
+        "allowed_task_actions": list(policy["allowed_task_actions"]),
+        "approval_required_actions": list(policy["approval_required_actions"]),
+        "step_budget": state.get("step_budget"),
+        "verification_status": state.get("verification_status"),
+        "blocked_actions": list(policy["blocked_actions"]),
+        "action_patterns": {name: list(patterns) for name, patterns in _AUTONOMY_ACTION_PATTERNS.items()},
+        "task_action_patterns": {name: list(patterns) for name, patterns in _AUTONOMY_TASK_ACTION_PATTERNS.items()},
+        "notes": list(policy["notes"]),
+    }
+
+
+def _evaluate_autonomy_policy(
+    text: str,
+    *,
+    mode: str,
+    forced: bool,
+    approved_actions: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    normalized = _normalize_command_text(text)
+    autonomy_mode = "autonomous" if not forced else "assisted"
+    policy = _policy_for_mode(autonomy_mode)
+    matched_actions = _matched_policy_actions(normalized, blocked_actions=policy["blocked_actions"])
+    if matched_actions:
+        labels = ", ".join(matched_actions)
+        return {
+            "allowed": False,
+            "reason": "sensitive_action",
+            "summary": f"La tarea incluye acciones sensibles bloqueadas por política: {labels}.",
+        }
+    approval_actions = _matched_named_actions(
+        normalized,
+        names=policy["approval_required_actions"],
+        pattern_map=_AUTONOMY_TASK_ACTION_PATTERNS,
+    )
+    approval_actions = [action for action in approval_actions if action not in approved_actions]
+    if approval_actions:
+        labels = ", ".join(approval_actions)
+        return {
+            "allowed": False,
+            "reason": "approval_required_action",
+            "summary": f"La tarea requiere aprobación para estas acciones: {labels}.",
+            "matched_approval_actions": approval_actions,
+        }
+    if mode not in {"coding", "research"}:
+        return {
+            "allowed": False,
+            "reason": "unsupported_mode",
+            "summary": f"Modo {mode} fuera del coordinador autónomo.",
+        }
+    if not forced and mode not in policy["automatic_coordinator_modes"]:
+        return {
+            "allowed": False,
+            "reason": "mode_not_auto_enabled",
+            "summary": f"El modo {mode} no está habilitado para ejecución automática en {autonomy_mode}.",
+        }
+    requested_actions = _classify_task_actions(normalized, mode=mode)
+    effective_allowed_actions = set(policy["allowed_task_actions"]) | set(approved_actions)
+    disallowed_actions = sorted(set(requested_actions) - effective_allowed_actions)
+    if disallowed_actions:
+        labels = ", ".join(disallowed_actions)
+        return {
+            "allowed": False,
+            "reason": "action_not_allowed",
+            "summary": f"La tarea pide acciones fuera del scope permitido para {autonomy_mode}: {labels}.",
+        }
+    return {
+        "allowed": True,
+        "reason": "allowed",
+        "summary": "La tarea entra dentro de la política de autonomía.",
+    }
+
+
+def _format_autonomy_policy_block(policy: dict[str, str | bool]) -> str:
+    summary = str(policy.get("summary", "autonomy policy blocked this task"))
+    reason = str(policy.get("reason", "blocked"))
+    return (
+        "autonomy policy blocked coordinated execution.\n"
+        f"Reason: {reason}\n"
+        f"Summary: {summary}\n"
+        "Allowed automatic scopes: coding, research.\n"
+        "Blocked automatic scopes: publish, deploy, push, destructive actions."
+    )
+
+
+def _format_task_approval_response(policy: dict[str, Any], pending: Any) -> str:
+    summary = str(policy.get("summary", "task approval required"))
+    reason = str(policy.get("reason", "approval_required_action"))
+    return (
+        "autonomy policy requires approval before coordinated execution.\n"
+        f"Reason: {reason}\n"
+        f"Summary: {summary}\n"
+        f"Approve via: `/task_approve {pending.approval_id} {pending.token}`\n"
+        f"Abort via: `/task_abort {pending.approval_id}`"
+    )
+
+
+def _task_approval_summary(objective: str, *, approval_actions: tuple[str, ...]) -> str:
+    action_text = ", ".join(approval_actions) if approval_actions else "manual approval"
+    compact = objective.strip()
+    if len(compact) > 120:
+        compact = compact[:117] + "..."
+    return f"Approve coordinated task ({action_text}): {compact}"
+
+
+def _policy_for_mode(autonomy_mode: str) -> dict[str, Any]:
+    return _AUTONOMY_POLICY_MATRIX.get(autonomy_mode, _AUTONOMY_POLICY_MATRIX["assisted"])
+
+
+def _matched_policy_actions(normalized_text: str, *, blocked_actions: tuple[str, ...] | list[str]) -> list[str]:
+    return _matched_named_actions(normalized_text, names=blocked_actions, pattern_map=_AUTONOMY_ACTION_PATTERNS)
+
+
+def _matched_named_actions(
+    normalized_text: str,
+    *,
+    names: tuple[str, ...] | list[str],
+    pattern_map: dict[str, tuple[str, ...]],
+) -> list[str]:
+    matches: list[str] = []
+    for name in names:
+        patterns = pattern_map.get(name, ())
+        if any(re.search(pattern, normalized_text, re.IGNORECASE) for pattern in patterns):
+            matches.append(name)
+    return matches
+
+
+def _classify_task_actions(normalized_text: str, *, mode: str) -> list[str]:
+    matched = _matched_named_actions(
+        normalized_text,
+        names=tuple(_AUTONOMY_TASK_ACTION_PATTERNS.keys()),
+        pattern_map=_AUTONOMY_TASK_ACTION_PATTERNS,
+    )
+    if matched:
+        return matched
+    if mode == "coding":
+        return ["inspect", "edit", "test"]
+    if mode == "research":
+        return ["research", "summarize"]
+    return []
+
+
+def _infer_session_mode(user_text: str, reply_text: str | None = None) -> str:
+    normalized = _normalize_command_text(f"{user_text}\n{reply_text or ''}")
+    if any(token in normalized for token in ("browse", "revisa", "review", "http://", "https://", "www.")):
+        return "browse"
+    if any(token in normalized for token in ("terminal", "chrome", "screen", "computer", "click", "scroll", "sesion")):
+        return "ops"
+    if any(token in normalized for token in ("commit", "test", "pytest", "fix", "corrige", "arregla", "bug", "repo", "codigo", "code", "patch")):
+        return "coding"
+    if any(token in normalized for token in ("tweet", "post", "publica", "publish", "x.com", "social")):
+        return "publish"
+    if any(token in normalized for token in ("investiga", "research", "analiza", "notebook", "cuaderno")):
+        return "research"
+    return "chat"
 
 
 def _looks_like_api_key(value: str) -> bool:

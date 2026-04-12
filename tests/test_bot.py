@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 
 from claw_v2.adapters.base import LLMRequest
 from claw_v2.agents import AgentDefinition, ExperimentRecord
+from claw_v2.coordinator import CoordinatorResult, WorkerResult
 from claw_v2.eval_mocks import scripted_experiment_runner
 from claw_v2.github import PullRequestResult
 from claw_v2.main import build_runtime
@@ -152,6 +153,883 @@ class BotTests(unittest.TestCase):
                 self.assertEqual(len(outcomes), 1)
                 self.assertEqual(outcomes[0]["outcome"], "success")
                 self.assertIn("usable reply", outcomes[0]["lesson"])
+
+    def test_autonomy_mode_commands_update_session_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+
+                initial = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/autonomy"))
+                self.assertEqual(initial["autonomy_mode"], "assisted")
+
+                updated = json.loads(
+                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/autonomy autonomous")
+                )
+                self.assertEqual(updated["autonomy_mode"], "autonomous")
+
+                policy = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/autonomy_policy"))
+                self.assertEqual(policy["autonomy_mode"], "autonomous")
+                self.assertIn("coding", policy["automatic_coordinator_modes"])
+                self.assertIn("edit", policy["allowed_task_actions"])
+                self.assertIn("commit", policy["approval_required_actions"])
+                self.assertIn("deploy", policy["blocked_actions"])
+                self.assertIn("deploy", policy["action_patterns"])
+                self.assertIn("commit", policy["task_action_patterns"])
+
+                invalid = runtime.bot.handle_text(user_id="123", session_id="s1", text="/autonomy unsafe")
+                self.assertEqual(invalid, "autonomy mode must be one of: manual, assisted, autonomous")
+
+    def test_option_followups_and_proceed_use_session_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            prompts: list[str] = []
+
+            def scripted_executor(request: LLMRequest) -> LLMResponse:
+                prompt_text = request.prompt if isinstance(request.prompt, str) else json.dumps(request.prompt)
+                prompts.append(prompt_text)
+                if len(prompts) == 1:
+                    content = "1. Revisar logs\n2. Corregir el bug de browse"
+                else:
+                    content = "handled"
+                return LLMResponse(
+                    content=content,
+                    lane=request.lane,
+                    provider="anthropic",
+                    model=request.model,
+                )
+
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=scripted_executor)
+
+                first = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="dame opciones para arreglar browse",
+                )
+                self.assertIn("1. Revisar logs", first)
+                state = runtime.memory.get_session_state("s1")
+                self.assertEqual(state["last_options"], ["Revisar logs", "Corregir el bug de browse"])
+
+                selected = runtime.bot.handle_text(user_id="123", session_id="s1", text="opción 2")
+                self.assertEqual(selected, "handled")
+                self.assertIn("El usuario seleccionó la opción 2.", prompts[-1])
+                self.assertIn("Opción elegida: Corregir el bug de browse", prompts[-1])
+
+                proceed = runtime.bot.handle_text(user_id="123", session_id="s1", text="procede")
+                self.assertEqual(proceed, "handled")
+                self.assertIn("Continúa con esta acción pendiente: Corregir el bug de browse", prompts[-1])
+
+    @patch("claw_v2.bot._jina_read")
+    def test_browse_updates_active_object_in_session_state(self, mock_jina) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                mock_jina.return_value = "contenido"
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="/browse https://example.com/path",
+                )
+                state = runtime.memory.get_session_state("s1")
+                self.assertEqual(state["mode"], "browse")
+                self.assertEqual(state["active_object"]["kind"], "url")
+                self.assertEqual(state["active_object"]["url"], "https://example.com/path")
+
+    def test_autonomous_mode_adds_task_loop_contract_to_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            prompts: list[str] = []
+
+            def scripted_executor(request: LLMRequest) -> LLMResponse:
+                prompt_text = request.prompt if isinstance(request.prompt, str) else json.dumps(request.prompt)
+                prompts.append(prompt_text)
+                return LLMResponse(
+                    content="handled",
+                    lane=request.lane,
+                    provider="anthropic",
+                    model=request.model,
+                )
+
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=scripted_executor)
+                runtime.bot.coordinator = None
+                runtime.bot.handle_text(user_id="123", session_id="s1", text="/autonomy autonomous")
+                runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="corrige el bug del login y corre tests",
+                )
+
+                self.assertIn("# Autonomy contract", prompts[-1])
+                self.assertIn("Mode: autonomous", prompts[-1])
+                self.assertIn("Follow a short task loop internally", prompts[-1])
+                self.assertIn("Batch multiple safe intermediate steps", prompts[-1])
+
+    def test_pending_action_is_extracted_from_assistant_reply(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            prompts: list[str] = []
+
+            def scripted_executor(request: LLMRequest) -> LLMResponse:
+                prompt_text = request.prompt if isinstance(request.prompt, str) else json.dumps(request.prompt)
+                prompts.append(prompt_text)
+                if len(prompts) == 1:
+                    content = "Hecho.\nSiguiente paso: correr pytest -q"
+                else:
+                    content = "handled"
+                return LLMResponse(
+                    content=content,
+                    lane=request.lane,
+                    provider="anthropic",
+                    model=request.model,
+                )
+
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=scripted_executor)
+                runtime.bot.handle_text(user_id="123", session_id="s1", text="corrige el bug del login")
+                state = runtime.memory.get_session_state("s1")
+                self.assertEqual(state["pending_action"], "correr pytest -q")
+                self.assertEqual(state["task_queue"][0]["summary"], "correr pytest -q")
+                self.assertEqual(state["task_queue"][0]["status"], "pending")
+
+                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="procede")
+                self.assertEqual(reply, "handled")
+                self.assertIn("Continúa con esta acción pendiente: correr pytest -q", prompts[-1])
+                state = runtime.memory.get_session_state("s1")
+                self.assertEqual(state["task_queue"][0]["status"], "in_progress")
+
+    def test_task_loop_tracks_budget_and_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+
+            def scripted_executor(request: LLMRequest) -> LLMResponse:
+                return LLMResponse(
+                    content="Hecho.\nVerificado: pending\nSiguiente paso: correr pytest -q",
+                    lane=request.lane,
+                    provider="anthropic",
+                    model=request.model,
+                )
+
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=scripted_executor)
+                runtime.bot.handle_text(user_id="123", session_id="s1", text="/autonomy assisted")
+                runtime.bot.handle_text(user_id="123", session_id="s1", text="corrige el bug del login")
+
+                state = runtime.memory.get_session_state("s1")
+                self.assertEqual(state["step_budget"], 2)
+                self.assertEqual(state["steps_taken"], 1)
+                self.assertEqual(state["verification_status"], "pending")
+                self.assertEqual(state["last_checkpoint"]["pending_action"], "correr pytest -q")
+
+                task_loop = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/task_loop"))
+                self.assertEqual(task_loop["steps_taken"], 1)
+                self.assertEqual(task_loop["verification_status"], "pending")
+
+                queue = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/task_queue"))
+                self.assertEqual(queue[0]["summary"], "correr pytest -q")
+                self.assertEqual(queue[0]["priority"], 1)
+
+    def test_task_queue_can_be_filtered_by_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.memory.update_session_state(
+                    "s1",
+                    task_queue=[
+                        {"task_id": "coding:assistant:correr-pytest-q", "summary": "correr pytest -q", "mode": "coding", "status": "pending", "source": "assistant", "priority": 1},
+                        {"task_id": "research:assistant:revisar-fuentes", "summary": "revisar fuentes", "mode": "research", "status": "pending", "source": "assistant", "priority": 1},
+                    ],
+                )
+
+                queue = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/task_queue coding"))
+                self.assertEqual(len(queue), 1)
+                self.assertEqual(queue[0]["mode"], "coding")
+
+    def test_proceed_uses_task_queue_when_pending_action_is_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            prompts: list[str] = []
+
+            def scripted_executor(request: LLMRequest) -> LLMResponse:
+                prompt_text = request.prompt if isinstance(request.prompt, str) else json.dumps(request.prompt)
+                prompts.append(prompt_text)
+                if len(prompts) == 1:
+                    content = "Hecho.\nSiguiente paso: correr pytest -q"
+                else:
+                    content = "handled"
+                return LLMResponse(
+                    content=content,
+                    lane=request.lane,
+                    provider="anthropic",
+                    model=request.model,
+                )
+
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=scripted_executor)
+                runtime.bot.handle_text(user_id="123", session_id="s1", text="corrige el bug del login")
+                state = runtime.memory.get_session_state("s1")
+                runtime.memory.update_session_state(
+                    "s1",
+                    pending_action="",
+                    task_queue=state["task_queue"],
+                )
+
+                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="procede")
+                self.assertEqual(reply, "handled")
+                self.assertIn("Continúa con este siguiente paso de la cola: correr pytest -q", prompts[-1])
+                state = runtime.memory.get_session_state("s1")
+                self.assertEqual(state["task_queue"][0]["status"], "in_progress")
+
+    def test_proceed_prefers_task_queue_item_matching_current_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            prompts: list[str] = []
+
+            def scripted_executor(request: LLMRequest) -> LLMResponse:
+                prompt_text = request.prompt if isinstance(request.prompt, str) else json.dumps(request.prompt)
+                prompts.append(prompt_text)
+                return LLMResponse(
+                    content="handled",
+                    lane=request.lane,
+                    provider="anthropic",
+                    model=request.model,
+                )
+
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=scripted_executor)
+                runtime.memory.update_session_state(
+                    "s1",
+                    mode="coding",
+                    pending_action="",
+                    task_queue=[
+                        {"task_id": "research:assistant:revisar-fuentes", "summary": "revisar fuentes", "mode": "research", "status": "pending", "source": "assistant", "priority": 0},
+                        {"task_id": "coding:assistant:correr-pytest-q", "summary": "correr pytest -q", "mode": "coding", "status": "pending", "source": "assistant", "priority": 1},
+                    ],
+                )
+
+                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="procede")
+                self.assertEqual(reply, "handled")
+                self.assertIn("Continúa con este siguiente paso de la cola: correr pytest -q", prompts[-1])
+
+    def test_proceed_stops_when_step_budget_is_exhausted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+
+            def scripted_executor(request: LLMRequest) -> LLMResponse:
+                return LLMResponse(
+                    content="Hecho.\nVerificado: pending\nSiguiente paso: correr pytest -q",
+                    lane=request.lane,
+                    provider="anthropic",
+                    model=request.model,
+                )
+
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=scripted_executor)
+                runtime.bot.handle_text(user_id="123", session_id="s1", text="/autonomy manual")
+                runtime.bot.handle_text(user_id="123", session_id="s1", text="corrige el bug del login")
+
+                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="procede")
+                self.assertIn("step budget agotado", reply)
+                self.assertIn("Resumen actual:", reply)
+
+    def test_task_done_marks_queue_entry_done(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+
+            def scripted_executor(request: LLMRequest) -> LLMResponse:
+                return LLMResponse(
+                    content="Hecho.\nSiguiente paso: correr pytest -q",
+                    lane=request.lane,
+                    provider="anthropic",
+                    model=request.model,
+                )
+
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=scripted_executor)
+                runtime.bot.handle_text(user_id="123", session_id="s1", text="corrige el bug del login")
+                task_id = runtime.memory.get_session_state("s1")["task_queue"][0]["task_id"]
+
+                result = json.loads(
+                    runtime.bot.handle_text(
+                        user_id="123",
+                        session_id="s1",
+                        text=f"/task_done {task_id}",
+                    )
+                )
+
+                self.assertEqual(result[0]["status"], "done")
+                state = runtime.memory.get_session_state("s1")
+                self.assertEqual(state["pending_action"], "")
+
+    def test_task_defer_marks_queue_entry_deferred(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+
+            def scripted_executor(request: LLMRequest) -> LLMResponse:
+                prompt_text = request.prompt if isinstance(request.prompt, str) else json.dumps(request.prompt)
+                if "corrige el bug del login" in prompt_text:
+                    return LLMResponse(
+                        content="Hecho.\nSiguiente paso: correr pytest -q",
+                        lane=request.lane,
+                        provider="anthropic",
+                        model=request.model,
+                    )
+                return LLMResponse(
+                    content="Hecho.\nSiguiente paso: revisar coverage",
+                    lane=request.lane,
+                    provider="anthropic",
+                    model=request.model,
+                )
+
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=scripted_executor)
+                runtime.bot.handle_text(user_id="123", session_id="s1", text="corrige el bug del login")
+                runtime.memory.update_session_state(
+                    "s1",
+                    task_queue=[
+                        {
+                            "task_id": "coding:assistant:correr-pytest-q",
+                            "summary": "correr pytest -q",
+                            "mode": "coding",
+                            "status": "pending",
+                            "source": "assistant",
+                            "priority": 1,
+                        },
+                        {
+                            "task_id": "coding:assistant:revisar-coverage",
+                            "summary": "revisar coverage",
+                            "mode": "coding",
+                            "status": "pending",
+                            "source": "assistant",
+                            "priority": 2,
+                        },
+                    ],
+                    pending_action="correr pytest -q",
+                )
+
+                result = json.loads(
+                    runtime.bot.handle_text(
+                        user_id="123",
+                        session_id="s1",
+                        text="/task_defer coding:assistant:correr-pytest-q",
+                    )
+                )
+
+                self.assertEqual(result[0]["status"], "deferred")
+                state = runtime.memory.get_session_state("s1")
+                self.assertEqual(state["pending_action"], "revisar coverage")
+
+    def test_proceed_skips_pending_tasks_with_unmet_dependencies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            prompts: list[str] = []
+
+            def scripted_executor(request: LLMRequest) -> LLMResponse:
+                prompt_text = request.prompt if isinstance(request.prompt, str) else json.dumps(request.prompt)
+                prompts.append(prompt_text)
+                return LLMResponse(
+                    content="handled",
+                    lane=request.lane,
+                    provider="anthropic",
+                    model=request.model,
+                )
+
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=scripted_executor)
+                runtime.memory.update_session_state(
+                    "s1",
+                    mode="coding",
+                    pending_action="",
+                    task_queue=[
+                        {
+                            "task_id": "coding:assistant:run-tests",
+                            "summary": "run tests",
+                            "mode": "coding",
+                            "status": "pending",
+                            "source": "assistant",
+                            "priority": 0,
+                            "depends_on": ["coding:assistant:fix-bug"],
+                        },
+                        {
+                            "task_id": "coding:assistant:fix-bug",
+                            "summary": "fix bug",
+                            "mode": "coding",
+                            "status": "pending",
+                            "source": "assistant",
+                            "priority": 1,
+                            "depends_on": [],
+                        },
+                    ],
+                )
+
+                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="procede")
+                self.assertEqual(reply, "handled")
+                self.assertIn("Continúa con este siguiente paso de la cola: fix bug", prompts[-1])
+
+    def test_task_done_unblocks_dependent_pending_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.memory.update_session_state(
+                    "s1",
+                    mode="coding",
+                    pending_action="fix bug",
+                    task_queue=[
+                        {
+                            "task_id": "coding:assistant:fix-bug",
+                            "summary": "fix bug",
+                            "mode": "coding",
+                            "status": "in_progress",
+                            "source": "assistant",
+                            "priority": 0,
+                            "depends_on": [],
+                        },
+                        {
+                            "task_id": "coding:assistant:run-tests",
+                            "summary": "run tests",
+                            "mode": "coding",
+                            "status": "pending",
+                            "source": "assistant",
+                            "priority": 1,
+                            "depends_on": ["coding:assistant:fix-bug"],
+                        },
+                    ],
+                )
+
+                result = json.loads(
+                    runtime.bot.handle_text(
+                        user_id="123",
+                        session_id="s1",
+                        text="/task_done coding:assistant:fix-bug",
+                    )
+                )
+
+                self.assertEqual(result[0]["status"], "done")
+                state = runtime.memory.get_session_state("s1")
+                self.assertEqual(state["pending_action"], "run tests")
+
+    def test_task_run_uses_coordinator_and_updates_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.coordinator = MagicMock()
+                runtime.bot.coordinator.run.return_value = CoordinatorResult(
+                    task_id="s1:123",
+                    phase_results={
+                        "research": [WorkerResult(task_name="scope_and_risks", content="scope ok", duration_seconds=0.1)],
+                        "implementation": [WorkerResult(task_name="implement_change", content="edited files", duration_seconds=0.2)],
+                        "verification": [WorkerResult(task_name="verify_change", content="Verification Status: passed", duration_seconds=0.1)],
+                    },
+                    synthesis="1. Update the failing path",
+                )
+
+                reply = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="/task_run corrige el bug del login",
+                )
+
+                self.assertIn("Coordinator task: s1:123", reply)
+                self.assertIn("Dispatch: manual", reply)
+                self.assertIn("Verification Status: passed", reply)
+                runtime.bot.coordinator.run.assert_called_once()
+                state = runtime.memory.get_session_state("s1")
+                self.assertEqual(state["verification_status"], "passed")
+                self.assertEqual(state["last_checkpoint"]["summary"], "1. Update the failing path")
+                self.assertEqual(state["task_queue"][0]["priority"], 0)
+
+    def test_autonomous_coding_message_uses_coordinator(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.coordinator = MagicMock()
+                runtime.bot.coordinator.run.return_value = CoordinatorResult(
+                    task_id="s1:autonomous",
+                    phase_results={
+                        "research": [WorkerResult(task_name="scope_and_risks", content="scope ok", duration_seconds=0.1)],
+                        "verification": [WorkerResult(task_name="verify_change", content="Verification Status: pending\nSiguiente paso: correr pytest -q", duration_seconds=0.1)],
+                    },
+                    synthesis="1. Inspect the login path",
+                )
+
+                runtime.bot.handle_text(user_id="123", session_id="s1", text="/autonomy autonomous")
+                reply = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="corrige el bug del login",
+                )
+
+                self.assertIn("Dispatch: autonomous", reply)
+                runtime.bot.coordinator.run.assert_called_once()
+                state = runtime.memory.get_session_state("s1")
+                self.assertEqual(state["pending_action"], "correr pytest -q")
+                self.assertEqual(state["verification_status"], "pending")
+                self.assertEqual(state["task_queue"][0]["priority"], 0)
+
+    def test_autonomous_policy_blocks_sensitive_automatic_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.coordinator = MagicMock()
+
+                runtime.bot.handle_text(user_id="123", session_id="s1", text="/autonomy autonomous")
+                reply = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="haz git push y despliega a prod",
+                )
+
+                self.assertIn("autonomy policy blocked coordinated execution", reply)
+                runtime.bot.coordinator.run.assert_not_called()
+                state = runtime.memory.get_session_state("s1")
+                self.assertEqual(state["verification_status"], "blocked")
+
+    def test_task_run_blocks_sensitive_scope_even_when_explicit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.coordinator = MagicMock()
+
+                reply = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="/task_run deploy to prod and git push",
+                )
+
+                self.assertIn("autonomy policy blocked coordinated execution", reply)
+                runtime.bot.coordinator.run.assert_not_called()
+
+    def test_task_run_blocks_commit_until_approved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.coordinator = MagicMock()
+
+                reply = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="/task_run commit los cambios del bug del login",
+                )
+
+                self.assertIn("autonomy policy requires approval", reply)
+                self.assertIn("/task_approve", reply)
+                self.assertIn("/task_abort", reply)
+                runtime.bot.coordinator.run.assert_not_called()
+                pending = runtime.approvals.list_pending()
+                self.assertEqual(len(pending), 1)
+                self.assertEqual(pending[0]["metadata"]["kind"], "coordinated_task")
+                self.assertEqual(pending[0]["metadata"]["session_id"], "s1")
+                self.assertEqual(pending[0]["metadata"]["approved_actions"], ["commit"])
+                state = runtime.memory.get_session_state("s1")
+                self.assertEqual(state["verification_status"], "awaiting_approval")
+
+    def test_task_approve_runs_coordinator_after_commit_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.coordinator = MagicMock()
+                runtime.bot.coordinator.run.return_value = CoordinatorResult(
+                    task_id="s1:approved",
+                    phase_results={
+                        "research": [WorkerResult(task_name="scope_and_risks", content="scope ok", duration_seconds=0.1)],
+                        "implementation": [WorkerResult(task_name="implement_change", content="created commit", duration_seconds=0.2)],
+                        "verification": [WorkerResult(task_name="verify_change", content="Verification Status: passed", duration_seconds=0.1)],
+                    },
+                    synthesis="1. Commit created and verified",
+                )
+
+                first = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="/task_run commit los cambios del bug del login",
+                )
+                match = re.search(r"/task_approve ([^ ]+) ([^`\n ]+)", first)
+                self.assertIsNotNone(match)
+                approval_id, token = match.group(1), match.group(2)
+
+                second = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text=f"/task_approve {approval_id} {token}",
+                )
+
+                self.assertIn("Coordinator task: s1:approved", second)
+                runtime.bot.coordinator.run.assert_called_once()
+                state = runtime.memory.get_session_state("s1")
+                self.assertEqual(state["verification_status"], "passed")
+
+    def test_proceed_during_task_approval_wait_returns_explicit_instruction(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.coordinator = MagicMock()
+
+                runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="/task_run commit los cambios del bug del login",
+                )
+
+                reply = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="procede",
+                )
+
+                self.assertIn("Hay una aprobación pendiente", reply)
+                self.assertIn("/task_pending", reply)
+                self.assertIn("/task_abort", reply)
+                runtime.bot.coordinator.run.assert_not_called()
+
+    def test_task_pending_lists_session_approval_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.coordinator = MagicMock()
+
+                runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="/task_run commit los cambios del bug del login",
+                )
+
+                pending = json.loads(
+                    runtime.bot.handle_text(
+                        user_id="123",
+                        session_id="s1",
+                        text="/task_pending",
+                    )
+                )
+
+                self.assertEqual(len(pending), 1)
+                self.assertEqual(pending[0]["action"], "coordinated_task")
+                self.assertIn("/task_approve", pending[0]["approve_command"])
+                self.assertIn("/task_abort", pending[0]["abort_command"])
+
+    def test_task_abort_rejects_pending_coordinated_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.coordinator = MagicMock()
+
+                first = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="/task_run commit los cambios del bug del login",
+                )
+                match = re.search(r"/task_abort ([^`\n ]+)", first)
+                self.assertIsNotNone(match)
+                approval_id = match.group(1)
+
+                second = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text=f"/task_abort {approval_id}",
+                )
+
+                self.assertEqual(second, "coordinated task rejected")
+                runtime.bot.coordinator.run.assert_not_called()
+                self.assertEqual(runtime.bot.approvals.status(approval_id), "rejected")
+                state = runtime.memory.get_session_state("s1")
+                self.assertEqual(state["verification_status"], "blocked")
+                self.assertEqual(state["pending_approvals"], [])
 
     @patch("claw_v2.bot._jina_read")
     def test_browse_failure_records_learning_outcome(self, mock_jina) -> None:

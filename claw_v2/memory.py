@@ -52,6 +52,24 @@ CREATE TABLE IF NOT EXISTS cron_state (
     runs INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS session_state (
+    session_id TEXT PRIMARY KEY,
+    autonomy_mode TEXT NOT NULL DEFAULT 'assisted',
+    mode TEXT NOT NULL DEFAULT 'chat',
+    current_goal TEXT,
+    pending_action TEXT,
+    step_budget INTEGER NOT NULL DEFAULT 2,
+    steps_taken INTEGER NOT NULL DEFAULT 0,
+    verification_status TEXT NOT NULL DEFAULT 'unknown',
+    active_object_json TEXT NOT NULL DEFAULT '{}',
+    last_options_json TEXT NOT NULL DEFAULT '[]',
+    task_queue_json TEXT NOT NULL DEFAULT '[]',
+    pending_approvals_json TEXT NOT NULL DEFAULT '[]',
+    last_checkpoint_json TEXT NOT NULL DEFAULT '{}',
+    rolling_summary TEXT,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS task_outcomes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     task_type TEXT NOT NULL,
@@ -108,6 +126,15 @@ def _simple_embedding(text: str, dim: int = 128) -> list[float]:
     return [x / norm for x in vec]
 
 
+def _loads_json_object(raw: str | None, *, default):
+    if not raw:
+        return default
+    try:
+        return json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return default
+
+
 _MIGRATION_ADD_AGENT_NAME = """
 ALTER TABLE facts ADD COLUMN agent_name TEXT NOT NULL DEFAULT 'system';
 """
@@ -122,6 +149,30 @@ ALTER TABLE task_outcomes ADD COLUMN tags TEXT NOT NULL DEFAULT '[]';
 
 _MIGRATION_ADD_PROVIDER_LAST_MESSAGE_ID = """
 ALTER TABLE provider_sessions ADD COLUMN last_message_id INTEGER NOT NULL DEFAULT 0;
+"""
+
+_MIGRATION_ADD_SESSION_STATE_STEP_BUDGET = """
+ALTER TABLE session_state ADD COLUMN step_budget INTEGER NOT NULL DEFAULT 2;
+"""
+
+_MIGRATION_ADD_SESSION_STATE_STEPS_TAKEN = """
+ALTER TABLE session_state ADD COLUMN steps_taken INTEGER NOT NULL DEFAULT 0;
+"""
+
+_MIGRATION_ADD_SESSION_STATE_VERIFICATION_STATUS = """
+ALTER TABLE session_state ADD COLUMN verification_status TEXT NOT NULL DEFAULT 'unknown';
+"""
+
+_MIGRATION_ADD_SESSION_STATE_LAST_CHECKPOINT = """
+ALTER TABLE session_state ADD COLUMN last_checkpoint_json TEXT NOT NULL DEFAULT '{}';
+"""
+
+_MIGRATION_ADD_SESSION_STATE_PENDING_APPROVALS = """
+ALTER TABLE session_state ADD COLUMN pending_approvals_json TEXT NOT NULL DEFAULT '[]';
+"""
+
+_MIGRATION_ADD_SESSION_STATE_TASK_QUEUE = """
+ALTER TABLE session_state ADD COLUMN task_queue_json TEXT NOT NULL DEFAULT '[]';
 """
 
 
@@ -161,6 +212,22 @@ class MemoryStore:
                 self._conn.commit()
             except sqlite3.OperationalError:
                 pass
+        cursor = self._conn.execute("PRAGMA table_info(session_state)")
+        session_state_cols = {row[1] for row in cursor.fetchall()}
+        for col, sql in [
+            ("step_budget", _MIGRATION_ADD_SESSION_STATE_STEP_BUDGET),
+            ("steps_taken", _MIGRATION_ADD_SESSION_STATE_STEPS_TAKEN),
+            ("verification_status", _MIGRATION_ADD_SESSION_STATE_VERIFICATION_STATUS),
+            ("task_queue_json", _MIGRATION_ADD_SESSION_STATE_TASK_QUEUE),
+            ("pending_approvals_json", _MIGRATION_ADD_SESSION_STATE_PENDING_APPROVALS),
+            ("last_checkpoint_json", _MIGRATION_ADD_SESSION_STATE_LAST_CHECKPOINT),
+        ]:
+            if col not in session_state_cols:
+                try:
+                    self._conn.execute(sql)
+                    self._conn.commit()
+                except sqlite3.OperationalError:
+                    pass
 
     def store_message(self, session_id: str, role: str, content: str) -> None:
         with self._lock:
@@ -241,6 +308,131 @@ class MemoryStore:
             )
             self._conn.commit()
             return True
+
+    def get_session_state(self, session_id: str) -> dict:
+        row = self._conn.execute(
+            """
+            SELECT autonomy_mode, mode, current_goal, pending_action, step_budget, steps_taken,
+                   verification_status, active_object_json, last_options_json, task_queue_json, pending_approvals_json,
+                   last_checkpoint_json, rolling_summary
+            FROM session_state
+            WHERE session_id = ?
+            """,
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            return {
+                "autonomy_mode": "assisted",
+                "mode": "chat",
+                "current_goal": None,
+                "pending_action": None,
+                "step_budget": 2,
+                "steps_taken": 0,
+                "verification_status": "unknown",
+                "active_object": {},
+                "last_options": [],
+                "task_queue": [],
+                "pending_approvals": [],
+                "last_checkpoint": {},
+                "rolling_summary": None,
+            }
+        return {
+            "autonomy_mode": row["autonomy_mode"] or "assisted",
+            "mode": row["mode"] or "chat",
+            "current_goal": row["current_goal"],
+            "pending_action": row["pending_action"],
+            "step_budget": int(row["step_budget"] or 2),
+            "steps_taken": int(row["steps_taken"] or 0),
+            "verification_status": row["verification_status"] or "unknown",
+            "active_object": _loads_json_object(row["active_object_json"], default={}),
+            "last_options": _loads_json_object(row["last_options_json"], default=[]),
+            "task_queue": _loads_json_object(row["task_queue_json"], default=[]),
+            "pending_approvals": _loads_json_object(row["pending_approvals_json"], default=[]),
+            "last_checkpoint": _loads_json_object(row["last_checkpoint_json"], default={}),
+            "rolling_summary": row["rolling_summary"],
+        }
+
+    def update_session_state(
+        self,
+        session_id: str,
+        *,
+        autonomy_mode: str | None = None,
+        mode: str | None = None,
+        current_goal: str | None = None,
+        pending_action: str | None = None,
+        step_budget: int | None = None,
+        steps_taken: int | None = None,
+        verification_status: str | None = None,
+        active_object: dict | None = None,
+        last_options: list[str] | None = None,
+        task_queue: list[dict] | None = None,
+        pending_approvals: list[dict] | None = None,
+        last_checkpoint: dict | None = None,
+        rolling_summary: str | None = None,
+    ) -> dict:
+        current = self.get_session_state(session_id)
+        payload = {
+            "autonomy_mode": autonomy_mode if autonomy_mode is not None else current["autonomy_mode"],
+            "mode": mode if mode is not None else current["mode"],
+            "current_goal": current_goal if current_goal is not None else current["current_goal"],
+            "pending_action": pending_action if pending_action is not None else current["pending_action"],
+            "step_budget": step_budget if step_budget is not None else current["step_budget"],
+            "steps_taken": steps_taken if steps_taken is not None else current["steps_taken"],
+            "verification_status": verification_status if verification_status is not None else current["verification_status"],
+            "active_object_json": json.dumps(active_object if active_object is not None else current["active_object"]),
+            "last_options_json": json.dumps(last_options if last_options is not None else current["last_options"]),
+            "task_queue_json": json.dumps(task_queue if task_queue is not None else current["task_queue"]),
+            "pending_approvals_json": json.dumps(
+                pending_approvals if pending_approvals is not None else current["pending_approvals"]
+            ),
+            "last_checkpoint_json": json.dumps(last_checkpoint if last_checkpoint is not None else current["last_checkpoint"]),
+            "rolling_summary": rolling_summary if rolling_summary is not None else current["rolling_summary"],
+        }
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO session_state (
+                    session_id, autonomy_mode, mode, current_goal, pending_action,
+                    step_budget, steps_taken, verification_status,
+                    active_object_json, last_options_json, task_queue_json, pending_approvals_json, last_checkpoint_json, rolling_summary
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_id)
+                DO UPDATE SET
+                    autonomy_mode = excluded.autonomy_mode,
+                    mode = excluded.mode,
+                    current_goal = excluded.current_goal,
+                    pending_action = excluded.pending_action,
+                    step_budget = excluded.step_budget,
+                    steps_taken = excluded.steps_taken,
+                    verification_status = excluded.verification_status,
+                    active_object_json = excluded.active_object_json,
+                    last_options_json = excluded.last_options_json,
+                    task_queue_json = excluded.task_queue_json,
+                    pending_approvals_json = excluded.pending_approvals_json,
+                    last_checkpoint_json = excluded.last_checkpoint_json,
+                    rolling_summary = excluded.rolling_summary,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (
+                    session_id,
+                    payload["autonomy_mode"],
+                    payload["mode"],
+                    payload["current_goal"],
+                    payload["pending_action"],
+                    payload["step_budget"],
+                    payload["steps_taken"],
+                    payload["verification_status"],
+                    payload["active_object_json"],
+                    payload["last_options_json"],
+                    payload["task_queue_json"],
+                    payload["pending_approvals_json"],
+                    payload["last_checkpoint_json"],
+                    payload["rolling_summary"],
+                ),
+            )
+            self._conn.commit()
+        return self.get_session_state(session_id)
 
     def store_fact(
         self,
@@ -336,6 +528,38 @@ class MemoryStore:
         sections: list[str] = []
         if message is not None:
             sections.extend(["# Current input", message])
+
+        session_state = self.get_session_state(session_id)
+        state_lines = [
+            f"autonomy_mode={session_state['autonomy_mode']}",
+            f"mode={session_state['mode']}",
+            f"step_budget={session_state['step_budget']}",
+            f"steps_taken={session_state['steps_taken']}",
+            f"verification_status={session_state['verification_status']}",
+        ]
+        if session_state.get("current_goal"):
+            state_lines.append(f"current_goal={session_state['current_goal']}")
+        if session_state.get("pending_action"):
+            state_lines.append(f"pending_action={session_state['pending_action']}")
+        active_object = session_state.get("active_object") or {}
+        if active_object:
+            state_lines.append(f"active_object={json.dumps(active_object, ensure_ascii=True, sort_keys=True)}")
+        last_options = session_state.get("last_options") or []
+        if last_options:
+            state_lines.append("last_options=" + " | ".join(last_options[:3]))
+        task_queue = session_state.get("task_queue") or []
+        if task_queue:
+            state_lines.append(f"task_queue={json.dumps(task_queue[:3], ensure_ascii=True, sort_keys=True)}")
+        pending_approvals = session_state.get("pending_approvals") or []
+        if pending_approvals:
+            state_lines.append(f"pending_approvals={json.dumps(pending_approvals[:3], ensure_ascii=True, sort_keys=True)}")
+        last_checkpoint = session_state.get("last_checkpoint") or {}
+        if last_checkpoint:
+            state_lines.append(f"last_checkpoint={json.dumps(last_checkpoint, ensure_ascii=True, sort_keys=True)}")
+        if session_state.get("rolling_summary"):
+            state_lines.append(f"summary={session_state['rolling_summary']}")
+        if state_lines:
+            sections.extend(["# Session state", *state_lines])
 
         facts = self.get_profile_facts()[:20]
         if facts:

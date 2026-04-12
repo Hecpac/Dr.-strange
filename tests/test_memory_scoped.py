@@ -70,6 +70,40 @@ class AgentScopedFactsTests(unittest.TestCase):
         outcomes = self.store.search_past_outcomes("Browse", task_type="browse")
         self.assertEqual(outcomes[0]["feedback"], "negative")
 
+    def test_session_state_roundtrip_and_context(self) -> None:
+        self.store.update_session_state(
+            "s1",
+            autonomy_mode="autonomous",
+            mode="coding",
+            current_goal="Arreglar el bug de browse",
+            pending_action="Correr pytest",
+            active_object={"kind": "url", "url": "https://example.com"},
+            last_options=["Revisar", "Corregir"],
+            task_queue=[{"task_id": "coding:assistant:correr-pytest", "summary": "Correr pytest", "mode": "coding", "status": "pending", "source": "assistant", "priority": 1}],
+            pending_approvals=[{"approval_id": "abc123", "action": "coordinated_task"}],
+            rolling_summary="Se detectó un bug en browse y se está corrigiendo.",
+        )
+
+        state = self.store.get_session_state("s1")
+        self.assertEqual(state["autonomy_mode"], "autonomous")
+        self.assertEqual(state["mode"], "coding")
+        self.assertEqual(state["active_object"]["kind"], "url")
+        self.assertEqual(state["last_options"], ["Revisar", "Corregir"])
+        self.assertEqual(state["task_queue"][0]["summary"], "Correr pytest")
+        self.assertEqual(state["task_queue"][0]["status"], "pending")
+        self.assertEqual(state["pending_approvals"][0]["approval_id"], "abc123")
+        self.assertEqual(state["step_budget"], 2)
+        self.assertEqual(state["steps_taken"], 0)
+        self.assertEqual(state["verification_status"], "unknown")
+
+        context = self.store.build_context("s1", message="continua", include_history=False)
+        self.assertIn("# Session state", context)
+        self.assertIn("autonomy_mode=autonomous", context)
+        self.assertIn("current_goal=Arreglar el bug de browse", context)
+        self.assertIn("verification_status=unknown", context)
+        self.assertIn("task_queue=", context)
+        self.assertIn("pending_approvals=", context)
+
 
 class ProviderSessionTTLTests(unittest.TestCase):
     def setUp(self) -> None:

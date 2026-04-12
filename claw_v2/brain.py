@@ -173,6 +173,9 @@ class BrainService:
         wiki_context = self._wiki_context(stored_user_message)
         if wiki_context:
             lessons = f"{lessons}\n{wiki_context}" if lessons else wiki_context
+        autonomy_contract = self._autonomy_contract(session_id, task_type=task_type)
+        if autonomy_contract:
+            lessons = f"{lessons}\n{autonomy_contract}" if lessons else autonomy_contract
         if isinstance(message, str):
             if not include_history:
                 # Include recent messages the SDK session might have missed
@@ -180,7 +183,7 @@ class BrainService:
                 catchup = self._build_catchup(session_id, after_id=catchup_after_id)
                 prompt = f"{catchup}{message}" if catchup else message
                 return f"{lessons}\n{prompt}" if lessons else prompt
-            ctx = self.memory.build_context(session_id, stored_user_message, include_history=True)
+            ctx = self.memory.build_context(session_id, message, include_history=True)
             return f"{lessons}\n{ctx}" if lessons else ctx
 
         if not include_history:
@@ -231,6 +234,44 @@ class BrainService:
             return ""
         lines = [f"{row['role']}: {row['content']}" for row in recent]
         return "# Recent context (includes messages outside this session)\n" + "\n".join(lines) + "\n\n"
+
+    def _autonomy_contract(self, session_id: str, *, task_type: str | None) -> str:
+        if task_type != "telegram_message":
+            return ""
+        state = self.memory.get_session_state(session_id)
+        autonomy_mode = state.get("autonomy_mode", "assisted")
+        mode = state.get("mode", "chat")
+        current_goal = state.get("current_goal")
+        pending_action = state.get("pending_action")
+        if autonomy_mode == "manual":
+            return "\n".join(
+                [
+                    "# Autonomy contract",
+                    "Mode: manual",
+                    "Ask before taking non-trivial or irreversible actions.",
+                ]
+            )
+        lines = [
+            "# Autonomy contract",
+            f"Mode: {autonomy_mode}",
+            f"Workstream: {mode}",
+        ]
+        if current_goal:
+            lines.append(f"Current goal: {current_goal}")
+        if pending_action:
+            lines.append(f"Pending action: {pending_action}")
+        lines.extend(
+            [
+                "Follow a short task loop internally: inspect context, choose the next safe step, execute or reason through it, then verify what changed.",
+                "Do not stop after a plan if the next safe step is obvious.",
+                "For coding or technical tasks, prefer end-to-end progress: inspect, edit, verify, summarize.",
+                "Stop and ask only when blocked, when an action is destructive, or when external publication/authenticated actions need confirmation.",
+                "End with a concise operational checkpoint: what was done, what was verified, and what is pending.",
+            ]
+        )
+        if autonomy_mode == "autonomous":
+            lines.append("Batch multiple safe intermediate steps before yielding back to the user when that materially advances the task.")
+        return "\n".join(lines)
 
     def verify_critical_action(
         self,
