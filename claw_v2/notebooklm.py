@@ -49,7 +49,7 @@ class NotebookLMService:
         finally:
             loop.close()
 
-    def _client_ctx(self):
+    def _client_ctx(self, timeout: float = 120):
         """Return an async context manager that yields the SDK client.
 
         When ``_client_factory`` is set (tests), the factory result is
@@ -63,7 +63,7 @@ class NotebookLMService:
         @contextlib.asynccontextmanager
         async def _real():
             from notebooklm import NotebookLMClient
-            async with await NotebookLMClient.from_storage(timeout=120) as client:
+            async with await NotebookLMClient.from_storage(timeout=timeout) as client:
                 yield client
 
         return _real()
@@ -195,7 +195,7 @@ class NotebookLMService:
         return f"Deep Research iniciado para '{query}' en notebook {title}..."
 
     async def _async_research(self, notebook_id: str, query: str, mode: str) -> int:
-        async with self._client_ctx() as client:
+        async with self._client_ctx(timeout=300) as client:
             task = await client.research.start(notebook_id, query, source="web", mode=mode)
             if task is None:
                 raise RuntimeError("Research start returned no task")
