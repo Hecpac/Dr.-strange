@@ -417,9 +417,10 @@ class ClaudeSDKExecutor:
         workspace_root = Path(request.cwd) if request.cwd else self.config.workspace_root
         read_paths = getattr(self.config, "allowed_read_paths", [])
         extra_roots = getattr(self.config, "extra_workspace_roots", [])
+        allowed = [workspace_root, *read_paths, *extra_roots, *getattr(self.config, "allowed_paths", [])]
         return SandboxPolicy(
             workspace_root=workspace_root,
-            allowed_paths=[workspace_root, *read_paths, *extra_roots],
+            allowed_paths=allowed,
             writable_paths=[workspace_root, Path("/private/tmp"), Path.home() / ".claw", *extra_roots],
             network_policy="allow",
             credential_scope="external",
