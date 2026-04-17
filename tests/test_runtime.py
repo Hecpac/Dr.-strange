@@ -69,7 +69,7 @@ class RuntimeTests(unittest.TestCase):
                 runtime.brain.handle_message("session-1", "hello")
                 payload = runtime.bot.handle_text(user_id="123", session_id="session-1", text="/status")
                 parsed = json.loads(payload)
-                self.assertIn("brain:anthropic:claude-opus-4-6", parsed["lane_metrics"])
+                self.assertIn("brain:anthropic:claude-opus-4-7", parsed["lane_metrics"])
 
     def test_build_runtime_wires_agent_infrastructure(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -118,6 +118,39 @@ class RuntimeTests(unittest.TestCase):
                 self.assertIn("heartbeat", tick.executed_jobs)
                 self.assertIn("morning_brief", tick.executed_jobs)
                 self.assertIn("daily_metrics", tick.executed_jobs)
+
+    def test_build_runtime_registers_sites_and_sub_agent_jobs_from_runtime_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            runtime_config = root / "runtime.yml"
+            runtime_config.write_text(
+                "monitored_sites:\n"
+                "  - name: status page\n"
+                "    url: https://status.example.com\n"
+                "    interval_seconds: 900\n"
+                "scheduled_sub_agents:\n"
+                "  - agent: alma\n"
+                "    skill: daily-brief\n"
+                "    interval_seconds: 7200\n"
+                "    lane: worker\n",
+                encoding="utf-8",
+            )
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "RUNTIME_CONFIG_PATH": str(runtime_config),
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                job_names = {job.name for job in runtime.scheduler.list_jobs()}
+
+        self.assertIn("site_monitor_status_page", job_names)
+        self.assertIn("alma_daily_brief", job_names)
+        self.assertIn("learning_soul_suggestions", job_names)
+        self.assertNotIn("site_monitor_premiumhome_design", job_names)
 
     def test_brain_persists_anthropic_provider_session_mapping(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -363,7 +396,7 @@ class RuntimeTests(unittest.TestCase):
                     "llm_response",
                     lane="brain",
                     provider="anthropic",
-                    model="claude-opus-4-6",
+                    model="claude-opus-4-7",
                     payload={"cost_estimate": 0.10},
                 )
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import fcntl
+import hashlib
 import logging
 import shutil
 import subprocess
@@ -34,6 +35,9 @@ class ComputerSession:
     max_iterations: int = 30
     iteration: int = 0
     current_url: str | None = None
+    visual_checks: int = 0
+    last_screenshot_hash: str | None = None
+    last_visual_changed: bool | None = None
     _cancelled: bool = False
 
 
@@ -101,6 +105,11 @@ def _restore_terminal_windows(app_names: list[str]) -> None:
             )
         except Exception:
             logger.warning("Failed to restore %s", name)
+
+
+def _screenshot_hash(screenshot: dict[str, str]) -> str:
+    data = screenshot.get("data", "")
+    return hashlib.sha256(data.encode("ascii", errors="ignore")).hexdigest()
 
 
 class _EscListener:
@@ -175,7 +184,6 @@ class CodexComputerBackend:
         cmd = [
             resolved, "exec",
             "--model", self.model,
-            "--dangerously-bypass-approvals-and-sandbox",
             "--skip-git-repo-check",
             "--color", "never",
             "--", prompt,
@@ -351,6 +359,7 @@ class ComputerUseService:
         # Build initial input with screenshot
         if not session.messages:
             screenshot = self.capture_screenshot()
+            session.last_screenshot_hash = _screenshot_hash(screenshot)
             screenshot_url = f"data:{screenshot['media_type']};base64,{screenshot['data']}"
             session.messages = [
                 {"role": "user", "content": [
@@ -415,6 +424,12 @@ class ComputerUseService:
                 self.execute_action(action_dict)
                 # Capture new screenshot after action
                 screenshot = self.capture_screenshot()
+                new_hash = _screenshot_hash(screenshot)
+                session.visual_checks += 1
+                session.last_visual_changed = (
+                    session.last_screenshot_hash is None or new_hash != session.last_screenshot_hash
+                )
+                session.last_screenshot_hash = new_hash
                 screenshot_url = f"data:{screenshot['media_type']};base64,{screenshot['data']}"
                 call_output = {
                     "type": "computer_call_output",

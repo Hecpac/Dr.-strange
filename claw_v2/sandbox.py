@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -61,8 +62,13 @@ def _unwrap_command_tokens(tokens: list[str]) -> list[str]:
     return remaining
 
 
+_SHELL_OPERATORS_RE = __import__("re").compile(r"[;|&`]|>\s|>>\s|\$\(")
+
+
 def check_command(command: str, policy: SandboxPolicy) -> str | None:
     dangerous_commands = {"rm", "shutdown", "reboot", "diskutil", "mkfs", "dd"}
+    if _SHELL_OPERATORS_RE.search(command):
+        return "shell operators (;|&>`$) are not allowed"
     try:
         tokens = shlex.split(command)
     except ValueError:
@@ -100,9 +106,25 @@ def sandbox_hook(
         violation = check_command(command, policy)
         if violation:
             return SandboxDecision(False, violation)
+        # System directories that are safe to reference (read-only tools, interpreters).
+        _SYSTEM_ROOTS = [Path("/usr"), Path("/bin"), Path("/sbin"), Path("/opt"), Path("/tmp"), Path("/private/tmp")]
         tokens = shlex.split(command) if command else []
         for token in tokens:
-            if "/" in token and not is_within_allowed(Path(token), policy):
+            if "/" not in token:
+                continue
+            # Skip flags, env-var assignments, and URLs — not file paths.
+            if token.startswith("-") or "://" in token:
+                continue
+            if "=" in token and not token.startswith("/"):
+                continue
+            # Use abspath (no symlink resolution) so .venv/bin/python
+            # doesn't resolve to /opt/homebrew/... and get blocked.
+            p = Path(token)
+            if not p.is_absolute():
+                p = policy.workspace_root / p
+            normalized = Path(os.path.abspath(p))
+            roots = [policy.workspace_root, *policy.allowed_paths, *policy.writable_paths, *_SYSTEM_ROOTS]
+            if not any(normalized.is_relative_to(Path(os.path.abspath(r))) for r in roots):
                 return SandboxDecision(False, "command references path outside allowed boundaries")
         return SandboxDecision(True)
 

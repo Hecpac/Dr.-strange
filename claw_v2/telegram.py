@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import inspect
 import logging
 import mimetypes
 import time
@@ -14,7 +15,7 @@ from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filte
 _NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 from claw_v2.bot import BotService
-from claw_v2.voice import VoiceUnavailableError, extract_audio, transcribe
+from claw_v2.voice import VoiceUnavailableError, extract_audio, synthesize_voice_note, transcribe
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,45 @@ def _download_suffix(file_path: str | None, mime_type: str | None) -> str:
     return ".jpg"
 
 
+_MAX_DOC_CHARS = 50_000
+
+
+def _extract_document_text(path: Path, mime_type: str | None, file_name: str | None) -> str:
+    suffix = path.suffix.lower()
+    # PDF extraction via pypdf
+    if suffix == ".pdf" or (mime_type and "pdf" in mime_type):
+        try:
+            from pypdf import PdfReader
+            reader = PdfReader(str(path))
+            pages = []
+            for page in reader.pages:
+                text = page.extract_text()
+                if text:
+                    pages.append(text)
+            content = "\n\n".join(pages)
+            if content.strip():
+                if len(content) > _MAX_DOC_CHARS:
+                    content = content[:_MAX_DOC_CHARS] + "\n\n[... truncado a 50k chars]"
+                return content
+        except Exception:
+            pass
+        return f"[PDF sin texto extraíble: {file_name or 'documento'}, {path.stat().st_size} bytes]"
+    # Plain text / code / csv / json etc.
+    try:
+        content = path.read_text(errors="replace")
+        if len(content) > _MAX_DOC_CHARS:
+            content = content[:_MAX_DOC_CHARS] + "\n\n[... truncado a 50k chars]"
+        return content
+    except Exception:
+        return f"[Archivo binario: {file_name or 'sin nombre'}, {path.stat().st_size} bytes, mime={mime_type}]"
+
+
+async def _maybe_send_chat_action(message: Any, action: str) -> None:
+    result = message.chat.send_action(action)
+    if inspect.isawaitable(result):
+        await result
+
+
 class TelegramTransport:
     def __init__(
         self,
@@ -133,9 +173,24 @@ class TelegramTransport:
         except Exception:
             logger.debug("Could not emit telegram latency", exc_info=True)
 
+    _PID_FILE = Path.home() / ".claw" / "telegram.pid"
+
     async def start(self) -> None:
         if self._token is None:
             return
+        # Single-instance guard: kill stale polling process if PID file exists
+        if self._PID_FILE.exists():
+            try:
+                old_pid = int(self._PID_FILE.read_text().strip())
+                import os, signal
+                os.kill(old_pid, signal.SIGKILL)
+                logger.warning("Killed stale Telegram poller (pid %d)", old_pid)
+                await asyncio.sleep(1)
+            except (ValueError, ProcessLookupError, PermissionError):
+                pass
+        self._PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+        import os
+        self._PID_FILE.write_text(str(os.getpid()))
         self._app = ApplicationBuilder().token(self._token).build()
         self._app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_text))
         self._app.add_handler(MessageHandler(filters.COMMAND, self._handle_text))
@@ -143,7 +198,12 @@ class TelegramTransport:
         self._app.add_handler(MessageHandler(filters.Document.IMAGE, self._handle_image_document))
         self._app.add_handler(MessageHandler(filters.VOICE, self._handle_voice))
         self._app.add_handler(MessageHandler(filters.AUDIO, self._handle_audio))
+        self._app.add_handler(MessageHandler(filters.Document.AUDIO, self._handle_audio_document))
         self._app.add_handler(MessageHandler(filters.VIDEO | filters.VIDEO_NOTE, self._handle_video))
+        self._app.add_handler(MessageHandler(
+            filters.Document.ALL & ~filters.Document.IMAGE & ~filters.Document.AUDIO,
+            self._handle_document,
+        ))
         await self._app.initialize()
         await self._app.start()
         await self._app.updater.start_polling()
@@ -183,6 +243,16 @@ class TelegramTransport:
             BotCommand("terminal_list", "Listar sesiones PTY de claude/codex"),
             BotCommand("nlm_list", "Listar cuadernos de NotebookLM"),
             BotCommand("nlm_create", "Crear cuaderno + Deep Research — /nlm_create <tema>"),
+            BotCommand("grill", "Entrevista rigurosa sobre un plan — /grill <plan>"),
+            BotCommand("tdd", "Desarrollo TDD red-green-refactor — /tdd <feature>"),
+            BotCommand("improve_arch", "Review arquitectural del codebase — /improve_arch"),
+            BotCommand("playbooks", "Listar playbooks disponibles"),
+            BotCommand("backtest", "Backtesting QTS — /backtest <instrucción>"),
+            BotCommand("effort", "Ajustar nivel de esfuerzo — /effort <level> [lane]"),
+            BotCommand("verify", "Verificar trabajo actual — /verify [foco]"),
+            BotCommand("focus", "Toggle focus mode (solo resultados finales)"),
+            BotCommand("voice", "Responder por audio — /voice [voz]"),
+            BotCommand("design", "Crear prototipo en Claude Design — /design <brief>"),
             BotCommand("help", "Ayuda por tema — /help [topic]"),
         ]
         try:
@@ -200,7 +270,7 @@ class TelegramTransport:
         session_id = f"tg-{update.effective_chat.id}"
         text = update.message.text or ""
         started_at = time.perf_counter()
-        await update.message.chat.send_action("typing")
+        await _maybe_send_chat_action(update.message, "typing")
         try:
             response = await asyncio.to_thread(
                 self._bot_service.handle_text, user_id=user_id, session_id=session_id, text=text,
@@ -226,9 +296,27 @@ class TelegramTransport:
         bot_done_at = time.perf_counter()
         if not response or not response.strip():
             response = "(procesando... intenta de nuevo en unos segundos)"
-        parts = _split_message(response)
-        for part in parts:
-            await update.message.reply_text(part, link_preview_options=_NO_PREVIEW)
+        voice_name = self._bot_service.is_voice_mode(session_id)
+        if voice_name and self._voice_api_key:
+            try:
+                await _maybe_send_chat_action(update.message, "record_voice")
+                ogg_path = await synthesize_voice_note(
+                    response, api_key=self._voice_api_key, voice=voice_name,
+                )
+                try:
+                    with open(ogg_path, "rb") as f:
+                        await update.message.reply_voice(voice=f)
+                finally:
+                    ogg_path.unlink(missing_ok=True)
+            except Exception:
+                logger.warning("TTS failed, falling back to text", exc_info=True)
+                parts = _split_message(response)
+                for part in parts:
+                    await update.message.reply_text(part, link_preview_options=_NO_PREVIEW)
+        else:
+            parts = _split_message(response)
+            for part in parts:
+                await update.message.reply_text(part, link_preview_options=_NO_PREVIEW)
         finished_at = time.perf_counter()
         self._emit_latency(
             session_id=session_id,
@@ -252,17 +340,28 @@ class TelegramTransport:
         if voice.file_size and voice.file_size > MAX_DOWNLOAD_BYTES:
             await update.message.reply_text("Archivo de audio demasiado grande (máx 20 MB).")
             return
-        file = await context.bot.get_file(voice.file_id)
+        await _maybe_send_chat_action(update.message, "typing")
         tmp_path = Path(f"/tmp/claw-voice-{voice.file_unique_id}.ogg")
-        await file.download_to_drive(str(tmp_path))
+        try:
+            file = await context.bot.get_file(voice.file_id, read_timeout=30, connect_timeout=15)
+            await file.download_to_drive(str(tmp_path))
+        except Exception:
+            logger.exception("Voice download failed")
+            await update.message.reply_text("No pude descargar la nota de voz. Intenta de nuevo.")
+            return
         try:
             text = await transcribe(tmp_path, api_key=self._voice_api_key)
         except VoiceUnavailableError:
-            await update.message.reply_text("Voice not available — OPENAI_API_KEY not configured.")
+            logger.exception("Voice transcription unavailable")
+            await update.message.reply_text("Voice transcription not available right now.")
+            return
+        except Exception:
+            logger.exception("Voice transcription failed")
+            await update.message.reply_text("No pude transcribir la nota de voz.")
             return
         finally:
             tmp_path.unlink(missing_ok=True)
-        await self._handle_text_content(update, text)
+        await self._handle_text_content(update, f"[Nota de voz]: {text}")
 
     async def _handle_audio(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_authorized(update):
@@ -274,14 +373,57 @@ class TelegramTransport:
         if audio.file_size and audio.file_size > MAX_DOWNLOAD_BYTES:
             await update.message.reply_text("Archivo de audio demasiado grande (máx 20 MB).")
             return
-        file = await context.bot.get_file(audio.file_id)
+        await _maybe_send_chat_action(update.message, "typing")
         suffix = Path(audio.file_name).suffix if audio.file_name else ".mp3"
         tmp_path = Path(f"/tmp/claw-audio-{audio.file_unique_id}{suffix}")
-        await file.download_to_drive(str(tmp_path))
+        try:
+            file = await context.bot.get_file(audio.file_id, read_timeout=30, connect_timeout=15)
+            await file.download_to_drive(str(tmp_path))
+        except Exception:
+            logger.exception("Audio download failed")
+            await update.message.reply_text("No pude descargar el audio. Intenta de nuevo.")
+            return
         try:
             text = await transcribe(tmp_path, api_key=self._voice_api_key)
         except VoiceUnavailableError:
-            await update.message.reply_text("Voice not available — OPENAI_API_KEY not configured.")
+            logger.exception("Audio transcription unavailable")
+            await update.message.reply_text("Voice transcription not available right now.")
+            return
+        except Exception:
+            logger.exception("Audio transcription failed")
+            await update.message.reply_text("No pude transcribir el audio.")
+            return
+        finally:
+            tmp_path.unlink(missing_ok=True)
+        caption = update.message.caption or ""
+        prefix = f"{caption}\n[Audio transcrito]: " if caption else "[Audio transcrito]: "
+        await self._handle_text_content(update, prefix + text)
+
+    async def _handle_audio_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_authorized(update):
+            return
+        if self._is_rate_limited(str(update.effective_user.id)):
+            await update.message.reply_text("Demasiados mensajes. Espera un momento.")
+            return
+        doc = update.message.document
+        if doc.file_size and doc.file_size > MAX_DOWNLOAD_BYTES:
+            await update.message.reply_text("Archivo de audio demasiado grande (máx 20 MB).")
+            return
+        await _maybe_send_chat_action(update.message, "typing")
+        suffix = Path(doc.file_name).suffix if doc.file_name else ".ogg"
+        tmp_path = Path(f"/tmp/claw-audiodoc-{doc.file_unique_id}{suffix}")
+        try:
+            file = await context.bot.get_file(doc.file_id, read_timeout=30, connect_timeout=15)
+            await file.download_to_drive(str(tmp_path))
+        except Exception:
+            logger.exception("Audio document download failed")
+            await update.message.reply_text("No pude descargar el archivo de audio. Intenta de nuevo.")
+            return
+        try:
+            text = await transcribe(tmp_path, api_key=self._voice_api_key)
+        except Exception:
+            logger.exception("Audio document transcription failed")
+            await update.message.reply_text("No pude transcribir el archivo de audio.")
             return
         finally:
             tmp_path.unlink(missing_ok=True)
@@ -301,10 +443,15 @@ class TelegramTransport:
         if hasattr(video, "file_size") and video.file_size and video.file_size > MAX_DOWNLOAD_BYTES:
             await update.message.reply_text("Video demasiado grande (máx 20 MB).")
             return
-        await update.message.chat.send_action("typing")
-        file = await context.bot.get_file(video.file_id)
+        await _maybe_send_chat_action(update.message, "typing")
         tmp_video = Path(f"/tmp/claw-video-{video.file_unique_id}.mp4")
-        await file.download_to_drive(str(tmp_video))
+        try:
+            file = await context.bot.get_file(video.file_id, read_timeout=60, connect_timeout=15)
+            await file.download_to_drive(str(tmp_video))
+        except Exception:
+            logger.exception("Video download failed")
+            await update.message.reply_text("No pude descargar el video. Intenta de nuevo.")
+            return
         tmp_audio: Path | None = None
         try:
             tmp_audio = await extract_audio(tmp_video)
@@ -314,6 +461,10 @@ class TelegramTransport:
             return
         except RuntimeError:
             await update.message.reply_text("No pude extraer audio del video.")
+            return
+        except Exception:
+            logger.exception("Video transcription failed")
+            await update.message.reply_text("No pude transcribir el video.")
             return
         finally:
             tmp_video.unlink(missing_ok=True)
@@ -377,7 +528,7 @@ class TelegramTransport:
         user_id = str(update.effective_user.id)
         session_id = f"tg-{update.effective_chat.id}"
         started_at = time.perf_counter()
-        await update.message.chat.send_action("typing")
+        await _maybe_send_chat_action(update.message, "typing")
         file = await context.bot.get_file(file_id)
         tmp_path = Path(
             f"/tmp/claw-image-{file_unique_id}{_download_suffix(getattr(file, 'file_path', None), mime_type)}"
@@ -420,6 +571,70 @@ class TelegramTransport:
             response_chars=len(response),
         )
 
+    async def _handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_authorized(update):
+            return
+        if self._is_rate_limited(str(update.effective_user.id)):
+            await update.message.reply_text("Demasiados mensajes. Espera un momento.")
+            return
+        doc = update.message.document
+        if doc is None:
+            return
+        if doc.file_size and doc.file_size > MAX_DOWNLOAD_BYTES:
+            await update.message.reply_text("Archivo demasiado grande (máx 20 MB).")
+            return
+        suffix = Path(doc.file_name).suffix if doc.file_name else ""
+        tmp_path = Path(f"/tmp/claw-doc-{doc.file_unique_id}{suffix}")
+        try:
+            file = await context.bot.get_file(doc.file_id, read_timeout=30, connect_timeout=15)
+            await file.download_to_drive(str(tmp_path))
+        except Exception:
+            logger.exception("Document download failed")
+            await update.message.reply_text("No pude descargar el archivo. Intenta de nuevo.")
+            return
+        user_id = str(update.effective_user.id)
+        session_id = f"tg-{update.effective_chat.id}"
+        started_at = time.perf_counter()
+        await _maybe_send_chat_action(update.message, "typing")
+        text_content = _extract_document_text(tmp_path, doc.mime_type, doc.file_name)
+        caption = update.message.caption or ""
+        prompt = caption if caption else f"El usuario envió el archivo '{doc.file_name or 'documento'}'. Analízalo."
+        memory_text = f"[archivo: {doc.file_name}] {caption}".strip()
+        content_blocks: list[dict[str, Any]] = [
+            {"type": "text", "text": f"{prompt}\n\n--- Contenido del archivo ---\n{text_content}"},
+        ]
+        try:
+            response = await asyncio.to_thread(
+                self._bot_service.handle_multimodal,
+                user_id=user_id,
+                session_id=session_id,
+                content_blocks=content_blocks,
+                memory_text=memory_text,
+            )
+        except Exception:
+            logger.exception("Error handling document")
+            response = "Error procesando tu documento. Intenta de nuevo."
+        finally:
+            tmp_path.unlink(missing_ok=True)
+        bot_done_at = time.perf_counter()
+        if not response or not response.strip():
+            response = "(procesando... intenta de nuevo en unos segundos)"
+        parts = _split_message(response)
+        for part in parts:
+            await update.message.reply_text(part, link_preview_options=_NO_PREVIEW)
+        finished_at = time.perf_counter()
+        self._emit_latency(
+            session_id=session_id,
+            user_id=user_id,
+            message_kind="document",
+            status="ok",
+            bot_ms=(bot_done_at - started_at) * 1000,
+            reply_ms=(finished_at - bot_done_at) * 1000,
+            total_ms=(finished_at - started_at) * 1000,
+            response_parts=len(parts),
+            response_chars=len(response),
+        )
+
     async def send_photo(self, *, chat_id: int, photo_path: str, caption: str | None = None) -> None:
         if self._app is None:
             return
@@ -431,6 +646,12 @@ class TelegramTransport:
             return
         with open(resolved, "rb") as photo:
             await self._app.bot.send_photo(chat_id=chat_id, photo=photo, caption=caption)
+
+    async def send_video_url(self, *, chat_id: int, video_url: str, caption: str | None = None) -> None:
+        """Send a video by URL to a Telegram chat."""
+        if self._app is None:
+            return
+        await self._app.bot.send_video(chat_id=chat_id, video=video_url, caption=caption)
 
     async def _handle_text_content(self, update: Update, text: str) -> None:
         user_id = str(update.effective_user.id)
@@ -444,9 +665,27 @@ class TelegramTransport:
             logger.exception("Error handling voice message")
             response = "Error processing your voice message."
         bot_done_at = time.perf_counter()
-        parts = _split_message(response)
-        for part in parts:
-            await update.message.reply_text(part, link_preview_options=_NO_PREVIEW)
+        voice_name = self._bot_service.is_voice_mode(session_id)
+        if voice_name and self._voice_api_key:
+            try:
+                await _maybe_send_chat_action(update.message, "record_voice")
+                ogg_path = await synthesize_voice_note(
+                    response, api_key=self._voice_api_key, voice=voice_name,
+                )
+                try:
+                    with open(ogg_path, "rb") as f:
+                        await update.message.reply_voice(voice=f)
+                finally:
+                    ogg_path.unlink(missing_ok=True)
+            except Exception:
+                logger.warning("TTS failed, falling back to text", exc_info=True)
+                parts = _split_message(response)
+                for part in parts:
+                    await update.message.reply_text(part, link_preview_options=_NO_PREVIEW)
+        else:
+            parts = _split_message(response)
+            for part in parts:
+                await update.message.reply_text(part, link_preview_options=_NO_PREVIEW)
         finished_at = time.perf_counter()
         self._emit_latency(
             session_id=session_id,

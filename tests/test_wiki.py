@@ -4,7 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from claw_v2.wiki import WikiService, _slugify
 
@@ -140,6 +140,24 @@ class DeepLintTests(unittest.TestCase):
         log = svc.log_path.read_text(encoding="utf-8")
         self.assertIn("deep_lint", log)
 
+    def test_auto_fix_creates_stub_without_auto_fill_query(self) -> None:
+        svc, router, tmp = _make_wiki()
+        _write_page(svc.wiki_dir, "models", "Models", "Mentions missing [[benchmarks]].")
+        router.ask.return_value = MagicMock(content=json.dumps({
+            "contradictions": [],
+            "stale": [],
+            "gaps": [{"topic": "benchmarks", "mentioned_in": ["models"], "description": "No benchmark page"}],
+            "suggestions": [],
+        }))
+
+        result = svc.deep_lint(auto_fix=True)
+
+        self.assertIn("stub:benchmarks", result["auto_fixed"])
+        stub = (svc.wiki_dir / "benchmarks.md").read_text(encoding="utf-8")
+        self.assertIn("Requires raw source evidence", stub)
+        self.assertNotIn("Síntesis automática", stub)
+        router.ask.assert_called_once()
+
 
 class SearchTests(unittest.TestCase):
     def test_search_returns_results(self) -> None:
@@ -148,11 +166,24 @@ class SearchTests(unittest.TestCase):
         results = svc.search("AI tools")
         self.assertGreater(len(results), 0)
         self.assertEqual(results[0]["slug"], "ai-tools")
+        self.assertIn("score", results[0])
+        self.assertIn("keyword_score", results[0])
 
     def test_search_empty_wiki(self) -> None:
         svc, _, _ = _make_wiki()
         results = svc.search("anything")
         self.assertEqual(results, [])
+
+    def test_search_exact_keyword_can_win(self) -> None:
+        svc, _, tmp = _make_wiki()
+        _write_page(svc.wiki_dir, "general-errors", "General Errors", "Generic troubleshooting guide.")
+        _write_page(svc.wiki_dir, "error-404", "HTTP Error", "The exact code Error 404 means not found.")
+
+        results = svc.search("Error 404")
+
+        self.assertGreater(len(results), 0)
+        self.assertEqual(results[0]["slug"], "error-404")
+        self.assertGreater(results[0]["keyword_score"], 0)
 
 
 class StatsTests(unittest.TestCase):
@@ -277,6 +308,39 @@ class IngestTests(unittest.TestCase):
         self.assertEqual(result["pages_written"], 1)
         self.assertEqual(router.ask.call_count, 2)
         self.assertTrue((svc.wiki_dir / "test-article.md").exists())
+        text = (svc.wiki_dir / "test-article.md").read_text(encoding="utf-8")
+        self.assertIn("sources: [test-article]", text)
+        self.assertTrue((svc.raw_dir / "test-article.md").exists())
+
+
+class AutoResearchTests(unittest.TestCase):
+    def test_auto_research_returns_candidates_without_writing_pages(self) -> None:
+        svc, router, tmp = _make_wiki()
+        _write_page(svc.wiki_dir, "existing", "Existing", "Content.")
+        router.ask.return_value = MagicMock(content=json.dumps([
+            {
+                "topic": "New Topic",
+                "category": "Research",
+                "reason": "Needs source research",
+                "source_queries": ["New Topic primary source"],
+            }
+        ]))
+
+        result = svc.auto_research(max_topics=1)
+
+        self.assertEqual(result["pages_written"], 0)
+        self.assertEqual(result["topics_researched"], 1)
+        self.assertFalse((svc.wiki_dir / "new-topic.md").exists())
+        self.assertEqual(result["candidates"][0]["slug"], "new-topic")
+
+
+class EvidenceTests(unittest.TestCase):
+    def test_raw_source_detection(self) -> None:
+        svc, _, tmp = _make_wiki()
+        (svc.raw_dir / "source-page.md").write_text("raw", encoding="utf-8")
+
+        self.assertTrue(svc._has_raw_evidence(["source-page"]))
+        self.assertFalse(svc._has_raw_evidence(["missing-source"]))
 
 
 class TokenBudgetQueryTests(unittest.TestCase):
@@ -294,6 +358,47 @@ class TokenBudgetQueryTests(unittest.TestCase):
         prompt = call_args[0][0]
         # Context should be well under 5000 chars of big-page
         self.assertLess(len(prompt), 8000)
+
+
+class AutoScrapeTests(unittest.TestCase):
+    def test_auto_scrape_ingests_through_raw_pipeline(self) -> None:
+        svc, router, tmp = _make_wiki()
+        svc.WATCH_SOURCES = [("Test Source", "https://example.com/source")]
+        scrape_extract = json.dumps([
+            {"title": "Scraped Topic", "content": "Specific sourced fact with enough detail for ingestion.", "category": "Research"}
+        ])
+        analyze_resp = json.dumps({
+            "entities": [],
+            "relations": [],
+            "key_facts": ["fact"],
+            "category": "Research",
+            "tags": ["test"],
+            "pages_to_update": [],
+            "new_concepts": [],
+        })
+        generate_resp = json.dumps({
+            "summary_page": {
+                "filename": "scraped-topic.md",
+                "content": "---\ntitle: Scraped Topic\n---\n\n# Scraped Topic\n\nContent.",
+            },
+            "updates": [],
+            "new_pages": [],
+            "index_entries": [],
+        })
+        router.ask.side_effect = [
+            MagicMock(content=scrape_extract),
+            MagicMock(content=analyze_resp),
+            MagicMock(content=generate_resp),
+        ]
+        proc = MagicMock(returncode=0, stdout="source page content", stderr="")
+
+        with patch("subprocess.run", return_value=proc):
+            result = svc.auto_scrape_sources()
+
+        self.assertGreaterEqual(result["pages_ingested"], 1)
+        self.assertTrue((svc.raw_dir / "scraped-topic.md").exists())
+        text = (svc.wiki_dir / "scraped-topic.md").read_text(encoding="utf-8")
+        self.assertIn("sources: [scraped-topic]", text)
 
 
 if __name__ == "__main__":

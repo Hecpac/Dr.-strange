@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 from claw_v2.approval import ApprovalManager
 from claw_v2.linear import LinearIssue, LinearService
 from claw_v2.memory import MemoryStore
+from claw_v2.observe import ObserveStream
 from claw_v2.pipeline import (
     PipelineRun,
     PipelineService,
@@ -21,6 +22,7 @@ from claw_v2.pipeline import (
     _retrieve_lessons,
     _validate_branch_name,
 )
+from claw_v2.types import LLMResponse
 
 
 def _make_issue(issue_id: str = "HEC-1", title: str = "Fix bug") -> LinearIssue:
@@ -382,6 +384,84 @@ class LearningLoopTests(unittest.TestCase):
             failures = mem.recent_failures(task_type="pipeline")
             self.assertEqual(len(failures), 1)
             self.assertEqual(failures[0]["task_id"], "B")
+
+    def test_negative_feedback_records_negative_preference(self) -> None:
+        from claw_v2.learning import LearningLoop
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mem = MemoryStore(Path(tmpdir) / "test.db")
+            loop = LearningLoop(memory=mem)
+            outcome_id = loop.record(
+                task_type="coding",
+                task_id="task-1",
+                description="Implement feature",
+                approach="use library X",
+                outcome="failure",
+                lesson="Avoid library X.",
+            )
+
+            loop.feedback(outcome_id, "negative: no uses esa libreria")
+
+            facts = mem.search_facts("negative_preference")
+            self.assertEqual(len(facts), 1)
+            self.assertIn("Avoid approach 'use library X'", facts[0]["value"])
+            self.assertIn("no uses esa libreria", facts[0]["value"])
+
+    def test_suggest_soul_updates_stores_reviewable_proposal(self) -> None:
+        from claw_v2.learning import LearningLoop
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            mem = MemoryStore(root / "test.db")
+            observe = ObserveStream(root / "test.db")
+            router = MagicMock()
+            router.ask.return_value = LLMResponse(
+                content=json.dumps(
+                    {
+                        "summary": "Failures show repeated strategy drift.",
+                        "suggestions": [
+                            {
+                                "section": "Autonomy",
+                                "change": "Before repeating a failed strategy, switch tools and summarize evidence.",
+                                "reason": "Recent failures show repeated retries without changing approach.",
+                                "priority": "high",
+                                "evidence": ["failure with three retries"],
+                            }
+                        ],
+                        "do_not_change": ["Keep approval boundaries intact."],
+                    }
+                ),
+                lane="judge",
+                provider="anthropic",
+                model="test",
+            )
+            loop = LearningLoop(memory=mem, router=router)
+            mem.store_task_outcome(
+                task_type="coding",
+                task_id="task-1",
+                description="Fix deploy bug",
+                approach="retry same command",
+                outcome="failure",
+                lesson="Switch tools after repeated failure.",
+                error_snippet="timeout",
+                retries=3,
+            )
+            observe.emit("llm_decision", payload={"api_key": "sk-secret", "status": "failed"})
+            observe.emit("kairos_notify_suppressed", payload={"message": "routine"})
+
+            proposal = loop.suggest_soul_updates(observe=observe, soul_text="# Claw\nSecurity Boundaries")
+
+            self.assertIsNotNone(proposal)
+            assert proposal is not None
+            self.assertEqual(proposal["suggestions"][0]["priority"], "high")
+            facts = mem.search_facts("soul_update_suggestion")
+            self.assertEqual(len(facts), 1)
+            self.assertIn("Before repeating a failed strategy", facts[0]["value"])
+            events = observe.recent_events(limit=5)
+            self.assertTrue(any(event["event_type"] == "soul_update_suggestion" for event in events))
+            prompt = router.ask.call_args.args[0]
+            self.assertIn("<redacted>", prompt)
+            self.assertNotIn("sk-secret", prompt)
 
     def test_pipeline_injects_lessons(self) -> None:
         """Integration: process_issue should pass past lessons to the LLM prompt."""

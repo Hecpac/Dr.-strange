@@ -12,6 +12,12 @@ from claw_v2.bus import AgentBus, _new_message
 from claw_v2.kairos import KairosService, TickDecision, KairosState
 
 
+@dataclass
+class _Site:
+    name: str
+    url: str
+
+
 def _make_service(**overrides):
     router = MagicMock()
     heartbeat = MagicMock()
@@ -79,6 +85,18 @@ class DecideTests(unittest.TestCase):
         call_kwargs = router.ask.call_args.kwargs
         self.assertEqual(call_kwargs["lane"], "judge")
         self.assertIn("evidence_pack", call_kwargs)
+
+    def test_decide_prompt_includes_few_shot_examples_and_configured_sites(self) -> None:
+        svc, router, *_ = _make_service(monitored_sites=[_Site("status.example", "https://status.example")])
+        router.ask.return_value = MagicMock(content='{"action": "none"}')
+
+        svc._decide("Pending approvals: 0")
+
+        prompt = router.ask.call_args.args[0]
+        self.assertIn("## Examples", prompt)
+        self.assertIn("critical approval pending", prompt)
+        self.assertIn("status.example", prompt)
+        self.assertNotIn("premiumhome.design and pachanodesign.com", prompt)
 
     def test_decide_action(self) -> None:
         svc, router, *_ = _make_service()
@@ -179,6 +197,26 @@ class TickTests(unittest.TestCase):
         self.assertIn("budget_exhausted", result.error)
         # Action not counted since it didn't execute
         self.assertEqual(svc.state.actions_taken, 0)
+
+    def test_handle_event_injects_event_context_and_emits_event(self) -> None:
+        svc, router, _, observe = _make_service()
+        router.ask.return_value = MagicMock(content='{"action": "none"}')
+
+        result = svc.handle_event("github.notification", {"repo": "owner/repo"})
+
+        self.assertEqual(result.action, "none")
+        prompt = router.ask.call_args.args[0]
+        self.assertIn("Event trigger: github.notification", prompt)
+        self.assertIn('"repo": "owner/repo"', prompt)
+        observe.emit.assert_any_call(
+            "kairos_event",
+            trace_id=ANY,
+            root_trace_id=ANY,
+            span_id=ANY,
+            parent_span_id=ANY,
+            artifact_id="kairos_event:github.notification",
+            payload={"event_type": "github.notification", "action": "none", "reason": "", "error": ""},
+        )
 
 
 class StateTests(unittest.TestCase):
@@ -285,6 +323,42 @@ class ExecuteActionTests(unittest.TestCase):
         result = svc._execute(decision, budget=10.0)
         self.assertEqual(result.action, "unknown_thing")
         self.assertIn("unknown", result.error)
+
+    def test_notify_user_suppresses_noise(self) -> None:
+        svc, router, _, observe = _make_service()
+        router.ask.return_value = MagicMock(content='{"important": false}')
+        decision = TickDecision(action="notify_user", reason="routine FYI", detail="Routine background update")
+
+        svc._handle_notify_user(decision)
+
+        observe.emit.assert_any_call(
+            "kairos_notify_suppressed",
+            trace_id=None,
+            root_trace_id=None,
+            span_id=None,
+            parent_span_id=None,
+            job_id=None,
+            artifact_id=None,
+            payload={"message": "Routine background update", "reason": "routine FYI"},
+        )
+
+    def test_notify_user_bypasses_noise_filter_for_critical_text(self) -> None:
+        svc, router, _, observe = _make_service()
+        decision = TickDecision(action="notify_user", reason="critical approval", detail="Critical approval pending")
+
+        svc._handle_notify_user(decision)
+
+        router.ask.assert_not_called()
+        observe.emit.assert_any_call(
+            "kairos_notify_user",
+            trace_id=None,
+            root_trace_id=None,
+            span_id=None,
+            parent_span_id=None,
+            job_id=None,
+            artifact_id=None,
+            payload={"message": "Critical approval pending"},
+        )
 
 
 class EnhancedContextTests(unittest.TestCase):

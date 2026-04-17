@@ -158,6 +158,21 @@ class TotalCostTodayTests(unittest.TestCase):
             observe.emit("llm_response", lane="brain", provider="anthropic", model="opus", payload={"cost_estimate": 2.0})
             self.assertAlmostEqual(observe.total_cost_today(), 2.0)
 
+    def test_spending_today_groups_llm_decisions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "test.db")
+            observe.emit("llm_decision", lane="brain", provider="anthropic", model="opus", payload={"cost_estimate": 1.5})
+            observe.emit("llm_decision", lane="brain", provider="anthropic", model="opus", payload={"cost_estimate": 0.5})
+            observe.emit("llm_decision", lane="worker", provider="openai", model="gpt-5.4-mini", payload={"cost_estimate": 0.25})
+            observe.emit("llm_response", lane="worker", provider="openai", model="gpt-5.4-mini", payload={"cost_estimate": 99.0})
+
+            spending = observe.spending_today()
+
+            self.assertAlmostEqual(spending["total"], 2.25)
+            self.assertEqual(spending["by_lane"], {"brain": 2.0, "worker": 0.25})
+            self.assertEqual(spending["by_provider"], {"anthropic": 2.0, "openai": 0.25})
+            self.assertEqual(len(spending["rows"]), 2)
+
 
 class DailyCostGateTests(unittest.TestCase):
     def _make_request(self) -> LLMRequest:
@@ -166,7 +181,7 @@ class DailyCostGateTests(unittest.TestCase):
             system_prompt=None,
             lane="brain",
             provider="anthropic",
-            model="claude-opus-4-6",
+            model="claude-opus-4-7",
             effort="high",
             session_id=None,
             max_budget=0.5,
@@ -221,7 +236,7 @@ class DecisionLoggerTests(unittest.TestCase):
                 system_prompt=None,
                 lane="brain",
                 provider="anthropic",
-                model="claude-opus-4-6",
+                model="claude-opus-4-7",
                 effort="high",
                 session_id="sess-1",
                 max_budget=0.5,
@@ -235,7 +250,7 @@ class DecisionLoggerTests(unittest.TestCase):
                 content="hello world",
                 lane="brain",
                 provider="anthropic",
-                model="claude-opus-4-6",
+                model="claude-opus-4-7",
                 confidence=0.85,
                 cost_estimate=0.03,
             )
@@ -296,7 +311,7 @@ class DecisionLoggerTests(unittest.TestCase):
                 system_prompt=None,
                 lane="brain",
                 provider="anthropic",
-                model="claude-opus-4-6",
+                model="claude-opus-4-7",
                 effort="high",
                 session_id=None,
                 max_budget=0.5,
@@ -310,7 +325,7 @@ class DecisionLoggerTests(unittest.TestCase):
                 content="ok",
                 lane="brain",
                 provider="anthropic",
-                model="claude-opus-4-6",
+                model="claude-opus-4-7",
                 confidence=0.5,
                 cost_estimate=0.01,
             )
@@ -366,7 +381,7 @@ class AntiDistillationTests(unittest.TestCase):
             system_prompt=system_prompt,
             lane=lane,
             provider="anthropic",
-            model="claude-opus-4-6",
+            model="claude-opus-4-7",
             effort="high",
             session_id=session_id,
             max_budget=0.5,

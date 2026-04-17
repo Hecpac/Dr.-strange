@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import subprocess
+import threading
+from contextlib import contextmanager
 from pathlib import Path
-from dataclasses import dataclass
-from typing import Any, Callable
+from dataclasses import dataclass, field
+from typing import Any, Callable, Generator
+
+_pool_logger = logging.getLogger(__name__)
 
 try:
     from playwright.sync_api import sync_playwright
@@ -262,6 +267,49 @@ console.log(JSON.stringify({{
             browser.close()
         return result
 
+    @staticmethod
+    def chrome_download_wait(
+        *,
+        extension: str | None = None,
+        timeout: float = 30,
+    ) -> str | None:
+        """Wait for the most recent file to appear in CDP or macOS download dirs.
+
+        Returns the file path or None if nothing appeared before timeout.
+        """
+        import time
+
+        watch_dirs = [Path(_CDP_DOWNLOAD_DIR), Path.home() / "Downloads"]
+        for d in watch_dirs:
+            d.mkdir(parents=True, exist_ok=True)
+
+        before: dict[str, set[str]] = {}
+        for d in watch_dirs:
+            try:
+                before[str(d)] = {p.name for p in d.iterdir()}
+            except OSError:
+                before[str(d)] = set()
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            for d in watch_dirs:
+                try:
+                    current = set(d.iterdir())
+                except OSError:
+                    continue
+                new_files = [
+                    p for p in current
+                    if p.name not in before[str(d)]
+                    and not p.name.endswith(".crdownload")
+                    and not p.name.endswith(".tmp")
+                    and (extension is None or p.suffix == extension)
+                ]
+                if new_files:
+                    newest = max(new_files, key=lambda p: p.stat().st_mtime)
+                    return str(newest)
+            time.sleep(0.5)
+        return None
+
     def browserbase_browse(
         self,
         url: str,
@@ -348,6 +396,7 @@ console.log(JSON.stringify({{
 
 
 _CDP_MAX_RETRIES = 2
+_CDP_DOWNLOAD_DIR = "/tmp/claw-downloads"
 
 # Domains that rely heavily on JS rendering and need extra wait time.
 _JS_HEAVY_DOMAINS = ("x.com", "twitter.com", "instagram.com", "facebook.com", "linkedin.com", "reddit.com")
@@ -363,19 +412,53 @@ def _require_sync_playwright():
     return sync_playwright()
 
 
-def _cdp_connect(pw, cdp_url: str, *, retries: int = _CDP_MAX_RETRIES):
+def _cdp_connect(pw, cdp_url: str, *, retries: int = _CDP_MAX_RETRIES, enable_downloads: bool = True):
     """Connect to Chrome via CDP with retry logic."""
     import time
 
     last_exc: Exception | None = None
     for attempt in range(retries + 1):
         try:
-            return pw.chromium.connect_over_cdp(cdp_url, timeout=10_000)
+            browser = pw.chromium.connect_over_cdp(cdp_url, timeout=10_000)
+            if enable_downloads:
+                _enable_cdp_downloads(browser)
+            return browser
         except Exception as exc:
             last_exc = exc
             if attempt < retries:
                 time.sleep(1)
     raise BrowserError(f"CDP connection failed after {retries + 1} attempts: {last_exc}") from last_exc
+
+
+def _enable_cdp_downloads(browser) -> None:
+    """Enable automatic file downloads via CDP to a known directory."""
+    os.makedirs(_CDP_DOWNLOAD_DIR, exist_ok=True)
+    try:
+        context = browser.contexts[0] if browser.contexts else None
+        if context is None:
+            _pool_logger.warning("CDP downloads: no browser context available")
+            return
+        for page in context.pages:
+            _enable_page_downloads(context, page)
+    except Exception as exc:
+        _pool_logger.warning("CDP download setup failed: %s", exc)
+
+
+def _enable_page_downloads(context, page) -> None:
+    """Enable downloads for a specific page via CDP session."""
+    try:
+        cdp = context.new_cdp_session(page)
+        cdp.send("Browser.setDownloadBehavior", {
+            "behavior": "allow",
+            "downloadPath": _CDP_DOWNLOAD_DIR,
+        })
+        cdp.send("Page.setDownloadBehavior", {
+            "behavior": "allow",
+            "downloadPath": _CDP_DOWNLOAD_DIR,
+        })
+        cdp.detach()
+    except Exception as exc:
+        _pool_logger.debug("Download enable failed for page %s: %s", getattr(page, "url", "?"), exc)
 
 
 def _is_js_heavy(url: str) -> bool:
@@ -499,3 +582,135 @@ def _browserbase_release_session(
     except Exception:
         # Cleanup is best-effort; the session will eventually expire server-side.
         return
+
+
+# ---------------------------------------------------------------------------
+# BrowserPool — isolated browser contexts for parallel workers
+# ---------------------------------------------------------------------------
+
+@dataclass
+class BrowserSession:
+    """An isolated browser context with its own page, cookies, and storage."""
+
+    session_id: str
+    context: Any  # playwright BrowserContext
+    page: Any  # playwright Page
+
+    def navigate(self, url: str, *, timeout: int = 30_000) -> BrowseResult:
+        self.page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+        _wait_for_dynamic_content(self.page, url)
+        text = _extract_page_text(self.page)
+        return BrowseResult(url=self.page.url, title=self.page.title(), content=text)
+
+    def screenshot(self, name: str = "session.png") -> BrowseResult:
+        safe_name = Path(name).name or "session.png"
+        path = f"/tmp/claw-pool-{self.session_id}-{safe_name}"
+        self.page.screenshot(path=path)
+        text = _extract_page_text(self.page)
+        return BrowseResult(
+            url=self.page.url,
+            title=self.page.title(),
+            content=text,
+            screenshot_path=path,
+        )
+
+    def close(self) -> None:
+        try:
+            self.context.close()
+        except Exception:
+            pass
+
+
+class BrowserPool:
+    """Pool of isolated BrowserContexts over a single CDP connection.
+
+    Each ``acquire()`` creates a fresh BrowserContext with its own cookies,
+    storage, and page — safe for parallel use across threads.
+
+    Usage::
+
+        pool = BrowserPool()
+        with pool.session("worker-1") as s:
+            s.navigate("https://example.com")
+            s.screenshot("result.png")
+        pool.shutdown()
+    """
+
+    def __init__(self, *, cdp_url: str = "http://localhost:9222", max_sessions: int = 8) -> None:
+        self._cdp_url = cdp_url
+        self._max_sessions = max_sessions
+        self._pw: Any = None
+        self._browser: Any = None
+        self._lock = threading.Lock()
+        self._active: dict[str, BrowserSession] = {}
+
+    def _ensure_connected(self) -> None:
+        if self._browser is not None and self._browser.is_connected():
+            return
+        if self._browser is not None:
+            _pool_logger.warning("CDP connection lost — reconnecting")
+            self._cleanup_browser()
+        pw_mod = _require_sync_playwright()
+        self._pw = pw_mod.start()
+        self._browser = _cdp_connect(self._pw, self._cdp_url)
+        _pool_logger.debug("BrowserPool connected to %s", self._cdp_url)
+
+    def _cleanup_browser(self) -> None:
+        for s in self._active.values():
+            s.close()
+        self._active.clear()
+        if self._browser:
+            try:
+                self._browser.close()
+            except Exception:
+                pass
+            self._browser = None
+        if self._pw:
+            try:
+                self._pw.stop()
+            except Exception:
+                pass
+            self._pw = None
+
+    def acquire(self, session_id: str) -> BrowserSession:
+        with self._lock:
+            if session_id in self._active:
+                return self._active[session_id]
+            if len(self._active) >= self._max_sessions:
+                raise BrowserError(
+                    f"BrowserPool limit reached ({self._max_sessions} sessions)"
+                )
+            self._ensure_connected()
+            context = self._browser.new_context(
+                viewport={"width": 1280, "height": 900},
+            )
+            page = context.new_page()
+            _enable_page_downloads(context, page)
+            session = BrowserSession(
+                session_id=session_id,
+                context=context,
+                page=page,
+            )
+            self._active[session_id] = session
+            _pool_logger.debug("Acquired session %s (%d active)", session_id, len(self._active))
+            return session
+
+    def release(self, session_id: str) -> None:
+        with self._lock:
+            session = self._active.pop(session_id, None)
+        if session:
+            session.close()
+            _pool_logger.debug("Released session %s", session_id)
+
+    @contextmanager
+    def session(self, session_id: str) -> Generator[BrowserSession, None, None]:
+        s = self.acquire(session_id)
+        try:
+            yield s
+        finally:
+            self.release(session_id)
+
+    def shutdown(self) -> None:
+        with self._lock:
+            self._cleanup_browser()
+        _pool_logger.debug("BrowserPool shut down")

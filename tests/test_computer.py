@@ -146,6 +146,8 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual(result, "Done! I clicked the button.")
         self.assertEqual(session.status, "done")
         self.assertEqual(session.iteration, 2)
+        self.assertEqual(session.visual_checks, 1)
+        self.assertFalse(session.last_visual_changed)
 
     def test_agent_loop_stops_at_max_iterations(self) -> None:
         svc = ComputerUseService(display_width=1280, display_height=800)
@@ -228,6 +230,42 @@ class AgentLoopTests(unittest.TestCase):
         call_output = session.messages[-1]
         self.assertEqual(call_output["type"], "computer_call_output")
         self.assertEqual(call_output["call_id"], "call_1")
+
+    def test_agent_loop_tracks_visual_change_after_action(self) -> None:
+        svc = ComputerUseService(display_width=1280, display_height=800)
+        gate = ActionGate(sensitive_urls=[])
+        session = ComputerSession(task="click the button", current_url="https://example.com")
+
+        call_count = [0]
+
+        def fake_create(**kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return _mock_openai_response(
+                    computer_calls=[{"call_id": "call_1", "action": {"type": "click", "x": 500, "y": 300, "button": "left"}}],
+                    response_id="resp_1",
+                )
+            return _mock_openai_response(text="Done.", response_id="resp_2")
+
+        screenshots = [
+            {"data": base64.b64encode(b"before").decode("ascii"), "media_type": "image/png"},
+            {"data": base64.b64encode(b"after").decode("ascii"), "media_type": "image/png"},
+        ]
+        mock_client = MagicMock()
+        mock_client.responses.create.side_effect = fake_create
+
+        with patch("claw_v2.computer.pyautogui"):
+            with patch.object(svc, "capture_screenshot", side_effect=screenshots):
+                result = svc.run_agent_loop(
+                    session=session,
+                    client=mock_client,
+                    gate=gate,
+                    model="computer-use-preview",
+                )
+
+        self.assertEqual(result, "Done.")
+        self.assertEqual(session.visual_checks, 1)
+        self.assertTrue(session.last_visual_changed)
 
 
 class BrowserUseServiceTests(unittest.TestCase):

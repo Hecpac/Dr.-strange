@@ -1,13 +1,16 @@
 """Learning loop — records outcomes, retrieves lessons, derives insights via LLM."""
 from __future__ import annotations
 
+import json
 import logging
+import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from claw_v2.llm import LLMRouter
     from claw_v2.memory import MemoryStore
+    from claw_v2.observe import ObserveStream
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +108,19 @@ class LearningLoop:
         if not existing:
             return f"Outcome #{oid} not found."
         self.memory.update_outcome_feedback(oid, rating)
+        if rating.strip().lower().startswith("negative"):
+            reason = rating.split(":", 1)[1].strip() if ":" in rating else "user rejected this approach"
+            self.memory.store_fact(
+                f"negative_preference.{oid}",
+                (
+                    f"Avoid approach '{existing['approach'][:160]}' for {existing['task_type']} "
+                    f"unless explicitly requested. Reason: {reason}."
+                ),
+                source="learning_loop",
+                source_trust="self",
+                confidence=0.85,
+                entity_tags=("learning", "negative_preference"),
+            )
         return f"Feedback '{rating}' saved for outcome #{oid}: {existing['description'][:60]}"
 
     # --- Derive lesson ---
@@ -186,3 +202,270 @@ class LearningLoop:
         except Exception:
             logger.warning("Learning loop consolidation failed")
             return None
+
+    # --- Prompt optimization ---
+
+    def suggest_soul_updates(
+        self,
+        *,
+        observe: ObserveStream,
+        soul_text: str,
+        event_limit: int = 100,
+        outcome_limit: int = 50,
+        min_signals: int = 3,
+    ) -> dict[str, Any] | None:
+        """Suggest reviewable Soul Definition changes from outcomes and observe events.
+
+        This deliberately stores proposals instead of editing SOUL.md. Prompt changes are
+        high-leverage behavior changes and should stay auditable.
+        """
+        outcomes = self.memory.search_past_outcomes("", limit=outcome_limit)
+        events = observe.recent_events(limit=event_limit)
+        signals = _prompt_optimization_signals(outcomes, events)
+        if len(signals) < min_signals:
+            return None
+
+        proposal = self._derive_soul_update_proposal(
+            soul_text=soul_text,
+            signals=signals,
+            outcomes=outcomes,
+            events=events,
+        )
+        if not proposal or not proposal.get("suggestions"):
+            return None
+
+        proposal["evidence_counts"] = {"signals": len(signals), "outcomes": len(outcomes), "events": len(events)}
+        key = f"soul_update_suggestion.{int(time.time())}"
+        value = json.dumps(proposal, ensure_ascii=True, sort_keys=True)
+        self.memory.store_fact(
+            key,
+            value,
+            source="learning_loop",
+            source_trust="self",
+            confidence=_proposal_confidence(proposal),
+            entity_tags=("learning", "soul_suggestion", "prompt_optimization"),
+        )
+        observe.emit(
+            "soul_update_suggestion",
+            payload={
+                "suggestion_count": len(proposal.get("suggestions", [])),
+                "summary": str(proposal.get("summary", ""))[:500],
+                "fact_key": key,
+            },
+        )
+        return proposal
+
+    def _derive_soul_update_proposal(
+        self,
+        *,
+        soul_text: str,
+        signals: list[dict[str, Any]],
+        outcomes: list[dict],
+        events: list[dict],
+    ) -> dict[str, Any] | None:
+        if self.router is None:
+            return _heuristic_soul_update_proposal(signals, outcomes, events)
+
+        prompt = (
+            "You are optimizing Claw's Soul Definition based on observed behavior.\n"
+            "Return JSON only. Do not rewrite the whole Soul. Suggest small, reviewable edits.\n"
+            "Never suggest adding raw chain-of-thought logging or weakening security boundaries.\n\n"
+            "JSON shape:\n"
+            "{\n"
+            '  "summary": "short pattern summary",\n'
+            '  "suggestions": [\n'
+            '    {"section": "target section", "change": "exact proposed wording or concise edit", '
+            '"reason": "why this improves behavior", "priority": "low|medium|high", "evidence": ["signal"]}\n'
+            "  ],\n"
+            '  "do_not_change": ["guardrail to preserve"]\n'
+            "}\n\n"
+            f"Current Soul excerpt:\n{(soul_text or '')[:6000]}\n\n"
+            "Observed signals:\n"
+            f"{json.dumps(signals[:40], ensure_ascii=True, sort_keys=True)}"
+        )
+        try:
+            response = self.router.ask(prompt, lane="judge", max_budget=0.15, timeout=60.0)
+            parsed = _parse_json_object(response.content)
+            if parsed is None:
+                return _heuristic_soul_update_proposal(signals, outcomes, events)
+            return _normalize_soul_update_proposal(parsed)
+        except Exception:
+            logger.warning("Soul update proposal derivation failed", exc_info=True)
+            return _heuristic_soul_update_proposal(signals, outcomes, events)
+
+
+def _prompt_optimization_signals(outcomes: list[dict], events: list[dict]) -> list[dict[str, Any]]:
+    signals: list[dict[str, Any]] = []
+    for outcome in outcomes:
+        signals.append(
+            {
+                "kind": "task_outcome",
+                "task_type": outcome.get("task_type"),
+                "outcome": outcome.get("outcome"),
+                "description": str(outcome.get("description", ""))[:240],
+                "approach": str(outcome.get("approach", ""))[:200],
+                "lesson": str(outcome.get("lesson", ""))[:240],
+                "feedback": str(outcome.get("feedback") or "")[:180],
+                "retries": int(outcome.get("retries") or 0),
+                "error": str(outcome.get("error_snippet") or "")[:240],
+            }
+        )
+    for event in events:
+        payload = _sanitize_payload(event.get("payload") or {})
+        signals.append(
+            {
+                "kind": "observe_event",
+                "event_type": event.get("event_type"),
+                "lane": event.get("lane"),
+                "provider": event.get("provider"),
+                "model": event.get("model"),
+                "payload": payload,
+            }
+        )
+    return signals
+
+
+def _sanitize_payload(payload: Any, *, depth: int = 0) -> Any:
+    if depth > 3:
+        return "<nested>"
+    if isinstance(payload, dict):
+        clean: dict[str, Any] = {}
+        for key, value in list(payload.items())[:20]:
+            key_text = str(key)
+            if _is_sensitive_key(key_text):
+                clean[key_text] = "<redacted>"
+            else:
+                clean[key_text] = _sanitize_payload(value, depth=depth + 1)
+        return clean
+    if isinstance(payload, list):
+        return [_sanitize_payload(item, depth=depth + 1) for item in payload[:10]]
+    if isinstance(payload, str):
+        return payload[:300]
+    return payload
+
+
+def _is_sensitive_key(key: str) -> bool:
+    lowered = key.lower()
+    return any(token in lowered for token in ("token", "secret", "password", "api_key", "authorization", "credential"))
+
+
+def _parse_json_object(text: str) -> dict[str, Any] | None:
+    clean = text.strip()
+    if clean.startswith("```"):
+        clean = clean.strip("`")
+        if clean.lower().startswith("json"):
+            clean = clean[4:].strip()
+    start = clean.find("{")
+    end = clean.rfind("}") + 1
+    if start == -1 or end == 0:
+        return None
+    try:
+        parsed = json.loads(clean[start:end])
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _normalize_soul_update_proposal(parsed: dict[str, Any]) -> dict[str, Any]:
+    suggestions: list[dict[str, Any]] = []
+    for raw in parsed.get("suggestions") or []:
+        if not isinstance(raw, dict):
+            continue
+        change = str(raw.get("change") or "").strip()
+        reason = str(raw.get("reason") or "").strip()
+        if not change or not reason:
+            continue
+        priority = str(raw.get("priority") or "medium").lower()
+        if priority not in {"low", "medium", "high"}:
+            priority = "medium"
+        evidence = raw.get("evidence") or []
+        if not isinstance(evidence, list):
+            evidence = [str(evidence)]
+        suggestions.append(
+            {
+                "section": str(raw.get("section") or "Soul Definition").strip()[:120],
+                "change": change[:1000],
+                "reason": reason[:500],
+                "priority": priority,
+                "evidence": [str(item)[:240] for item in evidence[:5]],
+            }
+        )
+    do_not_change = parsed.get("do_not_change") or []
+    if not isinstance(do_not_change, list):
+        do_not_change = [str(do_not_change)]
+    return {
+        "summary": str(parsed.get("summary") or "Soul update suggestions derived from recent signals.")[:500],
+        "suggestions": suggestions[:8],
+        "do_not_change": [str(item)[:240] for item in do_not_change[:5]],
+    }
+
+
+def _heuristic_soul_update_proposal(
+    signals: list[dict[str, Any]],
+    outcomes: list[dict],
+    events: list[dict],
+) -> dict[str, Any] | None:
+    suggestions: list[dict[str, Any]] = []
+    negative = [o for o in outcomes if str(o.get("feedback") or "").lower().startswith("negative")]
+    failures = [o for o in outcomes if o.get("outcome") == "failure"]
+    suppressed = [e for e in events if e.get("event_type") in {"kairos_notify_suppressed", "soul_update_suggestion"}]
+
+    if negative:
+        suggestions.append(
+            {
+                "section": "User Preferences / Negative Constraints",
+                "change": "When user feedback is negative, preserve the rejected approach as an explicit negative constraint and check it before repeating similar work.",
+                "reason": "Recent feedback includes rejected approaches that should become durable behavioral constraints.",
+                "priority": "high",
+                "evidence": [str(negative[0].get("feedback") or "negative feedback")[:240]],
+            }
+        )
+    if failures:
+        suggestions.append(
+            {
+                "section": "Autonomy / Verification",
+                "change": "After repeated failures, switch strategy and summarize evidence before asking for help.",
+                "reason": "Recent failed outcomes indicate the agent benefits from an explicit strategy-switch checkpoint.",
+                "priority": "medium",
+                "evidence": [str(failures[0].get("lesson") or failures[0].get("error_snippet") or "failure")[:240]],
+            }
+        )
+    if suppressed:
+        suggestions.append(
+            {
+                "section": "Proactivity",
+                "change": "Proactive notifications should only interrupt Hector when they change a decision, require action, or prevent risk; otherwise log them silently.",
+                "reason": "Recent notification suppression shows proactivity needs an importance threshold.",
+                "priority": "medium",
+                "evidence": [str(suppressed[0].get("payload") or "notification suppressed")[:240]],
+            }
+        )
+    if not suggestions and len(signals) >= 3:
+        suggestions.append(
+            {
+                "section": "Learning Loop",
+                "change": "Periodically review ObserveStream and task outcomes for prompt-level behavior drift, then propose small Soul Definition edits for human review.",
+                "reason": "There is enough operational signal to support reviewable prompt optimization.",
+                "priority": "low",
+                "evidence": [f"{len(signals)} recent learning signals available"],
+            }
+        )
+    if not suggestions:
+        return None
+    return {
+        "summary": "Reviewable Soul Definition suggestions derived from recent learning and telemetry signals.",
+        "suggestions": suggestions,
+        "do_not_change": [
+            "Do not weaken security approval boundaries.",
+            "Do not store raw chain-of-thought.",
+        ],
+    }
+
+
+def _proposal_confidence(proposal: dict[str, Any]) -> float:
+    priorities = [item.get("priority") for item in proposal.get("suggestions", []) if isinstance(item, dict)]
+    if "high" in priorities:
+        return 0.8
+    if "medium" in priorities:
+        return 0.7
+    return 0.6

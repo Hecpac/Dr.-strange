@@ -182,6 +182,8 @@ class MemoryStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.executescript(SCHEMA)
         self._migrate()
         self._lock = threading.Lock()
@@ -249,6 +251,22 @@ class MemoryStore:
             (session_id, limit),
         ).fetchall()
         return [dict(row) for row in reversed(rows)]
+
+    def delete_last_messages(self, session_id: str, count: int) -> int:
+        with self._lock:
+            ids = [
+                row[0]
+                for row in self._conn.execute(
+                    "SELECT id FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+                    (session_id, count),
+                ).fetchall()
+            ]
+            if not ids:
+                return 0
+            placeholders = ",".join("?" for _ in ids)
+            self._conn.execute(f"DELETE FROM messages WHERE id IN ({placeholders})", ids)
+            self._conn.commit()
+            return len(ids)
 
     def get_messages_since(self, session_id: str, after_id: int, limit: int | None = None) -> list[dict]:
         sql = [
@@ -640,28 +658,32 @@ class MemoryStore:
     def _provider_session_row(
         self, app_session_id: str, provider: str, *, max_age_seconds: int = 7200,
     ) -> sqlite3.Row | None:
-        row = self._conn.execute(
-            """
-            SELECT provider_session_id, last_message_id, updated_at
-            FROM provider_sessions
-            WHERE app_session_id = ? AND provider = ?
-            """,
-            (app_session_id, provider),
-        ).fetchone()
-        if row is None:
-            return None
-        # Expire sessions older than max_age_seconds to avoid stale resume failures.
-        if row["updated_at"] is not None:
-            from datetime import datetime, timezone
-            try:
-                updated = datetime.fromisoformat(row["updated_at"]).replace(tzinfo=timezone.utc)
-                age = (datetime.now(timezone.utc) - updated).total_seconds()
-                if age > max_age_seconds:
-                    self.clear_provider_session(app_session_id, provider)
-                    return None
-            except (ValueError, TypeError):
-                pass
-        return row
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT provider_session_id, last_message_id, updated_at
+                FROM provider_sessions
+                WHERE app_session_id = ? AND provider = ?
+                """,
+                (app_session_id, provider),
+            ).fetchone()
+            if row is None:
+                return None
+            if row["updated_at"] is not None:
+                from datetime import datetime, timezone
+                try:
+                    updated = datetime.fromisoformat(row["updated_at"]).replace(tzinfo=timezone.utc)
+                    age = (datetime.now(timezone.utc) - updated).total_seconds()
+                    if age > max_age_seconds:
+                        self._conn.execute(
+                            "DELETE FROM provider_sessions WHERE app_session_id = ? AND provider = ?",
+                            (app_session_id, provider),
+                        )
+                        self._conn.commit()
+                        return None
+                except (ValueError, TypeError):
+                    pass
+            return row
 
     def get_provider_session(
         self, app_session_id: str, provider: str, *, max_age_seconds: int = 7200,

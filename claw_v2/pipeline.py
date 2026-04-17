@@ -59,6 +59,7 @@ class PipelineService:
         self.state_root.mkdir(parents=True, exist_ok=True)
         self.memory = memory
         self.learning = learning
+        cleanup_stale_worktrees(default_repo_root)
 
     def process_issue(self, issue_id: str, *, repo_root: Path | None = None) -> PipelineRun:
         repo = repo_root or self.default_repo_root
@@ -103,6 +104,8 @@ class PipelineService:
                 self.linear.post_comment(issue_id, summary)
         finally:
             self._save_run(run)
+            if run.status == "failed" and wt_path:
+                _remove_worktree(repo, wt_path)
         if self.observe:
             self.observe.emit("pipeline_checkpoint", payload={"issue": issue_id, "status": run.status})
         return run
@@ -279,10 +282,27 @@ def _create_branch(repo: Path, branch: str) -> None:
     subprocess.run(["git", "-C", str(repo), "branch", "--no-track", "--", branch, "HEAD"], capture_output=True, text=True, check=False)
 
 
+def cleanup_stale_worktrees(repo: Path) -> int:
+    wt_root = repo.parent / ".claw-worktrees"
+    if not wt_root.exists():
+        return 0
+    cleaned = 0
+    for child in wt_root.iterdir():
+        if child.is_dir():
+            subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", str(child)], capture_output=True, text=True, check=False)
+            if child.exists():
+                shutil.rmtree(child, ignore_errors=True)
+            cleaned += 1
+    subprocess.run(["git", "-C", str(repo), "worktree", "prune"], capture_output=True, text=True, check=False)
+    return cleaned
+
+
 def _create_worktree(repo: Path, branch: str) -> Path:
     wt_path = repo.parent / ".claw-worktrees" / branch.replace("/", "-")
     if wt_path.exists():
-        shutil.rmtree(wt_path)
+        subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", str(wt_path)], capture_output=True, text=True, check=False)
+        if wt_path.exists():
+            shutil.rmtree(wt_path)
     wt_path.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "-C", str(repo), "worktree", "add", "--", str(wt_path), branch], capture_output=True, text=True, check=True)
     return wt_path
@@ -300,8 +320,14 @@ def _collect_diff(wt_path: Path) -> str:
     return (result.stdout or "") + "\n" + (status.stdout or "")
 
 
-def _run_tests(wt_path: Path) -> tuple[bool, str]:
-    result = subprocess.run(["python", "-m", "pytest", "-x", "-q"], cwd=str(wt_path), capture_output=True, text=True, check=False)
+def _run_tests(wt_path: Path, *, timeout: int = 300) -> tuple[bool, str]:
+    try:
+        result = subprocess.run(
+            ["python", "-m", "pytest", "-x", "-q"],
+            cwd=str(wt_path), capture_output=True, text=True, check=False, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"Tests timed out after {timeout}s"
     output = (result.stdout or "") + (result.stderr or "")
     return result.returncode == 0, output
 

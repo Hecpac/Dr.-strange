@@ -76,7 +76,7 @@ class AnthropicExecutorTests(unittest.IsolatedAsyncioTestCase):
                     recorded["streamed"] = streamed
 
                 async def receive_response(self):
-                    yield FakeAssistantMessage([SimpleNamespace(text="ok")], "claude-opus-4-6")
+                    yield FakeAssistantMessage([SimpleNamespace(text="ok")], "claude-opus-4-7")
                     yield FakeResultMessage(
                         session_id="sdk-session-1",
                         total_cost_usd=0.1,
@@ -111,7 +111,7 @@ class AnthropicExecutorTests(unittest.IsolatedAsyncioTestCase):
                 system_prompt="You are Claw.",
                 lane="brain",
                 provider="anthropic",
-                model="claude-opus-4-6",
+                model="claude-opus-4-7",
                 effort="high",
                 session_id="resume-123",
                 max_budget=0.5,
@@ -132,7 +132,7 @@ class AnthropicExecutorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(recorded["options"].kwargs["setting_sources"], ["project", "local"])
             self.assertEqual(recorded["options"].kwargs["extra_args"], {})
             self.assertTrue(callable(recorded["options"].kwargs["stderr"]))
-            self.assertEqual(recorded["options"].kwargs["env"], {})
+            self.assertEqual(recorded["options"].kwargs["env"], {"ANTHROPIC_API_KEY": ""})
             self.assertEqual(recorded["prompt_type"], "stream")
             self.assertEqual(recorded["session_id"], "resume-123")
             streamed = recorded["streamed"]
@@ -164,7 +164,7 @@ class AnthropicExecutorTests(unittest.IsolatedAsyncioTestCase):
                 system_prompt="You are Claw.",
                 lane="brain",
                 provider="anthropic",
-                model="claude-opus-4-6",
+                model="claude-opus-4-7",
                 effort="high",
                 session_id=None,
                 max_budget=0.5,
@@ -224,7 +224,7 @@ class AnthropicExecutorTests(unittest.IsolatedAsyncioTestCase):
                     return None
 
                 async def receive_response(self):
-                    yield FakeAssistantMessage([SimpleNamespace(text="partial output")], "claude-opus-4-6")
+                    yield FakeAssistantMessage([SimpleNamespace(text="partial output")], "claude-opus-4-7")
                     yield FakeResultMessage(
                         session_id="sdk-session-error",
                         result="tool runtime exploded",
@@ -247,7 +247,7 @@ class AnthropicExecutorTests(unittest.IsolatedAsyncioTestCase):
                 system_prompt="You are Claw.",
                 lane="brain",
                 provider="anthropic",
-                model="claude-opus-4-6",
+                model="claude-opus-4-7",
                 effort="high",
                 session_id="resume-err",
                 max_budget=0.5,

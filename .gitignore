@@ -6,3 +6,52 @@ data/
 .env
 .next/
 node_modules/
+
+# AI editor/tool configs
+.adal/
+.agents/
+.augment/
+.codebuddy/
+.commandcode/
+.continue/
+.cortex/
+.crush/
+.factory/
+.goose/
+.iflow/
+.junie/
+.kilocode/
+.kiro/
+.kode/
+.mcpjam/
+.mux/
+.neovate/
+.openhands/
+.pi/
+.pochi/
+.qoder/
+.qwen/
+.roo/
+.trae/
+.vibe/
+.windsurf/
+.zencoder/
+
+# Claude Code config
+.claude/
+
+# HyperFrames test
+hyperframes-test/
+
+# Runtime artifacts
+claw.db
+chrome_tabs.json
+logs/
+renders/
+skills-lock.json
+
+# Temp scripts
+scripts/aistudio_*.py
+scripts/gemini_think.py
+scripts/cdp_*.py
+scripts/close_chrome_tabs.py

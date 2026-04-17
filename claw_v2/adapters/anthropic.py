@@ -4,7 +4,6 @@ import asyncio
 import logging
 import os
 import re
-from contextlib import contextmanager
 from importlib import import_module
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
@@ -59,8 +58,15 @@ class ClaudeSDKExecutor:
         self.network_enforcer = DomainAllowlistEnforcer()
 
     def __call__(self, request: LLMRequest) -> LLMResponse:
-        with self._auth_environment():
-            return asyncio.run(self._run(request))
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None and loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                return pool.submit(asyncio.run, self._run(request)).result()
+        return asyncio.run(self._run(request))
 
     async def _run(self, request: LLMRequest) -> LLMResponse:
         sdk = _load_sdk()
@@ -220,6 +226,8 @@ class ClaudeSDKExecutor:
             if api_key := _resolve_anthropic_api_key():
                 sdk_env["ANTHROPIC_API_KEY"] = api_key
             extra_args["bare"] = None
+        elif os.environ.get("ANTHROPIC_API_KEY"):
+            sdk_env["ANTHROPIC_API_KEY"] = ""
         options_kwargs: dict[str, Any] = dict(
             tools=tools,
             allowed_tools=list(request.allowed_tools or []),
@@ -416,18 +424,6 @@ class ClaudeSDKExecutor:
             network_policy="allow",
             credential_scope="external",
         )
-
-    @contextmanager
-    def _auth_environment(self):
-        if self.config.claude_auth_mode != "subscription" or self._should_use_api_key_auth():
-            yield
-            return
-        original_api_key = os.environ.pop("ANTHROPIC_API_KEY", None)
-        try:
-            yield
-        finally:
-            if original_api_key is not None:
-                os.environ["ANTHROPIC_API_KEY"] = original_api_key
 
     def _should_use_api_key_auth(self) -> bool:
         if self.config.claude_auth_mode == "api_key":

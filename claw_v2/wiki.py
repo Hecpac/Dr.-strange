@@ -26,6 +26,24 @@ logger = logging.getLogger(__name__)
 _DEFAULT_WIKI_ROOT = Path.home() / ".claw" / "wiki"
 _WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
 _FRONTMATTER_RE = re.compile(r"^---\n(.+?)\n---", re.DOTALL)
+_TOKEN_RE = re.compile(r"[\w][\w-]*", re.IGNORECASE)
+_MIN_CONTEXT_CHARS = 200
+_DEFAULT_CHUNK_CHARS = 2400
+_CHUNK_OVERLAP_CHARS = 160
+
+VALID_CATEGORIES = [
+    "AI & Herramientas",
+    "Clientes & Proyectos",
+    "Operaciones Claw",
+    "Seguros",
+    "Diseno & Web",
+    "Personas",
+    "Research",
+]
+
+
+def _tokenize(text: str) -> list[str]:
+    return [tok.lower() for tok in _TOKEN_RE.findall(text)]
 
 # ---------- Embedding helpers (shared with memory.py pattern) ----------
 
@@ -111,6 +129,12 @@ class WikiService:
         if raw_path.exists() and self._is_deprecated(raw_path):
             return {"slug": slug, "raw_path": str(raw_path), "pages_written": 0, "skipped": True}
 
+        # Dedup: skip if content is too similar to an existing page
+        dup = self._find_duplicate(content)
+        if dup:
+            logger.info("Skipping ingest of '%s': duplicate of '%s'", title, dup)
+            return {"slug": slug, "raw_path": "", "pages_written": 0, "skipped": True, "duplicate_of": dup}
+
         raw_path.write_text(
             f"---\ntitle: {title}\ntype: {source_type}\ningested: {now}\n---\n\n{content}",
             encoding="utf-8",
@@ -136,8 +160,11 @@ class WikiService:
         pages_written = 0
         summary = result.get("summary_page", {})
         if summary.get("content"):
-            (self.wiki_dir / summary["filename"]).write_text(summary["content"], encoding="utf-8")
-            self._index_page_embedding(Path(summary["filename"]).stem, summary["content"])
+            target = self.wiki_dir / summary["filename"]
+            target.write_text(summary["content"], encoding="utf-8")
+            self._ensure_raw_source(target, slug)
+            summary_content = target.read_text(encoding="utf-8")
+            self._index_page_embedding(Path(summary["filename"]).stem, summary_content)
             pages_written += 1
 
         for update in result.get("updates", []):
@@ -145,7 +172,8 @@ class WikiService:
                 target = self.wiki_dir / update["filename"]
                 if target.exists():
                     target.write_text(update["content"], encoding="utf-8")
-                    self._index_page_embedding(target.stem, update["content"])
+                    self._ensure_raw_source(target, slug)
+                    self._index_page_embedding(target.stem, target.read_text(encoding="utf-8"))
                     pages_written += 1
 
         for new_page in result.get("new_pages", []):
@@ -153,7 +181,8 @@ class WikiService:
                 target = self.wiki_dir / new_page["filename"]
                 if not target.exists():
                     target.write_text(new_page["content"], encoding="utf-8")
-                    self._index_page_embedding(target.stem, new_page["content"])
+                    self._ensure_raw_source(target, slug)
+                    self._index_page_embedding(target.stem, target.read_text(encoding="utf-8"))
                     pages_written += 1
 
         for entry in result.get("index_entries", []):
@@ -275,32 +304,63 @@ class WikiService:
         # Find relevant pages from index + graph
         relevant = self._find_relevant_pages(question, index_text)
 
-        # Read relevant page contents within token budget
+        # Read coherent relevant chunks within token budget.
         char_budget = token_budget * 4
         page_contents: list[str] = []
         chars_used = 0
+        evidence_lines: list[str] = []
+        pages_with_raw_evidence = 0
         for page_path in relevant[:8]:
             if not page_path.exists():
                 continue
             text = page_path.read_text(encoding="utf-8")
+            sources = self._extract_sources(text)
+            has_raw_evidence = self._has_raw_evidence(sources)
+            if has_raw_evidence:
+                pages_with_raw_evidence += 1
+            source_text = ", ".join(sources) if sources else "none"
+            evidence_lines.append(
+                f"- [[{page_path.stem}]] raw_evidence={'yes' if has_raw_evidence else 'no'} sources={source_text}"
+            )
             available = char_budget - chars_used
-            if available <= 200:
+            if available <= _MIN_CONTEXT_CHARS:
                 break
-            chunk = text[:min(len(text), available)]
-            page_contents.append(f"## {page_path.stem}\n{chunk}")
-            chars_used += len(chunk)
+            for chunk in self._select_context_chunks(question, text, max_chars=available):
+                if chars_used + len(chunk) > char_budget:
+                    chunk = chunk[: max(0, char_budget - chars_used)].strip()
+                if len(chunk) <= _MIN_CONTEXT_CHARS:
+                    continue
+                page_contents.append(f"## {page_path.stem}\n{chunk}")
+                chars_used += len(chunk)
+                if char_budget - chars_used <= _MIN_CONTEXT_CHARS:
+                    break
+            if char_budget - chars_used <= _MIN_CONTEXT_CHARS:
+                break
 
         if not page_contents:
             return ""
 
         context = "\n\n---\n\n".join(page_contents)
+        evidence_status = (
+            "sufficient"
+            if pages_with_raw_evidence == len(evidence_lines) and evidence_lines
+            else "partial"
+            if pages_with_raw_evidence > 0
+            else "insufficient"
+        )
 
         prompt = textwrap.dedent(f"""\
             Answer the following question using ONLY the wiki pages provided.
             Cite sources using [[page-name]] wikilinks.
             If the wiki doesn't have enough information, say so clearly.
+            Include a short confidence note: "Confianza: alta", "Confianza: media", or "Confianza: baja",
+            based on whether the selected pages have raw evidence.
 
             Question: {question}
+
+            Evidence status: {evidence_status}
+            Evidence map:
+            {chr(10).join(evidence_lines)}
 
             Wiki pages:
             {context}
@@ -316,13 +376,18 @@ class WikiService:
             logger.exception("Wiki query failed for '%s'", question)
             return ""
 
+        if evidence_status == "insufficient" and answer:
+            answer = "Evidencia incompleta: las paginas wiki usadas no tienen fuentes raw verificables.\n\n" + answer
+        elif evidence_status == "partial" and answer:
+            answer = "Evidencia parcial: algunas paginas wiki usadas no tienen fuentes raw verificables.\n\n" + answer
+
         if archive and answer:
             slug = _slugify(f"query-{question[:40]}")
             now = _now_iso()
             page = (
                 f"---\ntitle: Query — {question[:60]}\ntags: [research]\n"
                 f"sources: [{', '.join(p.stem for p in relevant[:5])}]\n"
-                f"created: {now}\nupdated: {now}\n---\n\n{answer}"
+                f"created: {now}\nupdated: {now}\nconfidence: 0.2\n---\n\n{answer}"
             )
             (self.wiki_dir / f"{slug}.md").write_text(page, encoding="utf-8")
             self._update_index("Research", f"- [[{slug}]] — {question[:60]}")
@@ -487,6 +552,7 @@ class WikiService:
                         f"created: {now}\nupdated: {now}\nconfidence: 0.1\n---\n\n"
                         f"# {gap.get('topic', gap_slug)}\n\n"
                         f"*Stub — this page was auto-created by deep_lint.*\n\n"
+                        f"*Requires raw source evidence before it can be expanded.*\n\n"
                         f"{gap.get('description', '')}\n\n"
                         f"Mentioned in: {mentioned}\n"
                     )
@@ -497,26 +563,6 @@ class WikiService:
 
             if auto_fixed:
                 self._save_embeddings()
-
-            # Auto-fill: enrich stubs with synthesized content from existing pages
-            for fix in auto_fixed:
-                if fix.startswith("stub:"):
-                    stub_slug = fix[5:]
-                    try:
-                        answer = self.query(
-                            f"¿Qué información tenemos sobre {stub_slug.replace('-', ' ')}?",
-                            archive=False, token_budget=3000,
-                        )
-                        if answer and len(answer) > 100:
-                            stub_path = self.wiki_dir / f"{stub_slug}.md"
-                            if stub_path.exists():
-                                text = stub_path.read_text(encoding="utf-8")
-                                text += f"\n\n## Síntesis automática\n\n{answer}\n"
-                                stub_path.write_text(text, encoding="utf-8")
-                                self._index_page_embedding(stub_slug, text)
-                                self._set_frontmatter_field(stub_path, "confidence", "0.3")
-                    except Exception:
-                        logger.debug("Auto-fill failed for stub %s", stub_slug, exc_info=True)
 
         self._append_log(
             "deep_lint",
@@ -534,6 +580,250 @@ class WikiService:
             "issues": total_issues,
             "auto_fixed": auto_fixed,
         }
+
+    # ------------------------------------------------------------------
+    # Auto-Research (periodic knowledge acquisition)
+    # ------------------------------------------------------------------
+
+    def auto_research(self, *, max_topics: int = 3) -> dict:
+        """Identify knowledge gaps that need raw source research.
+
+        Designed to run as a scheduled job (e.g. every 12 hours).
+        This does not write wiki pages from LLM synthesis; candidates must be
+        grounded through raw sources before they can become wiki truth.
+        """
+        pages = self._list_wiki_pages()
+        if not pages:
+            return {"topics_researched": 0, "pages_written": 0}
+
+        existing = "\n".join(
+            f"- [[{p.stem}]]: {self._extract_title(p)}" for p in pages[:30]
+        )
+
+        prompt = textwrap.dedent(f"""\
+            You are a knowledge curator for an AI/tech wiki. Analyze the existing pages
+            and suggest {max_topics} topics that are MISSING and would be valuable.
+
+            Focus on: AI developments, frontier models, AI agents, AI safety,
+            developer tools, and industry trends from 2026.
+
+            Existing wiki pages:
+            {existing}
+
+            Respond with ONLY a JSON array of objects:
+            [
+              {{"topic": "short title", "category": "AI & Herramientas", "reason": "why this deserves research", "source_queries": ["specific source query"]}}
+            ]
+
+            Rules:
+            - Only suggest topics NOT already covered by existing pages.
+            - Do not write synthesized factual summaries.
+            - Suggest concrete source queries that can produce raw evidence.
+            - Write in Spanish.
+            - ONLY valid JSON array.
+        """)
+
+        try:
+            resp = self.router.ask(prompt, lane=self.lane, max_budget=0.40, timeout=120.0,
+                                   evidence_pack={"operation": "auto_research"})
+            topics = self._parse_json_array(resp.content)
+        except Exception:
+            logger.exception("Wiki auto_research failed")
+            return {"topics_researched": 0, "pages_written": 0}
+
+        candidates: list[dict] = []
+        for topic in topics[:max_topics]:
+            title = topic.get("topic", "")
+            category = topic.get("category", "Research")
+            if not title:
+                continue
+            slug = _slugify(title)
+            if (self.wiki_dir / f"{slug}.md").exists():
+                continue
+            candidates.append({
+                "topic": title,
+                "slug": slug,
+                "category": self._normalize_category(category),
+                "reason": topic.get("reason", ""),
+                "source_queries": topic.get("source_queries", []),
+            })
+
+        self._append_log("auto_research", f"topics={len(candidates)} candidates={len(candidates)} written=0", 0)
+        return {"topics_researched": len(candidates), "pages_written": 0, "candidates": candidates}
+
+    # ------------------------------------------------------------------
+    # Auto-Scrape Sources
+    # ------------------------------------------------------------------
+
+    WATCH_SOURCES = [
+        ("Crescendo AI News", "https://www.crescendo.ai/news/latest-ai-news-and-updates"),
+        ("BuildEZ AI Trends", "https://www.buildez.ai/blog/ai-trending-april-2026-biggest-shifts"),
+    ]
+
+    def auto_scrape_sources(self) -> dict:
+        """Scrape watched sources via firecrawl, extract key items, ingest new ones."""
+        import subprocess
+        scraped = 0
+        ingested = 0
+        for name, url in self.WATCH_SOURCES:
+            try:
+                result = subprocess.run(
+                    ["firecrawl", "scrape", url],
+                    capture_output=True, text=True, timeout=60,
+                )
+                if result.returncode != 0 or not result.stdout.strip():
+                    logger.warning("Wiki scrape failed for %s: %s", name, result.stderr[:200])
+                    continue
+                scraped += 1
+                content = result.stdout[:8000]
+                # Use LLM to extract distinct news items
+                prompt = textwrap.dedent(f"""\
+                    Extract the 3 most important NEW items from this page content.
+                    Source: {name} ({url})
+
+                    Content:
+                    {content}
+
+                    Respond with ONLY a JSON array:
+                    [{{"title": "short title in Spanish", "content": "2-3 paragraph summary in Spanish with facts and dates", "category": "AI & Herramientas"}}]
+
+                    Rules:
+                    - Only factual, specific items with dates and names.
+                    - Write in Spanish.
+                    - Skip opinion pieces or vague trend summaries.
+                """)
+                resp = self.router.ask(prompt, lane=self.lane, max_budget=0.30, timeout=90.0,
+                                       evidence_pack={"operation": "auto_scrape", "source": name})
+                items = self._parse_json_array(resp.content)
+                for item in items[:3]:
+                    title = item.get("title", "")
+                    body = item.get("content", "")
+                    if not title or len(body) < 50:
+                        continue
+                    slug = _slugify(title)
+                    if (self.wiki_dir / f"{slug}.md").exists():
+                        continue
+                    if self._find_duplicate(body):
+                        continue
+                    source_content = f"Source: {name}\nURL: {url}\n\n{body}"
+                    ingest_result = self.ingest(title, source_content, source_type="auto-scrape")
+                    ingested += int(ingest_result.get("pages_written", 0))
+            except Exception:
+                logger.exception("Wiki scrape error for %s", name)
+        self._append_log("auto_scrape", f"scraped={scraped} ingested={ingested}", ingested)
+        return {"sources_scraped": scraped, "pages_ingested": ingested}
+
+    # ------------------------------------------------------------------
+    # NotebookLM → Wiki sync
+    # ------------------------------------------------------------------
+
+    def ingest_from_notebooklm(self, nlm_service: object, *, max_notebooks: int = 3, questions_per_nb: int = 2) -> dict:
+        """Extract knowledge from NotebookLM notebooks and ingest into wiki.
+
+        For each recent notebook, asks targeted questions via chat() to
+        extract structured knowledge, then ingests unique findings.
+        """
+        try:
+            notebooks = nlm_service.list_notebooks()  # type: ignore[union-attr]
+        except Exception:
+            logger.exception("Failed to list NotebookLM notebooks")
+            return {"notebooks_scanned": 0, "pages_written": 0}
+
+        if not notebooks:
+            return {"notebooks_scanned": 0, "pages_written": 0}
+
+        # Get existing wiki page titles to avoid asking about covered topics
+        existing_titles = {self._extract_title(p).lower() for p in self._list_wiki_pages()}
+
+        pages_written = 0
+        notebooks_scanned = 0
+
+        for nb in notebooks[:max_notebooks]:
+            nb_id = nb["id"]
+            nb_title = nb.get("title", nb_id[:8])
+            notebooks_scanned += 1
+
+            # Ask NotebookLM to extract key facts
+            extraction_questions = [
+                (
+                    f"Lista los 3 hechos o desarrollos más importantes y específicos "
+                    f"de este cuaderno. Para cada uno incluye: título corto, fechas, "
+                    f"nombres de empresas/personas, y datos concretos. Responde en español."
+                ),
+                (
+                    f"¿Qué tendencias emergentes o predicciones aparecen en las fuentes "
+                    f"de este cuaderno que aún no son de conocimiento general? "
+                    f"Responde con hechos específicos en español."
+                ),
+            ]
+
+            for question in extraction_questions[:questions_per_nb]:
+                try:
+                    answer = nlm_service.chat(nb_id, question)  # type: ignore[union-attr]
+                except Exception:
+                    logger.debug("NotebookLM chat failed for %s", nb_id, exc_info=True)
+                    continue
+
+                if not answer or len(answer) < 100:
+                    continue
+
+                # Use LLM to structure the answer into wiki-ready items
+                prompt = textwrap.dedent(f"""\
+                    Extract distinct knowledge items from this NotebookLM response.
+                    Source notebook: "{nb_title}"
+
+                    Response:
+                    {answer[:4000]}
+
+                    Respond with ONLY a JSON array:
+                    [{{"title": "short title in Spanish", "content": "2-3 paragraph summary in Spanish", "category": "AI & Herramientas"}}]
+
+                    Rules:
+                    - Each item must be self-contained with specific facts.
+                    - Skip items that are vague or just opinions.
+                    - Write in Spanish.
+                """)
+
+                try:
+                    resp = self.router.ask(prompt, lane=self.lane, max_budget=0.30, timeout=90.0,
+                                           evidence_pack={"operation": "nlm_wiki_sync", "notebook": nb_title})
+                    items = self._parse_json_array(resp.content)
+                except Exception:
+                    logger.debug("LLM extraction failed for NLM response", exc_info=True)
+                    continue
+
+                for item in items[:3]:
+                    title = item.get("title", "")
+                    body = item.get("content", "")
+                    if not title or len(body) < 50:
+                        continue
+                    if title.lower() in existing_titles:
+                        continue
+                    slug = _slugify(title)
+                    if (self.wiki_dir / f"{slug}.md").exists():
+                        continue
+                    if self._find_duplicate(body):
+                        continue
+                    source_content = f"NotebookLM: {nb_title}\nNotebook ID: {nb_id}\n\n{body}"
+                    ingest_result = self.ingest(title, source_content, source_type="notebooklm-sync")
+                    if ingest_result.get("pages_written", 0):
+                        existing_titles.add(title.lower())
+                        pages_written += int(ingest_result.get("pages_written", 0))
+
+        self._append_log("nlm_wiki_sync", f"notebooks={notebooks_scanned} written={pages_written}", pages_written)
+        return {"notebooks_scanned": notebooks_scanned, "pages_written": pages_written}
+
+    def _parse_json_array(self, text: str) -> list[dict]:
+        """Parse a JSON array from LLM response."""
+        cleaned = text.strip()
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```[a-zA-Z]*\n?", "", cleaned)
+            cleaned = re.sub(r"\n?```$", "", cleaned)
+        start = cleaned.find("[")
+        end = cleaned.rfind("]") + 1
+        if start == -1 or end == 0:
+            return []
+        return json.loads(cleaned[start:end])
 
     # ------------------------------------------------------------------
     # Stats
@@ -740,44 +1030,23 @@ class WikiService:
             return page.stem
 
     def _find_relevant_pages(self, question: str, index_text: str) -> list[Path]:
-        """Find wiki pages relevant to a question using semantic similarity + graph expansion."""
-        query_vec = _embed(question)
-        scored: dict[str, tuple[float, Path]] = {}
-        embeddings_dirty = False
-        for page in self._list_wiki_pages():
-            slug = page.stem
-            page_vec = self._embeddings.get(slug)
-            if page_vec is None:
-                text = f"{self._extract_title(page)} {slug.replace('-', ' ')}"
-                try:
-                    content = page.read_text(encoding="utf-8")[:200]
-                    text += f" {content}"
-                except Exception:
-                    pass
-                page_vec = _embed(text)
-                self._embeddings[slug] = page_vec
-                embeddings_dirty = True
-            sim = _cosine(query_vec, page_vec)
-            if sim > 0.15:
-                # Apply time decay: newer pages rank higher
-                sim *= self._time_decay(page)
-                scored[slug] = (sim, page)
+        """Find wiki pages relevant to a question using hybrid retrieval + graph expansion."""
+        ranked = self._rank_pages(question)
+        scored: dict[str, tuple[float, Path]] = {
+            item["slug"]: (float(item["score"]), item["page"]) for item in ranked if item["score"] > 0
+        }
 
-        if embeddings_dirty:
-            self._save_embeddings()
-
-        # Graph expansion: boost neighbors of top hits
-        top_slugs = sorted(scored, key=lambda s: scored[s][0], reverse=True)[:3]
+        top_slugs = [item["slug"] for item in ranked[:3]]
         for top_slug in top_slugs:
+            top_score = scored.get(top_slug, (0.0, self.wiki_dir / f"{top_slug}.md"))[0]
             for neighbor in self._graph_neighbors(top_slug, depth=1):
                 if neighbor not in scored:
                     npath = self.wiki_dir / f"{neighbor}.md"
                     if npath.exists():
-                        scored[neighbor] = (scored[top_slug][0] * 0.6, npath)
+                        scored[neighbor] = (top_score * 0.6, npath)
 
-        ranked = sorted(scored.values(), key=lambda x: x[0], reverse=True)
-        if ranked:
-            return [p for _, p in ranked]
+        if scored:
+            return [p for _, p in sorted(scored.values(), key=lambda x: x[0], reverse=True)]
         return self._list_wiki_pages()[:3]
 
     # ------------------------------------------------------------------
@@ -785,41 +1054,261 @@ class WikiService:
     # ------------------------------------------------------------------
 
     def search(self, query: str, *, limit: int = 5) -> list[dict]:
-        """Semantic search across wiki pages. Returns [{slug, title, similarity, snippet}]."""
+        """Hybrid search across wiki pages. Returns semantic and keyword scores."""
+        ranked = self._rank_pages(query)
+        return [
+            {
+                "slug": item["slug"],
+                "title": item["title"],
+                "similarity": round(float(item["similarity"]), 4),
+                "keyword_score": round(float(item["keyword_score"]), 4),
+                "score": round(float(item["score"]), 4),
+                "snippet": item["snippet"],
+            }
+            for item in ranked[:limit]
+            if item["score"] > 0
+        ]
+
+    def _rank_pages(self, query: str) -> list[dict]:
+        """Rank pages with BM25-style keyword retrieval plus cosine similarity."""
+        pages = self._list_wiki_pages()
+        if not pages or not query.strip():
+            return []
+
         query_vec = _embed(query)
-        scored: list[tuple[float, Path]] = []
+        query_tokens = _tokenize(query)
+        page_records: list[dict] = []
+        corpus_tokens: list[list[str]] = []
         embeddings_dirty = False
-        for page in self._list_wiki_pages():
+        for page in pages:
             slug = page.stem
+            try:
+                text = page.read_text(encoding="utf-8")
+            except Exception:
+                text = ""
+            title = self._extract_title(page)
+            search_text = f"{title} {slug.replace('-', ' ')} {text[:20000]}"
             page_vec = self._embeddings.get(slug)
             if page_vec is None:
-                text = f"{self._extract_title(page)} {slug.replace('-', ' ')}"
-                try:
-                    text += f" {page.read_text(encoding='utf-8')[:200]}"
-                except Exception:
-                    pass
-                page_vec = _embed(text)
+                page_vec = _embed(search_text[:1500])
                 self._embeddings[slug] = page_vec
                 embeddings_dirty = True
-            sim = _cosine(query_vec, page_vec)
-            if sim > 0.15:
-                scored.append((sim, page))
+            similarity = max(0.0, _cosine(query_vec, page_vec)) * self._time_decay(page)
+            tokens = _tokenize(search_text)
+            corpus_tokens.append(tokens)
+            page_records.append({
+                "slug": slug,
+                "page": page,
+                "title": title,
+                "text": text,
+                "similarity": similarity,
+            })
         if embeddings_dirty:
             self._save_embeddings()
-        scored.sort(key=lambda x: x[0], reverse=True)
-        results = []
-        for sim, page in scored[:limit]:
-            try:
-                snippet = page.read_text(encoding="utf-8")[:300]
-            except Exception:
-                snippet = ""
-            results.append({
-                "slug": page.stem,
-                "title": self._extract_title(page),
-                "similarity": round(sim, 4),
-                "snippet": snippet,
-            })
-        return results
+
+        keyword_scores = self._bm25_scores(query_tokens, corpus_tokens)
+        max_keyword = max(keyword_scores) if keyword_scores else 0.0
+        for idx, record in enumerate(page_records):
+            raw_keyword = keyword_scores[idx] if idx < len(keyword_scores) else 0.0
+            keyword_score = raw_keyword / max_keyword if max_keyword > 0 else 0.0
+            similarity = float(record["similarity"])
+            score = (similarity * 0.65) + (keyword_score * 0.35)
+            record["keyword_score"] = keyword_score
+            record["score"] = score
+            record["snippet"] = self._best_snippet(query, record["text"])
+
+        page_records.sort(key=lambda item: item["score"], reverse=True)
+        return page_records
+
+    @staticmethod
+    def _bm25_scores(query_tokens: list[str], corpus_tokens: list[list[str]]) -> list[float]:
+        if not query_tokens or not corpus_tokens:
+            return [0.0 for _ in corpus_tokens]
+        try:
+            from rank_bm25 import BM25Okapi
+
+            return [float(score) for score in BM25Okapi(corpus_tokens).get_scores(query_tokens)]
+        except Exception:
+            pass
+
+        doc_count = len(corpus_tokens)
+        avg_len = sum(len(doc) for doc in corpus_tokens) / doc_count if doc_count else 0.0
+        doc_freq: dict[str, int] = {}
+        for doc in corpus_tokens:
+            for token in set(doc):
+                doc_freq[token] = doc_freq.get(token, 0) + 1
+
+        k1 = 1.5
+        b = 0.75
+        scores: list[float] = []
+        for doc in corpus_tokens:
+            if not doc:
+                scores.append(0.0)
+                continue
+            term_counts: dict[str, int] = {}
+            for token in doc:
+                term_counts[token] = term_counts.get(token, 0) + 1
+            score = 0.0
+            for token in query_tokens:
+                freq = term_counts.get(token, 0)
+                if freq == 0:
+                    continue
+                df = doc_freq.get(token, 0)
+                idf = math.log(1 + (doc_count - df + 0.5) / (df + 0.5))
+                denom = freq + k1 * (1 - b + b * (len(doc) / (avg_len or 1.0)))
+                score += idf * ((freq * (k1 + 1)) / denom)
+            scores.append(score)
+        return scores
+
+    def _select_context_chunks(self, question: str, text: str, *, max_chars: int) -> list[str]:
+        chunk_size = min(_DEFAULT_CHUNK_CHARS, max(_MIN_CONTEXT_CHARS, max_chars))
+        chunks = self._split_text_chunks(text, max_chars=chunk_size, overlap=_CHUNK_OVERLAP_CHARS)
+        if not chunks:
+            return []
+        query_vec = _embed(question)
+        query_tokens = set(_tokenize(question))
+        scored: list[tuple[float, int, str]] = []
+        for idx, chunk in enumerate(chunks):
+            chunk_tokens = _tokenize(chunk)
+            keyword_hits = len(query_tokens.intersection(chunk_tokens))
+            keyword_score = keyword_hits / max(len(query_tokens), 1)
+            semantic_score = max(0.0, _cosine(query_vec, _embed(chunk[:1500])))
+            scored.append(((semantic_score * 0.65) + (keyword_score * 0.35), idx, chunk))
+        scored.sort(key=lambda item: item[0], reverse=True)
+
+        selected: list[tuple[int, str]] = []
+        chars_used = 0
+        for _, idx, chunk in scored:
+            if chars_used + len(chunk) > max_chars and selected:
+                continue
+            selected.append((idx, chunk))
+            chars_used += len(chunk)
+            if chars_used >= max_chars:
+                break
+        selected.sort(key=lambda item: item[0])
+        return [chunk for _, chunk in selected]
+
+    def _split_text_chunks(self, text: str, *, max_chars: int, overlap: int = 0) -> list[str]:
+        text = text.strip()
+        if not text:
+            return []
+        chunks = self._recursive_split(text, max_chars, ["\n## ", "\n# ", "\n\n", ". ", " "])
+        if overlap <= 0 or len(chunks) <= 1:
+            return chunks
+        overlapped: list[str] = []
+        previous_tail = ""
+        for chunk in chunks:
+            merged = f"{previous_tail}{chunk}" if previous_tail else chunk
+            overlapped.append(merged[:max_chars].strip())
+            previous_tail = chunk[-overlap:] if len(chunk) > overlap else chunk
+        return overlapped
+
+    def _recursive_split(self, text: str, max_chars: int, separators: list[str]) -> list[str]:
+        if len(text) <= max_chars:
+            return [text.strip()]
+        if not separators:
+            return [text[i:i + max_chars].strip() for i in range(0, len(text), max_chars)]
+
+        sep = separators[0]
+        parts = text.split(sep)
+        if len(parts) == 1:
+            return self._recursive_split(text, max_chars, separators[1:])
+
+        normalized: list[str] = []
+        for idx, part in enumerate(parts):
+            if not part:
+                continue
+            if idx > 0 and sep.strip():
+                normalized.append(f"{sep.strip()} {part}" if sep.startswith("\n#") else part)
+            else:
+                normalized.append(part)
+
+        chunks: list[str] = []
+        current = ""
+        joiner = sep if sep in ("\n\n", " ") else "\n"
+        for part in normalized:
+            candidate = f"{current}{joiner}{part}".strip() if current else part.strip()
+            if len(candidate) <= max_chars:
+                current = candidate
+                continue
+            if current:
+                chunks.extend(self._recursive_split(current, max_chars, separators[1:]))
+            current = part.strip()
+        if current:
+            chunks.extend(self._recursive_split(current, max_chars, separators[1:]))
+        return [chunk for chunk in chunks if chunk]
+
+    def _best_snippet(self, query: str, text: str, *, size: int = 300) -> str:
+        if len(text) <= size:
+            return text
+        tokens = _tokenize(query)
+        lower = text.lower()
+        positions = [lower.find(token) for token in tokens if lower.find(token) >= 0]
+        if not positions:
+            return text[:size]
+        start = max(0, min(positions) - 80)
+        return text[start:start + size]
+
+    def _ensure_raw_source(self, page: Path, raw_slug: str) -> None:
+        try:
+            text = page.read_text(encoding="utf-8")
+        except Exception:
+            return
+        m = _FRONTMATTER_RE.match(text)
+        if not m:
+            return
+        sources = self._extract_sources(text)
+        if raw_slug not in sources:
+            sources.append(raw_slug)
+        fm = m.group(1)
+        body = text[m.end():]
+        source_line = f"sources: [{', '.join(sources)}]"
+        if re.search(r"^sources:.*$", fm, flags=re.MULTILINE):
+            fm = re.sub(r"^sources:.*(?:\n[ \t]+-.*)*", source_line, fm, flags=re.MULTILINE)
+        else:
+            fm += f"\n{source_line}"
+        page.write_text(f"---\n{fm}\n---{body}", encoding="utf-8")
+
+    def _extract_sources(self, text: str) -> list[str]:
+        m = _FRONTMATTER_RE.match(text)
+        if not m:
+            return []
+        lines = m.group(1).splitlines()
+        sources: list[str] = []
+        for idx, line in enumerate(lines):
+            stripped = line.strip()
+            if not stripped.startswith("sources:"):
+                continue
+            value = stripped.split(":", 1)[1].strip()
+            if value.startswith("[") and value.endswith("]"):
+                return [self._clean_source(item) for item in value[1:-1].split(",") if self._clean_source(item)]
+            if value:
+                return [self._clean_source(value)]
+            for follow in lines[idx + 1:]:
+                if follow and not follow.startswith((" ", "\t")):
+                    break
+                item = follow.strip()
+                if item.startswith("-"):
+                    source = self._clean_source(item[1:].strip())
+                    if source:
+                        sources.append(source)
+            return sources
+        return []
+
+    @staticmethod
+    def _clean_source(value: str) -> str:
+        return value.strip().strip('"').strip("'")
+
+    def _has_raw_evidence(self, sources: list[str]) -> bool:
+        for source in sources:
+            slug = _slugify(source)
+            candidates = [
+                self.raw_dir / f"{source}.md",
+                self.raw_dir / f"{slug}.md",
+            ]
+            if any(path.exists() for path in candidates):
+                return True
+        return False
 
     # ------------------------------------------------------------------
     # Embedding index persistence
@@ -921,6 +1410,7 @@ class WikiService:
     def _update_index(self, category: str, entry: str) -> None:
         if not entry.strip():
             return
+        category = self._normalize_category(category)
         text = self.index_path.read_text(encoding="utf-8") if self.index_path.exists() else ""
         # Check if entry already exists
         if entry.strip() in text:
@@ -932,6 +1422,70 @@ class WikiService:
         else:
             text += f"\n## {category}\n{entry.strip()}\n"
         self.index_path.write_text(text, encoding="utf-8")
+
+    # ------------------------------------------------------------------
+    # Dedup, category normalization, graph rebuild, raw backfill
+    # ------------------------------------------------------------------
+
+    def _find_duplicate(self, content: str, threshold: float = 0.85) -> str | None:
+        """Check if content is too similar to an existing wiki page."""
+        incoming_vec = _embed(content[:500])
+        for slug, page_vec in self._embeddings.items():
+            if _cosine(incoming_vec, page_vec) > threshold:
+                return slug
+        return None
+
+    def _normalize_category(self, category: str) -> str:
+        """Map LLM-assigned category to the closest valid category."""
+        cat_lower = category.lower().strip()
+        for valid in VALID_CATEGORIES:
+            if cat_lower == valid.lower() or cat_lower in valid.lower() or valid.lower() in cat_lower:
+                return valid
+        return "Research"
+
+    def rebuild_graph(self) -> dict:
+        """Rebuild the knowledge graph from wikilinks in all wiki pages."""
+        self._graph.clear()
+        pages = self._list_wiki_pages()
+        edges_added = 0
+        for page in pages:
+            slug = page.stem
+            text = page.read_text(encoding="utf-8")
+            links = _WIKILINK_RE.findall(text)
+            for link in links:
+                target = _slugify(link)
+                if not target or target == slug:
+                    continue
+                edge = {
+                    "target": target,
+                    "type": "relates_to",
+                    "weight": 0.5,
+                    "source_page": slug,
+                }
+                self._graph.setdefault(slug, [])
+                if not any(e["target"] == target for e in self._graph[slug]):
+                    self._graph[slug].append(edge)
+                    edges_added += 1
+        self._save_graph()
+        self._append_log("rebuild_graph", f"pages={len(pages)} edges={edges_added}", edges_added)
+        return {"pages_scanned": len(pages), "edges": edges_added, "nodes": len(self._graph)}
+
+    def backfill_raw(self) -> dict:
+        """Create raw/ entries for wiki pages that lack corresponding raw files."""
+        pages = self._list_wiki_pages()
+        created = 0
+        for page in pages:
+            raw_path = self.raw_dir / f"{page.stem}.md"
+            if not raw_path.exists():
+                content = page.read_text(encoding="utf-8")
+                title = self._extract_title(page)
+                raw_path.write_text(
+                    f"---\ntitle: {title}\ntype: backfill\ningested: {_now_iso()}\n---\n\n{content}",
+                    encoding="utf-8",
+                )
+                created += 1
+        self._append_log("backfill_raw", f"created={created}", created)
+        return {"created": created}
 
     def _append_log(self, operation: str, title: str, pages_affected: int) -> None:
         now = _now_iso()[:10]

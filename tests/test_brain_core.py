@@ -11,9 +11,12 @@ from claw_v2.brain import (
     _first_json_object,
     _normalize_recommendation,
     _normalize_risk_level,
+    _strip_trace_tags,
     _try_parse_json_object,
+    _validate_schema_keys,
 )
 from claw_v2.memory import MemoryStore
+from claw_v2.observe import ObserveStream
 from claw_v2.types import LLMResponse
 
 
@@ -129,7 +132,7 @@ class HandleMessageTests(unittest.TestCase):
             content="Hola Hector",
             lane="brain",
             provider="anthropic",
-            model="claude-opus-4-6",
+            model="claude-opus-4-7",
         )
         self.brain.handle_message("s1", "Dime algo")
         msgs = self.memory.get_recent_messages("s1")
@@ -144,7 +147,8 @@ class HandleMessageTests(unittest.TestCase):
         )
         self.brain.handle_message("s1", "test")
         call_kwargs = self.router.ask.call_args
-        self.assertEqual(call_kwargs.kwargs["system_prompt"], "You are Claw.")
+        self.assertIn("You are Claw.", call_kwargs.kwargs["system_prompt"])
+        self.assertIn("<response>", call_kwargs.kwargs["system_prompt"])
 
     def test_returns_llm_response(self) -> None:
         expected = LLMResponse(
@@ -163,6 +167,136 @@ class HandleMessageTests(unittest.TestCase):
         self.brain.handle_message("s1", "test")
         session = self.memory.get_provider_session("s1", "anthropic")
         self.assertEqual(session, "sdk-abc-123")
+
+    def test_extracts_reasoning_trace_and_stores_visible_response(self) -> None:
+        observe = ObserveStream(self.db_path)
+        brain = BrainService(
+            router=self.router,
+            memory=self.memory,
+            system_prompt="You are Claw.",
+            observe=observe,
+        )
+        self.router.ask.return_value = LLMResponse(
+            content="<trace>Checked context and no blockers.</trace><response>Listo, Hector.</response>",
+            lane="brain",
+            provider="anthropic",
+            model="test",
+        )
+
+        result = brain.handle_message("s2", "hazlo")
+
+        self.assertEqual(result.content, "Listo, Hector.")
+        self.assertEqual(result.artifacts["reasoning_trace"], "Checked context and no blockers.")
+        msgs = self.memory.get_recent_messages("s2")
+        self.assertEqual(msgs[-1]["content"], "Listo, Hector.")
+        events = observe.recent_events(limit=10)
+        self.assertTrue(any(e["event_type"] == "brain_reasoning_trace" for e in events))
+
+
+# ---------------------------------------------------------------------------
+# _strip_trace_tags
+# ---------------------------------------------------------------------------
+
+class StripTraceTagsTests(unittest.TestCase):
+    def test_removes_trace_tags(self) -> None:
+        self.assertEqual(_strip_trace_tags('<trace>reasoning</trace>{"a":1}'), '{"a":1}')
+
+    def test_removes_thinking_tags(self) -> None:
+        self.assertEqual(_strip_trace_tags('<thinking>stuff</thinking>{"b":2}'), '{"b":2}')
+
+    def test_removes_response_tags(self) -> None:
+        self.assertEqual(_strip_trace_tags('<response>{"c":3}</response>'), '{"c":3}')
+
+    def test_passes_through_plain_json(self) -> None:
+        self.assertEqual(_strip_trace_tags('{"d":4}'), '{"d":4}')
+
+
+# ---------------------------------------------------------------------------
+# _validate_schema_keys
+# ---------------------------------------------------------------------------
+
+class ValidateSchemaKeysTests(unittest.TestCase):
+    def test_valid_data(self) -> None:
+        schema = {"required": ["name"], "properties": {"name": {"type": "string"}, "age": {"type": "integer"}}}
+        self.assertEqual(_validate_schema_keys({"name": "Hector", "age": 30}, schema), [])
+
+    def test_missing_required(self) -> None:
+        schema = {"required": ["name"], "properties": {"name": {"type": "string"}}}
+        errors = _validate_schema_keys({}, schema)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("missing required", errors[0])
+
+    def test_wrong_type(self) -> None:
+        schema = {"properties": {"count": {"type": "integer"}}}
+        errors = _validate_schema_keys({"count": "not_int"}, schema)
+        self.assertEqual(len(errors), 1)
+
+    def test_no_properties(self) -> None:
+        self.assertEqual(_validate_schema_keys({"x": 1}, {}), [])
+
+
+# ---------------------------------------------------------------------------
+# BrainService.handle_structured
+# ---------------------------------------------------------------------------
+
+class HandleStructuredTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.db_path = Path(tempfile.mkdtemp()) / "test.db"
+        self.memory = MemoryStore(self.db_path)
+        self.router = MagicMock()
+        self.brain = BrainService(
+            router=self.router,
+            memory=self.memory,
+            system_prompt="You are Claw.",
+        )
+
+    def test_parses_clean_json(self) -> None:
+        self.router.ask.return_value = LLMResponse(
+            content='{"name": "test", "value": 42}',
+            lane="brain", provider="anthropic", model="test",
+        )
+        result = self.brain.handle_structured("s1", "extract data", schema={
+            "properties": {"name": {"type": "string"}, "value": {"type": "integer"}},
+            "required": ["name"],
+        })
+        self.assertEqual(result["name"], "test")
+        self.assertEqual(result["value"], 42)
+
+    def test_strips_trace_before_parsing(self) -> None:
+        self.router.ask.return_value = LLMResponse(
+            content='<trace>thinking</trace><response>{"status": "ok"}</response>',
+            lane="brain", provider="anthropic", model="test",
+        )
+        result = self.brain.handle_structured("s1", "check", schema={
+            "properties": {"status": {"type": "string"}},
+        })
+        self.assertEqual(result["status"], "ok")
+
+    def test_retries_on_bad_json(self) -> None:
+        self.router.ask.side_effect = [
+            LLMResponse(content="not json at all", lane="brain", provider="anthropic", model="test"),
+            LLMResponse(content='{"fixed": true}', lane="brain", provider="anthropic", model="test"),
+        ]
+        result = self.brain.handle_structured("s1", "retry test", schema={
+            "properties": {"fixed": {"type": "boolean"}},
+        })
+        self.assertTrue(result["fixed"])
+        self.assertEqual(self.router.ask.call_count, 2)
+
+    def test_returns_raw_after_all_retries_fail(self) -> None:
+        self.router.ask.return_value = LLMResponse(
+            content="still not json", lane="brain", provider="anthropic", model="test",
+        )
+        result = self.brain.handle_structured("s1", "fail test", schema={}, max_retries=0)
+        self.assertIn("raw", result)
+
+    def test_store_history_false_deletes_messages(self) -> None:
+        self.router.ask.return_value = LLMResponse(
+            content='{"ok": true}', lane="brain", provider="anthropic", model="test",
+        )
+        self.brain.handle_structured("s1", "ephemeral", schema={}, store_history=False)
+        msgs = self.memory.get_recent_messages("s1")
+        self.assertEqual(len(msgs), 0)
 
 
 if __name__ == "__main__":

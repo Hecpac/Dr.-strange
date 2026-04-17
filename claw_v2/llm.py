@@ -99,28 +99,32 @@ class LLMRouter:
         try:
             response = adapter.complete(request)
         except AdapterError as exc:
-            if lane in self.NON_TOOL_LANES and selected_provider != "anthropic":
-                fallback_request = LLMRequest(
-                    **{
-                        **asdict(request),
-                        "provider": "anthropic",
-                        "model": self.config.advisory_model_for_provider("anthropic"),
-                    }
-                )
-                response = self._adapter_for("anthropic").complete(fallback_request)
-                response.degraded_mode = True
-                response.artifacts["fallback_reason"] = str(exc)
-                response.artifacts.update(trace_metadata(request.evidence_pack))
-                for hook in self.post_hooks:
-                    response = hook(request, response)
-                self._audit(
-                    "llm_fallback",
-                    response,
-                    {"requested_provider": selected_provider, "response_text": response.content},
-                    request=request,
-                )
-                return response
-            raise
+            fallback_provider = self._pick_fallback(selected_provider, lane)
+            if fallback_provider is None:
+                raise
+            fb_adapter = self._adapter_for(fallback_provider)
+            if lane not in self.NON_TOOL_LANES and not fb_adapter.tool_capable:
+                raise
+            fallback_request = LLMRequest(
+                **{
+                    **asdict(request),
+                    "provider": fallback_provider,
+                    "model": self.config.advisory_model_for_provider(fallback_provider),
+                }
+            )
+            response = fb_adapter.complete(fallback_request)
+            response.degraded_mode = True
+            response.artifacts["fallback_reason"] = str(exc)
+            response.artifacts.update(trace_metadata(request.evidence_pack))
+            for hook in self.post_hooks:
+                response = hook(request, response)
+            self._audit(
+                "llm_fallback",
+                response,
+                {"requested_provider": selected_provider, "fallback_provider": fallback_provider, "response_text": response.content},
+                request=request,
+            )
+            return response
 
         # --- Post-hooks ---
         for hook in self.post_hooks:
@@ -134,6 +138,17 @@ class LLMRouter:
             request=request,
         )
         return response
+
+    # Fallback order: anthropic ↔ openai; advisory-only providers fall back to Anthropic.
+    _FALLBACK_MAP: dict[str, str] = {"anthropic": "openai", "openai": "anthropic"}
+
+    def _pick_fallback(self, failed_provider: str, lane: Lane) -> str | None:
+        candidate = self._FALLBACK_MAP.get(failed_provider)
+        if candidate and candidate in self.adapters:
+            return candidate
+        if lane in self.NON_TOOL_LANES and failed_provider != "anthropic" and "anthropic" in self.adapters:
+            return "anthropic"
+        return None
 
     def _adapter_for(self, provider: str) -> ProviderAdapter:
         if provider not in self.adapters:
@@ -176,12 +191,19 @@ class LLMRouter:
         audit_sink: Callable[[dict], None] | None = None,
         pre_hooks: list[PreLLMHook] | None = None,
         post_hooks: list[PostLLMHook] | None = None,
+        openai_tool_executor: Callable[[str, dict], dict] | None = None,
+        openai_tool_schemas: list[dict] | None = None,
     ) -> "LLMRouter":
         return cls(
             config=config,
             adapters={
                 "anthropic": AnthropicAgentAdapter(executor=anthropic_executor),
-                "openai": OpenAIAdapter(transport=openai_transport, api_key=config.openai_api_key),
+                "openai": OpenAIAdapter(
+                    transport=openai_transport,
+                    api_key=config.openai_api_key,
+                    tool_executor=openai_tool_executor,
+                    tool_schemas=openai_tool_schemas,
+                ),
                 "google": GoogleAdapter(transport=google_transport, api_key=config.google_api_key),
                 "ollama": OllamaAdapter(
                     transport=ollama_transport,

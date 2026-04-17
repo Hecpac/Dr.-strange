@@ -60,6 +60,8 @@ class CriticalActionVerification:
     approval_id: str | None = None
     approval_token: str | None = None
     response: LLMResponse | None = None
+    verifier_votes: list[dict[str, Any]] = field(default_factory=list)
+    consensus_status: str = "single"
 
 
 @dataclass(slots=True)

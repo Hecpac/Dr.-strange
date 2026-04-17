@@ -1,16 +1,24 @@
 from __future__ import annotations
 
+import json
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
+from urllib.request import Request, urlopen
 
 from claw_v2.memory import MemoryStore
 from claw_v2.network_proxy import DomainAllowlistEnforcer
 from claw_v2.sandbox import SandboxPolicy, sandbox_hook
 from claw_v2.types import AgentClass
 
+if TYPE_CHECKING:
+    from claw_v2.a2a import A2AService
+    from claw_v2.skills import SkillRegistry
+
 
 ToolHandler = Callable[[dict], dict]
+_FIRECRAWL_CONTENT_LIMIT = 12_000
 
 SUPPORTED_AGENT_CLASSES: tuple[AgentClass, ...] = ("researcher", "operator", "deployer")
 DEFAULT_TOOL_AGENT_CLASSES: dict[str, tuple[AgentClass, ...]] = {
@@ -27,6 +35,13 @@ DEFAULT_TOOL_AGENT_CLASSES: dict[str, tuple[AgentClass, ...]] = {
     "WikiLint": ("researcher", "operator", "deployer"),
     "WikiDelete": ("operator", "deployer"),
     "WikiGraph": ("researcher", "operator", "deployer"),
+    "SkillList": ("researcher", "operator", "deployer"),
+    "SkillGenerate": ("operator", "deployer"),
+    "SkillExecute": ("operator", "deployer"),
+    "A2ACard": ("researcher", "operator", "deployer"),
+    "A2APeers": ("researcher", "operator", "deployer"),
+    "A2ASend": ("operator", "deployer"),
+    "HeyGenVideo": ("operator", "deployer"),
 }
 
 
@@ -48,6 +63,7 @@ class ToolDefinition:
     handler: ToolHandler
     mutates_state: bool = False
     requires_network: bool = False
+    parameter_schema: dict | None = None
 
 
 class ToolRegistry:
@@ -70,6 +86,22 @@ class ToolRegistry:
             for definition in self._definitions.values()
             if agent_class in definition.allowed_agent_classes
         )
+
+    def openai_tool_schemas(self, agent_class: AgentClass | None = None) -> list[dict]:
+        """Export tool definitions as OpenAI function-calling schemas."""
+        schemas: list[dict] = []
+        for defn in self._definitions.values():
+            if defn.parameter_schema is None:
+                continue
+            if agent_class and agent_class not in defn.allowed_agent_classes:
+                continue
+            schemas.append({
+                "type": "function",
+                "name": defn.name,
+                "description": defn.description,
+                "parameters": defn.parameter_schema,
+            })
+        return schemas
 
     def execute(
         self,
@@ -102,6 +134,8 @@ class ToolRegistry:
         workspace_root: Path | str,
         memory: MemoryStore | None = None,
         wiki: object | None = None,
+        skill_registry: SkillRegistry | None = None,
+        a2a: A2AService | None = None,
     ) -> "ToolRegistry":
         registry = cls(workspace_root=workspace_root, memory=memory)
         _ws = Path(workspace_root).resolve()
@@ -174,6 +208,7 @@ class ToolRegistry:
                 description="Read a file from the workspace.",
                 allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["Read"],
                 handler=read_file,
+                parameter_schema={"type": "object", "properties": {"path": {"type": "string", "description": "Absolute file path"}}, "required": ["path"]},
             )
         )
         registry.register(
@@ -183,6 +218,7 @@ class ToolRegistry:
                 allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["Write"],
                 handler=write_file,
                 mutates_state=True,
+                parameter_schema={"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]},
             )
         )
         registry.register(
@@ -192,6 +228,7 @@ class ToolRegistry:
                 allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["Edit"],
                 handler=edit_file,
                 mutates_state=True,
+                parameter_schema={"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]},
             )
         )
         registry.register(
@@ -200,6 +237,7 @@ class ToolRegistry:
                 description="List files matching a glob pattern.",
                 allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["Glob"],
                 handler=glob_files,
+                parameter_schema={"type": "object", "properties": {"pattern": {"type": "string", "description": "Glob pattern (e.g. **/*.py)"}, "root": {"type": "string", "description": "Root directory (optional)"}}, "required": ["pattern"]},
             )
         )
         registry.register(
@@ -208,6 +246,7 @@ class ToolRegistry:
                 description="Search text content across files.",
                 allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["Grep"],
                 handler=grep_files,
+                parameter_schema={"type": "object", "properties": {"query": {"type": "string", "description": "Text to search for"}, "root": {"type": "string", "description": "Root directory (optional)"}}, "required": ["query"]},
             )
         )
         registry.register(
@@ -243,6 +282,7 @@ class ToolRegistry:
                 description="Search stored semantic facts.",
                 allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["SearchMemory"],
                 handler=search_memory,
+                parameter_schema={"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer", "default": 10}}, "required": ["query"]},
             )
         )
 
@@ -265,6 +305,7 @@ class ToolRegistry:
                 description="Semantic search across wiki pages. Args: query (str), limit (int, default 5).",
                 allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["WikiSearch"],
                 handler=wiki_search,
+                parameter_schema={"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer", "default": 5}}, "required": ["query"]},
             )
         )
         registry.register(
@@ -273,6 +314,7 @@ class ToolRegistry:
                 description="Audit wiki health. Args: deep (bool) for LLM-powered analysis, auto_fix (bool) to auto-deprecate stale pages and create gap stubs.",
                 allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["WikiLint"],
                 handler=wiki_lint,
+                parameter_schema={"type": "object", "properties": {"deep": {"type": "boolean", "default": False}, "auto_fix": {"type": "boolean", "default": False}}, "required": []},
             )
         )
 
@@ -304,6 +346,7 @@ class ToolRegistry:
                 allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["WikiDelete"],
                 handler=wiki_delete,
                 mutates_state=True,
+                parameter_schema={"type": "object", "properties": {"slug": {"type": "string"}}, "required": ["slug"]},
             )
         )
         registry.register(
@@ -312,6 +355,389 @@ class ToolRegistry:
                 description="Query the knowledge graph. Args: slug (str, optional) for a node's edges & neighbors, depth (int, default 1). Without slug returns graph summary.",
                 allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["WikiGraph"],
                 handler=wiki_graph,
+                parameter_schema={"type": "object", "properties": {"slug": {"type": "string"}, "depth": {"type": "integer", "default": 1}}, "required": []},
             )
         )
+
+        # --- Memento-Skills tools ---
+        def skill_list(args: dict) -> dict:
+            if skill_registry is None:
+                raise RuntimeError("SkillRegistry not configured")
+            return {"skills": skill_registry.list_skills(), "stats": skill_registry.stats()}
+
+        def skill_generate(args: dict) -> dict:
+            if skill_registry is None:
+                raise RuntimeError("SkillRegistry not configured")
+            task = args.get("task", "")
+            tags = args.get("tags", [])
+            return skill_registry.generate_skill(task_description=task, tags=tags)
+
+        def skill_execute(args: dict) -> dict:
+            if skill_registry is None:
+                raise RuntimeError("SkillRegistry not configured")
+            name = args.get("name", "")
+            kwargs = args.get("kwargs", {})
+            return skill_registry.execute_skill(name, **kwargs)
+
+        registry.register(ToolDefinition(
+            name="SkillList", description="List all registered skills and stats.",
+            allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["SkillList"], handler=skill_list,
+        ))
+        registry.register(ToolDefinition(
+            name="SkillGenerate",
+            description="Generate a new skill from description. Args: task (str), tags (list[str], optional).",
+            allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["SkillGenerate"],
+            handler=skill_generate, mutates_state=True,
+        ))
+        registry.register(ToolDefinition(
+            name="SkillExecute",
+            description="Execute a registered skill. Args: name (str), kwargs (dict, optional).",
+            allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["SkillExecute"],
+            handler=skill_execute, mutates_state=True,
+        ))
+
+        # --- A2A Protocol tools ---
+        def a2a_card(args: dict) -> dict:
+            if a2a is None:
+                raise RuntimeError("A2AService not configured")
+            return a2a.get_card()
+
+        def a2a_peers(args: dict) -> dict:
+            if a2a is None:
+                raise RuntimeError("A2AService not configured")
+            return {"peers": a2a.list_peers(), "stats": a2a.stats()}
+
+        def a2a_send(args: dict) -> dict:
+            if a2a is None:
+                raise RuntimeError("A2AService not configured")
+            return a2a.send_task(
+                to_agent=args.get("to_agent", ""),
+                action=args.get("action", ""),
+                payload=args.get("payload", {}),
+            )
+
+        registry.register(ToolDefinition(
+            name="A2ACard", description="Get this agent's A2A identity card.",
+            allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["A2ACard"], handler=a2a_card,
+        ))
+        registry.register(ToolDefinition(
+            name="A2APeers", description="List registered A2A peer agents and stats.",
+            allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["A2APeers"], handler=a2a_peers,
+        ))
+        registry.register(ToolDefinition(
+            name="A2ASend",
+            description="Send a task to an A2A peer. Args: to_agent (str), action (str), payload (dict).",
+            allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["A2ASend"],
+            handler=a2a_send, mutates_state=True, requires_network=True,
+        ))
+
+        # --- HeyGen Video tool ---
+        def _heygen_api_key() -> str:
+            result = subprocess.run(
+                ["security", "find-generic-password", "-a", "heygen", "-s", "HEYGEN_API_KEY", "-w"],
+                capture_output=True, text=True, timeout=5,
+            )
+            key = result.stdout.strip()
+            if not key:
+                raise RuntimeError("HEYGEN_API_KEY not found in Keychain")
+            return key
+
+        def heygen_video(args: dict) -> dict:
+            text = args.get("text", "")
+            if not text:
+                raise ValueError("text is required")
+            avatar_id = args.get("avatar_id", "284630e731f04f49ae7ba9f5d839e6bb")
+            voice_id = args.get("voice_id", "398936ac428244c6966feefe6d151c6a")
+            title = args.get("title", "Claw Briefing")
+
+            api_key = _heygen_api_key()
+            payload = json.dumps({
+                "video_inputs": [{
+                    "character": {"type": "avatar", "avatar_id": avatar_id, "avatar_style": "normal"},
+                    "voice": {"type": "text", "input_text": text, "voice_id": voice_id},
+                }],
+                "title": title,
+                "dimension": {"width": 1280, "height": 720},
+            }).encode()
+            req = Request(
+                "https://api.heygen.com/v2/video/generate",
+                data=payload,
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "X-Api-Key": api_key,
+                },
+                method="POST",
+            )
+            with urlopen(req, timeout=30) as resp:
+                body = json.loads(resp.read())
+            return {"video_id": body.get("data", {}).get("video_id"), "status": body.get("data", {}).get("status")}
+
+        registry.register(ToolDefinition(
+            name="HeyGenVideo",
+            description="Generate a video with a talking avatar. Args: text (str, required), avatar_id (str, optional), voice_id (str, optional), title (str, optional).",
+            allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["HeyGenVideo"],
+            handler=heygen_video, mutates_state=True, requires_network=True,
+            parameter_schema={"type": "object", "properties": {"text": {"type": "string"}, "avatar_id": {"type": "string"}, "voice_id": {"type": "string"}, "title": {"type": "string"}}, "required": ["text"]},
+        ))
+
+        # --- GPT Image generation tool ---
+        def _openai_api_key() -> str:
+            import os as _os
+            key = _os.getenv("OPENAI_API_KEY", "")
+            if not key:
+                result = subprocess.run(
+                    ["security", "find-generic-password", "-a", "openai", "-s", "OPENAI_API_KEY", "-w"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                key = result.stdout.strip()
+            if not key:
+                raise RuntimeError("OPENAI_API_KEY not found")
+            return key
+
+        def gpt_image(args: dict) -> dict:
+            prompt_text = args.get("prompt", "")
+            if not prompt_text:
+                raise ValueError("prompt is required")
+            size = args.get("size", "1024x1024")
+            quality = args.get("quality", "auto")
+            api_key = _openai_api_key()
+            payload = json.dumps({
+                "model": "gpt-image-1",
+                "prompt": prompt_text,
+                "size": size,
+                "quality": quality,
+            }).encode()
+            req = Request(
+                "https://api.openai.com/v1/images/generations",
+                data=payload,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            with urlopen(req, timeout=120) as resp:
+                body = json.loads(resp.read())
+            images = body.get("data", [])
+            # Save base64 images to files if present
+            saved: list[str] = []
+            output_dir = registry.workspace_root / "generated_images"
+            output_dir.mkdir(exist_ok=True)
+            import base64
+            import time as _time
+            for i, img in enumerate(images):
+                if img.get("b64_json"):
+                    fname = f"gpt_image_{int(_time.time())}_{i}.png"
+                    fpath = output_dir / fname
+                    fpath.write_bytes(base64.b64decode(img["b64_json"]))
+                    saved.append(str(fpath))
+                elif img.get("url"):
+                    saved.append(img["url"])
+            return {"images": saved, "revised_prompt": images[0].get("revised_prompt", "") if images else ""}
+
+        DEFAULT_TOOL_AGENT_CLASSES["GPTImage"] = ("operator", "deployer")
+        registry.register(ToolDefinition(
+            name="GPTImage",
+            description="Generate images using GPT Image API. Args: prompt (str, required), size (str, default '1024x1024'), quality (str, default 'auto').",
+            allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["GPTImage"],
+            handler=gpt_image, mutates_state=True, requires_network=True,
+            parameter_schema={"type": "object", "properties": {"prompt": {"type": "string", "description": "Image description"}, "size": {"type": "string", "enum": ["1024x1024", "1536x1024", "1024x1536"], "default": "1024x1024"}, "quality": {"type": "string", "enum": ["auto", "low", "medium", "high"], "default": "auto"}}, "required": ["prompt"]},
+        ))
+
+        # --- GPT Vision / Image Analysis tool ---
+        def analyze_image(args: dict) -> dict:
+            image_path = args.get("image_path", "")
+            image_url = args.get("image_url", "")
+            question = args.get("question", "Describe this image in detail.")
+            if not image_path and not image_url:
+                raise ValueError("image_path or image_url is required")
+            api_key = _openai_api_key()
+            content: list[dict] = [{"type": "input_text", "text": question}]
+            if image_path:
+                import base64 as _b64
+                p = Path(image_path).resolve()
+                if not p.exists():
+                    raise ValueError(f"Image file not found: {image_path}")
+                data = _b64.b64encode(p.read_bytes()).decode()
+                suffix = p.suffix.lower()
+                media = {".png": "image/png", ".gif": "image/gif", ".webp": "image/webp"}.get(suffix, "image/jpeg")
+                content.append({"type": "input_image", "image_url": f"data:{media};base64,{data}"})
+            else:
+                content.append({"type": "input_image", "image_url": image_url})
+            payload = json.dumps({
+                "model": "gpt-5.4-mini",
+                "input": [{"role": "user", "content": content}],
+            }).encode()
+            req = Request(
+                "https://api.openai.com/v1/responses",
+                data=payload,
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                method="POST",
+            )
+            with urlopen(req, timeout=60) as resp:
+                body = json.loads(resp.read())
+            return {"analysis": body.get("output_text", ""), "model": "gpt-5.4-mini"}
+
+        DEFAULT_TOOL_AGENT_CLASSES["AnalyzeImage"] = ("researcher", "operator", "deployer")
+        registry.register(ToolDefinition(
+            name="AnalyzeImage",
+            description="Analyze an image using GPT vision. Args: image_path (str) or image_url (str), question (str, optional).",
+            allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["AnalyzeImage"],
+            handler=analyze_image, requires_network=True,
+            parameter_schema={
+                "type": "object",
+                "properties": {
+                    "image_path": {"type": "string", "description": "Local file path to the image"},
+                    "image_url": {"type": "string", "description": "URL of the image to analyze"},
+                    "question": {"type": "string", "description": "What to analyze (default: describe the image)", "default": "Describe this image in detail."},
+                },
+                "required": [],
+            },
+        ))
+
+        # --- Firecrawl Scrape tool ---
+        def _firecrawl_api_key() -> str:
+            import os as _os
+            key = _os.getenv("FIRECRAWL_API_KEY", "")
+            if not key:
+                result = subprocess.run(
+                    ["security", "find-generic-password", "-a", "firecrawl", "-s", "FIRECRAWL_API_KEY", "-w"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                key = result.stdout.strip()
+            if not key:
+                raise RuntimeError("FIRECRAWL_API_KEY not found in env or Keychain")
+            return key
+
+        def firecrawl_scrape(args: dict) -> dict:
+            url = args.get("url", "")
+            if not url:
+                raise ValueError("url is required")
+            formats = args.get("formats", ["markdown"])
+            api_key = _firecrawl_api_key()
+            payload = json.dumps({"url": url, "formats": formats}).encode()
+            req = Request(
+                "https://api.firecrawl.dev/v1/scrape",
+                data=payload,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            with urlopen(req, timeout=60) as resp:
+                body = json.loads(resp.read())
+            data = body.get("data", {})
+            return {
+                "markdown": data.get("markdown", "")[:_FIRECRAWL_CONTENT_LIMIT],
+                "metadata": data.get("metadata", {}),
+                "url": data.get("metadata", {}).get("sourceURL", url),
+            }
+
+        def firecrawl_search(args: dict) -> dict:
+            query = args.get("query", "")
+            if not query:
+                raise ValueError("query is required")
+            limit = int(args.get("limit", 5))
+            api_key = _firecrawl_api_key()
+            payload = json.dumps({
+                "query": query,
+                "limit": limit,
+                "scrapeOptions": {"formats": ["markdown"]},
+            }).encode()
+            req = Request(
+                "https://api.firecrawl.dev/v1/search",
+                data=payload,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            with urlopen(req, timeout=60) as resp:
+                body = json.loads(resp.read())
+            results = []
+            for item in body.get("data", [])[:limit]:
+                results.append({
+                    "title": item.get("metadata", {}).get("title", ""),
+                    "url": item.get("metadata", {}).get("sourceURL", ""),
+                    "markdown": item.get("markdown", "")[:2000],
+                })
+            return {"results": results, "count": len(results)}
+
+        def firecrawl_extract(args: dict) -> dict:
+            url = args.get("url", "")
+            if not url:
+                raise ValueError("url is required")
+            schema = args.get("schema", {})
+            if not schema:
+                raise ValueError("schema is required")
+            prompt = args.get("prompt", "")
+            api_key = _firecrawl_api_key()
+            body: dict = {"urls": [url], "schema": schema}
+            if prompt:
+                body["prompt"] = prompt
+            payload = json.dumps(body).encode()
+            req = Request(
+                "https://api.firecrawl.dev/v1/extract",
+                data=payload,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            with urlopen(req, timeout=90) as resp:
+                result = json.loads(resp.read())
+            data = result.get("data", [])
+            return {"extracted": data[0] if len(data) == 1 else data, "success": result.get("success", False)}
+
+        DEFAULT_TOOL_AGENT_CLASSES["FirecrawlExtract"] = ("researcher", "operator", "deployer")
+        DEFAULT_TOOL_AGENT_CLASSES["FirecrawlScrape"] = ("researcher", "operator", "deployer")
+        DEFAULT_TOOL_AGENT_CLASSES["FirecrawlSearch"] = ("researcher", "operator", "deployer")
+        registry.register(ToolDefinition(
+            name="FirecrawlScrape",
+            description="Scrape a URL and return markdown content. Works with JS-rendered pages, SPAs, social media. Args: url (str, required), formats (list[str], default ['markdown']).",
+            allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["FirecrawlScrape"],
+            handler=firecrawl_scrape, requires_network=True,
+            parameter_schema={
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL to scrape"},
+                    "formats": {"type": "array", "items": {"type": "string"}, "default": ["markdown"]},
+                },
+                "required": ["url"],
+            },
+        ))
+        registry.register(ToolDefinition(
+            name="FirecrawlSearch",
+            description="Search the web and return scraped results with markdown content. Args: query (str, required), limit (int, default 5).",
+            allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["FirecrawlSearch"],
+            handler=firecrawl_search, requires_network=True,
+            parameter_schema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"},
+                    "limit": {"type": "integer", "default": 5, "description": "Max results"},
+                },
+                "required": ["query"],
+            },
+        ))
+        registry.register(ToolDefinition(
+            name="FirecrawlExtract",
+            description="Extract structured data from a URL using a JSON schema. Args: url (str, required), schema (dict, required), prompt (str, optional guidance).",
+            allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["FirecrawlExtract"],
+            handler=firecrawl_extract, requires_network=True,
+            parameter_schema={
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL to extract data from"},
+                    "schema": {"type": "object", "description": "JSON schema for the data to extract"},
+                    "prompt": {"type": "string", "description": "Optional prompt to guide extraction"},
+                },
+                "required": ["url", "schema"],
+            },
+        ))
+
         return registry

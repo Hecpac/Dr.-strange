@@ -152,6 +152,51 @@ class ObserveStream:
             ).fetchall()
         return {row[0]: row[1] for row in rows if row[0]}
 
+    def spending_today(self) -> dict:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT lane, provider, model,
+                       COALESCE(SUM(json_extract(payload, '$.cost_estimate')), 0.0) as cost,
+                       COUNT(*) as requests
+                FROM observe_stream
+                WHERE event_type = 'llm_decision'
+                  AND timestamp >= date('now', 'start of day')
+                GROUP BY lane, provider, model
+                ORDER BY cost DESC
+                """,
+            ).fetchall()
+        by_lane: dict[str, float] = {}
+        by_provider: dict[str, float] = {}
+        by_model: dict[str, float] = {}
+        rows_payload: list[dict] = []
+        total = 0.0
+        for lane, provider, model, cost, requests in rows:
+            cost = float(cost or 0.0)
+            total += cost
+            lane_key = lane or "unknown"
+            provider_key = provider or "unknown"
+            model_key = model or "unknown"
+            by_lane[lane_key] = by_lane.get(lane_key, 0.0) + cost
+            by_provider[provider_key] = by_provider.get(provider_key, 0.0) + cost
+            by_model[model_key] = by_model.get(model_key, 0.0) + cost
+            rows_payload.append(
+                {
+                    "lane": lane_key,
+                    "provider": provider_key,
+                    "model": model_key,
+                    "requests": int(requests or 0),
+                    "cost": round(cost, 6),
+                }
+            )
+        return {
+            "total": round(total, 6),
+            "by_lane": {key: round(value, 6) for key, value in sorted(by_lane.items())},
+            "by_provider": {key: round(value, 6) for key, value in sorted(by_provider.items())},
+            "by_model": {key: round(value, 6) for key, value in sorted(by_model.items())},
+            "rows": rows_payload,
+        }
+
     def recent_events(self, limit: int = 20) -> list[dict]:
         with self._lock:
             rows = self._conn.execute(

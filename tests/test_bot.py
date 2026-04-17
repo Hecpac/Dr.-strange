@@ -45,6 +45,7 @@ class BotTests(unittest.TestCase):
                 self.assertIn("/approvals", overview)
                 self.assertIn("/help pipeline", overview)
                 self.assertIn("/terminal_list", overview)
+                self.assertIn("/spending", overview)
 
                 pipeline_help = runtime.bot.handle_text(user_id="123", session_id="s1", text="/help pipeline")
                 self.assertIn("/pipeline_status", pipeline_help)
@@ -60,6 +61,51 @@ class BotTests(unittest.TestCase):
 
                 unknown = runtime.bot.handle_text(user_id="123", session_id="s1", text="/help desconocido")
                 self.assertIn("Tema de ayuda no reconocido", unknown)
+
+    def test_spending_command_returns_daily_llm_decision_breakdown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.observe.emit(
+                    "llm_decision",
+                    lane="brain",
+                    provider="anthropic",
+                    model="claude-opus-4-7",
+                    payload={"cost_estimate": 0.12},
+                )
+
+                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/spending")
+                payload = json.loads(reply)
+
+                self.assertAlmostEqual(payload["total"], 0.12)
+                self.assertEqual(payload["by_lane"], {"brain": 0.12})
+
+    def test_command_router_preserves_terminal_usage_response(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+
+                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/terminal_read")
+
+                self.assertEqual(reply, "usage: /terminal_read <session_id> [offset]")
 
     def test_trace_commands_return_recent_index_and_replay(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -154,6 +200,54 @@ class BotTests(unittest.TestCase):
                 self.assertEqual(outcomes[0]["outcome"], "success")
                 self.assertIn("usable reply", outcomes[0]["lesson"])
 
+    def test_chrome_commands_report_degraded_capability_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.set_capability_status(
+                    "chrome_cdp",
+                    available=False,
+                    reason="Chrome no pudo iniciar en el puerto configurado.",
+                )
+
+                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/chrome_pages")
+
+                self.assertIn("módulo de navegación", reply)
+                self.assertIn("Chrome no pudo iniciar", reply)
+
+    def test_computer_command_reports_degraded_capability_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.set_capability_status(
+                    "computer_use",
+                    available=False,
+                    reason="Computer Use está desactivado por healthcheck.",
+                )
+
+                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/computer revisa la pantalla")
+
+                self.assertIn("módulo de control de escritorio", reply)
+                self.assertIn("healthcheck", reply)
+
     def test_autonomy_mode_commands_update_session_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -236,7 +330,7 @@ class BotTests(unittest.TestCase):
                 self.assertEqual(proceed, "handled")
                 self.assertIn("Continúa con esta acción pendiente: Corregir el bug de browse", prompts[-1])
 
-    @patch("claw_v2.bot._jina_read")
+    @patch("claw_v2.browse_handler._jina_read")
     def test_browse_updates_active_object_in_session_state(self, mock_jina) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -1031,7 +1125,7 @@ class BotTests(unittest.TestCase):
                 self.assertEqual(state["verification_status"], "blocked")
                 self.assertEqual(state["pending_approvals"], [])
 
-    @patch("claw_v2.bot._jina_read")
+    @patch("claw_v2.browse_handler._jina_read")
     def test_browse_failure_records_learning_outcome(self, mock_jina) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -1637,7 +1731,7 @@ class BotTests(unittest.TestCase):
                     page_url_pattern="ads.google.com",
                 )
 
-    @patch("claw_v2.bot._jina_read")
+    @patch("claw_v2.browse_handler._jina_read")
     def test_natural_language_url_uses_isolated_browse(self, mock_jina) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -1657,7 +1751,7 @@ class BotTests(unittest.TestCase):
                         content="handled",
                         lane="brain",
                         provider="anthropic",
-                        model="claude-opus-4-6",
+                        model="claude-opus-4-7",
                     )
                     result = runtime.bot.handle_text(
                         user_id="123",
@@ -1674,7 +1768,7 @@ class BotTests(unittest.TestCase):
                 self.assertIn("[Contenido del enlace pre-cargado]", args[1])
                 self.assertEqual(kwargs["memory_text"], "Revisa https://openai.com/pricing")
 
-    @patch("claw_v2.bot._jina_read")
+    @patch("claw_v2.browse_handler._jina_read")
     def test_natural_language_bare_domain_is_normalized_for_browse(self, mock_jina) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -1694,7 +1788,7 @@ class BotTests(unittest.TestCase):
                         content="handled",
                         lane="brain",
                         provider="anthropic",
-                        model="claude-opus-4-6",
+                        model="claude-opus-4-7",
                     )
                     result = runtime.bot.handle_text(
                         user_id="123",
@@ -1709,7 +1803,7 @@ class BotTests(unittest.TestCase):
                 self.assertIn("[URL analizada]: https://example.com/docs", args[1])
                 self.assertEqual(kwargs["memory_text"], "revisa example.com/docs")
 
-    @patch("claw_v2.bot._jina_read")
+    @patch("claw_v2.browse_handler._jina_read")
     def test_standalone_url_uses_brain_link_analysis_prompt(self, mock_jina) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -1730,7 +1824,7 @@ class BotTests(unittest.TestCase):
                         content="handled",
                         lane="brain",
                         provider="anthropic",
-                        model="claude-opus-4-6",
+                        model="claude-opus-4-7",
                     )
                     result = runtime.bot.handle_text(
                         user_id="123",
@@ -1747,7 +1841,7 @@ class BotTests(unittest.TestCase):
                 self.assertIn("[URL analizada]: https://example.com/post", args[1])
                 self.assertEqual(kwargs["memory_text"], url)
 
-    @patch("claw_v2.bot._jina_read")
+    @patch("claw_v2.browse_handler._jina_read")
     def test_standalone_url_echo_is_rewritten_into_structured_analysis(self, mock_jina) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -1768,7 +1862,7 @@ class BotTests(unittest.TestCase):
                         content=url,
                         lane="brain",
                         provider="anthropic",
-                        model="claude-opus-4-6",
+                        model="claude-opus-4-7",
                     )
                     result = runtime.bot.handle_text(
                         user_id="123",
@@ -1780,7 +1874,7 @@ class BotTests(unittest.TestCase):
                 self.assertIn("contenido del post", result)
                 self.assertNotEqual(result.strip(), url)
 
-    @patch("claw_v2.bot._tweet_fxtwitter_read")
+    @patch("claw_v2.browse_handler._tweet_fxtwitter_read")
     def test_natural_language_review_tweet_reuses_recent_tweet_url(self, mock_tweet_read) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -1824,7 +1918,7 @@ class BotTests(unittest.TestCase):
                 self.assertEqual(second, "handled")
                 self.assertEqual(runtime.bot.browser.chrome_navigate.call_count, 1)
 
-    @patch("claw_v2.bot._tweet_fxtwitter_read")
+    @patch("claw_v2.browse_handler._tweet_fxtwitter_read")
     def test_ambiguous_x_tweet_request_does_not_reuse_previous_tweet(self, mock_tweet_read) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -1868,7 +1962,7 @@ class BotTests(unittest.TestCase):
                 self.assertEqual(second, "handled")
                 self.assertEqual(runtime.bot.browser.chrome_navigate.call_count, 1)
 
-    @patch("claw_v2.bot._tweet_fxtwitter_read")
+    @patch("claw_v2.browse_handler._tweet_fxtwitter_read")
     def test_natural_language_review_tweet_url_uses_brain_analysis(self, mock_tweet_read) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -1890,7 +1984,7 @@ class BotTests(unittest.TestCase):
                         content="handled",
                         lane="brain",
                         provider="anthropic",
-                        model="claude-opus-4-6",
+                        model="claude-opus-4-7",
                     )
 
                     result = runtime.bot.handle_text(
@@ -1926,7 +2020,7 @@ class BotTests(unittest.TestCase):
                         content="handled",
                         lane="brain",
                         provider="anthropic",
-                        model="claude-opus-4-6",
+                        model="claude-opus-4-7",
                     )
 
                     result = runtime.bot.handle_text(
@@ -1964,7 +2058,7 @@ class BotTests(unittest.TestCase):
                         content="Fallas críticas\nLa búsqueda semántica está limitada.\nSugiero embeddings reales.",
                         lane="brain",
                         provider="anthropic",
-                        model="claude-opus-4-6",
+                        model="claude-opus-4-7",
                     )
 
                     result = runtime.bot.handle_text(
@@ -2003,7 +2097,7 @@ class BotTests(unittest.TestCase):
                         content="Veo Google Ads en la pantalla.",
                         lane="brain",
                         provider="anthropic",
-                        model="claude-opus-4-6",
+                        model="claude-opus-4-7",
                     ),
                 ) as mock_handle_message:
                     result = runtime.bot.handle_text(
@@ -2054,7 +2148,7 @@ class BotTests(unittest.TestCase):
                 self.assertIn("/action_approve", result)
                 runtime.bot.computer.run_agent_loop.assert_called_once()
 
-    @patch("claw_v2.bot._jina_read")
+    @patch("claw_v2.browse_handler._jina_read")
     def test_browse_command_normalizes_bare_domain(self, mock_jina) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -2077,7 +2171,7 @@ class BotTests(unittest.TestCase):
                 self.assertIn("Local App", result)
                 mock_jina.assert_called_once_with("https://localhost:3000")
 
-    @patch("claw_v2.bot._jina_read")
+    @patch("claw_v2.browse_handler._jina_read")
     def test_browse_emits_observe_event_for_public_strategy(self, mock_jina) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -2105,7 +2199,7 @@ class BotTests(unittest.TestCase):
                 self.assertEqual(event["payload"]["selected_backend"], "jina")
                 self.assertEqual(event["payload"]["status"], "success")
 
-    @patch("claw_v2.bot._tweet_fxtwitter_read")
+    @patch("claw_v2.browse_handler._tweet_fxtwitter_read")
     def test_browse_emits_observe_event_for_authenticated_strategy(self, mock_tweet_read) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -2236,7 +2330,7 @@ class BotTests(unittest.TestCase):
                         content="Veo una pagina con metricas.",
                         lane="brain",
                         provider="anthropic",
-                        model="claude-opus-4-6",
+                        model="claude-opus-4-7",
                     ),
                 ) as mock_handle_message:
                     result = runtime.bot.handle_text(
@@ -2363,7 +2457,7 @@ class BotTests(unittest.TestCase):
             }
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
-                runtime.bot._computer_sessions["s1"] = MagicMock(status="running")
+                runtime.bot._computer_handler._sessions["s1"] = MagicMock(status="running")
 
                 result = runtime.bot.handle_text(
                     user_id="123",
@@ -2388,7 +2482,7 @@ class BotTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=True):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 with patch("openai.OpenAI") as mock_openai:
-                    client = runtime.bot._get_computer_client()
+                    client = runtime.bot._computer_handler._get_client()
 
                 mock_openai.assert_called_once_with(api_key="sk-proj-test-key")
                 self.assertIs(client, mock_openai.return_value)
@@ -2407,7 +2501,7 @@ class BotTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=True):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 with self.assertRaises(RuntimeError, msg="OPENAI_API_KEY"):
-                    runtime.bot._get_computer_client()
+                    runtime.bot._computer_handler._get_client()
 
     def test_action_approve_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2443,6 +2537,257 @@ class BotTests(unittest.TestCase):
                 result = runtime.bot.handle_text(user_id="123", session_id="s1", text=f"/action_abort {pending.approval_id}")
                 self.assertEqual(result, "action rejected")
                 self.assertEqual(runtime.bot.approvals.status(pending.approval_id), "rejected")
+
+
+    def test_playbooks_command_lists_available_playbooks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/playbooks")
+                self.assertIn("Playbooks disponibles", reply)
+                self.assertIn("QTS Backtesting", reply)
+
+    def test_playbook_detail_shows_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/playbook backtesting")
+                self.assertIn("QTS Backtesting", reply)
+                self.assertIn("backtest_multi.py", reply)
+
+    def test_backtest_command_without_args_shows_usage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/backtest")
+                self.assertIn("QTS Backtesting", reply)
+                self.assertIn("/backtest", reply)
+
+    def test_backtest_command_with_instruction_calls_brain(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/backtest corre ICT para BTC")
+                self.assertIsInstance(reply, str)
+                self.assertTrue(len(reply) > 0)
+
+
+    def test_grill_command_without_args_shows_usage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/grill")
+                self.assertIn("/grill", reply)
+
+    def test_grill_command_with_plan_calls_brain(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/grill migrar auth a OAuth2")
+                self.assertIsInstance(reply, str)
+                self.assertTrue(len(reply) > 0)
+
+    def test_tdd_command_without_args_shows_usage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/tdd")
+                self.assertIn("/tdd", reply)
+
+    def test_improve_arch_command_without_args_calls_brain(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/improve_arch")
+                self.assertIsInstance(reply, str)
+                self.assertTrue(len(reply) > 0)
+
+
+    def test_effort_command_shows_current_levels(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/effort")
+                self.assertIn("brain:", reply)
+                self.assertIn("worker:", reply)
+
+    def test_effort_command_sets_level(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/effort xhigh brain")
+                self.assertIn("xhigh", reply)
+                self.assertEqual(runtime.bot.config.brain_effort, "xhigh")
+
+    def test_effort_command_sets_all_lanes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/effort max")
+                self.assertIn("max", reply)
+                self.assertEqual(runtime.bot.config.brain_effort, "max")
+                self.assertEqual(runtime.bot.config.worker_effort, "max")
+                self.assertEqual(runtime.bot.config.judge_effort, "max")
+
+    def test_verify_command_calls_brain(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/verify")
+                self.assertIsInstance(reply, str)
+                self.assertTrue(len(reply) > 0)
+
+    def test_focus_command_toggles_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/focus")
+                self.assertIn("activado", reply)
+                reply2 = runtime.bot.handle_text(user_id="123", session_id="s1", text="/focus")
+                self.assertIn("desactivado", reply2)
+
+    def test_voice_command_toggles_and_selects(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/voice")
+                self.assertIn("activado", reply)
+                self.assertIn("nova", reply)
+                self.assertEqual(runtime.bot.is_voice_mode("s1"), "nova")
+                reply2 = runtime.bot.handle_text(user_id="123", session_id="s1", text="/voice echo")
+                self.assertIn("echo", reply2)
+                self.assertEqual(runtime.bot.is_voice_mode("s1"), "echo")
+                reply3 = runtime.bot.handle_text(user_id="123", session_id="s1", text="/voice off")
+                self.assertIn("desactivado", reply3)
+                self.assertIsNone(runtime.bot.is_voice_mode("s1"))
+                reply4 = runtime.bot.handle_text(user_id="123", session_id="s1", text="/voice invalid")
+                self.assertIn("inválida", reply4)
 
 
 if __name__ == "__main__":

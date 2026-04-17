@@ -523,12 +523,11 @@ class GitWorktreeExperimentRunner:
             except subprocess.TimeoutExpired:
                 return ExperimentEvaluation(metric_value=baseline, status="metric_failed", output="Docker timeout exceeded.")
         else:
-            logger.warning("Docker unavailable — running metric command on host without sandbox: %s", command)
-            import shlex
-            completed = subprocess.run(
-                shlex.split(command) if isinstance(command, str) else command,
-                cwd=worktree_path,
-                capture_output=True, text=True, check=False, timeout=300,
+            logger.error("Docker unavailable — refusing to run metric command on host: %s", command)
+            return ExperimentEvaluation(
+                metric_value=baseline,
+                status="metric_failed",
+                output="Docker sandbox is required but unavailable. Cannot run metric commands on host.",
             )
         output = (completed.stdout or "") + (completed.stderr or "")
         metric_value = self._parse_metric(output, baseline)
@@ -979,7 +978,7 @@ class SubAgentService:
         if "codex" in text:
             return ("codex", "codex-mini-latest")
         if "claude opus" in text:
-            return ("anthropic", "claude-opus-4-6")
+            return ("anthropic", "claude-opus-4-7")
         if "claude sonnet" in text:
             return ("anthropic", "claude-sonnet-4-6")
         if "gemini" in text:
