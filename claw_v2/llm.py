@@ -4,10 +4,13 @@ from dataclasses import asdict
 from typing import Callable
 
 from claw_v2.adapters.anthropic import AnthropicAgentAdapter
+from claw_v2.adapters.base import AdapterError, LLMRequest, PostLLMHook, PreLLMHook, ProviderAdapter, UserPrompt
+from claw_v2.adapters.codex import CodexAdapter
 from claw_v2.adapters.google import GoogleAdapter
-from claw_v2.adapters.base import AdapterError, LLMRequest, ProviderAdapter
+from claw_v2.adapters.ollama import OllamaAdapter
 from claw_v2.adapters.openai import OpenAIAdapter
 from claw_v2.config import AppConfig
+from claw_v2.tracing import current_llm_trace, trace_metadata
 from claw_v2.types import Lane, LLMResponse
 
 
@@ -21,14 +24,18 @@ class LLMRouter:
         config: AppConfig,
         adapters: dict[str, ProviderAdapter],
         audit_sink: Callable[[dict], None] | None = None,
+        pre_hooks: list[PreLLMHook] | None = None,
+        post_hooks: list[PostLLMHook] | None = None,
     ) -> None:
         self.config = config
         self.adapters = adapters
         self.audit_sink = audit_sink or (lambda event: None)
+        self.pre_hooks: list[PreLLMHook] = list(pre_hooks or [])
+        self.post_hooks: list[PostLLMHook] = list(post_hooks or [])
 
     def ask(
         self,
-        prompt: str,
+        prompt: UserPrompt,
         *,
         system_prompt: str | None = None,
         lane: Lane = "brain",
@@ -64,7 +71,27 @@ class LLMRouter:
             hooks=hooks,
             timeout=timeout,
             cwd=cwd,
+            cache_ttl=self.config.cache_prefix_ttl if self.config.cache_prefix_ttl > 0 else None,
         )
+        request.evidence_pack = {
+            **(request.evidence_pack or {}),
+            **current_llm_trace(request.evidence_pack),
+        }
+        # --- Pre-hooks ---
+        for hook in self.pre_hooks:
+            result = hook(request)
+            if result is None:
+                return LLMResponse(
+                    content="Request blocked by pre-hook.",
+                    lane=request.lane,
+                    provider="none",
+                    model="none",
+                    confidence=0.0,
+                    cost_estimate=0.0,
+                    artifacts={"blocked_by": getattr(hook, "__name__", "pre_hook")},
+                )
+            request = result
+
         adapter = self._adapter_for(selected_provider)
         if lane not in self.NON_TOOL_LANES and not adapter.tool_capable:
             raise ValueError(f"Lane '{lane}' requires a tool-capable provider adapter.")
@@ -72,26 +99,64 @@ class LLMRouter:
         try:
             response = adapter.complete(request)
         except AdapterError as exc:
-            if lane in self.NON_TOOL_LANES and selected_provider != "anthropic":
-                fallback_request = LLMRequest(
-                    **{**asdict(request), "provider": "anthropic", "model": self.config.model_for_lane(lane)}
-                )
-                response = self._adapter_for("anthropic").complete(fallback_request)
-                response.degraded_mode = True
-                response.artifacts["fallback_reason"] = str(exc)
-                self._audit("llm_fallback", response, {"requested_provider": selected_provider})
-                return response
-            raise
+            fallback_provider = self._pick_fallback(selected_provider, lane)
+            if fallback_provider is None:
+                raise
+            fb_adapter = self._adapter_for(fallback_provider)
+            if lane not in self.NON_TOOL_LANES and not fb_adapter.tool_capable:
+                raise
+            fallback_request = LLMRequest(
+                **{
+                    **asdict(request),
+                    "provider": fallback_provider,
+                    "model": self.config.advisory_model_for_provider(fallback_provider),
+                }
+            )
+            response = fb_adapter.complete(fallback_request)
+            response.degraded_mode = True
+            response.artifacts["fallback_reason"] = str(exc)
+            response.artifacts.update(trace_metadata(request.evidence_pack))
+            for hook in self.post_hooks:
+                response = hook(request, response)
+            self._audit(
+                "llm_fallback",
+                response,
+                {"requested_provider": selected_provider, "fallback_provider": fallback_provider, "response_text": response.content},
+                request=request,
+            )
+            return response
 
-        self._audit("llm_response", response, {"session_id": session_id})
+        # --- Post-hooks ---
+        for hook in self.post_hooks:
+            response = hook(request, response)
+
+        response.artifacts.update(trace_metadata(request.evidence_pack))
+        self._audit(
+            "llm_response",
+            response,
+            {"session_id": session_id, "response_text": response.content},
+            request=request,
+        )
         return response
+
+    # Fallback order: anthropic ↔ openai; advisory-only providers fall back to Anthropic.
+    _FALLBACK_MAP: dict[str, str] = {"anthropic": "openai", "openai": "anthropic"}
+
+    def _pick_fallback(self, failed_provider: str, lane: Lane) -> str | None:
+        candidate = self._FALLBACK_MAP.get(failed_provider)
+        if candidate and candidate in self.adapters:
+            return candidate
+        if lane in self.NON_TOOL_LANES and failed_provider != "anthropic" and "anthropic" in self.adapters:
+            return "anthropic"
+        return None
 
     def _adapter_for(self, provider: str) -> ProviderAdapter:
         if provider not in self.adapters:
             raise AdapterError(f"No adapter registered for provider '{provider}'.")
         return self.adapters[provider]
 
-    def _audit(self, action: str, response: LLMResponse, metadata: dict) -> None:
+    def _audit(self, action: str, response: LLMResponse, metadata: dict, *, request: LLMRequest | None = None) -> None:
+        trace = (request.evidence_pack or {}) if request is not None else {}
         self.audit_sink(
             {
                 "action": action,
@@ -101,7 +166,15 @@ class LLMRouter:
                 "cost_estimate": response.cost_estimate,
                 "confidence": response.confidence,
                 "degraded_mode": response.degraded_mode,
-                "metadata": metadata,
+                "metadata": {
+                    **metadata,
+                    "trace_id": trace.get("trace_id"),
+                    "root_trace_id": trace.get("root_trace_id"),
+                    "span_id": trace.get("span_id"),
+                    "parent_span_id": trace.get("parent_span_id"),
+                    "job_id": trace.get("job_id"),
+                    "artifact_id": trace.get("artifact_id"),
+                },
             }
         )
 
@@ -113,16 +186,39 @@ class LLMRouter:
         anthropic_executor: Callable[[LLMRequest], LLMResponse] | None = None,
         openai_transport: Callable[[LLMRequest], LLMResponse] | None = None,
         google_transport: Callable[[LLMRequest], LLMResponse] | None = None,
+        ollama_transport: Callable[[LLMRequest], LLMResponse] | None = None,
+        codex_transport: Callable[[LLMRequest], LLMResponse] | None = None,
         audit_sink: Callable[[dict], None] | None = None,
+        pre_hooks: list[PreLLMHook] | None = None,
+        post_hooks: list[PostLLMHook] | None = None,
+        openai_tool_executor: Callable[[str, dict], dict] | None = None,
+        openai_tool_schemas: list[dict] | None = None,
     ) -> "LLMRouter":
         return cls(
             config=config,
             adapters={
                 "anthropic": AnthropicAgentAdapter(executor=anthropic_executor),
-                "openai": OpenAIAdapter(transport=openai_transport, api_key=config.openai_api_key),
+                "openai": OpenAIAdapter(
+                    transport=openai_transport,
+                    api_key=config.openai_api_key,
+                    tool_executor=openai_tool_executor,
+                    tool_schemas=openai_tool_schemas,
+                ),
                 "google": GoogleAdapter(transport=google_transport, api_key=config.google_api_key),
+                "ollama": OllamaAdapter(
+                    transport=ollama_transport,
+                    host=config.ollama_host,
+                    num_ctx=min(config.worker_context_window, 131072),
+                    think=True,
+                ),
+                "codex": CodexAdapter(
+                    cli_path=config.codex_cli_path,
+                    transport=codex_transport,
+                ),
             },
             audit_sink=audit_sink,
+            pre_hooks=pre_hooks,
+            post_hooks=post_hooks,
         )
 
     def _validate_lane_input(

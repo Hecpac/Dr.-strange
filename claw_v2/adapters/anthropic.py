@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
-from contextlib import contextmanager
+import re
 from importlib import import_module
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, AsyncIterator, Callable
 
 from claw_v2.adapters.base import (
     ADVISORY_LANES,
@@ -22,7 +23,10 @@ from claw_v2.config import AppConfig
 from claw_v2.network_proxy import DomainAllowlistEnforcer
 from claw_v2.observe import ObserveStream
 from claw_v2.sandbox import SandboxPolicy, sandbox_hook
+from claw_v2.tracing import trace_metadata
 from claw_v2.types import LLMResponse
+
+logger = logging.getLogger(__name__)
 
 
 class AnthropicAgentAdapter(ProviderAdapter):
@@ -54,12 +58,26 @@ class ClaudeSDKExecutor:
         self.network_enforcer = DomainAllowlistEnforcer()
 
     def __call__(self, request: LLMRequest) -> LLMResponse:
-        with self._auth_environment():
-            return asyncio.run(self._run(request))
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None and loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                return pool.submit(asyncio.run, self._run(request)).result()
+        return asyncio.run(self._run(request))
 
     async def _run(self, request: LLMRequest) -> LLMResponse:
         sdk = _load_sdk()
-        options = self._build_options(sdk, request)
+        stderr_lines: list[str] = []
+
+        def _capture_stderr(line: str) -> None:
+            stderr_lines.append(line)
+            if len(stderr_lines) > 40:
+                del stderr_lines[0]
+
+        options = self._build_options(sdk, request, stderr_callback=_capture_stderr)
         effective_input = build_effective_input(request)
         assistant_text_chunks: list[str] = []
         result_text: str | None = None
@@ -67,10 +85,14 @@ class ClaudeSDKExecutor:
         total_cost = 0.0
         usage: dict[str, Any] = {}
         model_name = request.model
+        query_session_id = request.session_id or "default"
 
         try:
             async with sdk.ClaudeSDKClient(options=options) as client:
-                await client.query(effective_input)
+                if isinstance(effective_input, str):
+                    await client.query(effective_input, session_id=query_session_id)
+                else:
+                    await client.query(_stream_user_content(effective_input), session_id=query_session_id)
                 async for message in client.receive_response():
                     if isinstance(message, sdk.AssistantMessage):
                         assistant_text_chunks.extend(_extract_assistant_text(message.content))
@@ -83,19 +105,55 @@ class ClaudeSDKExecutor:
                         if message.is_error:
                             raise AdapterError(message.result or "Claude SDK execution failed.")
         except Exception as exc:  # pragma: no cover - runtime integration path
+            stderr_excerpt = " | ".join(stderr_lines[-5:]).strip()
+            self._emit_runtime_error(
+                request=request,
+                query_session_id=query_session_id,
+                result_session_id=result_session_id,
+                exc=exc,
+                stderr_excerpt=stderr_excerpt,
+                partial_text=_coalesce_content(assistant_text_chunks, result_text),
+            )
             if exc.__class__.__name__ == "CLINotFoundError":
                 raise AdapterUnavailableError(
                     f"Claude CLI not found at '{self.config.claude_cli_path}'."
                 ) from exc
             if isinstance(exc, AdapterError):
                 raise
+            if stderr_excerpt:
+                logger.error("Claude CLI stderr before failure: %s", stderr_excerpt)
+                raise AdapterError(f"Claude SDK execution failed: {exc}. Claude stderr: {stderr_excerpt}") from exc
             raise AdapterError(f"Claude SDK execution failed: {exc}") from exc
 
         content = _coalesce_content(assistant_text_chunks, result_text)
+        cache_read = usage.get("cache_read_input_tokens", 0)
+        cache_create = usage.get("cache_creation_input_tokens", 0)
+        input_tokens = usage.get("input_tokens", 0)
+        cache_hit_ratio = cache_read / max(input_tokens, 1) if input_tokens else 0.0
         artifacts = {
             "session_id": result_session_id,
             "usage": usage,
+            "cache": {
+                "read_tokens": cache_read,
+                "create_tokens": cache_create,
+                "hit_ratio": round(cache_hit_ratio, 3),
+            },
         }
+        if self.observe is not None:
+            self.observe.emit(
+                "prompt_cache",
+                lane=request.lane,
+                provider="anthropic",
+                model=model_name,
+                **trace_metadata(request.evidence_pack),
+                payload={
+                    "cache_read_tokens": cache_read,
+                    "cache_create_tokens": cache_create,
+                    "input_tokens": input_tokens,
+                    "hit_ratio": round(cache_hit_ratio, 3),
+                    "estimated_savings_pct": round(cache_hit_ratio * 75, 1),
+                },
+            )
         return LLMResponse(
             content=content,
             lane=request.lane,
@@ -106,7 +164,43 @@ class ClaudeSDKExecutor:
             artifacts=artifacts,
         )
 
-    def _build_options(self, sdk: Any, request: LLMRequest) -> Any:
+    def _emit_runtime_error(
+        self,
+        *,
+        request: LLMRequest,
+        query_session_id: str,
+        result_session_id: str | None,
+        exc: Exception,
+        stderr_excerpt: str,
+        partial_text: str,
+    ) -> None:
+        if self.observe is None:
+            return
+        payload = {
+            "session_id": request.session_id,
+            "query_session_id": query_session_id,
+            "result_session_id": result_session_id,
+            "error_type": exc.__class__.__name__,
+            "error": str(exc)[:1000],
+            "stderr_excerpt": stderr_excerpt[:1000],
+            "partial_text_preview": partial_text[:500],
+        }
+        self.observe.emit(
+            "llm_error",
+            lane=request.lane,
+            provider="anthropic",
+            model=request.model,
+            **trace_metadata(request.evidence_pack),
+            payload=payload,
+        )
+
+    def _build_options(
+        self,
+        sdk: Any,
+        request: LLMRequest,
+        *,
+        stderr_callback: Callable[[str], None] | None = None,
+    ) -> Any:
         tools: Any
         system_prompt: Any
         can_use_tool = None
@@ -122,11 +216,19 @@ class ClaudeSDKExecutor:
             system_prompt = {"type": "preset", "preset": "claude_code"}
             if effective_system_prompt:
                 system_prompt["append"] = effective_system_prompt
-            permission_mode = "default"
+            permission_mode = "bypassPermissions" if self.config.sdk_bypass_permissions else "default"
             can_use_tool = self._build_can_use_tool(sdk, request)
 
         sdk_agents = self._build_agents(sdk, request)
-        return sdk.ClaudeAgentOptions(
+        sdk_env: dict[str, str] = {}
+        extra_args: dict[str, str | None] = {}
+        if self._should_use_api_key_auth():
+            if api_key := _resolve_anthropic_api_key():
+                sdk_env["ANTHROPIC_API_KEY"] = api_key
+            extra_args["bare"] = None
+        elif os.environ.get("ANTHROPIC_API_KEY"):
+            sdk_env["ANTHROPIC_API_KEY"] = ""
+        options_kwargs: dict[str, Any] = dict(
             tools=tools,
             allowed_tools=list(request.allowed_tools or []),
             system_prompt=system_prompt,
@@ -136,12 +238,19 @@ class ClaudeSDKExecutor:
             model=request.model,
             cli_path=self.config.claude_cli_path,
             cwd=Path(request.cwd) if request.cwd else self.config.workspace_root,
-            setting_sources=["project"],
+            # Isolate the bot from user-level Claude Code hooks/plugins.
+            # The user's personal ~/.claude/settings.json can run heavy SessionStart
+            # hooks or custom callbacks that break SDK initialization.
+            setting_sources=["project", "local"],
+            stderr=stderr_callback,
+            extra_args=extra_args,
+            env=sdk_env,
             hooks=hooks,
             agents=sdk_agents,
             can_use_tool=can_use_tool,
             effort=request.effort,
         )
+        return sdk.ClaudeAgentOptions(**options_kwargs)
 
     def _build_agents(self, sdk: Any, request: LLMRequest) -> dict[str, Any] | None:
         if not request.agents:
@@ -227,6 +336,7 @@ class ClaudeSDKExecutor:
                     lane=request.lane,
                     provider="anthropic",
                     model=request.model,
+                    **trace_metadata(request.evidence_pack),
                     payload={
                         "tool_name": input_data.get("tool_name"),
                         "tool_use_id": tool_use_id,
@@ -244,6 +354,7 @@ class ClaudeSDKExecutor:
                     lane=request.lane,
                     provider="anthropic",
                     model=request.model,
+                    **trace_metadata(request.evidence_pack),
                     payload={
                         "tool_name": input_data.get("tool_name"),
                         "tool_use_id": tool_use_id,
@@ -259,6 +370,7 @@ class ClaudeSDKExecutor:
                     lane=request.lane,
                     provider="anthropic",
                     model=request.model,
+                    **trace_metadata(request.evidence_pack),
                     payload={"session_id": input_data.get("session_id")},
                 )
             return {}
@@ -270,6 +382,7 @@ class ClaudeSDKExecutor:
                     lane=request.lane,
                     provider="anthropic",
                     model=request.model,
+                    **trace_metadata(request.evidence_pack),
                     payload={"agent_id": input_data.get("agent_id"), "tool_use_id": tool_use_id},
                 )
             return {}
@@ -281,6 +394,7 @@ class ClaudeSDKExecutor:
                     lane=request.lane,
                     provider="anthropic",
                     model=request.model,
+                    **trace_metadata(request.evidence_pack),
                     payload={"agent_id": input_data.get("agent_id"), "tool_use_id": tool_use_id},
                 )
             return {}
@@ -301,26 +415,23 @@ class ClaudeSDKExecutor:
 
     def _policy_for_request(self, request: LLMRequest) -> SandboxPolicy:
         workspace_root = Path(request.cwd) if request.cwd else self.config.workspace_root
-        allowed = [workspace_root, *self.config.allowed_paths]
+        read_paths = getattr(self.config, "allowed_read_paths", [])
+        extra_roots = getattr(self.config, "extra_workspace_roots", [])
+        allowed = [workspace_root, *read_paths, *extra_roots, *getattr(self.config, "allowed_paths", [])]
         return SandboxPolicy(
             workspace_root=workspace_root,
             allowed_paths=allowed,
-            writable_paths=allowed,
+            writable_paths=[workspace_root, Path("/private/tmp"), Path.home() / ".claw", *extra_roots],
             network_policy="allow",
             credential_scope="external",
         )
 
-    @contextmanager
-    def _auth_environment(self):
-        if self.config.claude_auth_mode != "subscription":
-            yield
-            return
-        original_api_key = os.environ.pop("ANTHROPIC_API_KEY", None)
-        try:
-            yield
-        finally:
-            if original_api_key is not None:
-                os.environ["ANTHROPIC_API_KEY"] = original_api_key
+    def _should_use_api_key_auth(self) -> bool:
+        if self.config.claude_auth_mode == "api_key":
+            return True
+        if self.config.claude_auth_mode == "auto":
+            return _resolve_anthropic_api_key() is not None
+        return False
 
 
 def create_claude_sdk_executor(
@@ -360,10 +471,44 @@ def _extract_assistant_text(blocks: list[Any]) -> list[str]:
     return chunks
 
 
+async def _stream_user_content(content: list[dict[str, Any]]) -> AsyncIterator[dict[str, Any]]:
+    yield {
+        "type": "user",
+        "message": {"role": "user", "content": content},
+        "parent_tool_use_id": None,
+    }
+
+
 def _coalesce_content(assistant_text_chunks: list[str], result_text: str | None) -> str:
     content = "\n".join(chunk.strip() for chunk in assistant_text_chunks if chunk.strip()).strip()
     if content:
+        if result_text and result_text.strip() and result_text.strip() not in content:
+            return f"{content}\n\n{result_text.strip()}"
         return content
     if result_text:
         return result_text.strip()
     return ""
+
+
+def _resolve_anthropic_api_key() -> str | None:
+    if value := os.getenv("ANTHROPIC_API_KEY"):
+        return value.strip() or None
+    pattern = re.compile(r"^\s*(?:export\s+)?ANTHROPIC_API_KEY=(?P<value>.+?)\s*$")
+    for path in (
+        Path.home() / ".zshrc",
+        Path.home() / ".zprofile",
+        Path.home() / ".zshenv",
+        Path.home() / ".profile",
+    ):
+        try:
+            lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except FileNotFoundError:
+            continue
+        for line in reversed(lines):
+            match = pattern.match(line)
+            if match is None:
+                continue
+            value = match.group("value").strip().strip("\"'")
+            if value:
+                return value
+    return None

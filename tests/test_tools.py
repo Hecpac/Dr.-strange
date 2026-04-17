@@ -62,5 +62,34 @@ class ToolRegistryTests(unittest.TestCase):
                 )
 
 
+    def test_firecrawl_extract_registered(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            registry = ToolRegistry.default(workspace_root=workspace)
+            defn = registry.get("FirecrawlExtract")
+            self.assertEqual(defn.name, "FirecrawlExtract")
+            self.assertTrue(defn.requires_network)
+            self.assertIn("researcher", defn.allowed_agent_classes)
+            self.assertIn("url", defn.parameter_schema["required"])
+            self.assertIn("schema", defn.parameter_schema["required"])
+
+    def test_firecrawl_extract_requires_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            registry = ToolRegistry.default(workspace_root=workspace)
+            with self.assertRaises(ValueError):
+                registry.execute("FirecrawlExtract", {"url": "", "schema": {}}, agent_class="researcher")
+
+    def test_firecrawl_extract_requires_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            registry = ToolRegistry.default(workspace_root=workspace)
+            with self.assertRaises(ValueError):
+                registry.execute("FirecrawlExtract", {"url": "https://example.com", "schema": {}}, agent_class="researcher")
+
+
 if __name__ == "__main__":
     unittest.main()

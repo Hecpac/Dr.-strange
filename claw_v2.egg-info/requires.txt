@@ -1,0 +1,4 @@
+claude-agent-sdk
+openai
+google-genai
+python-telegram-bot
