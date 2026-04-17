@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Claw v2 multi-LLM agent scaffold"
 readme = "claw-v2.1-prd.md"
 requires-python = ">=3.12"
-dependencies = ["claude-agent-sdk", "openai", "google-genai"]
+dependencies = ["claude-agent-sdk", "openai", "google-genai", "ollama", "python-telegram-bot", "anthropic", "pyautogui", "rank-bm25", "pypdf"]
 
 [build-system]
 requires = ["setuptools>=68"]

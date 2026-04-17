@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Dr. Strange Local Chat</title>
+    <link rel="stylesheet" href="/chat.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <h1>Dr. Strange</h1>
+        <p>Local chat transport</p>
+      </header>
+      <section class="workspace">
+        <section class="chat-pane">
+          <section id="transcript" class="transcript" aria-live="polite"></section>
+          <form id="chat-form" class="composer">
+            <input id="message" name="message" type="text" placeholder="Ask Dr. Strange..." autocomplete="off">
+            <button type="submit">Send</button>
+          </form>
+        </section>
+        <aside class="sidebar">
+          <div class="panel">
+            <div class="panel-header">
+              <h2>Traces</h2>
+              <button id="refresh-traces" type="button">Refresh</button>
+            </div>
+            <div id="trace-list" class="trace-list"></div>
+          </div>
+          <div class="panel">
+            <div class="panel-header">
+              <h2>Replay</h2>
+            </div>
+            <pre id="trace-detail" class="trace-detail">Select a trace to inspect its replay.</pre>
+          </div>
+        </aside>
+      </section>
+    </main>
+    <script src="/chat.js"></script>
+  </body>
+</html>

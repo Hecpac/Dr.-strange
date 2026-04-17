@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -23,12 +24,66 @@ def is_within_allowed(path: Path, policy: SandboxPolicy) -> bool:
     return any(resolved.is_relative_to(root.expanduser().resolve(strict=False)) for root in roots)
 
 
+def _unwrap_command_tokens(tokens: list[str]) -> list[str]:
+    remaining = list(tokens)
+    while remaining:
+        base_cmd = Path(remaining[0]).name
+        if base_cmd in {"bash", "sh", "zsh", "fish", "dash"}:
+            if "-c" not in remaining:
+                return remaining
+            c_idx = remaining.index("-c")
+            if c_idx + 1 >= len(remaining):
+                return remaining
+            try:
+                return shlex.split(remaining[c_idx + 1])
+            except ValueError:
+                return []
+        if base_cmd in {"env", "command", "sudo", "nice", "nohup"}:
+            idx = 1
+            if base_cmd == "env":
+                while idx < len(remaining) and (
+                    "=" in remaining[idx]
+                    and not remaining[idx].startswith("-")
+                    and remaining[idx].split("=", 1)[0]
+                ):
+                    idx += 1
+            else:
+                while idx < len(remaining) and remaining[idx].startswith("-"):
+                    idx += 1
+                    if base_cmd == "sudo" and idx < len(remaining) and remaining[idx - 1] in {"-u", "-g", "-h", "-p"}:
+                        idx += 1
+                    if base_cmd == "nice" and idx < len(remaining) and remaining[idx - 1] == "-n":
+                        idx += 1
+            remaining = remaining[idx:]
+            continue
+        if base_cmd == "xargs":
+            return remaining
+        return remaining
+    return remaining
+
+
+_SHELL_OPERATORS_RE = __import__("re").compile(r"[;|&`]|>\s|>>\s|\$\(")
+
+
 def check_command(command: str, policy: SandboxPolicy) -> str | None:
-    dangerous_fragments = (" rm ", " shutdown", " reboot", " launchctl ", "diskutil", " mkfs", " dd ")
-    padded = f" {command} "
-    if any(fragment in padded for fragment in dangerous_fragments):
-        return "dangerous shell fragment detected"
-    if policy.network_policy == "none" and any(token in command for token in ("curl ", "wget ", "http://", "https://")):
+    dangerous_commands = {"rm", "shutdown", "reboot", "diskutil", "mkfs", "dd"}
+    if _SHELL_OPERATORS_RE.search(command):
+        return "shell operators (;|&>`$) are not allowed"
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return "unparseable command"
+    if not tokens:
+        return None
+    tokens = _unwrap_command_tokens(tokens)
+    if not tokens:
+        return "unparseable command"
+    if "xargs" in [Path(token).name for token in tokens]:
+        return "xargs is not allowed"
+    base_cmd = Path(tokens[0]).name
+    if base_cmd in dangerous_commands:
+        return "dangerous command detected"
+    if policy.network_policy == "none" and base_cmd in {"curl", "wget"}:
         return "network access not allowed for this agent"
     return None
 
@@ -51,16 +106,30 @@ def sandbox_hook(
         violation = check_command(command, policy)
         if violation:
             return SandboxDecision(False, violation)
+        # System directories that are safe to reference (read-only tools, interpreters).
+        _SYSTEM_ROOTS = [Path("/usr"), Path("/bin"), Path("/sbin"), Path("/opt"), Path("/tmp"), Path("/private/tmp")]
         tokens = shlex.split(command) if command else []
         for token in tokens:
-            if token.startswith("/") and not is_within_allowed(Path(token), policy):
+            if "/" not in token:
+                continue
+            # Skip flags, env-var assignments, and URLs — not file paths.
+            if token.startswith("-") or "://" in token:
+                continue
+            if "=" in token and not token.startswith("/"):
+                continue
+            # Use abspath (no symlink resolution) so .venv/bin/python
+            # doesn't resolve to /opt/homebrew/... and get blocked.
+            p = Path(token)
+            if not p.is_absolute():
+                p = policy.workspace_root / p
+            normalized = Path(os.path.abspath(p))
+            roots = [policy.workspace_root, *policy.allowed_paths, *policy.writable_paths, *_SYSTEM_ROOTS]
+            if not any(normalized.is_relative_to(Path(os.path.abspath(r))) for r in roots):
                 return SandboxDecision(False, "command references path outside allowed boundaries")
         return SandboxDecision(True)
 
     if tool_name in {"WebSearch", "WebFetch"} and network_enforcer is not None:
         url = tool_input.get("url") or tool_input.get("target") or ""
-        domains = tool_input.get("allowed_domains") or []
         if url:
-            network_policy = NetworkPolicy(allowed_domains=domains or ["*"], blocked_domains=[])
-            return network_enforcer.enforce_url(url, policy=network_policy, actor=actor)
+            return network_enforcer.enforce_url(url, policy=policy.network_policy if hasattr(policy, "network_policy") and isinstance(policy.network_policy, NetworkPolicy) else NetworkPolicy(allowed_domains=[], blocked_domains=[]), actor=actor)
     return SandboxDecision(True)

@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from claw_v2.agents import AgentDefinition, AutoResearchAgentService, ExperimentRecord, FileAgentStore, StagnationDetector
+from claw_v2.agents import AgentDefinition, AutoResearchAgentService, ExperimentRecord, FileAgentStore, StagnationDetector, SubAgentService
 from claw_v2.eval_mocks import build_test_router, scripted_experiment_runner
 
 from tests.helpers import make_config
@@ -150,6 +150,23 @@ class AgentServiceTests(unittest.TestCase):
                 service.create_agent(AgentDefinition(name="../bad", agent_class="operator", instruction="Bad"))
             with self.assertRaises(ValueError):
                 service.create_agent(AgentDefinition(name="bad-class", agent_class="judge", instruction="Bad"))
+
+
+class SubAgentServiceTests(unittest.TestCase):
+    def test_parse_model_from_explicit_model_line(self) -> None:
+        hex_soul = (
+            "# SOUL\n"
+            "- **Model:** GPT-5.4 Codex\n"
+            "You run on Codex because your job is code-native reasoning at speed.\n"
+        )
+        lux_soul = (
+            "# SOUL\n"
+            "- **Model:** GPT-5.4\n"
+            "You run on Gemini because your job needs broad synthesis across large content volumes.\n"
+        )
+
+        self.assertEqual(SubAgentService._parse_model_from_soul(hex_soul), ("codex", "codex-mini-latest"))
+        self.assertEqual(SubAgentService._parse_model_from_soul(lux_soul), ("openai", "gpt-5.4"))
 
 
 if __name__ == "__main__":

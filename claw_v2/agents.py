@@ -115,7 +115,11 @@ class FileAgentStore:
         return self.root / agent_name / "results.tsv"
 
     def list_agents(self) -> list[str]:
-        return sorted(path.name for path in self.root.iterdir() if path.is_dir())
+        return sorted(
+            path.name
+            for path in self.root.iterdir()
+            if path.is_dir() and not path.name.startswith("_")
+        )
 
     def load_state(self, agent_name: str) -> dict:
         path = self.state_path(agent_name)
@@ -212,6 +216,7 @@ class AutoResearchAgentService:
             "instruction": definition.instruction,
             "lane": definition.lane,
             "allowed_tools": allowed_tools,
+            "last_action": "created",
             "promote_on_improvement": False,
             "commit_on_promotion": False,
             "branch_on_promotion": False,
@@ -247,10 +252,12 @@ class AutoResearchAgentService:
             last_metric = record.metric_value
             state["experiments_today"] = state.get("experiments_today", 0) + 1
             state["last_verified_state"] = {"metric": record.metric_value}
+            state["last_action"] = f"experiment_{experiment_number}:{record.status}"
             self.store.save_state(agent_name, state)
             stagnation = self.detector.evaluate(history)
             if stagnation == "stagnating":
                 state["paused"] = True
+                state["last_action"] = "paused:stagnating"
                 self.store.save_state(agent_name, state)
                 return LoopResult(experiment_number, True, "stagnating", record.metric_value)
         return LoopResult(max_experiments, False, "completed", last_metric)
@@ -268,12 +275,14 @@ class AutoResearchAgentService:
             last_metric = record.metric_value
             state["experiments_today"] = state.get("experiments_today", 0) + 1
             state["last_verified_state"] = {"metric": record.metric_value}
+            state["last_action"] = f"experiment_{experiment_number}:{record.status}"
             self.store.save_state(agent_name, state)
             if record.metric_value >= target_metric:
                 return LoopResult(experiment_number, False, "target_reached", record.metric_value)
             stagnation = self.detector.evaluate(history)
             if stagnation == "stagnating":
                 state["paused"] = True
+                state["last_action"] = "paused:stagnating"
                 self.store.save_state(agent_name, state)
                 return LoopResult(experiment_number, True, "stagnating", record.metric_value)
         return LoopResult(max_experiments, False, "budget_exhausted", last_metric)
@@ -309,12 +318,14 @@ class AutoResearchAgentService:
     def pause(self, agent_name: str) -> dict:
         state = self.store.load_state(agent_name)
         state["paused"] = True
+        state["last_action"] = "paused"
         self.store.save_state(agent_name, state)
         return state
 
     def resume(self, agent_name: str) -> dict:
         state = self.store.load_state(agent_name)
         state["paused"] = False
+        state["last_action"] = "resumed"
         self.store.save_state(agent_name, state)
         return state
 
@@ -347,6 +358,7 @@ class AutoResearchAgentService:
                 state["promotion_branch_name"] = branch_name
             else:
                 state.pop("promotion_branch_name", None)
+        state["last_action"] = "controls_updated"
         self.store.save_state(agent_name, state)
         return state
 
@@ -363,6 +375,52 @@ class AutoResearchAgentService:
         return sorted(dict.fromkeys(requested_tools))
 
 
+class DockerSandbox:
+    """Wraps command execution in a Docker container with resource limits."""
+
+    def __init__(
+        self,
+        *,
+        image: str = "python:3.12-slim",
+        memory_limit: str = "2g",
+        pids_limit: int = 100,
+        network: str = "none",
+        timeout: int = 300,
+    ) -> None:
+        self.image = image
+        self.memory_limit = memory_limit
+        self.pids_limit = pids_limit
+        self.network = network
+        self.timeout = timeout
+        self._available: bool | None = None
+
+    def is_available(self) -> bool:
+        if self._available is None:
+            try:
+                result = subprocess.run(
+                    ["docker", "info"], capture_output=True, text=True, check=False, timeout=5,
+                )
+                self._available = result.returncode == 0
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                self._available = False
+        return self._available
+
+    def run(self, command: str, cwd: Path) -> subprocess.CompletedProcess[str]:
+        docker_cmd = [
+            "docker", "run", "--rm",
+            f"--memory={self.memory_limit}",
+            f"--pids-limit={self.pids_limit}",
+            f"--network={self.network}",
+            "-v", f"{cwd}:/workspace",
+            "-w", "/workspace",
+            self.image,
+            "sh", "-c", command,
+        ]
+        return subprocess.run(
+            docker_cmd, capture_output=True, text=True, check=False, timeout=self.timeout,
+        )
+
+
 class GitWorktreeExperimentRunner:
     def __init__(
         self,
@@ -373,6 +431,7 @@ class GitWorktreeExperimentRunner:
         brain: BrainService | None = None,
         evaluator: Callable[[Path, dict, str], ExperimentEvaluation] | None = None,
         promotion_executor: Callable[[Path, dict, str], Any] | None = None,
+        docker_sandbox: DockerSandbox | None = None,
     ) -> None:
         self.repo_root = Path(repo_root)
         self.worktree_root = Path(worktree_root)
@@ -380,6 +439,7 @@ class GitWorktreeExperimentRunner:
         self.brain = brain
         self.evaluator = evaluator
         self.promotion_executor = promotion_executor or WorkspacePromotionExecutor(self.repo_root)
+        self.docker_sandbox = docker_sandbox or DockerSandbox()
         self.worktree_root.mkdir(parents=True, exist_ok=True)
 
     def __call__(self, agent_name: str, experiment_number: int, state: dict) -> ExperimentRecord:
@@ -457,14 +517,18 @@ class GitWorktreeExperimentRunner:
         if not command:
             status = "no_metric" if diff.strip() else "noop"
             return ExperimentEvaluation(metric_value=baseline, status=status, output="No metric command configured.")
-        completed = subprocess.run(
-            command,
-            shell=True,
-            cwd=worktree_path,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        if self.docker_sandbox.is_available():
+            try:
+                completed = self.docker_sandbox.run(command, cwd=worktree_path)
+            except subprocess.TimeoutExpired:
+                return ExperimentEvaluation(metric_value=baseline, status="metric_failed", output="Docker timeout exceeded.")
+        else:
+            logger.error("Docker unavailable — refusing to run metric command on host: %s", command)
+            return ExperimentEvaluation(
+                metric_value=baseline,
+                status="metric_failed",
+                output="Docker sandbox is required but unavailable. Cannot run metric commands on host.",
+            )
         output = (completed.stdout or "") + (completed.stderr or "")
         metric_value = self._parse_metric(output, baseline)
         if completed.returncode != 0:
@@ -697,7 +761,7 @@ class GitCommitPromotionExecutor:
         try:
             if not self._has_staged_changes(paths):
                 return result
-            self._git("commit", "-m", message, "--no-verify", "--", *paths)
+            self._git("commit", "-m", message, "--", *paths)
         except subprocess.CalledProcessError:
             self._unstage(paths)
             raise
@@ -824,6 +888,212 @@ def _should_ignore_path(path: Path) -> bool:
 def _validate_agent_name(name: str) -> None:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", name):
         raise ValueError("agent_name must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+
+
+@dataclass(slots=True)
+class SubAgentDefinition:
+    name: str
+    display_name: str
+    provider: str
+    model: str
+    soul: str
+    heartbeat_config: str
+    user_context: str
+    skills: dict[str, str] = field(default_factory=dict)
+
+
+class SubAgentService:
+    """Manages named sub-agents (Alma, Hex, Lux, Rook) loaded from definition files."""
+
+    def __init__(
+        self,
+        definitions_root: Path | str,
+        router: LLMRouter,
+        store: FileAgentStore,
+    ) -> None:
+        self.definitions_root = Path(definitions_root)
+        self.router = router
+        self.store = store
+        self._agents: dict[str, SubAgentDefinition] = {}
+
+    # -- loading ----------------------------------------------------------
+
+    def discover(self) -> list[str]:
+        """Scan definitions_root for agent folders containing SOUL.md."""
+        found: list[str] = []
+        if not self.definitions_root.is_dir():
+            return found
+        for child in sorted(self.definitions_root.iterdir()):
+            if child.is_dir() and (child / "SOUL.md").exists():
+                defn = self._load_definition(child)
+                self._agents[defn.name] = defn
+                found.append(defn.name)
+        return found
+
+    def _load_definition(self, agent_dir: Path) -> SubAgentDefinition:
+        soul = (agent_dir / "SOUL.md").read_text(encoding="utf-8")
+        heartbeat = ""
+        hb_path = agent_dir / "HEARTBEAT.md"
+        if hb_path.exists():
+            heartbeat = hb_path.read_text(encoding="utf-8")
+        user_ctx = ""
+        user_path = agent_dir / "USER.md"
+        if user_path.exists():
+            user_ctx = user_path.read_text(encoding="utf-8")
+        skills = self._load_skills(agent_dir / "skills")
+        provider, model = self._parse_model_from_soul(soul)
+        display_name = self._parse_display_name(soul)
+        return SubAgentDefinition(
+            name=agent_dir.name,
+            display_name=display_name,
+            provider=provider,
+            model=model,
+            soul=soul,
+            heartbeat_config=heartbeat,
+            user_context=user_ctx,
+            skills=skills,
+        )
+
+    @staticmethod
+    def _load_skills(skills_dir: Path) -> dict[str, str]:
+        skills: dict[str, str] = {}
+        if not skills_dir.is_dir():
+            return skills
+        for child in sorted(skills_dir.iterdir()):
+            skill_file = child / "SKILL.md"
+            if child.is_dir() and skill_file.exists():
+                skills[child.name] = skill_file.read_text(encoding="utf-8")
+        return skills
+
+    @staticmethod
+    def _parse_model_from_soul(soul: str) -> tuple[str, str]:
+        model_line = ""
+        for line in soul.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("- **Model:**"):
+                model_line = stripped.split("**Model:**", maxsplit=1)[-1].strip()
+                break
+
+        text = (model_line or soul).lower()
+        if "codex" in text:
+            return ("codex", "codex-mini-latest")
+        if "claude opus" in text:
+            return ("anthropic", "claude-opus-4-7")
+        if "claude sonnet" in text:
+            return ("anthropic", "claude-sonnet-4-6")
+        if "gemini" in text:
+            return ("google", "gemini-2.5-pro")
+        if "gpt-5.4" in text:
+            return ("openai", "gpt-5.4")
+        if "gpt-5.4-mini" in text:
+            return ("openai", "gpt-5.4-mini")
+        if "gpt-4.1" in text:
+            return ("openai", "gpt-4.1")
+        if "gpt" in text:
+            return ("openai", "gpt-5.4")
+        return ("anthropic", "claude-sonnet-4-6")
+
+    @staticmethod
+    def _parse_display_name(soul: str) -> str:
+        for line in soul.splitlines():
+            if line.strip().startswith("- **Name:**"):
+                return line.split("**Name:**")[-1].strip()
+        return "Agent"
+
+    # -- dispatch ---------------------------------------------------------
+
+    def dispatch(self, agent_name: str, instruction: str, *, lane: str = "research") -> str:
+        """Send an instruction to a sub-agent and return its response.
+
+        Uses ``lane="research"`` by default (no tools required).  Pass
+        ``lane="worker"`` or ``lane="brain"`` when the sub-agent needs
+        tool access through a capable provider adapter.
+        """
+        defn = self._agents.get(agent_name)
+        if defn is None:
+            raise KeyError(f"unknown sub-agent: {agent_name}")
+        system_prompt = self._build_system_prompt(defn)
+        try:
+            response = self.router.ask(
+                instruction,
+                system_prompt=system_prompt,
+                lane=lane,
+                provider=defn.provider,
+                model=defn.model,
+                evidence_pack={"sub_agent": defn.name, "display_name": defn.display_name},
+            )
+        except (ValueError, Exception):
+            # Fallback to default provider when the preferred one is unavailable.
+            response = self.router.ask(
+                instruction,
+                system_prompt=system_prompt,
+                lane=lane,
+                evidence_pack={"sub_agent": defn.name, "display_name": defn.display_name},
+            )
+        return response.content
+
+    def run_skill(self, agent_name: str, skill_name: str, context: str = "", *, lane: str = "research") -> str:
+        """Execute a named skill for a sub-agent."""
+        defn = self._agents.get(agent_name)
+        if defn is None:
+            raise KeyError(f"unknown sub-agent: {agent_name}")
+        skill_prompt = defn.skills.get(skill_name)
+        if skill_prompt is None:
+            raise KeyError(f"unknown skill '{skill_name}' for agent '{agent_name}'")
+        instruction = f"Execute skill: {skill_name}\n\n{skill_prompt}"
+        if context:
+            instruction += f"\n\nAdditional context:\n{context}"
+        return self.dispatch(agent_name, instruction, lane=lane)
+
+    def heartbeat(self, agent_name: str) -> str:
+        """Run a heartbeat check for a sub-agent."""
+        defn = self._agents.get(agent_name)
+        if defn is None:
+            raise KeyError(f"unknown sub-agent: {agent_name}")
+        if not defn.heartbeat_config:
+            return "HEARTBEAT_OK"
+        return self.dispatch(agent_name, defn.heartbeat_config)
+
+    def list_agents(self) -> list[str]:
+        return list(self._agents.keys())
+
+    def get_agent(self, name: str) -> SubAgentDefinition | None:
+        return self._agents.get(name)
+
+    def list_skills(self, agent_name: str) -> list[str]:
+        defn = self._agents.get(agent_name)
+        if defn is None:
+            return []
+        return list(defn.skills.keys())
+
+    def registry(self) -> dict[str, dict[str, Any]]:
+        registry: dict[str, dict[str, Any]] = {}
+        for name, defn in self._agents.items():
+            registry[name] = {
+                "display_name": defn.display_name,
+                "provider": defn.provider,
+                "model": defn.model,
+                "soul_text": self._build_system_prompt(defn),
+                "skills": list(defn.skills.keys()),
+            }
+        return registry
+
+    @staticmethod
+    def _build_system_prompt(defn: SubAgentDefinition) -> str:
+        parts = [defn.soul]
+        if defn.user_context:
+            parts.append(f"\n\n## User Context\n\n{defn.user_context}")
+        # Context isolation boundary — prevent cross-agent contamination
+        parts.append(
+            f"\n\n## Context Isolation\n\n"
+            f"You are **{defn.display_name}** ({defn.name}). "
+            f"You operate in an isolated context window. "
+            f"Do NOT attempt tasks listed in your Weaknesses section — "
+            f"report them back so the coordinator can route to the right agent. "
+            f"If you receive information that belongs to another agent's domain, "
+            f"acknowledge it but do not act on it."
+        )
+        return "\n".join(parts)
 
 
 def _validate_branch_name(name: str) -> None:

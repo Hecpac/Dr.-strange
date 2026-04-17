@@ -42,6 +42,85 @@ class LLMRouterTests(unittest.TestCase):
             self.assertTrue(response.degraded_mode)
             self.assertIn("fallback_reason", response.artifacts)
 
+    def test_ollama_lane_routes_to_adapter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            config.judge_provider = "ollama"
+            config.judge_model = "gemma4"
+            router = LLMRouter(
+                config=config,
+                adapters={
+                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=echo_response("anthropic")),
+                    "ollama": StaticAdapter("ollama", tool_capable=True, responder=echo_response("ollama")),
+                },
+            )
+            response = router.ask("classify this", lane="judge", evidence_pack={"data": "x"})
+            self.assertEqual(response.provider, "ollama")
+            self.assertEqual(response.model, "gemma4")
+
+    def test_ollama_lane_uses_default_gemma4_model_when_model_not_set(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            config.judge_provider = "ollama"
+            config.judge_model = None
+            router = LLMRouter(
+                config=config,
+                adapters={
+                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=echo_response("anthropic")),
+                    "ollama": StaticAdapter("ollama", tool_capable=True, responder=echo_response("ollama")),
+                },
+            )
+            response = router.ask("classify this", lane="judge", evidence_pack={"data": "x"})
+            self.assertEqual(response.provider, "ollama")
+            self.assertEqual(response.model, "gemma4")
+
+    def test_secondary_fallback_uses_anthropic_worker_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            config.verifier_provider = "ollama"
+            config.verifier_model = None
+
+            def failing(_: LLMRequest) -> LLMResponse:
+                raise AdapterUnavailableError("provider unavailable")
+
+            router = LLMRouter(
+                config=config,
+                adapters={
+                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=echo_response("anthropic")),
+                    "ollama": StaticAdapter("ollama", tool_capable=True, responder=failing),
+                },
+            )
+            response = router.ask("verify", lane="verifier", evidence_pack={"diff": "x"})
+            self.assertEqual(response.provider, "anthropic")
+            self.assertEqual(response.model, config.worker_model)
+            self.assertTrue(response.degraded_mode)
+
+    def test_fallback_to_anthropic_uses_safe_anthropic_model_when_worker_is_codex(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            config.worker_provider = "codex"
+            config.worker_model = "codex-mini-latest"
+            config.verifier_provider = "openai"
+            config.verifier_model = None
+            audit_events: list[dict] = []
+
+            def failing(_: LLMRequest) -> LLMResponse:
+                raise AdapterUnavailableError("provider unavailable")
+
+            router = LLMRouter(
+                config=config,
+                adapters={
+                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=echo_response("anthropic")),
+                    "openai": StaticAdapter("openai", tool_capable=True, responder=failing),
+                },
+                audit_sink=audit_events.append,
+            )
+            response = router.ask("verify", lane="verifier", evidence_pack={"diff": "x"})
+            self.assertEqual(response.provider, "anthropic")
+            self.assertEqual(response.model, "claude-sonnet-4-6")
+            self.assertTrue(response.degraded_mode)
+            self.assertEqual(audit_events[-1]["action"], "llm_fallback")
+
     def test_worker_lane_rejects_non_tool_provider(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = make_config(Path(tmpdir))
@@ -54,6 +133,30 @@ class LLMRouterTests(unittest.TestCase):
             )
             with self.assertRaises(ValueError):
                 router.ask("do work", lane="worker", provider="openai")
+
+    def test_codex_worker_lane_routes_to_codex_adapter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            config.worker_provider = "codex"
+            config.worker_model = "codex-mini-latest"
+            from claw_v2.eval_mocks import StaticAdapter, echo_response
+            router = LLMRouter(
+                config=config,
+                adapters={
+                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=echo_response("anthropic")),
+                    "codex": StaticAdapter("codex", tool_capable=True, responder=echo_response("codex")),
+                },
+            )
+            response = router.ask("write a function", lane="worker")
+            self.assertEqual(response.provider, "codex")
+
+    def test_default_router_includes_codex_adapter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            router = LLMRouter.default(config)
+            self.assertIn("codex", router.adapters)
+            from claw_v2.adapters.codex import CodexAdapter
+            self.assertIsInstance(router.adapters["codex"], CodexAdapter)
 
 
 if __name__ == "__main__":
