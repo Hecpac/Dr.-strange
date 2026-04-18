@@ -57,7 +57,56 @@ class SafetyTests(unittest.TestCase):
             policy = SandboxPolicy(workspace_root=workspace)
             decision = sandbox_hook("Bash", {"command": "env FOO=1 rm -rf /"}, policy=policy)
             self.assertFalse(decision.allowed)
-            self.assertIn("dangerous", decision.reason)
+            self.assertIn("whitelist", decision.reason)
+
+    def test_sandbox_blocks_interpreter_bypass(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            policy = SandboxPolicy(workspace_root=workspace)
+            decision = sandbox_hook(
+                "Bash",
+                {"command": "python3 -m http.server"},
+                policy=policy,
+            )
+            self.assertFalse(decision.allowed)
+            self.assertIn("whitelist", decision.reason)
+
+    def test_sandbox_blocks_symlink_escape_with_explicit_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            secret = root / "secret.txt"
+            secret.write_text("private", encoding="utf-8")
+            (workspace / "my_key").symlink_to(secret)
+            policy = SandboxPolicy(workspace_root=workspace)
+            decision = sandbox_hook("Bash", {"command": "cat ./my_key"}, policy=policy)
+            self.assertFalse(decision.allowed)
+            self.assertIn("outside allowed", decision.reason)
+
+    def test_sandbox_blocks_symlink_escape_without_slash(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            secret = root / "secret.txt"
+            secret.write_text("private", encoding="utf-8")
+            (workspace / "my_key").symlink_to(secret)
+            policy = SandboxPolicy(workspace_root=workspace)
+            decision = sandbox_hook("Bash", {"command": "cat my_key"}, policy=policy)
+            self.assertFalse(decision.allowed)
+            self.assertIn("outside allowed", decision.reason)
+
+    def test_sandbox_blocks_path_escape_inside_flag_value(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            policy = SandboxPolicy(workspace_root=workspace)
+            decision = sandbox_hook("Bash", {"command": f"git --git-dir={root / 'outside'} status"}, policy=policy)
+            self.assertFalse(decision.allowed)
+            self.assertIn("outside allowed", decision.reason)
 
     def test_sandbox_blocks_env_wrapped_curl_when_network_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -73,7 +122,7 @@ class SafetyTests(unittest.TestCase):
             workspace = Path(tmpdir) / "workspace"
             workspace.mkdir()
             policy = SandboxPolicy(workspace_root=workspace)
-            decision = sandbox_hook("Bash", {"command": "printf / | xargs rm -rf"}, policy=policy)
+            decision = sandbox_hook("Bash", {"command": "xargs rm -rf"}, policy=policy)
             self.assertFalse(decision.allowed)
             self.assertIn("xargs", decision.reason)
 
