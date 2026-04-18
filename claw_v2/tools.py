@@ -79,13 +79,33 @@ def _strip_code_blocks(text: str) -> str:
     return _INLINE_CODE_RE.sub(" ", without_fences)
 
 
+def _collect_strings(value: object) -> list[str]:
+    """Recursively extract non-empty strings from nested lists/dicts."""
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, dict):
+        parts: list[str] = []
+        for v in value.values():
+            parts.extend(_collect_strings(v))
+        return parts
+    if isinstance(value, list):
+        parts = []
+        for item in value:
+            parts.extend(_collect_strings(item))
+        return parts
+    return []
+
+
 def _extract_sanitizable_text(result: dict, fields: tuple[str, ...]) -> tuple[str, str | None]:
     """Return (text_to_scan, field_used). Checks declared fields first, then falls back to common keys."""
     candidates = list(fields) if fields else ["content", "text", "body", "markdown", "result", "output"]
     for field_name in candidates:
         value = result.get(field_name)
-        if isinstance(value, str) and value.strip():
-            return value, field_name
+        if value is None:
+            continue
+        parts = _collect_strings(value)
+        if parts:
+            return "\n".join(parts), field_name
     return "", None
 
 
@@ -829,7 +849,7 @@ class ToolRegistry:
             allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["FirecrawlExtract"],
             handler=firecrawl_extract, requires_network=True,
             ingests_external_content=True,
-            sanitize_fields=("data", "markdown", "content"),
+            sanitize_fields=("data", "extracted", "markdown", "content"),
             parameter_schema={
                 "type": "object",
                 "properties": {
