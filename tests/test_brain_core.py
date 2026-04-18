@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 from claw_v2.brain import (
     BrainService,
+    _brain_system_prompt,
     _first_json_object,
     _normalize_recommendation,
     _normalize_risk_level,
@@ -149,6 +150,12 @@ class HandleMessageTests(unittest.TestCase):
         call_kwargs = self.router.ask.call_args
         self.assertIn("You are Claw.", call_kwargs.kwargs["system_prompt"])
         self.assertIn("<response>", call_kwargs.kwargs["system_prompt"])
+        self.assertIn("Self-healing loop", call_kwargs.kwargs["system_prompt"])
+
+    def test_brain_system_prompt_includes_self_healing_loop(self) -> None:
+        prompt = _brain_system_prompt("You are Claw.")
+        self.assertIn("Analyze: identify the likely cause", prompt)
+        self.assertIn("Only ask for help after 3 distinct strategies", prompt)
 
     def test_returns_llm_response(self) -> None:
         expected = LLMResponse(

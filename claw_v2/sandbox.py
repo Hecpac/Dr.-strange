@@ -8,7 +8,7 @@ from claw_v2.network_proxy import DomainAllowlistEnforcer, NetworkPolicy
 from claw_v2.types import SandboxDecision
 
 
-DEFAULT_ALLOWED_BINARIES = frozenset(
+SURGICAL_ALLOWED_BINARIES = frozenset(
     {
         "cat",
         "cp",
@@ -26,6 +26,37 @@ DEFAULT_ALLOWED_BINARIES = frozenset(
 )
 
 
+CAPABILITY_PROFILES = {
+    "surgical": SURGICAL_ALLOWED_BINARIES,
+    "engineer": SURGICAL_ALLOWED_BINARIES
+    | {
+        "pip",
+        "pip3",
+        "python",
+        "python3",
+        "npm",
+        "npx",
+        "node",
+    },
+    "admin": SURGICAL_ALLOWED_BINARIES
+    | {
+        "pip",
+        "pip3",
+        "python",
+        "python3",
+        "npm",
+        "npx",
+        "node",
+        "brew",
+        "chmod",
+        "chown",
+        "diskutil",
+    },
+}
+
+DEFAULT_ALLOWED_BINARIES = CAPABILITY_PROFILES["surgical"]
+
+
 @dataclass(slots=True)
 class SandboxPolicy:
     workspace_root: Path
@@ -33,7 +64,14 @@ class SandboxPolicy:
     writable_paths: list[Path] = field(default_factory=list)
     network_policy: str = "none"
     credential_scope: str = "workspace"
-    allowed_binaries: set[str] = field(default_factory=lambda: set(DEFAULT_ALLOWED_BINARIES))
+    capability_profile: str = "surgical"
+    allowed_binaries: set[str] | None = None
+
+    @property
+    def active_profile_binaries(self) -> set[str]:
+        if self.allowed_binaries is not None:
+            return set(self.allowed_binaries)
+        return set(CAPABILITY_PROFILES.get(self.capability_profile, DEFAULT_ALLOWED_BINARIES))
 
 
 def is_within_allowed(path: Path, policy: SandboxPolicy) -> bool:
@@ -100,8 +138,8 @@ def check_command(command: str, policy: SandboxPolicy) -> str | None:
     base_cmd = Path(tokens[0]).name
     if _network_disabled(policy) and base_cmd in {"curl", "wget"}:
         return "network access not allowed for this agent"
-    if base_cmd not in policy.allowed_binaries:
-        return f"binary '{base_cmd}' is not in the allowed whitelist"
+    if base_cmd not in policy.active_profile_binaries:
+        return f"binary '{base_cmd}' requires higher privilege level (not in the allowed whitelist)"
     return None
 
 
@@ -109,7 +147,7 @@ def _network_disabled(policy: SandboxPolicy) -> bool:
     if isinstance(policy.network_policy, str):
         return policy.network_policy == "none"
     if isinstance(policy.network_policy, NetworkPolicy):
-        return not policy.network_policy.allowed_domains
+        return False
     return False
 
 
