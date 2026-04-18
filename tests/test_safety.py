@@ -140,6 +140,60 @@ class SafetyTests(unittest.TestCase):
             self.assertIsNone(check_command("python3 --version", policy))
             self.assertIsNone(check_command("npm --version", policy))
 
+    def test_engineer_profile_blocks_python_inline_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            policy = SandboxPolicy(workspace_root=workspace, capability_profile="engineer")
+            violation = check_command("python3 -c 'print(\"hack\")'", policy)
+            self.assertIsNotNone(violation)
+            self.assertIn("inline python", violation)
+
+    def test_engineer_profile_blocks_python_repl_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            policy = SandboxPolicy(workspace_root=workspace, capability_profile="engineer")
+            violation = check_command("python3", policy)
+            self.assertIsNotNone(violation)
+            self.assertIn("interactive python", violation)
+
+    def test_engineer_profile_blocks_arbitrary_python_module_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            policy = SandboxPolicy(workspace_root=workspace, capability_profile="engineer")
+            violation = check_command("python3 -m http.server", policy)
+            self.assertIsNotNone(violation)
+            self.assertIn("python module", violation)
+
+    def test_engineer_profile_allows_workspace_python_scripts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            script = workspace / "task.py"
+            script.write_text("print('ok')\n", encoding="utf-8")
+            policy = SandboxPolicy(workspace_root=workspace, capability_profile="engineer")
+            decision = sandbox_hook("Bash", {"command": "python3 task.py"}, policy=policy)
+            self.assertTrue(decision.allowed)
+
+    def test_engineer_profile_allows_safe_python_modules(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            policy = SandboxPolicy(workspace_root=workspace, capability_profile="engineer")
+            self.assertIsNone(check_command("python3 -m ensurepip", policy))
+            self.assertIsNone(check_command("python3 -m unittest tests.test_safety", policy))
+
+    def test_engineer_profile_blocks_node_inline_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            policy = SandboxPolicy(workspace_root=workspace, capability_profile="engineer")
+            violation = check_command("node -e 'console.log(\"hack\")'", policy)
+            self.assertIsNotNone(violation)
+            self.assertIn("inline node", violation)
+
     def test_admin_profile_allows_admin_tools(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir) / "workspace"

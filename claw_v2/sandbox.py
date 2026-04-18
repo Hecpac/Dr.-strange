@@ -56,6 +56,21 @@ CAPABILITY_PROFILES = {
 
 DEFAULT_ALLOWED_BINARIES = CAPABILITY_PROFILES["surgical"]
 
+PYTHON_INTERPRETERS = frozenset({"python", "python3"})
+PYTHON_SAFE_MODULES = frozenset(
+    {
+        "compileall",
+        "ensurepip",
+        "pip",
+        "py_compile",
+        "pytest",
+        "unittest",
+        "venv",
+    }
+)
+NODE_INTERPRETERS = frozenset({"node"})
+VERSION_OR_HELP_FLAGS = frozenset({"--version", "-V", "-VV", "--help", "-h"})
+
 
 @dataclass(slots=True)
 class SandboxPolicy:
@@ -140,7 +155,101 @@ def check_command(command: str, policy: SandboxPolicy) -> str | None:
         return "network access not allowed for this agent"
     if base_cmd not in policy.active_profile_binaries:
         return f"binary '{base_cmd}' requires higher privilege level (not in the allowed whitelist)"
+    interpreter_violation = _check_interpreter_invocation(base_cmd, tokens, policy)
+    if interpreter_violation:
+        return interpreter_violation
     return None
+
+
+def _check_interpreter_invocation(base_cmd: str, tokens: list[str], policy: SandboxPolicy) -> str | None:
+    if base_cmd in PYTHON_INTERPRETERS:
+        return _check_python_invocation(tokens, policy)
+    if base_cmd in NODE_INTERPRETERS:
+        return _check_node_invocation(tokens, policy)
+    return None
+
+
+def _check_python_invocation(tokens: list[str], policy: SandboxPolicy) -> str | None:
+    args = tokens[1:]
+    if not args:
+        return "interactive python execution is not allowed; run an explicit workspace script"
+    if _contains_only_version_or_help_flags(args):
+        return None
+    for index, arg in enumerate(args):
+        if arg == "-" or arg == "-i":
+            return "interactive python execution is not allowed; run an explicit workspace script"
+        if arg == "-c" or arg.startswith("-c"):
+            return "inline python execution is not allowed; write a workspace script and run it"
+        if arg == "-m":
+            module_name = args[index + 1] if index + 1 < len(args) else ""
+            return _check_python_module(module_name)
+        if arg.startswith("-m") and len(arg) > 2:
+            return _check_python_module(arg[2:])
+    script = _first_non_option_arg(args)
+    if script is None:
+        return "python execution requires an explicit workspace script"
+    if not script.endswith(".py"):
+        return "python execution is limited to explicit .py scripts or safe -m modules"
+    if not _script_path_within_policy(script, policy):
+        return "python script path outside allowed boundaries"
+    return None
+
+
+def _check_python_module(module_name: str) -> str | None:
+    normalized = module_name.strip()
+    if normalized in PYTHON_SAFE_MODULES:
+        return None
+    return f"python module '{normalized or '<missing>'}' is not in the safe module allowlist"
+
+
+def _check_node_invocation(tokens: list[str], policy: SandboxPolicy) -> str | None:
+    args = tokens[1:]
+    if not args:
+        return "interactive node execution is not allowed; run an explicit workspace script"
+    if _contains_only_version_or_help_flags(args):
+        return None
+    for arg in args:
+        if arg in {"-", "-i", "-e", "--eval", "-p", "--print"}:
+            return "inline node execution is not allowed; write a workspace script and run it"
+        if arg.startswith("--eval=") or arg.startswith("--print="):
+            return "inline node execution is not allowed; write a workspace script and run it"
+    script = _first_non_option_arg(args)
+    if script is None:
+        return "node execution requires an explicit workspace script"
+    if not script.endswith((".js", ".mjs", ".cjs")):
+        return "node execution is limited to explicit .js, .mjs, or .cjs scripts"
+    if not _script_path_within_policy(script, policy):
+        return "node script path outside allowed boundaries"
+    return None
+
+
+def _contains_only_version_or_help_flags(args: list[str]) -> bool:
+    return bool(args) and all(arg in VERSION_OR_HELP_FLAGS for arg in args)
+
+
+def _first_non_option_arg(args: list[str]) -> str | None:
+    value_taking_options = {"-W", "-X", "--check-hash-based-pycs", "--encoding"}
+    skip_next = False
+    for arg in args:
+        if skip_next:
+            skip_next = False
+            continue
+        if arg in value_taking_options:
+            skip_next = True
+            continue
+        if arg.startswith("-"):
+            continue
+        return arg
+    return None
+
+
+def _script_path_within_policy(script: str, policy: SandboxPolicy) -> bool:
+    try:
+        resolved = _resolve_path_for_policy(Path(script), policy)
+    except OSError:
+        return False
+    roots = [root.expanduser().resolve(strict=False) for root in _path_roots(policy)]
+    return any(resolved.is_relative_to(root) for root in roots)
 
 
 def _network_disabled(policy: SandboxPolicy) -> bool:
