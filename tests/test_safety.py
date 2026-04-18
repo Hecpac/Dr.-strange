@@ -28,7 +28,7 @@ class SafetyTests(unittest.TestCase):
         self.assertIn("system prompt", result.reason)
 
     def test_domain_allowlist_enforces_patterns(self) -> None:
-        enforcer = DomainAllowlistEnforcer()
+        enforcer = DomainAllowlistEnforcer(resolver=lambda host: ["93.184.216.34"])
         allowed = enforcer.enforce_url(
             "https://docs.example.com/page",
             policy=NetworkPolicy(allowed_domains=["*.example.com"]),
@@ -41,6 +41,47 @@ class SafetyTests(unittest.TestCase):
         )
         self.assertTrue(allowed.allowed)
         self.assertFalse(blocked.allowed)
+
+    def test_domain_allowlist_handles_ports_before_matching(self) -> None:
+        enforcer = DomainAllowlistEnforcer(resolver=lambda host: ["93.184.216.34"])
+        decision = enforcer.enforce_url(
+            "https://docs.example.com:443/page",
+            policy=NetworkPolicy(allowed_domains=["*.example.com"]),
+            actor="researcher",
+        )
+        self.assertTrue(decision.allowed)
+
+    def test_domain_allowlist_blocks_private_literal_ip(self) -> None:
+        enforcer = DomainAllowlistEnforcer()
+        decision = enforcer.enforce_url(
+            "http://127.0.0.1:8080/admin",
+            policy=NetworkPolicy(allowed_domains=["*"]),
+            actor="researcher",
+        )
+        self.assertFalse(decision.allowed)
+        self.assertIn("non-public", decision.reason)
+
+    def test_domain_allowlist_blocks_private_dns_resolution(self) -> None:
+        enforcer = DomainAllowlistEnforcer(resolver=lambda host: ["10.0.0.7"])
+        decision = enforcer.enforce_url(
+            "https://allowed.example/page",
+            policy=NetworkPolicy(allowed_domains=["allowed.example"]),
+            actor="researcher",
+        )
+        self.assertFalse(decision.allowed)
+        self.assertIn("non-public", decision.reason)
+
+    def test_domain_allowlist_validates_redirect_chain(self) -> None:
+        enforcer = DomainAllowlistEnforcer(
+            resolver=lambda host: ["127.0.0.1"] if host == "localhost" else ["93.184.216.34"]
+        )
+        decision = enforcer.enforce_redirect_chain(
+            ["https://docs.example.com/start", "http://localhost:8080/private"],
+            policy=NetworkPolicy(allowed_domains=["*.example.com", "localhost"]),
+            actor="researcher",
+        )
+        self.assertFalse(decision.allowed)
+        self.assertIn("Redirect target blocked", decision.reason)
 
     def test_sandbox_blocks_write_outside_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
