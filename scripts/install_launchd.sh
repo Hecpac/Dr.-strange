@@ -22,12 +22,17 @@ LOG_DIR="$HOME/.claw"
 [[ -x "$PYTHON_BIN" ]] || { echo "ERROR: venv python not found: $PYTHON_BIN (run 'python -m venv .venv && .venv/bin/pip install -e .')" >&2; exit 1; }
 mkdir -p "$LOG_DIR"
 
-# --- plist validation ---
-plutil -lint "$PLIST_SRC" >/dev/null
-
-# --- install ---
+# --- render plist template with runtime paths ---
 mkdir -p "$HOME/Library/LaunchAgents"
-cp "$PLIST_SRC" "$PLIST_DST"
+sed -e "s|@LAUNCHER@|$LAUNCHER|g" \
+    -e "s|@PYTHON_BIN@|$PYTHON_BIN|g" \
+    -e "s|@REPO_ROOT@|$REPO_ROOT|g" \
+    -e "s|@LOG_DIR@|$LOG_DIR|g" \
+    -e "s|@LABEL@|$LABEL|g" \
+    "$PLIST_SRC" > "$PLIST_DST"
+
+# --- plist validation (after rendering) ---
+plutil -lint "$PLIST_DST" >/dev/null
 
 # --- reload into GUI session idempotently ---
 UID_NUM="$(id -u)"
