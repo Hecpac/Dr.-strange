@@ -52,6 +52,14 @@ Shape:
 <response>concise user-facing reply</response>
 If the task is simple, plain text is allowed."""
 
+SELF_HEALING_LOOP_CONTRACT = """# Self-healing loop
+When a tool returns an error:
+1. Analyze: identify the likely cause, such as a missing dependency, wrong path, stale state, or invalid input.
+2. Hypothesize: keep 2-3 plausible fixes in mind.
+3. Iterate: try the most likely safe fix immediately with the available tools.
+4. Verify: run a focused verification command after the fix.
+Only ask for help after 3 distinct strategies have failed, or when the next step requires high/critical risk approval."""
+
 
 @dataclass(slots=True)
 class BrainService:
@@ -523,6 +531,7 @@ class BrainService:
         diff: str,
         test_output: str,
         executor: Callable[[], Any],
+        autonomy_mode: str = "assisted",
         approval_id: str | None = None,
         pre_check: Callable[[CriticalActionVerification], bool] | None = None,
     ) -> CriticalActionExecution:
@@ -565,6 +574,23 @@ class BrainService:
                 executed=False,
                 verification=verification,
                 reason="Pre-execution check rejected the action.",
+                approval_status=approval_status,
+            )
+
+        if autonomy_mode == "autonomous" and verification.should_proceed and verification.risk_level in {"low", "medium"}:
+            result = executor()
+            self._emit_execution_event(
+                action=action,
+                verification=verification,
+                status="executed_autonomously",
+                approval_status=approval_status,
+            )
+            return CriticalActionExecution(
+                action=action,
+                status="executed_autonomously",
+                executed=True,
+                verification=verification,
+                result=result,
                 approval_status=approval_status,
             )
 
@@ -726,7 +752,7 @@ def _parse_verifier_payload(content: str) -> dict:
 
 
 def _brain_system_prompt(system_prompt: str) -> str:
-    return f"{system_prompt.rstrip()}\n\n{BRAIN_RESPONSE_CONTRACT}"
+    return f"{system_prompt.rstrip()}\n\n{BRAIN_RESPONSE_CONTRACT}\n\n{SELF_HEALING_LOOP_CONTRACT}"
 
 
 def _extract_visible_brain_response(response: LLMResponse) -> LLMResponse:

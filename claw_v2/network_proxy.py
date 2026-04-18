@@ -36,7 +36,7 @@ class DomainAllowlistEnforcer:
             return SandboxDecision(False, "Missing domain")
         if any(self._matches(host, blocked) for blocked in policy.blocked_domains):
             return SandboxDecision(False, "Blocked domain")
-        if not any(self._matches(host, allowed) for allowed in policy.allowed_domains):
+        if policy.allowed_domains and not any(self._matches(host, allowed) for allowed in policy.allowed_domains):
             return SandboxDecision(False, "Domain not in allowlist")
         ip_decision = self._enforce_resolved_ips(host)
         if not ip_decision.allowed:

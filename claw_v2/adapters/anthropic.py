@@ -424,6 +424,7 @@ class ClaudeSDKExecutor:
             writable_paths=[workspace_root, Path("/private/tmp"), Path.home() / ".claw", *extra_roots],
             network_policy="allow",
             credential_scope="external",
+            capability_profile=getattr(self.config, "sandbox_capability_profile", "engineer"),
         )
 
     def _should_use_api_key_auth(self) -> bool:

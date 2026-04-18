@@ -278,6 +278,45 @@ class BrainVerificationTests(unittest.TestCase):
                 self.assertEqual(result.status, "executed")
                 self.assertEqual(executed, ["ok"])
 
+    def test_execute_critical_action_uses_autonomous_fast_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "VERIFIER_PROVIDER": "openai",
+                "VERIFIER_MODEL": "gpt-5.4-mini",
+            }
+
+            def verifier_transport(request: LLMRequest) -> LLMResponse:
+                return LLMResponse(
+                    content=(
+                        '{"recommendation":"approve","risk_level":"medium","summary":"Ready.",'
+                        '"reasons":["Within policy"],"blockers":[],"missing_checks":[],"confidence":0.9}'
+                    ),
+                    lane="verifier",
+                    provider="openai",
+                    model=request.model,
+                )
+
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=self._fake_brain, openai_transport=verifier_transport)
+                executed: list[str] = []
+                result = runtime.brain.execute_critical_action(
+                    action="repair_workspace",
+                    plan="Repair generated files",
+                    diff="workspace-only diff",
+                    test_output="checks ok",
+                    executor=lambda: executed.append("ok") or {"done": True},
+                    autonomy_mode="autonomous",
+                )
+                self.assertTrue(result.executed)
+                self.assertEqual(result.status, "executed_autonomously")
+                self.assertEqual(executed, ["ok"])
+
     def test_execute_critical_action_waits_for_approval_and_then_runs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

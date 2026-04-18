@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from claw_v2.network_proxy import DomainAllowlistEnforcer, NetworkPolicy
-from claw_v2.sandbox import SandboxPolicy, sandbox_hook
+from claw_v2.sandbox import SandboxPolicy, check_command, sandbox_hook
 from claw_v2.sanitizer import sanitize
 
 
@@ -71,6 +71,25 @@ class SafetyTests(unittest.TestCase):
         self.assertFalse(decision.allowed)
         self.assertIn("non-public", decision.reason)
 
+    def test_network_policy_without_allowlist_allows_public_hosts_only(self) -> None:
+        enforcer = DomainAllowlistEnforcer(resolver=lambda host: ["93.184.216.34"])
+        decision = enforcer.enforce_url(
+            "https://docs.python.org/3/",
+            policy=NetworkPolicy(allowed_domains=[]),
+            actor="researcher",
+        )
+        self.assertTrue(decision.allowed)
+
+    def test_network_policy_without_allowlist_still_blocks_private_hosts(self) -> None:
+        enforcer = DomainAllowlistEnforcer(resolver=lambda host: ["192.168.1.1"])
+        decision = enforcer.enforce_url(
+            "https://router.local/",
+            policy=NetworkPolicy(allowed_domains=[]),
+            actor="researcher",
+        )
+        self.assertFalse(decision.allowed)
+        self.assertIn("non-public", decision.reason)
+
     def test_domain_allowlist_validates_redirect_chain(self) -> None:
         enforcer = DomainAllowlistEnforcer(
             resolver=lambda host: ["127.0.0.1"] if host == "localhost" else ["93.184.216.34"]
@@ -112,6 +131,22 @@ class SafetyTests(unittest.TestCase):
             )
             self.assertFalse(decision.allowed)
             self.assertIn("whitelist", decision.reason)
+
+    def test_engineer_profile_allows_development_tools(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            policy = SandboxPolicy(workspace_root=workspace, capability_profile="engineer")
+            self.assertIsNone(check_command("python3 --version", policy))
+            self.assertIsNone(check_command("npm --version", policy))
+
+    def test_admin_profile_allows_admin_tools(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            policy = SandboxPolicy(workspace_root=workspace, capability_profile="admin")
+            self.assertIsNone(check_command("brew --version", policy))
+            self.assertIsNone(check_command("chmod --version", policy))
 
     def test_sandbox_blocks_symlink_escape_with_explicit_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

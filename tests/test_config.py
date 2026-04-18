@@ -62,6 +62,21 @@ class AppConfigDefaultsTests(unittest.TestCase):
             finally:
                 os.chdir(previous_cwd)
 
+    def test_sandbox_capability_profile_defaults_to_engineer_and_accepts_override(self) -> None:
+        previous_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.chdir(tmpdir)
+            try:
+                with patch.dict(os.environ, {}, clear=True):
+                    config = AppConfig.from_env()
+                self.assertEqual(config.sandbox_capability_profile, "engineer")
+
+                with patch.dict(os.environ, {"SANDBOX_CAPABILITY_PROFILE": "surgical"}, clear=True):
+                    configured = AppConfig.from_env()
+                self.assertEqual(configured.sandbox_capability_profile, "surgical")
+            finally:
+                os.chdir(previous_cwd)
+
     def test_runtime_config_path_loads_monitored_sites_and_sub_agent_jobs(self) -> None:
         previous_cwd = Path.cwd()
         with tempfile.TemporaryDirectory() as tmpdir:

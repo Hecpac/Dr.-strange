@@ -69,6 +69,7 @@ def make_config(root: Path) -> AppConfig:
         browserbase_api_url="https://api.browserbase.com",
         browserbase_region=None,
         browserbase_keep_alive=False,
+        sandbox_capability_profile="engineer",
         sdk_bypass_permissions=False,
         daily_cost_limit=10.0,
         chrome_cdp_enabled=False,

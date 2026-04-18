@@ -9,7 +9,7 @@ AgentClass = Literal["researcher", "operator", "deployer"]
 SanitizerVerdict = Literal["clean", "malicious", "unsure"]
 VerificationRecommendation = Literal["approve", "needs_approval", "deny"]
 RiskLevel = Literal["low", "medium", "high", "critical"]
-CriticalActionStatus = Literal["executed", "executed_with_approval", "awaiting_approval", "blocked"]
+CriticalActionStatus = Literal["executed", "executed_autonomously", "executed_with_approval", "awaiting_approval", "blocked"]
 
 
 @dataclass(slots=True)
