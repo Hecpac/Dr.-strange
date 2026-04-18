@@ -7,7 +7,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from claw_v2.adapters.anthropic import ClaudeSDKExecutor, create_claude_sdk_executor
+from claw_v2.adapters.anthropic import (
+    ClaudeSDKExecutor,
+    SILENCE_DIRECTIVE,
+    create_claude_sdk_executor,
+)
 from claw_v2.adapters.base import AdapterError, AdapterUnavailableError, LLMRequest
 from claw_v2.llm import LLMRouter
 from claw_v2.observe import ObserveStream
@@ -181,6 +185,50 @@ class AnthropicExecutorTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(options.kwargs["extra_args"], {"bare": None})
             self.assertEqual(options.kwargs["env"]["ANTHROPIC_API_KEY"], "sk-test")
+
+    async def test_brain_lane_appends_silence_directive_to_claude_code_preset(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            executor = ClaudeSDKExecutor(config)
+
+            class FakeHookMatcher:
+                def __init__(self, *, hooks) -> None:
+                    self.hooks = hooks
+
+            class FakeClaudeAgentOptions:
+                def __init__(self, **kwargs) -> None:
+                    self.kwargs = kwargs
+
+            fake_sdk = SimpleNamespace(
+                ClaudeAgentOptions=FakeClaudeAgentOptions,
+                HookMatcher=FakeHookMatcher,
+                AgentDefinition=lambda **kwargs: kwargs,
+            )
+            request = LLMRequest(
+                prompt="hello",
+                system_prompt="You are Claw.",
+                lane="brain",
+                provider="anthropic",
+                model="claude-opus-4-7",
+                effort="high",
+                session_id=None,
+                max_budget=0.5,
+                evidence_pack={"app_session_id": "tg-1"},
+                allowed_tools=None,
+                agents=None,
+                hooks=None,
+                timeout=30.0,
+                cwd=str(config.workspace_root),
+            )
+
+            options = executor._build_options(fake_sdk, request)
+
+            system_prompt = options.kwargs["system_prompt"]
+            self.assertEqual(system_prompt["type"], "preset")
+            self.assertEqual(system_prompt["preset"], "claude_code")
+            self.assertIn("You are Claw.", system_prompt["append"])
+            self.assertIn("headless engine", system_prompt["append"])
+            self.assertIn(SILENCE_DIRECTIVE.strip(), system_prompt["append"])
 
     async def test_executor_emits_llm_error_event_when_sdk_result_is_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

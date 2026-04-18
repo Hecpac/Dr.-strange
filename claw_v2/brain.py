@@ -50,7 +50,7 @@ Do not include step-by-step hidden chain-of-thought. Use only brief decision not
 Shape:
 <trace>short operational reasoning summary for logs</trace>
 <response>concise user-facing reply</response>
-If the task is simple, plain text is allowed."""
+No user-visible text is valid outside <response> tags."""
 
 SELF_HEALING_LOOP_CONTRACT = """# Self-healing loop
 When a tool returns an error:
@@ -220,8 +220,8 @@ class BrainService:
         """
         schema_text = json.dumps(schema, indent=2)
         instruction = (
-            "Respond ONLY with valid JSON matching this schema "
-            "(no markdown fences, no <trace> tags, no extra text):\n"
+            "Respond with valid JSON matching this schema, wrapped in <response> tags "
+            "(no markdown fences and no text outside <response>):\n"
             f"```json\n{schema_text}\n```\n\n"
             f"Task: {message}"
         )
@@ -231,7 +231,7 @@ class BrainService:
             if attempt > 0:
                 instruction = (
                     "Your previous response was not valid JSON. "
-                    "Respond with ONLY the JSON object, nothing else.\n\n"
+                    "Respond with ONLY the JSON object wrapped in <response> tags, nothing else.\n\n"
                     f"Schema:\n```json\n{schema_text}\n```\n\n"
                     f"Task: {message}"
                 )
@@ -763,6 +763,9 @@ def _extract_visible_brain_response(response: LLMResponse) -> LLMResponse:
     if visible is not None:
         response.artifacts["raw_response"] = content
         response.content = visible
+    elif content.strip():
+        response.artifacts["reasoning_trace"] = f"Unwrapped SDK output: {content}"
+        response.content = ""
     return response
 
 
@@ -772,10 +775,7 @@ def _split_trace_response(content: str) -> tuple[str, str | None]:
     trace = trace_match.group(1).strip() if trace_match else ""
     if response_match:
         return trace, response_match.group(1).strip()
-    if trace_match:
-        visible = (content[:trace_match.start()] + content[trace_match.end():]).strip()
-        return trace, visible or None
-    return "", None
+    return trace, None
 
 
 def _aggregate_verifier_votes(votes: list[dict]) -> dict:
