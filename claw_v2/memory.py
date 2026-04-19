@@ -2,11 +2,15 @@ from __future__ import annotations
 
 from html import escape
 import json
+import logging
 import math
 import sqlite3
 import threading
 from pathlib import Path
 from typing import Any, Callable, Iterable
+
+
+logger = logging.getLogger(__name__)
 
 
 SCHEMA = """
@@ -204,8 +208,8 @@ class MemoryStore:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.executescript(SCHEMA)
-        self._migrate()
         self._lock = threading.Lock()
+        self._migrate()
 
     def _migrate(self) -> None:
         cursor = self._conn.execute("PRAGMA table_info(facts)")
@@ -262,6 +266,10 @@ class MemoryStore:
                     self._conn.commit()
                 except sqlite3.OperationalError:
                     pass
+        try:
+            self.backfill_outcome_embeddings()
+        except Exception:
+            logger.debug("Outcome embedding backfill skipped", exc_info=True)
 
     def store_message(self, session_id: str, role: str, content: str) -> None:
         with self._lock:
