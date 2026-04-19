@@ -597,6 +597,16 @@ class EntityEdgesSchemaTests(unittest.TestCase):
         )
         self.assertIsNotNone(cursor.fetchone())
 
+    def test_migration_runs_safely_when_table_already_exists(self) -> None:
+        # Calling _migrate() a second time must not raise even though the table
+        # already exists from the SCHEMA executescript at __init__.
+        self.store._migrate()
+        # And the table is still there afterwards.
+        cursor = self.store._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='outcome_entity_edges'"
+        )
+        self.assertIsNotNone(cursor.fetchone())
+
 
 if __name__ == "__main__":
     unittest.main()

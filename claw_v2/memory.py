@@ -110,6 +110,8 @@ CREATE INDEX IF NOT EXISTS idx_checkpoints_created_at ON checkpoints(created_at 
 CREATE INDEX IF NOT EXISTS idx_checkpoints_pending_restore
     ON checkpoints(pending_restore) WHERE pending_restore = 1;
 
+-- Edges follow task_outcomes lifecycle. ON DELETE CASCADE is currently inert
+-- because PRAGMA foreign_keys is not enabled; cleanup is the caller's responsibility.
 CREATE TABLE IF NOT EXISTS outcome_entity_edges (
     outcome_id INTEGER NOT NULL REFERENCES task_outcomes(id) ON DELETE CASCADE,
     entity_tag TEXT NOT NULL,
@@ -379,6 +381,8 @@ class MemoryStore:
         if cursor.fetchone() is None:
             try:
                 self._conn.executescript(
+                    "-- Edges follow task_outcomes lifecycle. ON DELETE CASCADE is currently inert\n"
+                    "-- because PRAGMA foreign_keys is not enabled; cleanup is the caller's responsibility.\n"
                     "CREATE TABLE IF NOT EXISTS outcome_entity_edges ("
                     "outcome_id INTEGER NOT NULL REFERENCES task_outcomes(id) ON DELETE CASCADE, "
                     "entity_tag TEXT NOT NULL, "
