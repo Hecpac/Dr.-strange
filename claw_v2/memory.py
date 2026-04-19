@@ -92,6 +92,22 @@ CREATE TABLE IF NOT EXISTS outcome_embeddings (
     outcome_id INTEGER PRIMARY KEY REFERENCES task_outcomes(id),
     embedding TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS checkpoints (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ckpt_id TEXT NOT NULL UNIQUE,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    trigger_reason TEXT NOT NULL,
+    session_id TEXT,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    file_path TEXT NOT NULL,
+    pending_restore INTEGER NOT NULL DEFAULT 0,
+    restored_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_checkpoints_created_at ON checkpoints(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_checkpoints_pending_restore
+    ON checkpoints(pending_restore) WHERE pending_restore = 1;
 """
 
 
@@ -266,6 +282,30 @@ class MemoryStore:
                     self._conn.commit()
                 except sqlite3.OperationalError:
                     pass
+        cursor = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='checkpoints'"
+        )
+        if cursor.fetchone() is None:
+            try:
+                self._conn.executescript(
+                    "CREATE TABLE IF NOT EXISTS checkpoints ("
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                    "ckpt_id TEXT NOT NULL UNIQUE, "
+                    "created_at TEXT DEFAULT CURRENT_TIMESTAMP, "
+                    "trigger_reason TEXT NOT NULL, "
+                    "session_id TEXT, "
+                    "consecutive_failures INTEGER NOT NULL DEFAULT 0, "
+                    "file_path TEXT NOT NULL, "
+                    "pending_restore INTEGER NOT NULL DEFAULT 0, "
+                    "restored_at TEXT); "
+                    "CREATE INDEX IF NOT EXISTS idx_checkpoints_created_at "
+                    "ON checkpoints(created_at DESC); "
+                    "CREATE INDEX IF NOT EXISTS idx_checkpoints_pending_restore "
+                    "ON checkpoints(pending_restore) WHERE pending_restore = 1;"
+                )
+                self._conn.commit()
+            except sqlite3.OperationalError:
+                pass
         try:
             self.backfill_outcome_embeddings()
         except Exception:

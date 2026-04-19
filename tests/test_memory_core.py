@@ -323,5 +323,35 @@ class MigrationBackfillsOutcomeEmbeddingsTests(unittest.TestCase):
         self.assertEqual(row["c"], 1)
 
 
+class CheckpointsTableSchemaTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.store = MemoryStore(Path(tempfile.mkdtemp()) / "test.db")
+
+    def test_checkpoints_table_exists(self) -> None:
+        row = self.store._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='checkpoints'"
+        ).fetchone()
+        self.assertIsNotNone(row)
+
+    def test_checkpoints_columns(self) -> None:
+        cols = {r[1] for r in self.store._conn.execute(
+            "PRAGMA table_info(checkpoints)").fetchall()}
+        expected = {"id", "ckpt_id", "created_at", "trigger_reason",
+                    "session_id", "consecutive_failures", "file_path",
+                    "pending_restore", "restored_at"}
+        self.assertEqual(cols, expected)
+
+    def test_checkpoints_indices_exist(self) -> None:
+        indices = {r[1] for r in self.store._conn.execute(
+            "SELECT * FROM sqlite_master WHERE type='index' AND tbl_name='checkpoints'"
+        ).fetchall()}
+        self.assertIn("idx_checkpoints_created_at", indices)
+        self.assertIn("idx_checkpoints_pending_restore", indices)
+
+    def test_migration_idempotent(self) -> None:
+        MemoryStore(self.store.db_path)
+        MemoryStore(self.store.db_path)
+
+
 if __name__ == "__main__":
     unittest.main()
