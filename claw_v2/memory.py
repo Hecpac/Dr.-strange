@@ -934,6 +934,7 @@ class MemoryStore:
         embedder = embed_fn or _simple_embedding
         query_vec = embedder(query)
         query_dim = len(query_vec)
+        query_tokens = _tokenize(query)
         rows = self._conn.execute(
             """
             SELECT f.id, f.key, f.value, f.source, f.source_trust, f.confidence, fe.embedding
@@ -941,22 +942,44 @@ class MemoryStore:
             JOIN fact_embeddings fe ON f.id = fe.fact_id
             """,
         ).fetchall()
-        scored = []
+        if not rows:
+            return []
+
+        candidates: list[dict] = []
+        corpus_tokens: list[list[str]] = []
         stale_ids: list[tuple[int, str, str]] = []
         for row in rows:
             stored_vec = json.loads(row["embedding"])
             if len(stored_vec) != query_dim:
-                # Dimension mismatch — re-embed on the fly and queue for update.
                 stored_vec = embedder(f"{row['key']} {row['value']}")
                 stale_ids.append((row["id"], row["key"], row["value"]))
             sim = _cosine_similarity(query_vec, stored_vec)
-            if sim >= min_similarity:
-                scored.append({
-                    "key": row["key"], "value": row["value"],
-                    "source": row["source"], "confidence": row["confidence"],
-                    "similarity": round(sim, 4),
-                })
-        # Lazily migrate stale embeddings in the background.
+            tokens = _tokenize(f"{row['key']} {row['value']}")
+            corpus_tokens.append(tokens)
+            candidates.append({
+                "id": row["id"], "key": row["key"], "value": row["value"],
+                "source": row["source"], "source_trust": row["source_trust"],
+                "confidence": row["confidence"], "similarity_raw": sim,
+            })
+
+        keyword_scores = _bm25_scores(query_tokens, corpus_tokens)
+        max_keyword = max(keyword_scores) if keyword_scores else 0.0
+        scored: list[dict] = []
+        for idx, item in enumerate(candidates):
+            sim = max(0.0, item["similarity_raw"])
+            raw_kw = keyword_scores[idx] if idx < len(keyword_scores) else 0.0
+            kw_norm = raw_kw / max_keyword if max_keyword > 0 else 0.0
+            score = (sim * 0.65) + (kw_norm * 0.35)
+            if sim < min_similarity and kw_norm == 0.0:
+                continue
+            scored.append({
+                "key": item["key"], "value": item["value"],
+                "source": item["source"], "confidence": item["confidence"],
+                "similarity": round(sim, 4),
+                "keyword_score": round(kw_norm, 4),
+                "score": round(score, 4),
+            })
+
         if stale_ids:
             with self._lock:
                 for fact_id, key, value in stale_ids:
@@ -966,7 +989,8 @@ class MemoryStore:
                         (json.dumps(new_vec), fact_id),
                     )
                 self._conn.commit()
-        scored.sort(key=lambda x: x["similarity"], reverse=True)
+
+        scored.sort(key=lambda x: x["score"], reverse=True)
         return scored[:limit]
 
     def backfill_embeddings(self, embed_fn: Callable[..., list[float]] | None = None) -> int:
