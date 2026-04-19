@@ -524,5 +524,49 @@ class HybridFactSearchTests(unittest.TestCase):
         self.assertGreater(results[0]["keyword_score"], 0.0)
 
 
+class HybridOutcomeSearchTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.store = MemoryStore(Path(tempfile.mkdtemp()) / "test.db")
+
+    def test_results_include_hybrid_score_field(self) -> None:
+        self.store.store_task_outcome_with_embedding(
+            task_type="browse", task_id="s1:1",
+            description="Search the web", approach="firecrawl",
+            outcome="success", lesson="Firecrawl is reliable for static pages",
+        )
+        results = self.store.search_outcomes_semantic("firecrawl", limit=1)
+        self.assertEqual(len(results), 1)
+        self.assertIn("score", results[0])
+        self.assertIn("keyword_score", results[0])
+        self.assertIn("similarity", results[0])
+
+    def test_bm25_breaks_cosine_tie_for_outcomes(self) -> None:
+        # Adversarial pair, mirroring HybridFactSearchTests::test_bm25_breaks_cosine_tie.
+        # Long fluff outcome whose char-bag drifts toward the query, vs. a short outcome
+        # containing the exact query token. With BM25 active, the exact match must win.
+        # Third filler outcome keeps BM25Okapi IDF > 0 (df=1, N=2 collapses to log(1)=0).
+        long_fluff = "x" * 200 + " " + " ".join(
+            "alpha beta gamma delta epsilon zeta eta theta iota".split()
+        )
+        self.store.store_task_outcome_with_embedding(
+            task_type="browse", task_id="s1:fluff",
+            description=long_fluff, approach="some approach",
+            outcome="failure", lesson="generic lesson text",
+        )
+        self.store.store_task_outcome_with_embedding(
+            task_type="browse", task_id="s1:exact",
+            description="firecrawl", approach="firecrawl",
+            outcome="success", lesson="firecrawl",
+        )
+        self.store.store_task_outcome_with_embedding(
+            task_type="browse", task_id="s1:filler",
+            description="another unrelated filler",
+            approach="another", outcome="success", lesson="filler",
+        )
+        results = self.store.search_outcomes_semantic("firecrawl", limit=3)
+        self.assertEqual(results[0]["task_id"], "s1:exact")
+        self.assertGreater(results[0]["keyword_score"], 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()
