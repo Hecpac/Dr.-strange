@@ -207,3 +207,46 @@ class CheckpointListTests(unittest.TestCase):
                          "session_id", "consecutive_failures",
                          "file_path", "pending_restore", "restored_at"):
             self.assertIn(expected, keys)
+
+
+class CheckpointScheduleRestoreTests(unittest.TestCase):
+    def setUp(self) -> None:
+        tmp = Path(tempfile.mkdtemp())
+        self.store = MemoryStore(tmp / "test.db")
+        self.snapshots_dir = tmp / "snapshots"
+        self.service = CheckpointService(
+            memory=self.store, snapshots_dir=self.snapshots_dir,
+        )
+
+    def test_schedule_restore_sets_flag(self) -> None:
+        ckpt_id = self.service.create(trigger_reason="t")
+        self.service.schedule_restore(ckpt_id)
+        row = self.store._conn.execute(
+            "SELECT pending_restore FROM checkpoints WHERE ckpt_id = ?",
+            (ckpt_id,),
+        ).fetchone()
+        self.assertEqual(row["pending_restore"], 1)
+
+    def test_schedule_restore_clears_previous_pending(self) -> None:
+        a = self.service.create(trigger_reason="a")
+        b = self.service.create(trigger_reason="b")
+        self.service.schedule_restore(a)
+        self.service.schedule_restore(b)
+        count = self.store._conn.execute(
+            "SELECT COUNT(*) AS c FROM checkpoints WHERE pending_restore = 1"
+        ).fetchone()["c"]
+        self.assertEqual(count, 1)
+        row = self.store._conn.execute(
+            "SELECT pending_restore FROM checkpoints WHERE ckpt_id = ?", (a,),
+        ).fetchone()
+        self.assertEqual(row["pending_restore"], 0)
+
+    def test_schedule_restore_unknown_id_raises(self) -> None:
+        with self.assertRaises(KeyError):
+            self.service.schedule_restore("ckpt_deadbeef")
+
+    def test_schedule_restore_missing_file_raises(self) -> None:
+        ckpt_id = self.service.create(trigger_reason="t")
+        (self.snapshots_dir / f"{ckpt_id}.db").unlink()
+        with self.assertRaises(FileNotFoundError):
+            self.service.schedule_restore(ckpt_id)

@@ -102,3 +102,22 @@ class CheckpointService:
     def latest(self) -> dict | None:
         rows = self.list()
         return rows[0] if rows else None
+
+    def schedule_restore(self, ckpt_id: str) -> None:
+        with self.memory._lock:
+            row = self.memory._conn.execute(
+                "SELECT file_path FROM checkpoints WHERE ckpt_id = ?",
+                (ckpt_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(ckpt_id)
+            if not Path(row["file_path"]).exists():
+                raise FileNotFoundError(row["file_path"])
+            self.memory._conn.execute(
+                "UPDATE checkpoints SET pending_restore = 0 WHERE pending_restore = 1"
+            )
+            self.memory._conn.execute(
+                "UPDATE checkpoints SET pending_restore = 1 WHERE ckpt_id = ?",
+                (ckpt_id,),
+            )
+            self.memory._conn.commit()
