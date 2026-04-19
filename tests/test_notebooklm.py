@@ -387,5 +387,42 @@ class BotCommandTests(unittest.TestCase):
         self.assertIn("usage:", result)
 
 
+class CdpCreateNotebookTests(unittest.TestCase):
+    """Production path: when no SDK client_factory is set, create_notebook
+    delegates to the CDP driver (claw_v2.notebooklm_cdp.create_notebook by
+    default, overridable via _cdp_create_notebook_fn for unit tests).
+    """
+
+    def test_create_notebook_uses_cdp_when_no_client_factory(self) -> None:
+        svc = NotebookLMService()
+        captured: dict[str, str] = {}
+
+        def fake_cdp(title: str) -> dict:
+            captured["title"] = title
+            return {"id": "cdp-notebook-id", "title": title}
+
+        svc._cdp_create_notebook_fn = fake_cdp
+        result = svc.create_notebook("My CDP Notebook")
+        self.assertEqual(result, {"id": "cdp-notebook-id", "title": "My CDP Notebook"})
+        self.assertEqual(captured["title"], "My CDP Notebook")
+
+    def test_create_notebook_prefers_client_factory_when_set(self) -> None:
+        client = AsyncMock()
+        client.notebooks.create.return_value = _mock_notebook("sdk-id", "SDK NB")
+        svc = NotebookLMService()
+        svc._client_factory = lambda: client
+        cdp_called = False
+
+        def fake_cdp(_title: str) -> dict:
+            nonlocal cdp_called
+            cdp_called = True
+            return {"id": "should-not-be-used", "title": _title}
+
+        svc._cdp_create_notebook_fn = fake_cdp
+        result = svc.create_notebook("Test")
+        self.assertEqual(result["id"], "sdk-id")
+        self.assertFalse(cdp_called, "CDP should not be invoked when _client_factory is set")
+
+
 if __name__ == "__main__":
     unittest.main()
