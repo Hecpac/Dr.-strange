@@ -15,9 +15,12 @@ SURGICAL_ALLOWED_BINARIES = frozenset(
         "curl",
         "git",
         "grep",
+        "launchctl",
         "ls",
         "mkdir",
         "mv",
+        "open",
+        "osascript",
         "pwd",
         "rg",
         "touch",
@@ -43,7 +46,7 @@ CAPABILITY_PROFILES = {
 DEFAULT_ALLOWED_BINARIES = CAPABILITY_PROFILES["surgical"]
 
 PYTHON_INTERPRETERS = frozenset({"python", "python3"})
-PYTHON_SAFE_MODULES = frozenset({"compileall", "py_compile", "pytest", "unittest", "venv"})
+PYTHON_SAFE_MODULES = frozenset({"compileall", "claw_v2.browser_cli", "py_compile", "pytest", "unittest", "venv"})
 NODE_INTERPRETERS = frozenset({"node"})
 VERSION_OR_HELP_FLAGS = frozenset({"--version", "-V", "-VV", "--help", "-h"})
 SHELL_CONTROL_TOKENS = frozenset({";", "|", "||", "&", "&&", "`", "<", ">", ">>", "<<", "$("})
