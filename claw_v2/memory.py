@@ -109,6 +109,15 @@ CREATE TABLE IF NOT EXISTS checkpoints (
 CREATE INDEX IF NOT EXISTS idx_checkpoints_created_at ON checkpoints(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_checkpoints_pending_restore
     ON checkpoints(pending_restore) WHERE pending_restore = 1;
+
+CREATE TABLE IF NOT EXISTS outcome_entity_edges (
+    outcome_id INTEGER NOT NULL REFERENCES task_outcomes(id) ON DELETE CASCADE,
+    entity_tag TEXT NOT NULL,
+    PRIMARY KEY (outcome_id, entity_tag)
+);
+
+CREATE INDEX IF NOT EXISTS idx_outcome_entity_tag
+    ON outcome_entity_edges(entity_tag);
 """
 
 
@@ -360,6 +369,22 @@ class MemoryStore:
                     "ON checkpoints(created_at DESC); "
                     "CREATE INDEX IF NOT EXISTS idx_checkpoints_pending_restore "
                     "ON checkpoints(pending_restore) WHERE pending_restore = 1;"
+                )
+                self._conn.commit()
+            except sqlite3.OperationalError:
+                pass
+        cursor = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='outcome_entity_edges'"
+        )
+        if cursor.fetchone() is None:
+            try:
+                self._conn.executescript(
+                    "CREATE TABLE IF NOT EXISTS outcome_entity_edges ("
+                    "outcome_id INTEGER NOT NULL REFERENCES task_outcomes(id) ON DELETE CASCADE, "
+                    "entity_tag TEXT NOT NULL, "
+                    "PRIMARY KEY (outcome_id, entity_tag)); "
+                    "CREATE INDEX IF NOT EXISTS idx_outcome_entity_tag "
+                    "ON outcome_entity_edges(entity_tag);"
                 )
                 self._conn.commit()
             except sqlite3.OperationalError:
