@@ -497,6 +497,32 @@ class HybridFactSearchTests(unittest.TestCase):
         # Semantic similarity should still catch this even with no keyword overlap.
         self.assertEqual(len(results), 1)
 
+    def test_bm25_breaks_cosine_tie(self) -> None:
+        # Construct an adversarial pair: fact A is a long fluff entry whose
+        # bag-of-chars embedding accidentally lands close to the query; fact B is
+        # short and contains the exact query token. Under cosine alone, A may
+        # outrank B. Under hybrid, BM25's exact-token boost on B must win.
+        # Note: BM25Okapi IDF collapses to 0 at N=2/df=1, so we add a third
+        # filler doc to keep IDF > 0 (same trick used in BM25HelperTests).
+        long_fluff = "x" * 200 + " " + " ".join(
+            "alpha beta gamma delta epsilon zeta eta theta iota".split()
+        )
+        self.store.store_fact_with_embedding(
+            "fluff.long", long_fluff, source="profile", confidence=0.5,
+        )
+        self.store.store_fact_with_embedding(
+            "exact.firecrawl", "firecrawl",
+            source="profile", confidence=0.5,
+        )
+        self.store.store_fact_with_embedding(
+            "filler.unrelated", "another unrelated filler document",
+            source="profile", confidence=0.5,
+        )
+        results = self.store.search_facts_semantic("firecrawl", limit=3)
+        self.assertEqual(results[0]["key"], "exact.firecrawl")
+        # The keyword_score on the winner must be non-zero, proving BM25 contributed.
+        self.assertGreater(results[0]["keyword_score"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()
