@@ -1085,7 +1085,11 @@ class MemoryStore:
     # --- Learning loop ---
 
     def _index_outcome_tags(self, outcome_id: int, tags: Iterable[str]) -> None:
-        """Insert (outcome_id, tag) rows into outcome_entity_edges. Caller holds self._lock."""
+        """Insert (outcome_id, tag) rows into outcome_entity_edges. Caller holds self._lock.
+
+        Tags are lowercased + whitespace-stripped, then deduped; collisions are by design
+        (these are entity tags drawn from a shared vocabulary, not free text).
+        """
         seen: set[str] = set()
         for tag in tags:
             t = str(tag).strip().lower()
