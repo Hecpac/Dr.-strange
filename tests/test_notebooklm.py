@@ -424,5 +424,50 @@ class CdpCreateNotebookTests(unittest.TestCase):
         self.assertFalse(cdp_called, "CDP should not be invoked when _client_factory is set")
 
 
+class CdpResearchTests(unittest.TestCase):
+    """When no SDK is configured, start_research dispatches to the CDP driver
+    in a background thread without invoking any SDK list/resolve calls.
+    """
+
+    def test_start_research_uses_cdp_when_no_client_factory(self) -> None:
+        notify = MagicMock()
+        svc = NotebookLMService(notify=notify)
+        captured: dict[str, object] = {}
+
+        def fake_cdp(notebook_id: str, query: str) -> int:
+            captured["notebook_id"] = notebook_id
+            captured["query"] = query
+            return 7
+
+        svc._cdp_research_fn = fake_cdp
+        message = svc.start_research("nb-cdp-full-id", "buenas prácticas blender")
+        self.assertIn("Deep Research iniciado", message)
+
+        # Wait for the background worker to finish.
+        deadline = time.time() + 2.0
+        while time.time() < deadline and svc._running:
+            time.sleep(0.01)
+
+        self.assertEqual(captured["notebook_id"], "nb-cdp-full-id")
+        self.assertEqual(captured["query"], "buenas prácticas blender")
+        # Notify fires once on completion with the URL.
+        self.assertTrue(any("Deep Research completado" in str(c.args) for c in notify.call_args_list))
+
+    def test_cdp_research_does_not_invoke_id_resolution(self) -> None:
+        # Critical: in CDP mode start_research must NOT call list_notebooks
+        # (which would fail without SDK). We simulate by setting _client_factory
+        # to None and providing a CDP fn — list_notebooks would raise
+        # ModuleNotFoundError if reached.
+        svc = NotebookLMService()
+        svc._cdp_research_fn = lambda nb, q: 0
+        # Should not raise.
+        message = svc.start_research("nb-id", "query")
+        self.assertIn("nb-id"[:8], message)
+        # Drain background thread.
+        deadline = time.time() + 2.0
+        while time.time() < deadline and svc._running:
+            time.sleep(0.01)
+
+
 if __name__ == "__main__":
     unittest.main()
