@@ -469,5 +469,39 @@ class CdpResearchTests(unittest.TestCase):
             time.sleep(0.01)
 
 
+class CdpArtifactTests(unittest.TestCase):
+    """When no SDK is configured, start_artifact dispatches to the CDP driver
+    in a background thread without invoking _ensure_artifact_supported (which
+    requires the SDK) or _resolve_notebook_id.
+    """
+
+    def test_start_podcast_uses_cdp_when_no_client_factory(self) -> None:
+        notify = MagicMock()
+        svc = NotebookLMService(notify=notify)
+        captured: dict[str, str] = {}
+
+        def fake_cdp(notebook_id: str, kind: str) -> None:
+            captured["notebook_id"] = notebook_id
+            captured["kind"] = kind
+
+        svc._cdp_artifact_fn = fake_cdp
+        message = svc.start_podcast("nb-cdp-id")
+        self.assertIn("Generando podcast", message)
+
+        deadline = time.time() + 2.0
+        while time.time() < deadline and svc._running:
+            time.sleep(0.01)
+
+        self.assertEqual(captured, {"notebook_id": "nb-cdp-id", "kind": "podcast"})
+        self.assertTrue(any("podcast generado" in str(c.args).lower() for c in notify.call_args_list))
+
+    def test_start_artifact_unsupported_kind_still_raises(self) -> None:
+        # CDP path should still validate the kind label up-front (same as SDK).
+        svc = NotebookLMService()
+        svc._cdp_artifact_fn = lambda nb, kind: None
+        with self.assertRaises(ValueError):
+            svc.start_artifact("nb-id", "totally-invalid-kind")
+
+
 if __name__ == "__main__":
     unittest.main()
