@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from claw_v2.learning import LearningLoop
 from claw_v2.memory import MemoryStore
 
 
@@ -193,3 +194,30 @@ class ProviderSessionTTLTests(unittest.TestCase):
         self.assertTrue(replaced)
         recent = self.store.get_recent_messages("app-1", limit=2)
         self.assertEqual(recent[-1]["content"], "Recibido. ¿Qué quieres que haga con esto?")
+
+
+class LearningRecordEmbeddingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.store = MemoryStore(Path(tempfile.mkdtemp()) / "test.db")
+        self.loop = LearningLoop(memory=self.store)
+
+    def test_record_writes_embedding(self) -> None:
+        oid = self.loop.record(
+            task_type="self_heal", task_id="c1",
+            description="pytest import failure",
+            approach="pip install pytest",
+            outcome="success",
+            lesson="install pytest in the venv",
+        )
+        row = self.store._conn.execute(
+            "SELECT embedding FROM outcome_embeddings WHERE outcome_id = ?", (oid,),
+        ).fetchone()
+        self.assertIsNotNone(row)
+
+    def test_record_still_returns_outcome_id(self) -> None:
+        oid = self.loop.record(
+            task_type="t", task_id="a",
+            description="d", approach="a", outcome="success", lesson="l",
+        )
+        self.assertIsInstance(oid, int)
+        self.assertEqual(self.store.get_outcome(oid)["task_id"], "a")
