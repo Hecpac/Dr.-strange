@@ -4,10 +4,12 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from claw_v2.adapters.base import LLMRequest
 from claw_v2.main import build_runtime
+from claw_v2.memory import MemoryStore
+from claw_v2.observe import ObserveStream
 from claw_v2.types import LLMResponse
 
 
@@ -367,6 +369,67 @@ class BrainVerificationTests(unittest.TestCase):
                 self.assertTrue(approved.executed)
                 self.assertEqual(approved.status, "executed_with_approval")
                 self.assertEqual(executed, ["ran"])
+
+
+class AutoPostMortemTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.memory = MemoryStore(Path(tempfile.mkdtemp()) / "test.db")
+        self.observe = ObserveStream(Path(tempfile.mkdtemp()) / "events.db")
+        from claw_v2.learning import LearningLoop
+        self.loop = LearningLoop(memory=self.memory)
+
+    def _brain(self) -> "BrainService":
+        from claw_v2.brain import BrainService
+        router = MagicMock()
+        return BrainService(
+            router=router,
+            memory=self.memory,
+            system_prompt="You are Claw.",
+            learning=self.loop,
+            observe=self.observe,
+        )
+
+    def test_completed_verification_records_outcome(self) -> None:
+        brain = self._brain()
+        brain._emit_verification_outcome(
+            session_id="sess-1",
+            task_type="self_heal",
+            goal="install pytest",
+            action_summary="ran pip install pytest -U",
+            verification_status="ok",
+            error_snippet=None,
+        )
+        recent = self.memory.search_past_outcomes("pytest", limit=5)
+        self.assertEqual(len(recent), 1)
+        self.assertEqual(recent[0]["outcome"], "success")
+
+    def test_failed_verification_records_failure_outcome(self) -> None:
+        brain = self._brain()
+        brain._emit_verification_outcome(
+            session_id="sess-2",
+            task_type="self_heal",
+            goal="launch chrome",
+            action_summary="chrome did not open",
+            verification_status="failed",
+            error_snippet="Chrome CDP refused connection",
+        )
+        failures = self.memory.recent_failures(task_type="self_heal", limit=5)
+        self.assertEqual(len(failures), 1)
+        self.assertIn("CDP", failures[0]["error_snippet"])
+
+    def test_emits_cycle_verification_complete_event(self) -> None:
+        brain = self._brain()
+        brain._emit_verification_outcome(
+            session_id="sess-3",
+            task_type="self_heal",
+            goal="do stuff",
+            action_summary="did stuff",
+            verification_status="ok",
+            error_snippet=None,
+        )
+        events = self.observe.recent_events(limit=10)
+        kinds = [e["event_type"] for e in events]
+        self.assertIn("cycle_verification_complete", kinds)
 
 
 if __name__ == "__main__":

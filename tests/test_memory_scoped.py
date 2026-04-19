@@ -275,3 +275,55 @@ class LearningRetrieveSemanticTests(unittest.TestCase):
             "pytest missing again", task_type="self_heal", embed_fn=flat,
         )
         self.assertIn("install pytest", out)
+
+
+class LearningRecordCycleTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.store = MemoryStore(Path(tempfile.mkdtemp()) / "test.db")
+        self.loop = LearningLoop(memory=self.store)
+
+    def test_record_cycle_outcome_maps_success(self) -> None:
+        oid = self.loop.record_cycle_outcome(
+            session_id="s1",
+            task_type="self_heal",
+            goal="install pytest",
+            action_summary="ran pip install pytest",
+            verification_status="ok",
+            error_snippet=None,
+        )
+        row = self.store.get_outcome(oid)
+        self.assertEqual(row["outcome"], "success")
+        self.assertEqual(row["task_type"], "self_heal")
+        self.assertEqual(row["task_id"], "s1")
+
+    def test_record_cycle_outcome_maps_failure(self) -> None:
+        oid = self.loop.record_cycle_outcome(
+            session_id="s2",
+            task_type="self_heal",
+            goal="install pytest",
+            action_summary="pip failed",
+            verification_status="failed",
+            error_snippet="ERROR: Could not find a version",
+        )
+        row = self.store.get_outcome(oid)
+        self.assertEqual(row["outcome"], "failure")
+        self.assertIn("Could not find", row["error_snippet"])
+
+    def test_record_cycle_outcome_maps_partial(self) -> None:
+        oid = self.loop.record_cycle_outcome(
+            session_id="s3",
+            task_type="self_heal",
+            goal="g",
+            action_summary="a",
+            verification_status="unknown",
+            error_snippet=None,
+        )
+        self.assertEqual(self.store.get_outcome(oid)["outcome"], "partial")
+
+    def test_skipped_when_inputs_insufficient(self) -> None:
+        oid = self.loop.record_cycle_outcome(
+            session_id="s4", task_type="self_heal",
+            goal="", action_summary="", verification_status="ok",
+            error_snippet=None,
+        )
+        self.assertIsNone(oid)

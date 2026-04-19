@@ -53,6 +53,38 @@ class LearningLoop:
         logger.info("Learning loop recorded outcome #%d (%s/%s)", oid, task_type, outcome)
         return oid
 
+    def record_cycle_outcome(
+        self,
+        *,
+        session_id: str,
+        task_type: str,
+        goal: str,
+        action_summary: str,
+        verification_status: str,
+        error_snippet: str | None,
+        retries: int = 0,
+    ) -> int | None:
+        """Record a post-mortem for a Brain cycle. Returns None if signal is too thin."""
+        goal = (goal or "").strip()
+        action_summary = (action_summary or "").strip()
+        if not goal and not action_summary:
+            return None
+        mapping = {"ok": "success", "passed": "success", "verified": "success",
+                   "failed": "failure", "error": "failure",
+                   "unknown": "partial", "pending": "partial"}
+        outcome = mapping.get((verification_status or "").strip().lower(), "partial")
+        description = goal or action_summary[:200]
+        approach = action_summary or goal[:200]
+        return self.record(
+            task_type=task_type,
+            task_id=session_id,
+            description=description[:500],
+            approach=approach[:500],
+            outcome=outcome,
+            error_snippet=(error_snippet or None),
+            retries=retries,
+        )
+
     # --- Retrieve ---
 
     def retrieve_lessons(
