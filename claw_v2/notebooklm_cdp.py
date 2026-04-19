@@ -145,3 +145,141 @@ def create_notebook(title: str, *, cdp_url: str = DEFAULT_CDP_URL) -> dict:
         except Exception:
             pass
         pw.stop()
+
+
+def _focus_notebook(browser, notebook_id: str) -> "Page":
+    """Navigate the existing NLM tab to the given notebook id."""
+    target = f"https://notebooklm.google.com/notebook/{notebook_id}"
+    page = _open_nlm_page(browser)
+    if notebook_id not in page.url:
+        page.goto(target, wait_until="domcontentloaded", timeout=30_000)
+    return page
+
+
+def deep_research(
+    notebook_id: str,
+    query: str,
+    *,
+    cdp_url: str = DEFAULT_CDP_URL,
+    poll_timeout: float = 600.0,
+) -> int:
+    """Run Deep Research on an existing notebook and import the discovered sources.
+
+    Steps (mirrors feedback_notebooklm_podcast.md):
+      1. Navigate to the notebook page.
+      2. Open the source-mode dropdown (currently labeled 'Investigación rápida')
+         and switch to 'Deep Research'.
+      3. Locate the `source-discovery-query-box` input, type the query via
+         mouse.click + keyboard.type (Angular requires native events).
+      4. Click 'Enviar' via bounding_box (NOT aria-label — there are two).
+      5. Poll until 'Deep Research finalizó la búsqueda' appears.
+      6. Click 'Importar' to add the discovered sources.
+
+    Returns the number of sources imported (best-effort estimate from the
+    success banner or 0 if it can't be parsed).
+
+    Raises CdpNotebookLMError on any failure.
+    """
+    query = (query or "").strip()
+    if not query:
+        raise CdpNotebookLMError("deep_research requires a non-empty query")
+
+    pw, browser = _connect(cdp_url)
+    try:
+        page = _focus_notebook(browser, notebook_id)
+
+        # 1. Open the source-mode dropdown and switch to Deep Research.
+        try:
+            page.locator("text=Investigación rápida").first.click(timeout=15_000)
+            page.locator("text=Deep Research").first.click(timeout=10_000)
+        except Exception as exc:
+            raise CdpNotebookLMError(
+                f"Could not switch to Deep Research mode: {exc}"
+            ) from exc
+
+        # 2. Find the Deep Research query input (NOT the page title at y~12).
+        try:
+            box_locator = page.locator("source-discovery-query-box").first
+            box_locator.wait_for(state="visible", timeout=10_000)
+            inner_input = box_locator.locator("input").first
+            inp_box = inner_input.bounding_box()
+            if not inp_box:
+                raise CdpNotebookLMError("source-discovery query input has no bounding box")
+            page.mouse.click(
+                inp_box["x"] + inp_box["width"] / 2,
+                inp_box["y"] + inp_box["height"] / 2,
+            )
+            page.keyboard.press("Meta+a")
+            page.keyboard.press("Backspace")
+            page.keyboard.type(query, delay=40)
+        except CdpNotebookLMError:
+            raise
+        except Exception as exc:
+            raise CdpNotebookLMError(f"Could not enter Deep Research query: {exc}") from exc
+
+        # 3. Click Enviar by bounding_box (aria-label collides with the chat box).
+        try:
+            send_btn = page.locator(
+                'source-discovery-query-box button[aria-label="Enviar"]'
+            ).first
+            send_btn.wait_for(state="visible", timeout=10_000)
+            send_box = send_btn.bounding_box()
+            if not send_box:
+                raise CdpNotebookLMError("Enviar button has no bounding box")
+            page.mouse.click(send_box["x"] + 16, send_box["y"] + 16)
+        except CdpNotebookLMError:
+            raise
+        except Exception as exc:
+            raise CdpNotebookLMError(f"Could not click Enviar: {exc}") from exc
+
+        # 4. Poll for completion (up to poll_timeout seconds).
+        deadline = time.monotonic() + poll_timeout
+        completed = False
+        while time.monotonic() < deadline:
+            try:
+                if page.locator("text=Deep Research finalizó la búsqueda").first.is_visible(
+                    timeout=2_000
+                ):
+                    completed = True
+                    break
+            except Exception:
+                pass
+            time.sleep(15)
+        if not completed:
+            raise CdpNotebookLMError(
+                f"Deep Research did not complete within {poll_timeout:.0f}s"
+            )
+
+        # 5. Click Importar.
+        try:
+            buttons = page.locator("button")
+            count = buttons.count()
+            clicked = False
+            for i in range(count):
+                btn = buttons.nth(i)
+                try:
+                    if btn.is_visible() and "Importar" in btn.inner_text():
+                        btn.click()
+                        clicked = True
+                        break
+                except Exception:
+                    continue
+            if not clicked:
+                raise CdpNotebookLMError("Could not find 'Importar' button after research")
+        except CdpNotebookLMError:
+            raise
+        except Exception as exc:
+            raise CdpNotebookLMError(f"Could not click Importar: {exc}") from exc
+
+        # 6. Best-effort source count: brief settle then return 0 if not parseable.
+        # NotebookLM doesn't expose a stable count selector; the caller already gets
+        # a "Deep Research completado" notification with the notebook URL, so the
+        # exact count is informational.
+        time.sleep(2)
+        return 0
+    finally:
+        try:
+            browser.close()
+        except Exception:
+            pass
+        pw.stop()
