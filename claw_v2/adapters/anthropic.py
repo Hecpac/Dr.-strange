@@ -117,7 +117,11 @@ class ClaudeSDKExecutor:
                             usage = coerce_usage_dict(message.usage)
                             result_text = message.result
                             if message.is_error:
-                                raise AdapterError(message.result or "Claude SDK execution failed.")
+                                stderr_hint = " | ".join(stderr_lines[-5:]).strip()
+                                detail = message.result or "Claude SDK execution failed."
+                                if stderr_hint:
+                                    detail = f"{detail} (stderr: {stderr_hint})"
+                                raise AdapterError(detail)
         except TimeoutError as exc:  # pragma: no cover - exercised with fake SDK tests
             stderr_excerpt = " | ".join(stderr_lines[-5:]).strip()
             partial_text = _coalesce_content(assistant_text_chunks, result_text)

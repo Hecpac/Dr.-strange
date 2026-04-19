@@ -288,11 +288,14 @@ class TelegramTransport:
                 except Exception:
                     response = "Error procesando tu mensaje. Intenta de nuevo."
             elif "Claude SDK execution failed" in err_str or "Control request timeout: initialize" in err_str:
-                response = "El runtime de Claude falló al iniciar esta solicitud. Intenta de nuevo en unos segundos."
+                short = err_str[:300] if len(err_str) > 300 else err_str
+                response = f"El runtime de Claude falló: {short}"
             elif "API Error" in err_str or "invalid_request" in err_str:
-                response = "Error con la API. Intenta de nuevo en unos segundos."
+                short = err_str[:300] if len(err_str) > 300 else err_str
+                response = f"Error con la API: {short}"
             else:
-                response = "Error procesando tu mensaje. Intenta de nuevo."
+                short = err_str[:300] if len(err_str) > 300 else err_str
+                response = f"Error procesando tu mensaje: {short}"
         bot_done_at = time.perf_counter()
         if not response or not response.strip():
             response = "(procesando... intenta de nuevo en unos segundos)"
