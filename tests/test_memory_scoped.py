@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from claw_v2.learning import LearningLoop
 from claw_v2.memory import MemoryStore
 
 
@@ -193,3 +194,187 @@ class ProviderSessionTTLTests(unittest.TestCase):
         self.assertTrue(replaced)
         recent = self.store.get_recent_messages("app-1", limit=2)
         self.assertEqual(recent[-1]["content"], "Recibido. ¿Qué quieres que haga con esto?")
+
+
+class LearningRecordEmbeddingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.store = MemoryStore(Path(tempfile.mkdtemp()) / "test.db")
+        self.loop = LearningLoop(memory=self.store)
+
+    def test_record_writes_embedding(self) -> None:
+        oid = self.loop.record(
+            task_type="self_heal", task_id="c1",
+            description="pytest import failure",
+            approach="pip install pytest",
+            outcome="success",
+            lesson="install pytest in the venv",
+        )
+        row = self.store._conn.execute(
+            "SELECT embedding FROM outcome_embeddings WHERE outcome_id = ?", (oid,),
+        ).fetchone()
+        self.assertIsNotNone(row)
+
+    def test_record_still_returns_outcome_id(self) -> None:
+        oid = self.loop.record(
+            task_type="t", task_id="a",
+            description="d", approach="a", outcome="success", lesson="l",
+        )
+        self.assertIsInstance(oid, int)
+        self.assertEqual(self.store.get_outcome(oid)["task_id"], "a")
+
+
+class LearningRetrieveSemanticTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.store = MemoryStore(Path(tempfile.mkdtemp()) / "test.db")
+        self.loop = LearningLoop(memory=self.store)
+
+    def _embed(self, text: str) -> list[float]:
+        t = text.lower()
+        if "pytest" in t:
+            return [1.0, 0.0, 0.0]
+        if "chrome" in t or "browser" in t:
+            return [0.0, 1.0, 0.0]
+        return [0.0, 0.0, 1.0]
+
+    def test_semantic_beats_text_match(self) -> None:
+        self.store.store_task_outcome_with_embedding(
+            task_type="self_heal", task_id="pytest-fix",
+            description="missing module: pytest",
+            approach="pip install pytest",
+            outcome="success",
+            lesson="ensure pytest is installed in the venv",
+            embed_fn=self._embed,
+        )
+        self.store.store_task_outcome_with_embedding(
+            task_type="self_heal", task_id="browser-fix",
+            description="chrome disconnected",
+            approach="relaunch",
+            outcome="success",
+            lesson="use a dedicated user-data-dir",
+            embed_fn=self._embed,
+        )
+        out = self.loop.retrieve_lessons(
+            "# Current input\npytest says No module named pytest",
+            task_type="self_heal",
+            embed_fn=self._embed,
+        )
+        self.assertIn("pytest", out)
+        self.assertNotIn("chrome", out.lower())
+
+    def test_falls_back_to_text_when_no_semantic_hits(self) -> None:
+        def flat(text: str) -> list[float]:
+            return [0.0, 0.0, 0.0]
+        self.store.store_task_outcome(
+            task_type="self_heal", task_id="legacy",
+            description="pytest missing",
+            approach="install",
+            outcome="success",
+            lesson="install pytest",
+        )
+        out = self.loop.retrieve_lessons(
+            "pytest missing again", task_type="self_heal", embed_fn=flat,
+        )
+        self.assertIn("install pytest", out)
+
+
+class LearningRecordCycleTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.store = MemoryStore(Path(tempfile.mkdtemp()) / "test.db")
+        self.loop = LearningLoop(memory=self.store)
+
+    def test_record_cycle_outcome_maps_success(self) -> None:
+        oid = self.loop.record_cycle_outcome(
+            session_id="s1",
+            task_type="self_heal",
+            goal="install pytest",
+            action_summary="ran pip install pytest",
+            verification_status="ok",
+            error_snippet=None,
+        )
+        row = self.store.get_outcome(oid)
+        self.assertEqual(row["outcome"], "success")
+        self.assertEqual(row["task_type"], "self_heal")
+        self.assertEqual(row["task_id"], "s1")
+
+    def test_record_cycle_outcome_maps_failure(self) -> None:
+        oid = self.loop.record_cycle_outcome(
+            session_id="s2",
+            task_type="self_heal",
+            goal="install pytest",
+            action_summary="pip failed",
+            verification_status="failed",
+            error_snippet="ERROR: Could not find a version",
+        )
+        row = self.store.get_outcome(oid)
+        self.assertEqual(row["outcome"], "failure")
+        self.assertIn("Could not find", row["error_snippet"])
+
+    def test_record_cycle_outcome_maps_partial(self) -> None:
+        oid = self.loop.record_cycle_outcome(
+            session_id="s3",
+            task_type="self_heal",
+            goal="g",
+            action_summary="a",
+            verification_status="unknown",
+            error_snippet=None,
+        )
+        self.assertEqual(self.store.get_outcome(oid)["outcome"], "partial")
+
+    def test_skipped_when_inputs_insufficient(self) -> None:
+        oid = self.loop.record_cycle_outcome(
+            session_id="s4", task_type="self_heal",
+            goal="", action_summary="", verification_status="ok",
+            error_snippet=None,
+        )
+        self.assertIsNone(oid)
+
+
+class ExperienceReplayEndToEndTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.store = MemoryStore(Path(tempfile.mkdtemp()) / "test.db")
+        self.loop = LearningLoop(memory=self.store)
+
+    def _embed(self, text: str) -> list[float]:
+        t = text.lower()
+        if "pytest" in t or "no module" in t:
+            return [1.0, 0.0, 0.0]
+        if "chrome" in t:
+            return [0.0, 1.0, 0.0]
+        return [0.0, 0.0, 1.0]
+
+    def test_failure_in_cycle_n_is_recalled_in_cycle_n_plus_1(self) -> None:
+        self.store.store_task_outcome_with_embedding(
+            task_type="self_heal",
+            task_id="cycle-N",
+            description="pytest module not importable",
+            approach="tried running bare pytest",
+            outcome="failure",
+            lesson="the venv does not have pytest installed; run pip install pytest first",
+            error_snippet="No module named pytest",
+            embed_fn=self._embed,
+        )
+        lessons = self.loop.retrieve_lessons(
+            "# Current input\nTests are failing: the import for pytest blows up",
+            task_type="self_heal",
+            embed_fn=self._embed,
+        )
+        self.assertIn("pip install pytest", lessons)
+        self.assertIn("FAIL", lessons)
+
+    def test_success_also_recalled(self) -> None:
+        self.store.store_task_outcome_with_embedding(
+            task_type="self_heal",
+            task_id="cycle-N",
+            description="chrome cdp disconnect",
+            approach="dedicated user-data-dir + manual google login",
+            outcome="success",
+            lesson="always use a dedicated user-data-dir for chrome 146 CDP",
+            embed_fn=self._embed,
+        )
+        lessons = self.loop.retrieve_lessons(
+            "chrome is refusing my CDP connection again",
+            task_type="self_heal",
+            embed_fn=self._embed,
+        )
+        self.assertIn("user-data-dir", lessons)
+        self.assertIn("OK", lessons)

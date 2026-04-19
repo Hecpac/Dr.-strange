@@ -142,5 +142,186 @@ class SessionStateLockTests(unittest.TestCase):
         self.assertTrue(state["current_goal"].startswith("goal-"))
 
 
+class OutcomeEmbeddingsSchemaTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.store = MemoryStore(Path(tempfile.mkdtemp()) / "test.db")
+
+    def test_outcome_embeddings_table_exists(self) -> None:
+        row = self.store._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='outcome_embeddings'"
+        ).fetchone()
+        self.assertIsNotNone(row)
+
+    def test_outcome_embeddings_columns(self) -> None:
+        cols = {r[1] for r in self.store._conn.execute("PRAGMA table_info(outcome_embeddings)").fetchall()}
+        self.assertEqual(cols, {"outcome_id", "embedding"})
+
+    def test_migration_is_idempotent(self) -> None:
+        MemoryStore(self.store.db_path)
+        MemoryStore(self.store.db_path)
+
+
+class OutcomeEmbeddingStoreTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.store = MemoryStore(Path(tempfile.mkdtemp()) / "test.db")
+
+    def test_stores_outcome_and_embedding_together(self) -> None:
+        oid = self.store.store_task_outcome_with_embedding(
+            task_type="self_heal",
+            task_id="cycle-1",
+            description="pytest import failure",
+            approach="pip install pytest",
+            outcome="success",
+            lesson="always install pytest in the venv",
+        )
+        self.assertIsInstance(oid, int)
+        outcome = self.store.get_outcome(oid)
+        self.assertEqual(outcome["outcome"], "success")
+        row = self.store._conn.execute(
+            "SELECT embedding FROM outcome_embeddings WHERE outcome_id = ?", (oid,)
+        ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertTrue(row["embedding"].startswith("["))  # JSON-encoded list
+
+    def test_embedding_fn_is_used_when_provided(self) -> None:
+        captured: list[str] = []
+        def fake_embed(text: str) -> list[float]:
+            captured.append(text)
+            return [0.1, 0.2, 0.3]
+        oid = self.store.store_task_outcome_with_embedding(
+            task_type="self_heal",
+            task_id="cycle-2",
+            description="ping",
+            approach="pong",
+            outcome="success",
+            lesson="ok",
+            embed_fn=fake_embed,
+        )
+        self.assertEqual(len(captured), 1)
+        self.assertIn("ping", captured[0])
+        self.assertIn("pong", captured[0])
+        self.assertIn("ok", captured[0])
+
+    def test_embedder_failure_leaves_no_orphan_outcome(self) -> None:
+        def boom(text: str) -> list[float]:
+            raise RuntimeError("embedder down")
+        with self.assertRaises(RuntimeError):
+            self.store.store_task_outcome_with_embedding(
+                task_type="self_heal", task_id="cycle-X",
+                description="d", approach="a", outcome="success", lesson="l",
+                embed_fn=boom,
+            )
+        count = self.store._conn.execute("SELECT COUNT(*) AS c FROM task_outcomes").fetchone()["c"]
+        self.assertEqual(count, 0)
+        emb_count = self.store._conn.execute("SELECT COUNT(*) AS c FROM outcome_embeddings").fetchone()["c"]
+        self.assertEqual(emb_count, 0)
+
+
+class OutcomeSemanticSearchTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.store = MemoryStore(Path(tempfile.mkdtemp()) / "test.db")
+
+    def test_returns_semantically_close_outcome(self) -> None:
+        def embed(text: str) -> list[float]:
+            if "pytest" in text.lower():
+                return [1.0, 0.0, 0.0]
+            if "browser" in text.lower():
+                return [0.0, 1.0, 0.0]
+            return [0.0, 0.0, 1.0]
+        self.store.store_task_outcome_with_embedding(
+            task_type="self_heal", task_id="t1",
+            description="No module named pytest",
+            approach="install pytest",
+            outcome="success",
+            lesson="ensure pytest is in the venv",
+            embed_fn=embed,
+        )
+        self.store.store_task_outcome_with_embedding(
+            task_type="self_heal", task_id="t2",
+            description="Chrome CDP disconnect",
+            approach="relaunch headed chrome",
+            outcome="success",
+            lesson="use dedicated user-data-dir",
+            embed_fn=embed,
+        )
+        hits = self.store.search_outcomes_semantic(
+            "pytest module missing in venv", limit=3, embed_fn=embed,
+        )
+        self.assertGreater(len(hits), 0)
+        self.assertEqual(hits[0]["task_id"], "t1")
+        self.assertGreater(hits[0]["similarity"], 0.9)
+
+    def test_returns_empty_when_no_outcomes(self) -> None:
+        def embed(text: str) -> list[float]:
+            return [1.0, 0.0, 0.0]
+        self.assertEqual(self.store.search_outcomes_semantic("anything", embed_fn=embed), [])
+
+    def test_filters_by_task_type(self) -> None:
+        def embed(text: str) -> list[float]:
+            return [1.0, 0.0, 0.0]
+        self.store.store_task_outcome_with_embedding(
+            task_type="self_heal", task_id="a",
+            description="x", approach="y", outcome="success", lesson="z",
+            embed_fn=embed,
+        )
+        self.store.store_task_outcome_with_embedding(
+            task_type="user_task", task_id="b",
+            description="x", approach="y", outcome="success", lesson="z",
+            embed_fn=embed,
+        )
+        hits = self.store.search_outcomes_semantic(
+            "x", task_type="self_heal", embed_fn=embed,
+        )
+        self.assertEqual([h["task_id"] for h in hits], ["a"])
+
+
+class OutcomeBackfillTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.store = MemoryStore(Path(tempfile.mkdtemp()) / "test.db")
+
+    def test_backfills_missing_embeddings(self) -> None:
+        oid = self.store.store_task_outcome(
+            task_type="self_heal", task_id="legacy",
+            description="legacy row", approach="legacy", outcome="success",
+            lesson="ok",
+        )
+        before = self.store._conn.execute(
+            "SELECT COUNT(*) AS c FROM outcome_embeddings WHERE outcome_id = ?", (oid,)
+        ).fetchone()["c"]
+        self.assertEqual(before, 0)
+        filled = self.store.backfill_outcome_embeddings(embed_fn=lambda t: [1.0, 0.0])
+        self.assertEqual(filled, 1)
+        after = self.store._conn.execute(
+            "SELECT COUNT(*) AS c FROM outcome_embeddings WHERE outcome_id = ?", (oid,)
+        ).fetchone()["c"]
+        self.assertEqual(after, 1)
+
+    def test_backfill_is_idempotent(self) -> None:
+        self.store.store_task_outcome_with_embedding(
+            task_type="t", task_id="a",
+            description="d", approach="a", outcome="success", lesson="l",
+            embed_fn=lambda t: [1.0, 0.0],
+        )
+        filled = self.store.backfill_outcome_embeddings(embed_fn=lambda t: [1.0, 0.0])
+        self.assertEqual(filled, 0)
+
+
+class MigrationBackfillsOutcomeEmbeddingsTests(unittest.TestCase):
+    def test_reopen_backfills_missing_embeddings(self) -> None:
+        tmp = Path(tempfile.mkdtemp()) / "test.db"
+        store = MemoryStore(tmp)
+        oid = store.store_task_outcome(
+            task_type="self_heal", task_id="legacy",
+            description="legacy row", approach="legacy", outcome="success", lesson="ok",
+        )
+        store._conn.execute("DELETE FROM outcome_embeddings WHERE outcome_id = ?", (oid,))
+        store._conn.commit()
+        MemoryStore(tmp)
+        row = store._conn.execute(
+            "SELECT COUNT(*) AS c FROM outcome_embeddings WHERE outcome_id = ?", (oid,)
+        ).fetchone()
+        self.assertEqual(row["c"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

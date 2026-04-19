@@ -2,11 +2,15 @@ from __future__ import annotations
 
 from html import escape
 import json
+import logging
 import math
 import sqlite3
 import threading
 from pathlib import Path
 from typing import Any, Callable, Iterable
+
+
+logger = logging.getLogger(__name__)
 
 
 SCHEMA = """
@@ -82,6 +86,11 @@ CREATE TABLE IF NOT EXISTS task_outcomes (
     error_snippet TEXT,
     retries INTEGER NOT NULL DEFAULT 0,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS outcome_embeddings (
+    outcome_id INTEGER PRIMARY KEY REFERENCES task_outcomes(id),
+    embedding TEXT NOT NULL
 );
 """
 
@@ -199,8 +208,8 @@ class MemoryStore:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.executescript(SCHEMA)
-        self._migrate()
         self._lock = threading.Lock()
+        self._migrate()
 
     def _migrate(self) -> None:
         cursor = self._conn.execute("PRAGMA table_info(facts)")
@@ -228,6 +237,19 @@ class MemoryStore:
                 self._conn.commit()
             except sqlite3.OperationalError:
                 pass
+        cursor = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='outcome_embeddings'"
+        )
+        if cursor.fetchone() is None:
+            try:
+                self._conn.execute(
+                    "CREATE TABLE IF NOT EXISTS outcome_embeddings ("
+                    "outcome_id INTEGER PRIMARY KEY REFERENCES task_outcomes(id), "
+                    "embedding TEXT NOT NULL)"
+                )
+                self._conn.commit()
+            except sqlite3.OperationalError:
+                pass
         cursor = self._conn.execute("PRAGMA table_info(session_state)")
         session_state_cols = {row[1] for row in cursor.fetchall()}
         for col, sql in [
@@ -244,6 +266,10 @@ class MemoryStore:
                     self._conn.commit()
                 except sqlite3.OperationalError:
                     pass
+        try:
+            self.backfill_outcome_embeddings()
+        except Exception:
+            logger.debug("Outcome embedding backfill skipped", exc_info=True)
 
     def store_message(self, session_id: str, role: str, content: str) -> None:
         with self._lock:
@@ -860,6 +886,28 @@ class MemoryStore:
             self._conn.commit()
         return len(rows)
 
+    def backfill_outcome_embeddings(
+        self, embed_fn: Callable[..., list[float]] | None = None,
+    ) -> int:
+        embedder = embed_fn or _simple_embedding
+        rows = self._conn.execute(
+            "SELECT id, description, approach, lesson, error_snippet "
+            "FROM task_outcomes "
+            "WHERE id NOT IN (SELECT outcome_id FROM outcome_embeddings)"
+        ).fetchall()
+        with self._lock:
+            for row in rows:
+                text = f"{row['description']} | {row['approach']} | {row['lesson']}"
+                if row["error_snippet"]:
+                    text += f" | {row['error_snippet']}"
+                embedding = embedder(text)
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO outcome_embeddings (outcome_id, embedding) VALUES (?, ?)",
+                    (row["id"], json.dumps(embedding)),
+                )
+            self._conn.commit()
+        return len(rows)
+
     # --- Learning loop ---
 
     def store_task_outcome(
@@ -885,6 +933,41 @@ class MemoryStore:
             )
             self._conn.commit()
         return cursor.lastrowid  # type: ignore[return-value]
+
+    def store_task_outcome_with_embedding(
+        self,
+        *,
+        task_type: str,
+        task_id: str,
+        description: str,
+        approach: str,
+        outcome: str,
+        lesson: str,
+        error_snippet: str | None = None,
+        retries: int = 0,
+        embed_fn: Callable[..., list[float]] | None = None,
+    ) -> int:
+        embedder = embed_fn or _simple_embedding
+        with self._lock:
+            text = f"{description} | {approach} | {lesson}"
+            if error_snippet:
+                text += f" | {error_snippet}"
+            embedding = embedder(text)
+            cursor = self._conn.execute(
+                """
+                INSERT INTO task_outcomes
+                    (task_type, task_id, description, approach, outcome, lesson, error_snippet, retries)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (task_type, task_id, description, approach, outcome, lesson, error_snippet, retries),
+            )
+            oid = cursor.lastrowid
+            self._conn.execute(
+                "INSERT INTO outcome_embeddings (outcome_id, embedding) VALUES (?, ?)",
+                (oid, json.dumps(embedding)),
+            )
+            self._conn.commit()
+        return oid  # type: ignore[return-value]
 
     def search_past_outcomes(
         self, query: str, *, task_type: str | None = None, limit: int = 5,
@@ -931,6 +1014,55 @@ class MemoryStore:
                 (limit,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def search_outcomes_semantic(
+        self,
+        query: str,
+        *,
+        task_type: str | None = None,
+        limit: int = 5,
+        min_similarity: float = 0.1,
+        embed_fn: Callable[..., list[float]] | None = None,
+    ) -> list[dict]:
+        embedder = embed_fn or _simple_embedding
+        query_vec = embedder(query)
+        query_dim = len(query_vec)
+        base_sql = (
+            "SELECT o.id, o.task_type, o.task_id, o.description, o.approach, "
+            "o.outcome, o.lesson, o.error_snippet, o.retries, o.created_at, "
+            "o.feedback, oe.embedding "
+            "FROM task_outcomes o JOIN outcome_embeddings oe ON o.id = oe.outcome_id"
+        )
+        if task_type:
+            rows = self._conn.execute(base_sql + " WHERE o.task_type = ?", (task_type,)).fetchall()
+        else:
+            rows = self._conn.execute(base_sql).fetchall()
+        scored: list[dict] = []
+        stale: list[tuple[int, str]] = []
+        for row in rows:
+            stored_vec = json.loads(row["embedding"])
+            if len(stored_vec) != query_dim:
+                text = f"{row['description']} | {row['approach']} | {row['lesson']}"
+                if row["error_snippet"]:
+                    text += f" | {row['error_snippet']}"
+                stored_vec = embedder(text)
+                stale.append((row["id"], text))
+            sim = _cosine_similarity(query_vec, stored_vec)
+            if sim >= min_similarity:
+                item = dict(row)
+                item.pop("embedding", None)
+                item["similarity"] = round(sim, 4)
+                scored.append(item)
+        if stale:
+            with self._lock:
+                for oid, text in stale:
+                    self._conn.execute(
+                        "UPDATE outcome_embeddings SET embedding = ? WHERE outcome_id = ?",
+                        (json.dumps(embedder(text)), oid),
+                    )
+                self._conn.commit()
+        scored.sort(key=lambda x: x["similarity"], reverse=True)
+        return scored[:limit]
 
     # --- Learning loop: feedback & retrieval helpers ---
 

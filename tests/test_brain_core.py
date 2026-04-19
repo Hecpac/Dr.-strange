@@ -321,5 +321,62 @@ class HandleStructuredTests(unittest.TestCase):
         self.assertEqual(len(msgs), 0)
 
 
+class ExperienceReplayObserveTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.memory = MemoryStore(Path(tempfile.mkdtemp()) / "test.db")
+        self.observe = ObserveStream(Path(tempfile.mkdtemp()) / "events.db")
+        self.memory.store_task_outcome_with_embedding(
+            task_type="self_heal", task_id="seed",
+            description="pytest missing",
+            approach="install pytest",
+            outcome="success",
+            lesson="install pytest in the venv",
+            embed_fn=lambda t: [1.0, 0.0] if "pytest" in t.lower() else [0.0, 1.0],
+        )
+
+    def test_emits_event_when_lessons_retrieved(self) -> None:
+        from claw_v2.learning import LearningLoop
+        loop = LearningLoop(memory=self.memory)
+        router = MagicMock()
+        brain = BrainService(
+            router=router, memory=self.memory,
+            system_prompt="You are Claw.",
+            learning=loop, observe=self.observe,
+        )
+        brain._build_prompt(
+            session_id="s1",
+            message="pytest cannot import",
+            stored_user_message="pytest cannot import",
+            include_history=False,
+            catchup_after_id=None,
+            task_type="self_heal",
+        )
+        events = self.observe.recent_events(limit=10)
+        kinds = [e["event_type"] for e in events]
+        self.assertIn("experience_replay_retrieved", kinds)
+
+    def test_no_event_when_no_lessons_found(self) -> None:
+        from claw_v2.learning import LearningLoop
+        empty_memory = MemoryStore(Path(tempfile.mkdtemp()) / "empty.db")
+        loop = LearningLoop(memory=empty_memory)
+        router = MagicMock()
+        brain = BrainService(
+            router=router, memory=empty_memory,
+            system_prompt="You are Claw.",
+            learning=loop, observe=self.observe,
+        )
+        brain._build_prompt(
+            session_id="s1",
+            message="nothing relevant",
+            stored_user_message="nothing relevant",
+            include_history=False,
+            catchup_after_id=None,
+            task_type="self_heal",
+        )
+        events = self.observe.recent_events(limit=10)
+        kinds = [e["event_type"] for e in events]
+        self.assertNotIn("experience_replay_retrieved", kinds)
+
+
 if __name__ == "__main__":
     unittest.main()
