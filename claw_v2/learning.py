@@ -36,10 +36,10 @@ class LearningLoop:
         retries: int = 0,
         lesson: str | None = None,
     ) -> int:
-        """Record a task outcome. Derives lesson via LLM if not provided."""
+        """Record a task outcome with embedding. Derives lesson via LLM if not provided."""
         if not lesson:
             lesson = self._derive_lesson(description, approach, outcome, error_snippet)
-        oid = self.memory.store_task_outcome(
+        oid = self.memory.store_task_outcome_with_embedding(
             task_type=task_type,
             task_id=task_id,
             description=description,
