@@ -25,51 +25,28 @@ SURGICAL_ALLOWED_BINARIES = frozenset(
     }
 )
 
+DEVELOPMENT_ALLOWED_BINARIES = frozenset(
+    {
+        "node",
+        "python",
+        "python3",
+    }
+)
+
 
 CAPABILITY_PROFILES = {
     "surgical": SURGICAL_ALLOWED_BINARIES,
-    "engineer": SURGICAL_ALLOWED_BINARIES
-    | {
-        "pip",
-        "pip3",
-        "python",
-        "python3",
-        "npm",
-        "npx",
-        "node",
-    },
-    "admin": SURGICAL_ALLOWED_BINARIES
-    | {
-        "pip",
-        "pip3",
-        "python",
-        "python3",
-        "npm",
-        "npx",
-        "node",
-        "brew",
-        "chmod",
-        "chown",
-        "diskutil",
-    },
+    "engineer": SURGICAL_ALLOWED_BINARIES | DEVELOPMENT_ALLOWED_BINARIES,
+    "admin": SURGICAL_ALLOWED_BINARIES | DEVELOPMENT_ALLOWED_BINARIES | {"brew"},
 }
 
 DEFAULT_ALLOWED_BINARIES = CAPABILITY_PROFILES["surgical"]
 
 PYTHON_INTERPRETERS = frozenset({"python", "python3"})
-PYTHON_SAFE_MODULES = frozenset(
-    {
-        "compileall",
-        "ensurepip",
-        "pip",
-        "py_compile",
-        "pytest",
-        "unittest",
-        "venv",
-    }
-)
+PYTHON_SAFE_MODULES = frozenset({"compileall", "py_compile", "pytest", "unittest", "venv"})
 NODE_INTERPRETERS = frozenset({"node"})
 VERSION_OR_HELP_FLAGS = frozenset({"--version", "-V", "-VV", "--help", "-h"})
+SHELL_CONTROL_TOKENS = frozenset({";", "|", "||", "&", "&&", "`", "<", ">", ">>", "<<", "$("})
 
 
 @dataclass(slots=True)
@@ -133,21 +110,22 @@ def _unwrap_command_tokens(tokens: list[str]) -> list[str]:
     return remaining
 
 
-_SHELL_OPERATORS_RE = __import__("re").compile(r"[;|&`<>]|\$\(")
-
-
 def check_command(command: str, policy: SandboxPolicy) -> str | None:
-    if _SHELL_OPERATORS_RE.search(command):
-        return "shell operators (;|&`<>$) are not allowed"
+    if "\n" in command or "\r" in command:
+        return "shell command separators are not allowed"
     try:
         tokens = shlex.split(command)
     except ValueError:
         return "unparseable command"
     if not tokens:
         return None
+    if _tokens_contain_shell_controls(tokens):
+        return "shell operators (;|&`<>$) are not allowed"
     tokens = _unwrap_command_tokens(tokens)
     if not tokens:
         return "unparseable command"
+    if _tokens_contain_shell_controls(tokens):
+        return "shell operators (;|&`<>$) are not allowed"
     if "xargs" in [Path(token).name for token in tokens]:
         return "xargs is not allowed"
     base_cmd = Path(tokens[0]).name
@@ -159,6 +137,17 @@ def check_command(command: str, policy: SandboxPolicy) -> str | None:
     if interpreter_violation:
         return interpreter_violation
     return None
+
+
+def _tokens_contain_shell_controls(tokens: list[str]) -> bool:
+    for token in tokens:
+        if token in SHELL_CONTROL_TOKENS:
+            return True
+        if any(char in token for char in (";", "|", "&", "`", "<", ">")):
+            return True
+        if token.startswith("$("):
+            return True
+    return False
 
 
 def _check_interpreter_invocation(base_cmd: str, tokens: list[str], policy: SandboxPolicy) -> str | None:

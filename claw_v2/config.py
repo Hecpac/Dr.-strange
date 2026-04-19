@@ -315,14 +315,11 @@ class AppConfig:
         if runtime_config_path is not None and not runtime_config_path.is_absolute():
             runtime_config_path = (cwd / runtime_config_path).resolve()
         runtime_config = _load_runtime_config_file(runtime_config_path)
-        default_allowed_read_paths = [
-            home,
-            Path("/private/tmp"),
-        ]
+        default_allowed_read_paths = [Path("/private/tmp")]
         return cls(
             telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN"),
             telegram_allowed_user_id=os.getenv("TELEGRAM_ALLOWED_USER_ID"),
-            web_chat_enabled=_env_bool("WEB_CHAT_ENABLED", True),
+            web_chat_enabled=_env_bool("WEB_CHAT_ENABLED", False),
             web_chat_host=os.getenv("WEB_CHAT_HOST", "127.0.0.1"),
             web_chat_port=_env_int("WEB_CHAT_PORT", 8765),
             web_chat_token=os.getenv("WEB_CHAT_TOKEN"),
@@ -390,7 +387,7 @@ class AppConfig:
             browserbase_region=os.getenv("BROWSERBASE_REGION"),
             browserbase_keep_alive=_env_bool("BROWSERBASE_KEEP_ALIVE", False),
             sandbox_capability_profile=os.getenv("SANDBOX_CAPABILITY_PROFILE", "engineer"),
-            sdk_bypass_permissions=_env_bool("SDK_BYPASS_PERMISSIONS", False),
+            sdk_bypass_permissions=False,
             daily_cost_limit=_env_float("DAILY_COST_LIMIT", 0.0),
             chrome_cdp_enabled=_env_bool("CHROME_CDP_ENABLED", True),
             claw_chrome_port=_env_int("CLAW_CHROME_PORT", 9250),
@@ -433,6 +430,8 @@ class AppConfig:
             raise ValueError(f"browse_backend must be one of {sorted(supported_browse_backends)}.")
         if self.sandbox_capability_profile not in {"surgical", "engineer", "admin"}:
             raise ValueError("sandbox_capability_profile must be one of: surgical, engineer, admin.")
+        if self.sdk_bypass_permissions:
+            raise ValueError("sdk_bypass_permissions is not supported; approval and sandbox hooks must remain enabled.")
         if self.computer_use_backend not in {"openai", "codex"}:
             raise ValueError("computer_use_backend must be 'openai' or 'codex'.")
         if self.web_chat_port <= 0:

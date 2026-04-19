@@ -86,8 +86,9 @@ class BrainService:
     ) -> LLMResponse:
         stored_user_message = memory_text or _summarize_user_prompt(message)
         trace = new_trace_context(artifact_id=session_id)
-        provider_session_id = self.memory.get_provider_session(session_id, "anthropic")
-        provider_cursor = self.memory.get_provider_session_cursor(session_id, "anthropic")
+        primary_provider = self.router.config.provider_for_lane("brain")
+        provider_session_id = self.memory.get_provider_session(session_id, primary_provider)
+        provider_cursor = self.memory.get_provider_session_cursor(session_id, primary_provider)
         # When resuming a provider session, skip message history — the SDK already has it.
         # Including both causes Claude to re-summarize the entire conversation each time.
         resuming = provider_session_id is not None
@@ -128,7 +129,7 @@ class BrainService:
                 self.observe.emit(
                     "session_resume_failed",
                     lane="brain",
-                    provider="anthropic",
+                    provider=primary_provider,
                     trace_id=trace["trace_id"],
                     root_trace_id=trace["root_trace_id"],
                     span_id=trace["span_id"],
@@ -136,7 +137,7 @@ class BrainService:
                     artifact_id=trace["artifact_id"],
                     payload={"app_session_id": session_id, "stale_session": provider_session_id},
                 )
-            self.memory.clear_provider_session(session_id, "anthropic")
+            self.memory.clear_provider_session(session_id, primary_provider)
             prompt = self._build_prompt(
                 session_id=session_id,
                 message=message,

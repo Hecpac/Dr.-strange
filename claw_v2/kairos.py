@@ -274,7 +274,7 @@ class KairosService:
             "- Only act if there is a clear, useful action to take right now.\n"
             "- Prefer 'none' over noisy or speculative actions.\n"
             "- Actions must complete in under 15 seconds.\n"
-            "- Available actions: none, notify_user, dispatch_to_agent, approve_pending, "
+            "- Available actions: none, notify_user, dispatch_to_agent, "
             "run_skill, pause_agent, escalate_to_human, wiki_deep_lint, wiki_research, "
             "wiki_scrape, site_monitor, auto_publish_social, auto_deploy, gmail_digest, publish_task, claim_task.\n"
             "- publish_task: add a task to the shared board for any agent to claim. "
@@ -344,7 +344,6 @@ class KairosService:
         handlers = {
             "notify_user": self._handle_notify_user,
             "dispatch_to_agent": self._handle_dispatch_to_agent,
-            "approve_pending": self._handle_approve_pending,
             "run_skill": self._handle_run_skill,
             "pause_agent": self._handle_pause_agent,
             "escalate_to_human": self._handle_escalate_to_human,
@@ -442,25 +441,6 @@ class KairosService:
             priority="normal",
         )
         self.bus.send(msg)
-
-    def _handle_approve_pending(self, decision: TickDecision, trace_context: dict[str, Any] | None = None) -> None:
-        if self.approvals is None:
-            raise RuntimeError("Approvals not configured")
-        data = json.loads(decision.detail)
-        approval_id = data["approval_id"]
-        approved = self.approvals.approve_internal(approval_id)
-        if not approved:
-            raise RuntimeError(f"approval could not be auto-approved: {approval_id}")
-        self.observe.emit(
-            "kairos_auto_approved",
-            trace_id=trace_context.get("trace_id") if trace_context else None,
-            root_trace_id=trace_context.get("root_trace_id") if trace_context else None,
-            span_id=trace_context.get("span_id") if trace_context else None,
-            parent_span_id=trace_context.get("parent_span_id") if trace_context else None,
-            job_id=trace_context.get("job_id") if trace_context else None,
-            artifact_id=trace_context.get("artifact_id") if trace_context else None,
-            payload={"approval_id": approval_id},
-        )
 
     def _handle_run_skill(self, decision: TickDecision, trace_context: dict[str, Any] | None = None) -> None:
         if self.sub_agents is None:

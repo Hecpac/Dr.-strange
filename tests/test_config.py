@@ -23,7 +23,7 @@ class AppConfigDefaultsTests(unittest.TestCase):
                 os.chdir(previous_cwd)
         self.assertEqual(config.workspace_root, Path(tmpdir).resolve())
 
-    def test_default_allowed_read_paths_allow_reading_from_home(self) -> None:
+    def test_default_allowed_read_paths_do_not_allow_home(self) -> None:
         home = Path.home()
         previous_cwd = Path.cwd()
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -34,14 +34,29 @@ class AppConfigDefaultsTests(unittest.TestCase):
             finally:
                 os.chdir(previous_cwd)
 
-        self.assertIn(home, config.allowed_read_paths)
+        self.assertNotIn(home, config.allowed_read_paths)
         policy = SandboxPolicy(
             workspace_root=config.workspace_root,
             allowed_paths=config.allowed_read_paths,
             writable_paths=[config.workspace_root],
         )
         decision = sandbox_hook("Read", {"file_path": str(home / "agents" / "notes.txt")}, policy=policy)
-        self.assertTrue(decision.allowed)
+        self.assertFalse(decision.allowed)
+
+    def test_web_chat_disabled_by_default(self) -> None:
+        previous_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.chdir(tmpdir)
+            try:
+                with patch.dict(os.environ, {}, clear=True):
+                    config = AppConfig.from_env()
+                self.assertFalse(config.web_chat_enabled)
+
+                with patch.dict(os.environ, {"WEB_CHAT_ENABLED": "true"}, clear=True):
+                    configured = AppConfig.from_env()
+                self.assertTrue(configured.web_chat_enabled)
+            finally:
+                os.chdir(previous_cwd)
 
     def test_browse_backend_defaults_and_accepts_override(self) -> None:
         previous_cwd = Path.cwd()
@@ -76,6 +91,17 @@ class AppConfigDefaultsTests(unittest.TestCase):
                 self.assertEqual(configured.sandbox_capability_profile, "surgical")
             finally:
                 os.chdir(previous_cwd)
+
+    def test_sdk_bypass_permissions_env_is_ignored(self) -> None:
+        previous_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.chdir(tmpdir)
+            try:
+                with patch.dict(os.environ, {"SDK_BYPASS_PERMISSIONS": "true"}, clear=True):
+                    config = AppConfig.from_env()
+            finally:
+                os.chdir(previous_cwd)
+        self.assertFalse(config.sdk_bypass_permissions)
 
     def test_runtime_config_path_loads_monitored_sites_and_sub_agent_jobs(self) -> None:
         previous_cwd = Path.cwd()

@@ -3,7 +3,7 @@
 ## Workspace Isolation
 - Default workspace: current working directory (`Path.cwd()`)
 - Agents operate within workspace unless explicitly allowlisted
-- Allowlisted read paths: `$HOME`, `/private/tmp` (configurable via `ALLOWED_READ_PATHS`)
+- Allowlisted read paths: `/private/tmp` (configurable via `ALLOWED_READ_PATHS`)
 - Extra workspace roots configurable via `EXTRA_WORKSPACE_ROOTS`
 - All file tools (`Read`, `Write`, `Edit`, `Glob`, `Grep`) enforce path containment via `_require_within_workspace` — resolved paths must be under `workspace_root`
 
@@ -11,7 +11,7 @@
 - Credentials stored outside the workspace, NOT in `.env` files
 - Default macOS implementation uses Keychain-backed credential scopes:
   - com.pachano.claw.researcher: GSC read-only, Analytics read-only
-  - com.pachano.claw.operator: git (local), npm, brew
+  - com.pachano.claw.operator: git (local), brew
   - com.pachano.claw.deployer: git push, hosting APIs, OANDA
 - Never share credentials across agent classes
 - No secrets in workspace directory — credential adapter retrieves at runtime
@@ -19,6 +19,7 @@
 ## Input Validation & Hardening
 - **Path traversal**: all file operations resolve and validate against allowed roots (`tools.py`, `browser.py`, `telegram.py`, `adapters/ollama.py`)
 - **Command injection**: `sandbox.py` uses `shlex.split` + token-level checking (not substring blacklists); `pipeline.py` validates branch names via strict regex `^[a-zA-Z0-9._/-]+$`
+- **Package manager isolation**: `pip`, `pip3`, `npm`, `npx`, and `ensurepip` are not allowed in agent sandbox profiles
 - **Race conditions**: `approval.py` uses `fcntl` file locking for atomic read-modify-write; `network_proxy.py` and `cron.py` use `threading.Lock` for shared state
 - **JS injection**: `browser.py` escapes all user input via `json.dumps` before embedding in JS templates; browser names validated via `^[a-zA-Z0-9_-]+$`
 - **Screenshot path traversal**: `browser.py` strips directory components from filenames via `Path(name).name`

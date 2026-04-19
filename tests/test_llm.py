@@ -42,6 +42,35 @@ class LLMRouterTests(unittest.TestCase):
             self.assertTrue(response.degraded_mode)
             self.assertIn("fallback_reason", response.artifacts)
 
+    def test_fallback_does_not_reuse_session_id_across_providers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            fallback_session_ids: list[str | None] = []
+
+            def failing(_: LLMRequest) -> LLMResponse:
+                raise AdapterUnavailableError("provider unavailable")
+
+            def fallback(request: LLMRequest) -> LLMResponse:
+                fallback_session_ids.append(request.session_id)
+                return LLMResponse(
+                    content="fallback",
+                    lane=request.lane,
+                    provider="openai",
+                    model=request.model,
+                )
+
+            router = LLMRouter(
+                config=config,
+                adapters={
+                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=failing),
+                    "openai": StaticAdapter("openai", tool_capable=True, responder=fallback),
+                },
+            )
+            response = router.ask("work", lane="worker", session_id="anthropic-session-1")
+
+            self.assertEqual(response.provider, "openai")
+            self.assertEqual(fallback_session_ids, [None])
+
     def test_ollama_lane_routes_to_adapter(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = make_config(Path(tmpdir))

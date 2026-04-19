@@ -56,17 +56,7 @@ class ApprovalManager:
         return result.pop("_result", False)
 
     def approve_internal(self, approval_id: str) -> bool:
-        def _do_approve(payload: dict) -> None:
-            created = payload.get("created_at", 0)
-            if time.time() - created > APPROVAL_TTL_SECONDS:
-                payload["status"] = "expired"
-                payload["_result"] = False
-                return
-            payload["status"] = "approved"
-            payload["_result"] = True
-
-        result = self._locked_update(approval_id, _do_approve)
-        return result.pop("_result", False)
+        raise PermissionError("internal approval bypass is disabled; use approve() with a human-issued token")
 
     def reject(self, approval_id: str) -> None:
         self._locked_update(approval_id, lambda p: p.__setitem__("status", "rejected"))

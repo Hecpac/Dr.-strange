@@ -110,6 +110,7 @@ class LLMRouter:
                     **asdict(request),
                     "provider": fallback_provider,
                     "model": self.config.advisory_model_for_provider(fallback_provider),
+                    "session_id": request.session_id if fallback_provider == selected_provider else None,
                 }
             )
             response = fb_adapter.complete(fallback_request)

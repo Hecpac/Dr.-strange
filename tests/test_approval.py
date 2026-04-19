@@ -12,6 +12,16 @@ from claw_v2.approval import ApprovalManager
 
 
 class ApprovalManagerTests(unittest.TestCase):
+    def test_internal_approval_bypass_is_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = ApprovalManager(Path(tmpdir), "secret")
+            pending = manager.create("deploy", "Deploy to production")
+
+            with self.assertRaises(PermissionError):
+                manager.approve_internal(pending.approval_id)
+
+            self.assertEqual(manager.status(pending.approval_id), "pending")
+
     def test_read_waits_for_writer_lock(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = ApprovalManager(Path(tmpdir), "secret")
