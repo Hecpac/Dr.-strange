@@ -726,5 +726,60 @@ class EdgeBackfillTests(unittest.TestCase):
         self.assertEqual(count, 0)
 
 
+class OutcomeGraphNeighborsTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.store = MemoryStore(Path(tempfile.mkdtemp()) / "test.db")
+
+    def test_neighbors_share_at_least_one_tag(self) -> None:
+        a = self.store.store_task_outcome(
+            task_type="browse", task_id="s1:1", description="d", approach="a",
+            outcome="success", lesson="l", tags=["tradingview", "cdp"],
+        )
+        b = self.store.store_task_outcome(
+            task_type="browse", task_id="s1:2", description="d", approach="a",
+            outcome="failure", lesson="l", tags=["tradingview"],
+        )
+        c = self.store.store_task_outcome(
+            task_type="browse", task_id="s1:3", description="d", approach="a",
+            outcome="success", lesson="l", tags=["unrelated"],
+        )
+        neighbors = self.store._outcome_graph_neighbors([a])
+        self.assertIn(b, neighbors)
+        self.assertNotIn(c, neighbors)
+        self.assertNotIn(a, neighbors)  # exclude seeds themselves
+
+    def test_no_neighbors_when_no_tags(self) -> None:
+        a = self.store.store_task_outcome(
+            task_type="browse", task_id="s1:1", description="d", approach="a",
+            outcome="success", lesson="l",
+        )
+        self.assertEqual(self.store._outcome_graph_neighbors([a]), [])
+
+    def test_multiple_seeds_combined(self) -> None:
+        a = self.store.store_task_outcome(
+            task_type="t", task_id="i:1", description="d", approach="a",
+            outcome="success", lesson="l", tags=["alpha"],
+        )
+        b = self.store.store_task_outcome(
+            task_type="t", task_id="i:2", description="d", approach="a",
+            outcome="failure", lesson="l", tags=["beta"],
+        )
+        n_a = self.store.store_task_outcome(
+            task_type="t", task_id="i:3", description="d", approach="a",
+            outcome="success", lesson="l", tags=["alpha"],
+        )
+        n_b = self.store.store_task_outcome(
+            task_type="t", task_id="i:4", description="d", approach="a",
+            outcome="failure", lesson="l", tags=["beta"],
+        )
+        neighbors = set(self.store._outcome_graph_neighbors([a, b]))
+        self.assertEqual(neighbors, {n_a, n_b})
+
+    def test_empty_seed_list_returns_empty(self) -> None:
+        # Edge case: no seeds = no neighbors. Important because Task 8 may pass [] when
+        # hybrid retrieval finds no high-similarity hits.
+        self.assertEqual(self.store._outcome_graph_neighbors([]), [])
+
+
 if __name__ == "__main__":
     unittest.main()
