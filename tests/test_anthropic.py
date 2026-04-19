@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import unittest
 from os import environ
@@ -322,6 +323,87 @@ class AnthropicExecutorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(event["payload"]["error_type"], "AdapterError")
             self.assertIn("tool runtime exploded", event["payload"]["error"])
             self.assertIn("partial output", event["payload"]["partial_text_preview"])
+
+    async def test_executor_times_out_stalled_sdk_response_stream(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = make_config(root)
+            observe = ObserveStream(config.db_path)
+            executor = ClaudeSDKExecutor(config, observe=observe)
+
+            class FakeHookMatcher:
+                def __init__(self, *, hooks) -> None:
+                    self.hooks = hooks
+
+            class FakeAssistantMessage:
+                def __init__(self, content, model) -> None:
+                    self.content = content
+                    self.model = model
+
+            class FakeResultMessage:
+                pass
+
+            class FakeClaudeAgentOptions:
+                def __init__(self, **kwargs) -> None:
+                    self.kwargs = kwargs
+
+            class FakeClaudeSDKClient:
+                def __init__(self, options=None) -> None:
+                    self.options = options
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    return False
+
+                async def query(self, prompt, session_id: str = "default") -> None:
+                    return None
+
+                async def receive_response(self):
+                    yield FakeAssistantMessage([SimpleNamespace(text="still working")], "claude-opus-4-7")
+                    await asyncio.sleep(1)
+
+            fake_sdk = SimpleNamespace(
+                ClaudeSDKClient=FakeClaudeSDKClient,
+                ClaudeAgentOptions=FakeClaudeAgentOptions,
+                HookMatcher=FakeHookMatcher,
+                AssistantMessage=FakeAssistantMessage,
+                ResultMessage=FakeResultMessage,
+            )
+            fake_sdk_types = SimpleNamespace(
+                PermissionResultAllow=lambda **kwargs: SimpleNamespace(**kwargs),
+                PermissionResultDeny=lambda **kwargs: SimpleNamespace(**kwargs),
+            )
+            request = LLMRequest(
+                prompt="hello",
+                system_prompt="You are Claw.",
+                lane="brain",
+                provider="anthropic",
+                model="claude-opus-4-7",
+                effort="high",
+                session_id="resume-timeout",
+                max_budget=0.5,
+                evidence_pack={"app_session_id": "tg-1"},
+                allowed_tools=None,
+                agents=None,
+                hooks=None,
+                timeout=0.01,
+                cwd=str(config.workspace_root),
+            )
+
+            with patch.dict(environ, {"ANTHROPIC_API_KEY": "sk-test"}, clear=False):
+                with patch("claw_v2.adapters.anthropic._load_sdk", return_value=fake_sdk):
+                    with patch("claw_v2.adapters.anthropic._load_sdk_types", return_value=fake_sdk_types):
+                        with self.assertRaises(AdapterError) as ctx:
+                            await executor._run(request)
+
+            self.assertIn("timed out", str(ctx.exception))
+            event = observe.recent_events(limit=1)[0]
+            self.assertEqual(event["event_type"], "llm_error")
+            self.assertEqual(event["payload"]["session_id"], "resume-timeout")
+            self.assertEqual(event["payload"]["error_type"], "TimeoutError")
+            self.assertIn("still working", event["payload"]["partial_text_preview"])
 
 
 if __name__ == "__main__":
