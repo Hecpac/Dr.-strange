@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import re
 from pathlib import Path
 
 from claw_v2.config import AppConfig
@@ -86,3 +88,20 @@ def make_config(root: Path) -> AppConfig:
     config.validate()
     config.ensure_directories()
     return config
+
+
+def strict_token_embed(text: str, *, dim: int = 4096) -> list[float]:
+    """Test-only token-hashing embedder: cosine ≈ 0 when texts share no literal tokens.
+
+    Each unique token hashes into its own slot in a wide vector. Collisions are rare
+    for small test corpora, so single-shared-token overlap is clearly distinguishable
+    from no-overlap. Avoids the bag-of-chars false-positives that _simple_embedding
+    produces for English text.
+    """
+    tokens = set(re.findall(r"\w+", text.lower()))
+    vec = [0.0] * dim
+    for t in tokens:
+        idx = int(hashlib.md5(t.encode()).hexdigest()[:8], 16) % dim
+        vec[idx] = 1.0
+    norm = (sum(x * x for x in vec)) ** 0.5 or 1.0
+    return [x / norm for x in vec]
