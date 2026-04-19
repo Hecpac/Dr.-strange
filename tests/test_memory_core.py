@@ -411,6 +411,31 @@ class ApplyPendingRestoreOnInitTests(unittest.TestCase):
         self.assertIn("before", values)
         self.assertNotIn("after", values)
 
+    def test_clears_flag_when_snapshot_file_missing(self) -> None:
+        store = MemoryStore(self.db_path)
+        store.store_fact("seed", "A", source="test")
+        service = CheckpointService(memory=store, snapshots_dir=self.snapshots_dir)
+        ckpt_id = service.create(trigger_reason="t")
+        # Schedule the restore, then delete the snapshot file BEFORE the apply path runs.
+        service.schedule_restore(ckpt_id)
+        (self.snapshots_dir / f"{ckpt_id}.db").unlink()
+        store._conn.close()
+
+        result = apply_pending_restore_if_any(self.db_path)
+        self.assertIsNone(result)
+
+        # DB itself was not modified (the seed fact survives).
+        store2 = MemoryStore(self.db_path)
+        values = [f["value"] for f in store2.search_facts("seed")]
+        self.assertIn("A", values)
+        # Flag cleared, restored_at NOT set.
+        row = store2._conn.execute(
+            "SELECT pending_restore, restored_at FROM checkpoints WHERE ckpt_id = ?",
+            (ckpt_id,),
+        ).fetchone()
+        self.assertEqual(row["pending_restore"], 0)
+        self.assertIsNone(row["restored_at"])
+
 
 if __name__ == "__main__":
     unittest.main()
