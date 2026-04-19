@@ -985,6 +985,55 @@ class MemoryStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def search_outcomes_semantic(
+        self,
+        query: str,
+        *,
+        task_type: str | None = None,
+        limit: int = 5,
+        min_similarity: float = 0.1,
+        embed_fn: Callable[..., list[float]] | None = None,
+    ) -> list[dict]:
+        embedder = embed_fn or _simple_embedding
+        query_vec = embedder(query)
+        query_dim = len(query_vec)
+        base_sql = (
+            "SELECT o.id, o.task_type, o.task_id, o.description, o.approach, "
+            "o.outcome, o.lesson, o.error_snippet, o.retries, o.created_at, "
+            "o.feedback, oe.embedding "
+            "FROM task_outcomes o JOIN outcome_embeddings oe ON o.id = oe.outcome_id"
+        )
+        if task_type:
+            rows = self._conn.execute(base_sql + " WHERE o.task_type = ?", (task_type,)).fetchall()
+        else:
+            rows = self._conn.execute(base_sql).fetchall()
+        scored: list[dict] = []
+        stale: list[tuple[int, str]] = []
+        for row in rows:
+            stored_vec = json.loads(row["embedding"])
+            if len(stored_vec) != query_dim:
+                text = f"{row['description']} | {row['approach']} | {row['lesson']}"
+                if row["error_snippet"]:
+                    text += f" | {row['error_snippet']}"
+                stored_vec = embedder(text)
+                stale.append((row["id"], text))
+            sim = _cosine_similarity(query_vec, stored_vec)
+            if sim >= min_similarity:
+                item = dict(row)
+                item.pop("embedding", None)
+                item["similarity"] = round(sim, 4)
+                scored.append(item)
+        if stale:
+            with self._lock:
+                for oid, text in stale:
+                    self._conn.execute(
+                        "UPDATE outcome_embeddings SET embedding = ? WHERE outcome_id = ?",
+                        (json.dumps(embedder(text)), oid),
+                    )
+                self._conn.commit()
+        scored.sort(key=lambda x: x["similarity"], reverse=True)
+        return scored[:limit]
+
     # --- Learning loop: feedback & retrieval helpers ---
 
     def get_outcome(self, outcome_id: int) -> dict | None:

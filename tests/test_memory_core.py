@@ -217,5 +217,63 @@ class OutcomeEmbeddingStoreTests(unittest.TestCase):
         self.assertEqual(emb_count, 0)
 
 
+class OutcomeSemanticSearchTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.store = MemoryStore(Path(tempfile.mkdtemp()) / "test.db")
+
+    def test_returns_semantically_close_outcome(self) -> None:
+        def embed(text: str) -> list[float]:
+            if "pytest" in text.lower():
+                return [1.0, 0.0, 0.0]
+            if "browser" in text.lower():
+                return [0.0, 1.0, 0.0]
+            return [0.0, 0.0, 1.0]
+        self.store.store_task_outcome_with_embedding(
+            task_type="self_heal", task_id="t1",
+            description="No module named pytest",
+            approach="install pytest",
+            outcome="success",
+            lesson="ensure pytest is in the venv",
+            embed_fn=embed,
+        )
+        self.store.store_task_outcome_with_embedding(
+            task_type="self_heal", task_id="t2",
+            description="Chrome CDP disconnect",
+            approach="relaunch headed chrome",
+            outcome="success",
+            lesson="use dedicated user-data-dir",
+            embed_fn=embed,
+        )
+        hits = self.store.search_outcomes_semantic(
+            "pytest module missing in venv", limit=3, embed_fn=embed,
+        )
+        self.assertGreater(len(hits), 0)
+        self.assertEqual(hits[0]["task_id"], "t1")
+        self.assertGreater(hits[0]["similarity"], 0.9)
+
+    def test_returns_empty_when_no_outcomes(self) -> None:
+        def embed(text: str) -> list[float]:
+            return [1.0, 0.0, 0.0]
+        self.assertEqual(self.store.search_outcomes_semantic("anything", embed_fn=embed), [])
+
+    def test_filters_by_task_type(self) -> None:
+        def embed(text: str) -> list[float]:
+            return [1.0, 0.0, 0.0]
+        self.store.store_task_outcome_with_embedding(
+            task_type="self_heal", task_id="a",
+            description="x", approach="y", outcome="success", lesson="z",
+            embed_fn=embed,
+        )
+        self.store.store_task_outcome_with_embedding(
+            task_type="user_task", task_id="b",
+            description="x", approach="y", outcome="success", lesson="z",
+            embed_fn=embed,
+        )
+        hits = self.store.search_outcomes_semantic(
+            "x", task_type="self_heal", embed_fn=embed,
+        )
+        self.assertEqual([h["task_id"] for h in hits], ["a"])
+
+
 if __name__ == "__main__":
     unittest.main()
