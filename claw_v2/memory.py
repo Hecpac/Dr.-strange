@@ -219,6 +219,12 @@ class MemoryStore:
     def __init__(self, db_path: Path | str) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        # Apply any pending checkpoint restore before opening the persistent connection.
+        try:
+            from claw_v2.checkpoint import apply_pending_restore_if_any as _apply_pending_restore
+            _apply_pending_restore(self.db_path)
+        except Exception:
+            logger.debug("Pending restore check failed", exc_info=True)
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")

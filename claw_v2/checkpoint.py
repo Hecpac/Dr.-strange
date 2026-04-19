@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import secrets
+import shutil
 import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -140,3 +141,66 @@ class CheckpointService:
                 (ckpt_id,),
             )
             self.memory._conn.commit()
+
+
+def apply_pending_restore_if_any(db_path: Path) -> str | None:
+    """Called from MemoryStore.__init__ BEFORE any schema migrations.
+
+    If a pending_restore flag is set and the referenced snapshot file exists,
+    copy the snapshot over db_path and mark restored_at. Returns the applied
+    ckpt_id or None.
+    """
+    db_path = Path(db_path)
+    if not db_path.exists():
+        return None
+    try:
+        probe = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.OperationalError:
+        return None
+    try:
+        probe.row_factory = sqlite3.Row
+        table_exists = probe.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='table' AND name='checkpoints'"
+        ).fetchone() is not None
+        if not table_exists:
+            return None
+        row = probe.execute(
+            "SELECT ckpt_id, file_path FROM checkpoints "
+            "WHERE pending_restore = 1 LIMIT 1"
+        ).fetchone()
+    finally:
+        probe.close()
+    if row is None:
+        return None
+    snapshot_path = Path(row["file_path"])
+    ckpt_id = row["ckpt_id"]
+    if not snapshot_path.exists():
+        logger.warning(
+            "Pending restore points to missing snapshot %s; clearing flag.",
+            snapshot_path,
+        )
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "UPDATE checkpoints SET pending_restore = 0 WHERE ckpt_id = ?",
+                (ckpt_id,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return None
+    shutil.copy(snapshot_path, db_path)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "UPDATE checkpoints "
+            "SET pending_restore = 0, restored_at = CURRENT_TIMESTAMP "
+            "WHERE ckpt_id = ?",
+            (ckpt_id,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    logger.info("Applied checkpoint %s from %s", ckpt_id, snapshot_path)
+    return ckpt_id
