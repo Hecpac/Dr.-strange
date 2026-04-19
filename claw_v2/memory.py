@@ -1226,6 +1226,7 @@ class MemoryStore:
                 stale.append((row["id"], text))
             sim = _cosine_similarity(query_vec, stored_vec)
             corpus_tokens.append(_tokenize(text))
+            # Output shape is the SELECT list minus 'embedding'; update callers if columns change.
             item = dict(row)
             item.pop("embedding", None)
             item["similarity_raw"] = sim
