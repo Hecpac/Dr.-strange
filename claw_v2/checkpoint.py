@@ -38,56 +38,75 @@ class CheckpointService:
     ) -> str:
         ckpt_id = f"ckpt_{secrets.token_hex(4)}"
         file_path = self.snapshots_dir / f"{ckpt_id}.db"
-        target_conn: sqlite3.Connection | None = None
-        try:
-            with self.memory._lock:
+        with self.memory._lock:
+            # Insert the metadata row FIRST and commit so the row is visible
+            # to the subsequent backup() — snapshot must be self-describing.
+            self.memory._conn.execute(
+                "INSERT INTO checkpoints "
+                "(ckpt_id, trigger_reason, session_id, consecutive_failures, file_path) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (ckpt_id, trigger_reason, session_id, consecutive_failures, str(file_path)),
+            )
+            self.memory._conn.commit()
+            target_conn: sqlite3.Connection | None = None
+            try:
                 target_conn = sqlite3.connect(file_path)
                 self.memory._conn.backup(target_conn, pages=100, sleep=0.001)
-                target_conn.close()
-                target_conn = None
-                self.memory._conn.execute(
-                    "INSERT INTO checkpoints "
-                    "(ckpt_id, trigger_reason, session_id, consecutive_failures, file_path) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (ckpt_id, trigger_reason, session_id, consecutive_failures, str(file_path)),
-                )
-                self.memory._conn.commit()
+            except Exception:
+                # Roll back the metadata row so the DB stays clean.
                 try:
-                    rows_to_purge = self.memory._conn.execute(
-                        "SELECT ckpt_id, file_path FROM checkpoints "
-                        "ORDER BY created_at ASC, id ASC"
-                    ).fetchall()
-                    excess = len(rows_to_purge) - self.ring_size
-                    if excess > 0:
-                        for row in rows_to_purge[:excess]:
-                            try:
-                                Path(row["file_path"]).unlink(missing_ok=True)
-                            except OSError:
-                                logger.warning(
-                                    "Checkpoint rotation: failed to unlink %s",
-                                    row["file_path"], exc_info=True,
-                                )
-                            try:
-                                self.memory._conn.execute(
-                                    "DELETE FROM checkpoints WHERE ckpt_id = ?",
-                                    (row["ckpt_id"],),
-                                )
-                            except sqlite3.Error:
-                                logger.warning(
-                                    "Checkpoint rotation: failed to delete row %s",
-                                    row["ckpt_id"], exc_info=True,
-                                )
-                        self.memory._conn.commit()
-                except Exception:
-                    logger.warning("Checkpoint rotation encountered an error", exc_info=True)
-        except Exception:
-            if target_conn is not None:
-                try:
-                    target_conn.close()
-                except Exception:
-                    pass
-            file_path.unlink(missing_ok=True)
-            raise
+                    self.memory._conn.execute(
+                        "DELETE FROM checkpoints WHERE ckpt_id = ?", (ckpt_id,),
+                    )
+                    self.memory._conn.commit()
+                except sqlite3.Error:
+                    logger.warning(
+                        "Checkpoint rollback: DELETE failed for %s", ckpt_id,
+                        exc_info=True,
+                    )
+                if target_conn is not None:
+                    try:
+                        target_conn.close()
+                    except Exception:
+                        pass
+                file_path.unlink(missing_ok=True)
+                raise
+            finally:
+                if target_conn is not None:
+                    try:
+                        target_conn.close()
+                    except Exception:
+                        pass
+
+            # Ring rotation (unchanged from CP3)
+            try:
+                rows_to_purge = self.memory._conn.execute(
+                    "SELECT ckpt_id, file_path FROM checkpoints "
+                    "ORDER BY created_at ASC, id ASC"
+                ).fetchall()
+                excess = len(rows_to_purge) - self.ring_size
+                if excess > 0:
+                    for row in rows_to_purge[:excess]:
+                        try:
+                            Path(row["file_path"]).unlink(missing_ok=True)
+                        except OSError:
+                            logger.warning(
+                                "Checkpoint rotation: failed to unlink %s",
+                                row["file_path"], exc_info=True,
+                            )
+                        try:
+                            self.memory._conn.execute(
+                                "DELETE FROM checkpoints WHERE ckpt_id = ?",
+                                (row["ckpt_id"],),
+                            )
+                        except sqlite3.Error:
+                            logger.warning(
+                                "Checkpoint rotation: failed to delete row %s",
+                                row["ckpt_id"], exc_info=True,
+                            )
+                    self.memory._conn.commit()
+            except Exception:
+                logger.warning("Checkpoint rotation encountered an error", exc_info=True)
         return ckpt_id
 
     def list(self) -> list[dict]:
