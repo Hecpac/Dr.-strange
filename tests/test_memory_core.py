@@ -323,5 +323,119 @@ class MigrationBackfillsOutcomeEmbeddingsTests(unittest.TestCase):
         self.assertEqual(row["c"], 1)
 
 
+class CheckpointsTableSchemaTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.store = MemoryStore(Path(tempfile.mkdtemp()) / "test.db")
+
+    def test_checkpoints_table_exists(self) -> None:
+        row = self.store._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='checkpoints'"
+        ).fetchone()
+        self.assertIsNotNone(row)
+
+    def test_checkpoints_columns(self) -> None:
+        cols = {r[1] for r in self.store._conn.execute(
+            "PRAGMA table_info(checkpoints)").fetchall()}
+        expected = {"id", "ckpt_id", "created_at", "trigger_reason",
+                    "session_id", "consecutive_failures", "file_path",
+                    "pending_restore", "restored_at"}
+        self.assertEqual(cols, expected)
+
+    def test_checkpoints_indices_exist(self) -> None:
+        indices = {r[1] for r in self.store._conn.execute(
+            "SELECT * FROM sqlite_master WHERE type='index' AND tbl_name='checkpoints'"
+        ).fetchall()}
+        self.assertIn("idx_checkpoints_created_at", indices)
+        self.assertIn("idx_checkpoints_pending_restore", indices)
+
+    def test_migration_idempotent(self) -> None:
+        MemoryStore(self.store.db_path)
+        MemoryStore(self.store.db_path)
+
+
+import shutil
+
+from claw_v2.checkpoint import CheckpointService, apply_pending_restore_if_any
+
+
+class ApplyPendingRestoreOnInitTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.db_path = self.tmp / "test.db"
+        self.snapshots_dir = self.tmp / "snapshots"
+
+    def test_returns_none_when_no_pending_restore(self) -> None:
+        MemoryStore(self.db_path)  # creates table
+        result = apply_pending_restore_if_any(self.db_path)
+        self.assertIsNone(result)
+
+    def test_returns_none_when_db_does_not_exist(self) -> None:
+        self.assertIsNone(apply_pending_restore_if_any(self.tmp / "missing.db"))
+
+    def test_applies_snapshot_and_marks_restored_at(self) -> None:
+        store = MemoryStore(self.db_path)
+        store.store_fact("seed", "A", source="test")
+        service = CheckpointService(memory=store, snapshots_dir=self.snapshots_dir)
+        ckpt_id = service.create(trigger_reason="seed")
+        store.store_fact("seed", "B", source="test")   # mutation post-snapshot
+        service.schedule_restore(ckpt_id)
+        store._conn.close()
+
+        result = apply_pending_restore_if_any(self.db_path)
+        self.assertEqual(result, ckpt_id)
+
+        store2 = MemoryStore(self.db_path)
+        facts = store2.search_facts("seed")
+        values = [f["value"] for f in facts]
+        self.assertIn("A", values)
+        self.assertNotIn("B", values)
+        row = store2._conn.execute(
+            "SELECT pending_restore, restored_at FROM checkpoints WHERE ckpt_id = ?",
+            (ckpt_id,),
+        ).fetchone()
+        self.assertEqual(row["pending_restore"], 0)
+        self.assertIsNotNone(row["restored_at"])
+
+    def test_memorystore_init_invokes_apply(self) -> None:
+        # End-to-end: schedule then reopen MemoryStore — no manual apply call.
+        store = MemoryStore(self.db_path)
+        store.store_fact("key", "before", source="test")
+        service = CheckpointService(memory=store, snapshots_dir=self.snapshots_dir)
+        ckpt_id = service.create(trigger_reason="t")
+        store.store_fact("key", "after", source="test")
+        service.schedule_restore(ckpt_id)
+        store._conn.close()
+
+        store2 = MemoryStore(self.db_path)
+        values = [f["value"] for f in store2.search_facts("key")]
+        self.assertIn("before", values)
+        self.assertNotIn("after", values)
+
+    def test_clears_flag_when_snapshot_file_missing(self) -> None:
+        store = MemoryStore(self.db_path)
+        store.store_fact("seed", "A", source="test")
+        service = CheckpointService(memory=store, snapshots_dir=self.snapshots_dir)
+        ckpt_id = service.create(trigger_reason="t")
+        # Schedule the restore, then delete the snapshot file BEFORE the apply path runs.
+        service.schedule_restore(ckpt_id)
+        (self.snapshots_dir / f"{ckpt_id}.db").unlink()
+        store._conn.close()
+
+        result = apply_pending_restore_if_any(self.db_path)
+        self.assertIsNone(result)
+
+        # DB itself was not modified (the seed fact survives).
+        store2 = MemoryStore(self.db_path)
+        values = [f["value"] for f in store2.search_facts("seed")]
+        self.assertIn("A", values)
+        # Flag cleared, restored_at NOT set.
+        row = store2._conn.execute(
+            "SELECT pending_restore, restored_at FROM checkpoints WHERE ckpt_id = ?",
+            (ckpt_id,),
+        ).fetchone()
+        self.assertEqual(row["pending_restore"], 0)
+        self.assertIsNone(row["restored_at"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -13,6 +13,24 @@ from claw_v2.observe import ObserveStream
 from claw_v2.types import LLMResponse
 
 
+def _fake_verification(*, should_proceed: bool, risk: str) -> "CriticalActionVerification":
+    from claw_v2.types import (
+        CriticalActionVerification, LLMResponse,
+    )
+    return CriticalActionVerification(
+        recommendation="approve" if should_proceed else "deny",
+        risk_level=risk,
+        summary="ok" if should_proceed else "blocked",
+        should_proceed=should_proceed,
+        requires_human_approval=not should_proceed,
+        confidence=0.9,
+        response=LLMResponse(
+            content="ok", lane="verify", provider="mock", model="mock",
+            confidence=0.9, cost_estimate=0.0,
+        ),
+    )
+
+
 class BrainVerificationTests(unittest.TestCase):
     @staticmethod
     def _fake_brain(request: LLMRequest) -> LLMResponse:
@@ -516,6 +534,254 @@ class ExecutionEventRecordsOutcomeTests(unittest.TestCase):
         kinds = [e["event_type"] for e in events]
         self.assertIn("critical_action_execution", kinds)
         self.assertIn("cycle_verification_complete", kinds)
+
+
+class PreCriticalActionCheckpointTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from claw_v2.checkpoint import CheckpointService
+        from claw_v2.learning import LearningLoop
+        tmp = Path(tempfile.mkdtemp())
+        self.memory = MemoryStore(tmp / "claw.db")
+        self.observe = ObserveStream(tmp / "obs.db")
+        self.learning = LearningLoop(memory=self.memory)
+        self.checkpoint = CheckpointService(
+            memory=self.memory, snapshots_dir=tmp / "snapshots",
+        )
+
+    def _brain(self) -> "BrainService":
+        from claw_v2.brain import BrainService
+        return BrainService(
+            router=MagicMock(),
+            memory=self.memory,
+            system_prompt="You are Claw.",
+            learning=self.learning,
+            observe=self.observe,
+            checkpoint=self.checkpoint,
+        )
+
+    def test_executed_autonomously_takes_pre_snapshot(self) -> None:
+        brain = self._brain()
+        called_executor = {"count": 0}
+        def executor():
+            called_executor["count"] += 1
+            return "ok"
+        with patch(
+            "claw_v2.brain.BrainService.verify_critical_action",
+            return_value=_fake_verification(should_proceed=True, risk="low"),
+        ):
+            result = brain.execute_critical_action(
+                action="rm -rf /tmp/foo",
+                plan="p", diff="d", test_output="t",
+                executor=executor, autonomy_mode="autonomous",
+            )
+        self.assertEqual(called_executor["count"], 1)
+        self.assertIsNotNone(result.checkpoint_id)
+        self.assertTrue(result.checkpoint_id.startswith("ckpt_"))
+        count = self.memory._conn.execute(
+            "SELECT COUNT(*) AS c FROM checkpoints"
+        ).fetchone()["c"]
+        self.assertEqual(count, 1)
+
+    def test_blocked_path_does_not_create_checkpoint(self) -> None:
+        brain = self._brain()
+        def executor():
+            self.fail("executor must not run when blocked")
+        with patch(
+            "claw_v2.brain.BrainService.verify_critical_action",
+            return_value=_fake_verification(should_proceed=False, risk="high"),
+        ):
+            result = brain.execute_critical_action(
+                action="x", plan="p", diff="d", test_output="t",
+                executor=executor, autonomy_mode="assisted",
+            )
+        self.assertIsNone(result.checkpoint_id)
+        count = self.memory._conn.execute(
+            "SELECT COUNT(*) AS c FROM checkpoints"
+        ).fetchone()["c"]
+        self.assertEqual(count, 0)
+
+    def test_checkpoint_id_in_observe_event(self) -> None:
+        brain = self._brain()
+        with patch(
+            "claw_v2.brain.BrainService.verify_critical_action",
+            return_value=_fake_verification(should_proceed=True, risk="low"),
+        ):
+            brain.execute_critical_action(
+                action="install pytest", plan="p", diff="d", test_output="t",
+                executor=lambda: None, autonomy_mode="autonomous",
+            )
+        events = [e for e in self.observe.recent_events(limit=20)
+                  if e["event_type"] == "critical_action_execution"]
+        self.assertEqual(len(events), 1)
+        self.assertIn("checkpoint_id", events[0]["payload"])
+        self.assertTrue(events[0]["payload"]["checkpoint_id"].startswith("ckpt_"))
+
+    def test_checkpoint_failure_does_not_block_execution(self) -> None:
+        brain = self._brain()
+        with patch.object(
+            self.checkpoint, "create",
+            side_effect=RuntimeError("simulated"),
+        ), patch(
+            "claw_v2.brain.BrainService.verify_critical_action",
+            return_value=_fake_verification(should_proceed=True, risk="low"),
+        ):
+            result = brain.execute_critical_action(
+                action="x", plan="p", diff="d", test_output="t",
+                executor=lambda: "ok", autonomy_mode="autonomous",
+            )
+        self.assertEqual(result.result, "ok")
+        self.assertIsNone(result.checkpoint_id)
+
+
+class ConsecutiveFailuresTriggerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from claw_v2.checkpoint import CheckpointService
+        from claw_v2.learning import LearningLoop
+        tmp = Path(tempfile.mkdtemp())
+        self.memory = MemoryStore(tmp / "claw.db")
+        self.observe = ObserveStream(tmp / "obs.db")
+        self.learning = LearningLoop(memory=self.memory)
+        self.checkpoint = CheckpointService(
+            memory=self.memory, snapshots_dir=tmp / "snapshots",
+        )
+        self.memory.update_session_state(
+            "sess-X", autonomy_mode="autonomous", mode="coding",
+        )
+        self.seed_ckpt_id = self.checkpoint.create(trigger_reason="seed")
+
+    def _brain(self) -> "BrainService":
+        from claw_v2.brain import BrainService
+        return BrainService(
+            router=MagicMock(),
+            memory=self.memory,
+            system_prompt="You are Claw.",
+            learning=self.learning,
+            observe=self.observe,
+            checkpoint=self.checkpoint,
+        )
+
+    def _push_failure(self, brain, i: int) -> None:
+        brain._emit_verification_outcome(
+            session_id="sess-X", task_type="self_heal",
+            goal=f"goal-{i}", action_summary=f"action-{i}",
+            verification_status="failed", error_snippet="boom",
+        )
+
+    def test_three_consecutive_failures_trigger_autonomous_rollback(self) -> None:
+        brain = self._brain()
+        for i in range(3):
+            self._push_failure(brain, i)
+        events = self.observe.recent_events(limit=20)
+        kinds = [e["event_type"] for e in events]
+        self.assertIn("auto_rollback_proposed", kinds)
+        row = self.memory._conn.execute(
+            "SELECT pending_restore FROM checkpoints WHERE ckpt_id = ?",
+            (self.seed_ckpt_id,),
+        ).fetchone()
+        self.assertEqual(row["pending_restore"], 1)
+
+
+class AssistedModeDoesNotAutoRestoreTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from claw_v2.checkpoint import CheckpointService
+        from claw_v2.learning import LearningLoop
+        tmp = Path(tempfile.mkdtemp())
+        self.memory = MemoryStore(tmp / "claw.db")
+        self.observe = ObserveStream(tmp / "obs.db")
+        self.learning = LearningLoop(memory=self.memory)
+        self.checkpoint = CheckpointService(
+            memory=self.memory, snapshots_dir=tmp / "snapshots",
+        )
+        self.memory.update_session_state(
+            "sess-A", autonomy_mode="assisted", mode="coding",
+        )
+        self.seed_ckpt_id = self.checkpoint.create(trigger_reason="seed")
+
+    def test_assisted_emits_event_but_does_not_schedule(self) -> None:
+        from claw_v2.brain import BrainService
+        brain = BrainService(
+            router=MagicMock(), memory=self.memory,
+            system_prompt="p", learning=self.learning,
+            observe=self.observe, checkpoint=self.checkpoint,
+        )
+        for i in range(3):
+            brain._emit_verification_outcome(
+                session_id="sess-A", task_type="self_heal",
+                goal=f"g-{i}", action_summary="a",
+                verification_status="failed", error_snippet="x",
+            )
+        kinds = [e["event_type"] for e in self.observe.recent_events(limit=20)]
+        self.assertIn("auto_rollback_proposed", kinds)
+        row = self.memory._conn.execute(
+            "SELECT pending_restore FROM checkpoints WHERE ckpt_id = ?",
+            (self.seed_ckpt_id,),
+        ).fetchone()
+        self.assertEqual(row["pending_restore"], 0)
+
+
+class NoCheckpointAvailableTests(unittest.TestCase):
+    def test_three_failures_without_checkpoint_emit_unavailable(self) -> None:
+        from claw_v2.brain import BrainService
+        from claw_v2.checkpoint import CheckpointService
+        from claw_v2.learning import LearningLoop
+        tmp = Path(tempfile.mkdtemp())
+        memory = MemoryStore(tmp / "claw.db")
+        observe = ObserveStream(tmp / "obs.db")
+        learning = LearningLoop(memory=memory)
+        checkpoint = CheckpointService(
+            memory=memory, snapshots_dir=tmp / "snapshots",
+        )
+        memory.update_session_state("sess-Z", autonomy_mode="autonomous")
+        brain = BrainService(
+            router=MagicMock(), memory=memory, system_prompt="p",
+            learning=learning, observe=observe, checkpoint=checkpoint,
+        )
+        for i in range(3):
+            brain._emit_verification_outcome(
+                session_id="sess-Z", task_type="self_heal",
+                goal=f"g-{i}", action_summary="a",
+                verification_status="failed", error_snippet="x",
+            )
+        kinds = [e["event_type"] for e in observe.recent_events(limit=20)]
+        self.assertIn("auto_rollback_unavailable", kinds)
+        self.assertNotIn("auto_rollback_proposed", kinds)
+
+
+class OldFailuresIgnoredTests(unittest.TestCase):
+    def test_failures_older_than_window_do_not_trigger(self) -> None:
+        from claw_v2.brain import BrainService
+        from claw_v2.checkpoint import CheckpointService
+        from claw_v2.learning import LearningLoop
+        tmp = Path(tempfile.mkdtemp())
+        memory = MemoryStore(tmp / "claw.db")
+        observe = ObserveStream(tmp / "obs.db")
+        learning = LearningLoop(memory=memory)
+        checkpoint = CheckpointService(
+            memory=memory, snapshots_dir=tmp / "snapshots",
+        )
+        checkpoint.create(trigger_reason="seed")
+        memory.update_session_state("sess-Y", autonomy_mode="autonomous")
+        for i in range(3):
+            memory._conn.execute(
+                "INSERT INTO task_outcomes "
+                "(task_type, task_id, description, approach, outcome, lesson, "
+                "error_snippet, retries, created_at) "
+                "VALUES ('self_heal', 'sess-Y', 'd', 'a', 'failure', 'l', 'x', 0, "
+                "datetime('now', '-60 minutes'))"
+            )
+        memory._conn.commit()
+        brain = BrainService(
+            router=MagicMock(), memory=memory, system_prompt="p",
+            learning=learning, observe=observe, checkpoint=checkpoint,
+        )
+        brain._emit_verification_outcome(
+            session_id="sess-Y", task_type="self_heal",
+            goal="g", action_summary="a",
+            verification_status="ok", error_snippet=None,
+        )
+        kinds = [e["event_type"] for e in observe.recent_events(limit=20)]
+        self.assertNotIn("auto_rollback_proposed", kinds)
+        self.assertNotIn("auto_rollback_unavailable", kinds)
 
 
 if __name__ == "__main__":

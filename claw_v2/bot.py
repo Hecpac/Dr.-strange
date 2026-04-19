@@ -15,6 +15,7 @@ from claw_v2.task_handler import TaskHandler
 from claw_v2.approval import ApprovalManager
 from claw_v2.brain import BrainService
 from claw_v2.bot_commands import BotCommand, CommandContext, dispatch_commands
+from claw_v2.checkpoint_handler import CheckpointHandler
 from claw_v2.chrome_handler import ChromeHandler
 from claw_v2.computer_handler import ComputerHandler
 from claw_v2.design_handler import DesignHandler
@@ -118,6 +119,7 @@ class BotService:
             capability_check=self._capability_unavailable_message,
             get_managed_chrome=lambda: self.managed_chrome,
         )
+        self._checkpoint_handler = CheckpointHandler(checkpoint=brain.checkpoint) if brain.checkpoint is not None else None
         self._computer_handler = ComputerHandler(
             computer=computer,
             browser_use=browser_use,
@@ -288,6 +290,7 @@ class BotService:
             BotCommand("focus", self._handle_focus_command, exact=("/focus",)),
             BotCommand("voice", self._handle_voice_command, exact=("/voice",), prefixes=("/voice ",)),
             *self._design_handler.commands(),
+            *(self._checkpoint_handler.commands() if self._checkpoint_handler is not None else []),
         ]
 
     def _build_post_shortcut_commands(self) -> list[BotCommand]:

@@ -73,3 +73,4 @@ class CriticalActionExecution:
     result: Any = None
     reason: str | None = None
     approval_status: str | None = None
+    checkpoint_id: str | None = None

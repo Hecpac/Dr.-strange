@@ -5,7 +5,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, TYPE_CHECKING
 
 from claw_v2.adapters.base import AdapterError, UserContentBlock, UserPrompt
 from claw_v2.approval import ApprovalManager
@@ -16,6 +16,9 @@ from claw_v2.observe import ObserveStream
 from claw_v2.playbook_loader import PlaybookLoader
 from claw_v2.tracing import attach_trace, new_trace_context, child_trace_context
 from claw_v2.types import CriticalActionExecution, CriticalActionVerification, LLMResponse
+
+if TYPE_CHECKING:
+    from claw_v2.checkpoint import CheckpointService
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +72,7 @@ class BrainService:
     approvals: ApprovalManager | None = None
     observe: ObserveStream | None = None
     learning: LearningLoop | None = None
+    checkpoint: "CheckpointService | None" = None
     wiki: object | None = None  # WikiService, injected after init
     playbooks: PlaybookLoader = None  # type: ignore[assignment]
 
@@ -338,19 +342,65 @@ class BrainService:
                     "had_error": bool(error_snippet),
                 },
             )
-        if self.learning is None:
+        if self.learning is not None:
+            try:
+                self.learning.record_cycle_outcome(
+                    session_id=session_id,
+                    task_type=task_type,
+                    goal=goal,
+                    action_summary=action_summary,
+                    verification_status=verification_status,
+                    error_snippet=error_snippet,
+                )
+            except Exception:
+                logger.warning("Auto post-mortem recording failed", exc_info=True)
+
+        # Auto-rollback decision block (CP9)
+        if self.checkpoint is None:
             return
         try:
-            self.learning.record_cycle_outcome(
-                session_id=session_id,
+            consecutive = _count_recent_consecutive_failures(
+                self.memory,
                 task_type=task_type,
-                goal=goal,
-                action_summary=action_summary,
-                verification_status=verification_status,
-                error_snippet=error_snippet,
+                session_id=session_id,
+                within_minutes=30,
             )
         except Exception:
-            logger.warning("Auto post-mortem recording failed", exc_info=True)
+            logger.debug("Failure count probe failed", exc_info=True)
+            return
+        if consecutive < 3:
+            return
+        latest = self.checkpoint.latest()
+        autonomy_mode = (
+            self.memory.get_session_state(session_id).get("autonomy_mode", "assisted")
+            if session_id else "assisted"
+        )
+        if latest is None:
+            if self.observe is not None:
+                self.observe.emit(
+                    "auto_rollback_unavailable",
+                    payload={
+                        "session_id": session_id,
+                        "consecutive_failures": consecutive,
+                        "autonomy_mode": autonomy_mode,
+                    },
+                )
+            return
+        if self.observe is not None:
+            self.observe.emit(
+                "auto_rollback_proposed",
+                payload={
+                    "ckpt_id": latest["ckpt_id"],
+                    "consecutive_failures": consecutive,
+                    "session_id": session_id,
+                    "autonomy_mode": autonomy_mode,
+                },
+            )
+        if autonomy_mode == "autonomous":
+            try:
+                self.checkpoint.schedule_restore(latest["ckpt_id"])
+            except Exception:
+                logger.warning("schedule_restore failed", exc_info=True)
 
     def _wiki_context(self, message: str) -> str:
         """Query the wiki for relevant pages and return a compact context section."""
@@ -625,12 +675,14 @@ class BrainService:
             )
 
         if autonomy_mode == "autonomous" and verification.should_proceed and verification.risk_level in {"low", "medium"}:
+            ckpt_id = self._maybe_pre_snapshot(action=action)
             result = executor()
             self._emit_execution_event(
                 action=action,
                 verification=verification,
                 status="executed_autonomously",
                 approval_status=approval_status,
+                checkpoint_id=ckpt_id,
             )
             return CriticalActionExecution(
                 action=action,
@@ -639,15 +691,18 @@ class BrainService:
                 verification=verification,
                 result=result,
                 approval_status=approval_status,
+                checkpoint_id=ckpt_id,
             )
 
         if verification.should_proceed:
+            ckpt_id = self._maybe_pre_snapshot(action=action)
             result = executor()
             self._emit_execution_event(
                 action=action,
                 verification=verification,
                 status="executed",
                 approval_status=approval_status,
+                checkpoint_id=ckpt_id,
             )
             return CriticalActionExecution(
                 action=action,
@@ -656,15 +711,18 @@ class BrainService:
                 verification=verification,
                 result=result,
                 approval_status=approval_status,
+                checkpoint_id=ckpt_id,
             )
 
         if approval_override:
+            ckpt_id = self._maybe_pre_snapshot(action=action)
             result = executor()
             self._emit_execution_event(
                 action=action,
                 verification=verification,
                 status="executed_with_approval",
                 approval_status=approval_status,
+                checkpoint_id=ckpt_id,
             )
             return CriticalActionExecution(
                 action=action,
@@ -674,6 +732,7 @@ class BrainService:
                 result=result,
                 approval_status=approval_status,
                 reason="human approval override",
+                checkpoint_id=ckpt_id,
             )
 
         if verification.requires_human_approval:
@@ -709,6 +768,18 @@ class BrainService:
             approval_status=approval_status,
         )
 
+    def _maybe_pre_snapshot(self, *, action: str, session_id: str | None = None) -> str | None:
+        if self.checkpoint is None:
+            return None
+        try:
+            return self.checkpoint.create(
+                trigger_reason=f"pre-critical-action:{action[:80]}",
+                session_id=session_id,
+            )
+        except Exception:
+            logger.warning("Pre-action checkpoint failed", exc_info=True)
+            return None
+
     def _emit_execution_event(
         self,
         *,
@@ -716,6 +787,7 @@ class BrainService:
         verification: CriticalActionVerification,
         status: str,
         approval_status: str | None,
+        checkpoint_id: str | None = None,
     ) -> None:
         if self.observe is None or verification.response is None:
             return
@@ -733,6 +805,7 @@ class BrainService:
                 "requires_human_approval": verification.requires_human_approval,
                 "should_proceed": verification.should_proceed,
                 "approval_id": verification.approval_id,
+                "checkpoint_id": checkpoint_id,
             },
         )
         status_map = {
@@ -1105,3 +1178,25 @@ def _summarize_user_prompt(message: UserPrompt) -> str:
         summary_parts.append(f"[{image_count} imagenes adjuntas]")
     summary_parts.extend(text_parts)
     return "\n".join(summary_parts) if summary_parts else "[Mensaje multimodal]"
+
+
+def _count_recent_consecutive_failures(
+    memory: "MemoryStore",
+    *,
+    task_type: str | None,
+    session_id: str | None,
+    within_minutes: int = 30,
+) -> int:
+    rows = memory.recent_outcomes_within(
+        within_minutes=within_minutes,
+        task_type=task_type,
+        session_id=session_id,
+        limit=20,
+    )
+    count = 0
+    for row in rows:
+        if row["outcome"] == "failure":
+            count += 1
+        else:
+            break
+    return count
