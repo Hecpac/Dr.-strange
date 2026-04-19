@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -55,11 +56,27 @@ class ManagedChrome:
         if headless:
             cmd.append("--headless=new")
 
-        self._process = subprocess.Popen(
-            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
+        if _should_launch_headed_via_open(chrome_path, headless=headless):
+            subprocess.run(
+                [
+                    "open",
+                    "-na",
+                    "Google Chrome",
+                    "--args",
+                    *cmd[1:],
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            self._process = None
+        else:
+            self._process = subprocess.Popen(
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
         _wait_for_cdp_ready(self.port, timeout=10)
-        logger.info("ManagedChrome started on port %d (PID %d)", self.port, self._process.pid)
+        pid = self._process.pid if self._process is not None else _describe_port_owner(self.port)
+        logger.info("ManagedChrome started on port %d (PID %s)", self.port, pid)
 
     def stop(self) -> None:
         if self._process is not None:
@@ -70,15 +87,25 @@ class ManagedChrome:
                 self._process.kill()
             self._process = None
             logger.info("ManagedChrome stopped")
+        else:
+            for pid, name in _check_port_pids(self.port):
+                if any(cn in name.lower() for cn in _CHROME_NAMES):
+                    logger.info("Killing managed Chrome (PID %d) on port %d", pid, self.port)
+                    _kill_pid(pid)
 
     def ensure(self) -> None:
+        if _is_cdp_ready(self.port):
+            return
         if self._process is not None and self._process.poll() is None:
             return
         self.start()
 
     @property
     def is_running(self) -> bool:
-        return self._process is not None and self._process.poll() is None
+        return (
+            (self._process is not None and self._process.poll() is None)
+            or _is_cdp_ready(self.port)
+        )
 
 
 def _find_chrome() -> str:
@@ -90,6 +117,15 @@ def _find_chrome() -> str:
         if candidate and Path(candidate).exists():
             return candidate
     raise ChromeStartError("Chrome not found. Install Google Chrome.")
+
+
+def _should_launch_headed_via_open(chrome_path: str, *, headless: bool) -> bool:
+    return (
+        sys.platform == "darwin"
+        and not headless
+        and chrome_path == "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+        and shutil.which("open") is not None
+    )
 
 
 def _check_port_pids(port: int) -> list[tuple[int, str]]:
@@ -133,13 +169,26 @@ def _wait_for_port_free(port: int, timeout: float = 5) -> None:
 
 
 def _wait_for_cdp_ready(port: int, timeout: float = 10) -> None:
-    import urllib.request
-    url = f"http://localhost:{port}/json/version"
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        try:
-            urllib.request.urlopen(url, timeout=2)
+        if _is_cdp_ready(port):
             return
-        except Exception:
-            time.sleep(0.5)
+        time.sleep(0.5)
     raise ChromeStartError(f"Chrome CDP not responding on port {port} after {timeout}s")
+
+
+def _is_cdp_ready(port: int) -> bool:
+    import urllib.request
+    url = f"http://localhost:{port}/json/version"
+    try:
+        with urllib.request.urlopen(url, timeout=2):
+            return True
+    except Exception:
+        return False
+
+
+def _describe_port_owner(port: int) -> str:
+    owners = _check_port_pids(port)
+    if not owners:
+        return "unknown"
+    return ",".join(str(pid) for pid, _ in owners)
