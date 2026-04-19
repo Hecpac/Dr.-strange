@@ -660,5 +660,71 @@ class EdgePopulationTests(unittest.TestCase):
         self.assertEqual(self._edges_for(oid), {"tradingview", "cdp"})
 
 
+class EdgeBackfillTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.db_path = Path(tempfile.mkdtemp()) / "test.db"
+        self.store = MemoryStore(self.db_path)
+
+    def test_backfill_indexes_pre_existing_outcomes(self) -> None:
+        # Insert an outcome the "old way" — directly with tags JSON, bypassing the new edge index.
+        self.store._conn.execute(
+            "INSERT INTO task_outcomes (task_type, task_id, description, approach, "
+            "outcome, lesson, tags) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("browse", "s1:1", "d", "a", "success", "l", '["foo", "bar"]'),
+        )
+        self.store._conn.commit()
+        # Confirm no edges exist yet.
+        rows_before = self.store._conn.execute(
+            "SELECT COUNT(*) FROM outcome_entity_edges"
+        ).fetchone()
+        self.assertEqual(rows_before[0], 0)
+
+        count = self.store.backfill_outcome_entity_edges()
+        self.assertEqual(count, 1)
+
+        rows_after = self.store._conn.execute(
+            "SELECT entity_tag FROM outcome_entity_edges"
+        ).fetchall()
+        self.assertEqual({r[0] for r in rows_after}, {"foo", "bar"})
+
+    def test_backfill_invoked_on_store_init(self) -> None:
+        # Insert via direct SQL to simulate legacy rows.
+        self.store._conn.execute(
+            "INSERT INTO task_outcomes (task_type, task_id, description, approach, "
+            "outcome, lesson, tags) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("browse", "s1:1", "d", "a", "success", "l", '["legacy"]'),
+        )
+        self.store._conn.commit()
+        # Re-open the DB — the new MemoryStore should backfill on init.
+        store2 = MemoryStore(self.db_path)
+        rows = store2._conn.execute(
+            "SELECT entity_tag FROM outcome_entity_edges"
+        ).fetchall()
+        self.assertEqual({r[0] for r in rows}, {"legacy"})
+
+    def test_backfill_skips_already_indexed(self) -> None:
+        # Insert with new write path (auto-indexes).
+        self.store.store_task_outcome(
+            task_type="browse", task_id="s1:1",
+            description="d", approach="a", outcome="success", lesson="l",
+            tags=["alpha"],
+        )
+        # Backfill should report 0 — nothing left to index.
+        count = self.store.backfill_outcome_entity_edges()
+        self.assertEqual(count, 0)
+
+    def test_backfill_handles_malformed_tags_json(self) -> None:
+        # Defensive: a corrupt or non-JSON tags value must not crash backfill.
+        self.store._conn.execute(
+            "INSERT INTO task_outcomes (task_type, task_id, description, approach, "
+            "outcome, lesson, tags) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("browse", "s1:bad", "d", "a", "success", "l", 'not-json'),
+        )
+        self.store._conn.commit()
+        # Should not raise; should skip the malformed row and return 0.
+        count = self.store.backfill_outcome_entity_edges()
+        self.assertEqual(count, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

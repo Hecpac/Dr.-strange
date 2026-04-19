@@ -397,6 +397,10 @@ class MemoryStore:
             self.backfill_outcome_embeddings()
         except Exception:
             logger.debug("Outcome embedding backfill skipped", exc_info=True)
+        try:
+            self.backfill_outcome_entity_edges()
+        except Exception:
+            logger.debug("Outcome entity edges backfill skipped", exc_info=True)
 
     def store_message(self, session_id: str, role: str, content: str) -> None:
         with self._lock:
@@ -1081,6 +1085,29 @@ class MemoryStore:
                 )
             self._conn.commit()
         return len(rows)
+
+    def backfill_outcome_entity_edges(self) -> int:
+        """Populate outcome_entity_edges from task_outcomes.tags JSON for any rows
+        that have tags but no edges. Returns count of outcomes backfilled.
+        """
+        rows = self._conn.execute(
+            "SELECT id, tags FROM task_outcomes "
+            "WHERE id NOT IN (SELECT DISTINCT outcome_id FROM outcome_entity_edges) "
+            "AND tags IS NOT NULL AND tags != '[]'"
+        ).fetchall()
+        backfilled = 0
+        with self._lock:
+            for row in rows:
+                try:
+                    tags = json.loads(row["tags"])
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if not tags:
+                    continue
+                self._index_outcome_tags(row["id"], tags)
+                backfilled += 1
+            self._conn.commit()
+        return backfilled
 
     # --- Learning loop ---
 
