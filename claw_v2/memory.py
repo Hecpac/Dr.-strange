@@ -120,6 +120,58 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
+import re as _re_for_tokenize
+_TOKEN_RE = _re_for_tokenize.compile(r"[\w][\w-]*", _re_for_tokenize.IGNORECASE)
+
+
+def _tokenize(text: str) -> list[str]:
+    """Lowercase token splitter for BM25 — mirrors wiki.py:_tokenize."""
+    return [tok.lower() for tok in _TOKEN_RE.findall(text)]
+
+
+def _bm25_scores(query_tokens: list[str], corpus_tokens: list[list[str]]) -> list[float]:
+    """BM25 scores for each document. Uses rank_bm25 if available; else manual formula.
+
+    Mirrors claw_v2/wiki.py:1124-1161 verbatim — keep them in sync if you change either.
+    """
+    if not query_tokens or not corpus_tokens:
+        return [0.0 for _ in corpus_tokens]
+    try:
+        from rank_bm25 import BM25Okapi
+        return [float(score) for score in BM25Okapi(corpus_tokens).get_scores(query_tokens)]
+    except Exception:
+        pass
+
+    doc_count = len(corpus_tokens)
+    avg_len = sum(len(doc) for doc in corpus_tokens) / doc_count if doc_count else 0.0
+    doc_freq: dict[str, int] = {}
+    for doc in corpus_tokens:
+        for token in set(doc):
+            doc_freq[token] = doc_freq.get(token, 0) + 1
+
+    k1 = 1.5
+    b = 0.75
+    scores: list[float] = []
+    for doc in corpus_tokens:
+        if not doc:
+            scores.append(0.0)
+            continue
+        term_counts: dict[str, int] = {}
+        for token in doc:
+            term_counts[token] = term_counts.get(token, 0) + 1
+        score = 0.0
+        for token in query_tokens:
+            freq = term_counts.get(token, 0)
+            if freq == 0:
+                continue
+            df = doc_freq.get(token, 0)
+            idf = math.log(1 + (doc_count - df + 0.5) / (df + 0.5))
+            denom = freq + k1 * (1 - b + b * (len(doc) / (avg_len or 1.0)))
+            score += idf * ((freq * (k1 + 1)) / denom)
+        scores.append(score)
+    return scores
+
+
 _ST_MODEL = None
 _ST_LOCK = threading.Lock()
 
