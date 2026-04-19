@@ -342,19 +342,65 @@ class BrainService:
                     "had_error": bool(error_snippet),
                 },
             )
-        if self.learning is None:
+        if self.learning is not None:
+            try:
+                self.learning.record_cycle_outcome(
+                    session_id=session_id,
+                    task_type=task_type,
+                    goal=goal,
+                    action_summary=action_summary,
+                    verification_status=verification_status,
+                    error_snippet=error_snippet,
+                )
+            except Exception:
+                logger.warning("Auto post-mortem recording failed", exc_info=True)
+
+        # Auto-rollback decision block (CP9)
+        if self.checkpoint is None:
             return
         try:
-            self.learning.record_cycle_outcome(
-                session_id=session_id,
+            consecutive = _count_recent_consecutive_failures(
+                self.memory,
                 task_type=task_type,
-                goal=goal,
-                action_summary=action_summary,
-                verification_status=verification_status,
-                error_snippet=error_snippet,
+                session_id=session_id,
+                within_minutes=30,
             )
         except Exception:
-            logger.warning("Auto post-mortem recording failed", exc_info=True)
+            logger.debug("Failure count probe failed", exc_info=True)
+            return
+        if consecutive < 3:
+            return
+        latest = self.checkpoint.latest()
+        autonomy_mode = (
+            self.memory.get_session_state(session_id).get("autonomy_mode", "assisted")
+            if session_id else "assisted"
+        )
+        if latest is None:
+            if self.observe is not None:
+                self.observe.emit(
+                    "auto_rollback_unavailable",
+                    payload={
+                        "session_id": session_id,
+                        "consecutive_failures": consecutive,
+                        "autonomy_mode": autonomy_mode,
+                    },
+                )
+            return
+        if self.observe is not None:
+            self.observe.emit(
+                "auto_rollback_proposed",
+                payload={
+                    "ckpt_id": latest["ckpt_id"],
+                    "consecutive_failures": consecutive,
+                    "session_id": session_id,
+                    "autonomy_mode": autonomy_mode,
+                },
+            )
+        if autonomy_mode == "autonomous":
+            try:
+                self.checkpoint.schedule_restore(latest["ckpt_id"])
+            except Exception:
+                logger.warning("schedule_restore failed", exc_info=True)
 
     def _wiki_context(self, message: str) -> str:
         """Query the wiki for relevant pages and return a compact context section."""
@@ -1132,3 +1178,25 @@ def _summarize_user_prompt(message: UserPrompt) -> str:
         summary_parts.append(f"[{image_count} imagenes adjuntas]")
     summary_parts.extend(text_parts)
     return "\n".join(summary_parts) if summary_parts else "[Mensaje multimodal]"
+
+
+def _count_recent_consecutive_failures(
+    memory: "MemoryStore",
+    *,
+    task_type: str | None,
+    session_id: str | None,
+    within_minutes: int = 30,
+) -> int:
+    rows = memory.recent_outcomes_within(
+        within_minutes=within_minutes,
+        task_type=task_type,
+        session_id=session_id,
+        limit=20,
+    )
+    count = 0
+    for row in rows:
+        if row["outcome"] == "failure":
+            count += 1
+        else:
+            break
+    return count

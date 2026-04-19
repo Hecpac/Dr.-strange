@@ -633,5 +633,156 @@ class PreCriticalActionCheckpointTests(unittest.TestCase):
         self.assertIsNone(result.checkpoint_id)
 
 
+class ConsecutiveFailuresTriggerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from claw_v2.checkpoint import CheckpointService
+        from claw_v2.learning import LearningLoop
+        tmp = Path(tempfile.mkdtemp())
+        self.memory = MemoryStore(tmp / "claw.db")
+        self.observe = ObserveStream(tmp / "obs.db")
+        self.learning = LearningLoop(memory=self.memory)
+        self.checkpoint = CheckpointService(
+            memory=self.memory, snapshots_dir=tmp / "snapshots",
+        )
+        self.memory.update_session_state(
+            "sess-X", autonomy_mode="autonomous", mode="coding",
+        )
+        self.seed_ckpt_id = self.checkpoint.create(trigger_reason="seed")
+
+    def _brain(self) -> "BrainService":
+        from claw_v2.brain import BrainService
+        return BrainService(
+            router=MagicMock(),
+            memory=self.memory,
+            system_prompt="You are Claw.",
+            learning=self.learning,
+            observe=self.observe,
+            checkpoint=self.checkpoint,
+        )
+
+    def _push_failure(self, brain, i: int) -> None:
+        brain._emit_verification_outcome(
+            session_id="sess-X", task_type="self_heal",
+            goal=f"goal-{i}", action_summary=f"action-{i}",
+            verification_status="failed", error_snippet="boom",
+        )
+
+    def test_three_consecutive_failures_trigger_autonomous_rollback(self) -> None:
+        brain = self._brain()
+        for i in range(3):
+            self._push_failure(brain, i)
+        events = self.observe.recent_events(limit=20)
+        kinds = [e["event_type"] for e in events]
+        self.assertIn("auto_rollback_proposed", kinds)
+        row = self.memory._conn.execute(
+            "SELECT pending_restore FROM checkpoints WHERE ckpt_id = ?",
+            (self.seed_ckpt_id,),
+        ).fetchone()
+        self.assertEqual(row["pending_restore"], 1)
+
+
+class AssistedModeDoesNotAutoRestoreTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from claw_v2.checkpoint import CheckpointService
+        from claw_v2.learning import LearningLoop
+        tmp = Path(tempfile.mkdtemp())
+        self.memory = MemoryStore(tmp / "claw.db")
+        self.observe = ObserveStream(tmp / "obs.db")
+        self.learning = LearningLoop(memory=self.memory)
+        self.checkpoint = CheckpointService(
+            memory=self.memory, snapshots_dir=tmp / "snapshots",
+        )
+        self.memory.update_session_state(
+            "sess-A", autonomy_mode="assisted", mode="coding",
+        )
+        self.seed_ckpt_id = self.checkpoint.create(trigger_reason="seed")
+
+    def test_assisted_emits_event_but_does_not_schedule(self) -> None:
+        from claw_v2.brain import BrainService
+        brain = BrainService(
+            router=MagicMock(), memory=self.memory,
+            system_prompt="p", learning=self.learning,
+            observe=self.observe, checkpoint=self.checkpoint,
+        )
+        for i in range(3):
+            brain._emit_verification_outcome(
+                session_id="sess-A", task_type="self_heal",
+                goal=f"g-{i}", action_summary="a",
+                verification_status="failed", error_snippet="x",
+            )
+        kinds = [e["event_type"] for e in self.observe.recent_events(limit=20)]
+        self.assertIn("auto_rollback_proposed", kinds)
+        row = self.memory._conn.execute(
+            "SELECT pending_restore FROM checkpoints WHERE ckpt_id = ?",
+            (self.seed_ckpt_id,),
+        ).fetchone()
+        self.assertEqual(row["pending_restore"], 0)
+
+
+class NoCheckpointAvailableTests(unittest.TestCase):
+    def test_three_failures_without_checkpoint_emit_unavailable(self) -> None:
+        from claw_v2.brain import BrainService
+        from claw_v2.checkpoint import CheckpointService
+        from claw_v2.learning import LearningLoop
+        tmp = Path(tempfile.mkdtemp())
+        memory = MemoryStore(tmp / "claw.db")
+        observe = ObserveStream(tmp / "obs.db")
+        learning = LearningLoop(memory=memory)
+        checkpoint = CheckpointService(
+            memory=memory, snapshots_dir=tmp / "snapshots",
+        )
+        memory.update_session_state("sess-Z", autonomy_mode="autonomous")
+        brain = BrainService(
+            router=MagicMock(), memory=memory, system_prompt="p",
+            learning=learning, observe=observe, checkpoint=checkpoint,
+        )
+        for i in range(3):
+            brain._emit_verification_outcome(
+                session_id="sess-Z", task_type="self_heal",
+                goal=f"g-{i}", action_summary="a",
+                verification_status="failed", error_snippet="x",
+            )
+        kinds = [e["event_type"] for e in observe.recent_events(limit=20)]
+        self.assertIn("auto_rollback_unavailable", kinds)
+        self.assertNotIn("auto_rollback_proposed", kinds)
+
+
+class OldFailuresIgnoredTests(unittest.TestCase):
+    def test_failures_older_than_window_do_not_trigger(self) -> None:
+        from claw_v2.brain import BrainService
+        from claw_v2.checkpoint import CheckpointService
+        from claw_v2.learning import LearningLoop
+        tmp = Path(tempfile.mkdtemp())
+        memory = MemoryStore(tmp / "claw.db")
+        observe = ObserveStream(tmp / "obs.db")
+        learning = LearningLoop(memory=memory)
+        checkpoint = CheckpointService(
+            memory=memory, snapshots_dir=tmp / "snapshots",
+        )
+        checkpoint.create(trigger_reason="seed")
+        memory.update_session_state("sess-Y", autonomy_mode="autonomous")
+        for i in range(3):
+            memory._conn.execute(
+                "INSERT INTO task_outcomes "
+                "(task_type, task_id, description, approach, outcome, lesson, "
+                "error_snippet, retries, created_at) "
+                "VALUES ('self_heal', 'sess-Y', 'd', 'a', 'failure', 'l', 'x', 0, "
+                "datetime('now', '-60 minutes'))"
+            )
+        memory._conn.commit()
+        brain = BrainService(
+            router=MagicMock(), memory=memory, system_prompt="p",
+            learning=learning, observe=observe, checkpoint=checkpoint,
+        )
+        brain._emit_verification_outcome(
+            session_id="sess-Y", task_type="self_heal",
+            goal="g", action_summary="a",
+            verification_status="ok", error_snippet=None,
+        )
+        kinds = [e["event_type"] for e in observe.recent_events(limit=20)]
+        self.assertNotIn("auto_rollback_proposed", kinds)
+        self.assertNotIn("auto_rollback_unavailable", kinds)
+
+
 if __name__ == "__main__":
     unittest.main()

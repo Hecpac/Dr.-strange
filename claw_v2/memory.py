@@ -1061,6 +1061,33 @@ class MemoryStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def recent_outcomes_within(
+        self,
+        *,
+        within_minutes: int,
+        task_type: str | None = None,
+        session_id: str | None = None,
+        limit: int = 20,
+    ) -> list[dict]:
+        """Outcomes in the last `within_minutes`, newest first."""
+        clauses = ["created_at >= datetime('now', ?)"]
+        params: list[object] = [f"-{int(within_minutes)} minutes"]
+        if task_type is not None:
+            clauses.append("task_type = ?")
+            params.append(task_type)
+        if session_id is not None:
+            clauses.append("task_id = ?")
+            params.append(session_id)
+        params.append(limit)
+        sql = (
+            "SELECT task_type, task_id, description, approach, outcome, lesson, "
+            "error_snippet, retries, created_at, feedback "
+            "FROM task_outcomes WHERE " + " AND ".join(clauses)
+            + " ORDER BY id DESC LIMIT ?"
+        )
+        rows = self._conn.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
+
     def search_outcomes_semantic(
         self,
         query: str,
