@@ -1,6 +1,8 @@
 """Tests for core MemoryStore operations: messages, facts, delete, build_context with history."""
 from __future__ import annotations
 
+import hashlib
+import re
 import tempfile
 import threading
 import unittest
@@ -798,9 +800,7 @@ def _strict_token_embed(text: str) -> list[float]:
     distinguishable from no-overlap. Avoids the bag-of-chars false-positives that
     _simple_embedding produces for English text.
     """
-    import hashlib
-    import re as _re
-    tokens = set(_re.findall(r"\w+", text.lower()))
+    tokens = set(re.findall(r"\w+", text.lower()))
     dim = 4096
     vec = [0.0] * dim
     for t in tokens:
