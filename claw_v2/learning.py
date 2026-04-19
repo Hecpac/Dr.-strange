@@ -8,10 +8,11 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable
 
+from claw_v2.observe import ObserveStream
+
 if TYPE_CHECKING:
     from claw_v2.llm import LLMRouter
     from claw_v2.memory import MemoryStore
-    from claw_v2.observe import ObserveStream
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,7 @@ logger = logging.getLogger(__name__)
 class LearningLoop:
     memory: MemoryStore
     router: LLMRouter | None = None
+    observe: ObserveStream | None = None
     _last_outcome_id: int | None = field(default=None, repr=False)
 
     # --- Record ---
@@ -113,6 +115,21 @@ class LearningLoop:
             )
         except Exception:
             logger.debug("Graph outcome search failed, falling back to semantic", exc_info=True)
+
+        if outcomes and self.observe is not None:
+            graph_count = sum(1 for o in outcomes if o.get("via_graph"))
+            if graph_count:
+                try:
+                    self.observe.emit(
+                        "lessons_graph_hit",
+                        payload={
+                            "graph_count": graph_count,
+                            "total": len(outcomes),
+                            "task_type": task_type or "any",
+                        },
+                    )
+                except Exception:
+                    logger.debug("Observe emit for lessons_graph_hit failed", exc_info=True)
 
         if not outcomes:
             try:
