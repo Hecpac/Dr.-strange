@@ -28,6 +28,16 @@ from claw_v2.types import LLMResponse
 
 logger = logging.getLogger(__name__)
 
+SILENCE_DIRECTIVE = (
+    "\n\n# CRITICAL OUTPUT RULE:\n"
+    "You are operating as a headless engine. DO NOT use conversational filler. "
+    "DO NOT explain your thoughts, do not say 'I will now...', 'I have found...', "
+    "or 'I am finished'.\n"
+    "EVERY SINGLE WORD of your final response to the user MUST be wrapped inside <response> tags. "
+    "Any text outside <response> tags will be discarded. "
+    "Internal reasoning must go inside <trace> tags."
+)
+
 
 class AnthropicAgentAdapter(ProviderAdapter):
     provider_name = "anthropic"
@@ -215,7 +225,9 @@ class ClaudeSDKExecutor:
             tools = {"type": "preset", "preset": "claude_code"}
             system_prompt = {"type": "preset", "preset": "claude_code"}
             if effective_system_prompt:
-                system_prompt["append"] = effective_system_prompt
+                system_prompt["append"] = f"{effective_system_prompt}{SILENCE_DIRECTIVE}"
+            else:
+                system_prompt["append"] = SILENCE_DIRECTIVE
             permission_mode = "bypassPermissions" if self.config.sdk_bypass_permissions else "default"
             can_use_tool = self._build_can_use_tool(sdk, request)
 
@@ -424,6 +436,7 @@ class ClaudeSDKExecutor:
             writable_paths=[workspace_root, Path("/private/tmp"), Path.home() / ".claw", *extra_roots],
             network_policy="allow",
             credential_scope="external",
+            capability_profile=getattr(self.config, "sandbox_capability_profile", "engineer"),
         )
 
     def _should_use_api_key_auth(self) -> bool:
