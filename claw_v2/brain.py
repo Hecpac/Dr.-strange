@@ -5,7 +5,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, TYPE_CHECKING
 
 from claw_v2.adapters.base import AdapterError, UserContentBlock, UserPrompt
 from claw_v2.approval import ApprovalManager
@@ -16,6 +16,9 @@ from claw_v2.observe import ObserveStream
 from claw_v2.playbook_loader import PlaybookLoader
 from claw_v2.tracing import attach_trace, new_trace_context, child_trace_context
 from claw_v2.types import CriticalActionExecution, CriticalActionVerification, LLMResponse
+
+if TYPE_CHECKING:
+    from claw_v2.checkpoint import CheckpointService
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +72,7 @@ class BrainService:
     approvals: ApprovalManager | None = None
     observe: ObserveStream | None = None
     learning: LearningLoop | None = None
+    checkpoint: "CheckpointService | None" = None
     wiki: object | None = None  # WikiService, injected after init
     playbooks: PlaybookLoader = None  # type: ignore[assignment]
 

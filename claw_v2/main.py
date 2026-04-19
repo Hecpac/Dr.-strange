@@ -24,6 +24,7 @@ from claw_v2.approval import ApprovalManager
 from claw_v2.bot import BotService
 from claw_v2.brain import BrainService
 from claw_v2.browser import DevBrowserService
+from claw_v2.checkpoint import CheckpointService
 from claw_v2.buddy import BuddyService
 from claw_v2.bus import AgentBus
 from claw_v2.computer import BrowserUseService, CodexComputerBackend, ComputerUseService
@@ -379,6 +380,10 @@ def _setup_llm_stack(
         openai_tool_schemas=openai_tool_schemas,
     )
     learning = LearningLoop(memory=memory, router=router)
+    checkpoint = CheckpointService(
+        memory=memory,
+        snapshots_dir=config.db_path.parent / "snapshots",
+    )
     brain = BrainService(
         router=router,
         memory=memory,
@@ -386,6 +391,7 @@ def _setup_llm_stack(
         approvals=approvals,
         observe=observe,
         learning=learning,
+        checkpoint=checkpoint,
     )
     return router, learning, brain
 
