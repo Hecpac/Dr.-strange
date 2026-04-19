@@ -1278,9 +1278,11 @@ class MemoryStore:
     def _outcome_graph_neighbors(self, seed_ids: list[int]) -> list[int]:
         """Return outcome ids that share at least one entity tag with any seed.
 
-        Excludes the seed ids themselves. Single-hop only (depth=1). Mirrors the
-        pattern from claw_v2/wiki.py:_graph_neighbors but operates over a SQL edge
-        table instead of an in-memory adjacency dict.
+        Excludes the seed ids themselves. Single-hop only (depth=1) — the entity-tag
+        graph for outcomes is denser than the wiki's link graph, so a second hop
+        saturates recall noise without adding signal. Mirrors the pattern from
+        claw_v2/wiki.py:_graph_neighbors but operates over a SQL edge table instead
+        of an in-memory adjacency dict.
         """
         if not seed_ids:
             return []
@@ -1292,6 +1294,7 @@ class MemoryStore:
             JOIN outcome_entity_edges e2 ON e1.entity_tag = e2.entity_tag
             WHERE e1.outcome_id IN ({placeholders})
               AND e2.outcome_id NOT IN ({placeholders})
+            ORDER BY e2.outcome_id
             """,
             (*seed_ids, *seed_ids),
         ).fetchall()
