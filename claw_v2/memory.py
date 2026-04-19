@@ -1199,6 +1199,7 @@ class MemoryStore:
         embedder = embed_fn or _simple_embedding
         query_vec = embedder(query)
         query_dim = len(query_vec)
+        query_tokens = _tokenize(query)
         base_sql = (
             "SELECT o.id, o.task_type, o.task_id, o.description, o.approach, "
             "o.outcome, o.lesson, o.error_snippet, o.retries, o.created_at, "
@@ -1209,22 +1210,33 @@ class MemoryStore:
             rows = self._conn.execute(base_sql + " WHERE o.task_type = ?", (task_type,)).fetchall()
         else:
             rows = self._conn.execute(base_sql).fetchall()
-        scored: list[dict] = []
+        if not rows:
+            return []
+
+        candidates: list[dict] = []
+        corpus_tokens: list[list[str]] = []
         stale: list[tuple[int, str]] = []
         for row in rows:
             stored_vec = json.loads(row["embedding"])
+            text = f"{row['description']} | {row['approach']} | {row['lesson']}"
+            if row["error_snippet"]:
+                text += f" | {row['error_snippet']}"
             if len(stored_vec) != query_dim:
-                text = f"{row['description']} | {row['approach']} | {row['lesson']}"
-                if row["error_snippet"]:
-                    text += f" | {row['error_snippet']}"
                 stored_vec = embedder(text)
                 stale.append((row["id"], text))
             sim = _cosine_similarity(query_vec, stored_vec)
-            if sim >= min_similarity:
-                item = dict(row)
-                item.pop("embedding", None)
-                item["similarity"] = round(sim, 4)
-                scored.append(item)
+            corpus_tokens.append(_tokenize(text))
+            item = dict(row)
+            item.pop("embedding", None)
+            item["similarity_raw"] = sim
+            candidates.append(item)
+
+        scored = self._hybrid_rank(
+            query_vec=query_vec, query_tokens=query_tokens,
+            candidates=candidates, corpus_tokens=corpus_tokens,
+            min_similarity=min_similarity,
+        )
+
         if stale:
             with self._lock:
                 for oid, text in stale:
@@ -1233,7 +1245,7 @@ class MemoryStore:
                         (json.dumps(embedder(text)), oid),
                     )
                 self._conn.commit()
-        scored.sort(key=lambda x: x["similarity"], reverse=True)
+
         return scored[:limit]
 
     # --- Learning loop: feedback & retrieval helpers ---
