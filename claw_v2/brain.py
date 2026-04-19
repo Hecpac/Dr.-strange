@@ -271,6 +271,18 @@ class BrainService:
         lessons = ""
         if self.learning:
             lessons = self.learning.retrieve_lessons(stored_user_message, task_type=task_type)
+            if lessons and self.observe is not None:
+                first_tag_end = lessons.find("</learned_lesson>")
+                preview = lessons[:first_tag_end + len("</learned_lesson>")] if first_tag_end >= 0 else lessons[:400]
+                self.observe.emit(
+                    "experience_replay_retrieved",
+                    payload={
+                        "session_id": session_id,
+                        "task_type": task_type,
+                        "lesson_count": lessons.count("<learned_lesson"),
+                        "preview": preview[:400],
+                    },
+                )
         # Enrich with wiki context when available
         wiki_context = self._wiki_context(stored_user_message)
         if wiki_context:
