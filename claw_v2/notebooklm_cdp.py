@@ -283,3 +283,85 @@ def deep_research(
         except Exception:
             pass
         pw.stop()
+
+
+# Map of artifact kind → UI label that triggers generation. Only podcast is
+# documented in feedback_notebooklm_podcast.md; video/infographic UI labels
+# would need empirical discovery before implementation.
+_ARTIFACT_BUTTON_TEXT = {
+    "podcast": "Resumen en audio",
+}
+
+
+def generate_artifact(
+    notebook_id: str,
+    kind: str,
+    *,
+    cdp_url: str = DEFAULT_CDP_URL,
+    poll_timeout: float = 1200.0,
+) -> None:
+    """Trigger NotebookLM artifact generation (podcast/video/infographic) via CDP.
+
+    Currently only `kind="podcast"` is supported via CDP — the UI labels for
+    video and infographic generation are not documented in the workflow memory.
+    Other kinds raise CdpNotebookLMError with a clear message so the caller can
+    surface a degradation notice instead of crashing.
+
+    Steps for podcast:
+      1. Navigate to the notebook page.
+      2. Click "Resumen en audio".
+      3. Wait until the "Generando" indicator disappears (5-15 min for large
+         source sets).
+    """
+    kind = (kind or "").strip().lower()
+    if kind not in _ARTIFACT_BUTTON_TEXT:
+        raise CdpNotebookLMError(
+            f"CDP NotebookLM only supports podcast generation today; '{kind}' is not implemented. "
+            "Use the NotebookLM UI directly for video/infographic."
+        )
+
+    pw, browser = _connect(cdp_url)
+    try:
+        page = _focus_notebook(browser, notebook_id)
+
+        try:
+            page.locator(f"text={_ARTIFACT_BUTTON_TEXT[kind]}").first.click(timeout=15_000)
+        except Exception as exc:
+            raise CdpNotebookLMError(
+                f"Could not find '{_ARTIFACT_BUTTON_TEXT[kind]}' button: {exc}"
+            ) from exc
+
+        # Poll: wait for "Generando" to appear (it should within seconds), then
+        # wait for it to disappear (signals completion).
+        deadline_start = time.monotonic() + 30
+        generating_seen = False
+        while time.monotonic() < deadline_start:
+            try:
+                if page.locator("text=Generando").first.is_visible(timeout=2_000):
+                    generating_seen = True
+                    break
+            except Exception:
+                pass
+            time.sleep(2)
+        if not generating_seen:
+            # Some artifact types finish very quickly; treat absence of the
+            # spinner as immediate success.
+            return
+
+        deadline_end = time.monotonic() + poll_timeout
+        while time.monotonic() < deadline_end:
+            try:
+                if not page.locator("text=Generando").first.is_visible(timeout=2_000):
+                    return
+            except Exception:
+                return
+            time.sleep(15)
+        raise CdpNotebookLMError(
+            f"Artifact '{kind}' did not complete within {poll_timeout:.0f}s"
+        )
+    finally:
+        try:
+            browser.close()
+        except Exception:
+            pass
+        pw.stop()

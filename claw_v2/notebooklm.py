@@ -40,6 +40,7 @@ class NotebookLMService:
         # the real CDP driver in claw_v2.notebooklm_cdp.
         self._cdp_create_notebook_fn: Callable[[str], dict] | None = None
         self._cdp_research_fn: Callable[[str, str], int] | None = None
+        self._cdp_artifact_fn: Callable[[str, str], None] | None = None
 
     _ARTIFACT_LABELS = {
         "podcast": "podcast",
@@ -254,16 +255,25 @@ class NotebookLMService:
         normalized_kind = kind.strip().lower()
         if normalized_kind not in self._ARTIFACT_LABELS:
             raise ValueError(f"Tipo de artefacto no soportado: {kind}")
-        full_id = self._resolve_notebook_id(notebook_id)
+        cdp_mode = self._client_factory is None
+        if cdp_mode:
+            full_id = notebook_id
+            title = notebook_id[:8]
+        else:
+            full_id = self._resolve_notebook_id(notebook_id)
+            self._ensure_artifact_supported(normalized_kind)
+            title = self._get_notebook_title(full_id)
         if full_id in self._running and self._running[full_id].is_alive():
             return f"Ya hay una operación en curso para este notebook ({full_id[:8]}...)."
-        self._ensure_artifact_supported(normalized_kind)
-        title = self._get_notebook_title(full_id)
         self._emit(f"nlm_{normalized_kind}_started", notebook_id=full_id)
 
         def _worker():
             try:
-                self._run_async(self._async_generate_artifact(full_id, normalized_kind))
+                if cdp_mode:
+                    cdp_fn = self._cdp_artifact_fn or notebooklm_cdp.generate_artifact
+                    cdp_fn(full_id, normalized_kind)
+                else:
+                    self._run_async(self._async_generate_artifact(full_id, normalized_kind))
                 self._emit(f"nlm_{normalized_kind}_completed", notebook_id=full_id)
                 self._notify(
                     f"{self._artifact_name(normalized_kind)} generado para notebook {title}\n"
