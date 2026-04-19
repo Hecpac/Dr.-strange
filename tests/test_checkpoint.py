@@ -104,3 +104,70 @@ class CheckpointCreateTests(unittest.TestCase):
             "SELECT COUNT(*) AS c FROM checkpoints"
         ).fetchone()["c"]
         self.assertEqual(count, 0)
+
+
+class CheckpointRotationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        tmp = Path(tempfile.mkdtemp())
+        self.store = MemoryStore(tmp / "test.db")
+        self.snapshots_dir = tmp / "snapshots"
+        self.service = CheckpointService(
+            memory=self.store, snapshots_dir=self.snapshots_dir, ring_size=10,
+        )
+
+    def test_ring_keeps_exactly_N_snapshots(self) -> None:
+        created: list[str] = []
+        for i in range(11):
+            created.append(self.service.create(trigger_reason=f"ckpt-{i}"))
+        files = sorted(self.snapshots_dir.glob("ckpt_*.db"))
+        self.assertEqual(len(files), 10)
+        count = self.store._conn.execute(
+            "SELECT COUNT(*) AS c FROM checkpoints"
+        ).fetchone()["c"]
+        self.assertEqual(count, 10)
+
+    def test_oldest_snapshot_is_purged_first(self) -> None:
+        created: list[str] = []
+        for i in range(11):
+            created.append(self.service.create(trigger_reason=f"ckpt-{i}"))
+        first_ckpt_id = created[0]
+        row = self.store._conn.execute(
+            "SELECT ckpt_id FROM checkpoints WHERE ckpt_id = ?",
+            (first_ckpt_id,),
+        ).fetchone()
+        self.assertIsNone(row)
+        first_path = self.snapshots_dir / f"{first_ckpt_id}.db"
+        self.assertFalse(first_path.exists())
+        for ckpt_id in created[1:]:
+            self.assertTrue((self.snapshots_dir / f"{ckpt_id}.db").exists())
+
+    def test_custom_ring_size_respected(self) -> None:
+        svc = CheckpointService(
+            memory=self.store,
+            snapshots_dir=Path(tempfile.mkdtemp()),
+            ring_size=3,
+        )
+        for i in range(5):
+            svc.create(trigger_reason=f"t-{i}")
+        count = self.store._conn.execute(
+            "SELECT COUNT(*) AS c FROM checkpoints"
+        ).fetchone()["c"]
+        self.assertEqual(count, 3)
+
+    def test_rotation_failure_does_not_rollback_new_snapshot(self) -> None:
+        # Prime with 10 snapshots.
+        for i in range(10):
+            self.service.create(trigger_reason=f"base-{i}")
+        # Force Path.unlink to fail on the next rotation attempt (the oldest file).
+        original_unlink = Path.unlink
+        def fail_on_unlink(self, *args, **kwargs):
+            if self.name.startswith("ckpt_") and self.suffix == ".db":
+                raise OSError("simulated rotation failure")
+            return original_unlink(self, *args, **kwargs)
+        with patch.object(Path, "unlink", fail_on_unlink):
+            new_ckpt = self.service.create(trigger_reason="new")
+        # The new ckpt must still exist in the DB (rotation failure is non-fatal).
+        row = self.store._conn.execute(
+            "SELECT ckpt_id FROM checkpoints WHERE ckpt_id = ?", (new_ckpt,),
+        ).fetchone()
+        self.assertIsNotNone(row)

@@ -52,6 +52,34 @@ class CheckpointService:
                     (ckpt_id, trigger_reason, session_id, consecutive_failures, str(file_path)),
                 )
                 self.memory._conn.commit()
+                try:
+                    rows_to_purge = self.memory._conn.execute(
+                        "SELECT ckpt_id, file_path FROM checkpoints "
+                        "ORDER BY created_at ASC, id ASC"
+                    ).fetchall()
+                    excess = len(rows_to_purge) - self.ring_size
+                    if excess > 0:
+                        for row in rows_to_purge[:excess]:
+                            try:
+                                Path(row["file_path"]).unlink(missing_ok=True)
+                            except OSError:
+                                logger.warning(
+                                    "Checkpoint rotation: failed to unlink %s",
+                                    row["file_path"], exc_info=True,
+                                )
+                            try:
+                                self.memory._conn.execute(
+                                    "DELETE FROM checkpoints WHERE ckpt_id = ?",
+                                    (row["ckpt_id"],),
+                                )
+                            except sqlite3.Error:
+                                logger.warning(
+                                    "Checkpoint rotation: failed to delete row %s",
+                                    row["ckpt_id"], exc_info=True,
+                                )
+                        self.memory._conn.commit()
+                except Exception:
+                    logger.warning("Checkpoint rotation encountered an error", exc_info=True)
         except Exception:
             if target_conn is not None:
                 try:
