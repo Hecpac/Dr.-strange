@@ -270,6 +270,18 @@ class BrainService:
         lessons = ""
         if self.learning:
             lessons = self.learning.retrieve_lessons(stored_user_message, task_type=task_type)
+            if lessons and self.observe is not None:
+                first_tag_end = lessons.find("</learned_lesson>")
+                preview = lessons[:first_tag_end + len("</learned_lesson>")] if first_tag_end >= 0 else lessons[:400]
+                self.observe.emit(
+                    "experience_replay_retrieved",
+                    payload={
+                        "session_id": session_id,
+                        "task_type": task_type,
+                        "lesson_count": lessons.count("<learned_lesson"),
+                        "preview": preview[:400],
+                    },
+                )
         # Enrich with wiki context when available
         wiki_context = self._wiki_context(stored_user_message)
         if wiki_context:
@@ -304,6 +316,41 @@ class BrainService:
         blocks.append({"type": "text", "text": marker_text})
         blocks.extend(message)
         return blocks
+
+    def _emit_verification_outcome(
+        self,
+        *,
+        session_id: str,
+        task_type: str,
+        goal: str,
+        action_summary: str,
+        verification_status: str,
+        error_snippet: str | None,
+    ) -> None:
+        """Called at the end of a verification cycle. Emits observe + records a post-mortem."""
+        if self.observe is not None:
+            self.observe.emit(
+                "cycle_verification_complete",
+                payload={
+                    "session_id": session_id,
+                    "task_type": task_type,
+                    "verification_status": verification_status,
+                    "had_error": bool(error_snippet),
+                },
+            )
+        if self.learning is None:
+            return
+        try:
+            self.learning.record_cycle_outcome(
+                session_id=session_id,
+                task_type=task_type,
+                goal=goal,
+                action_summary=action_summary,
+                verification_status=verification_status,
+                error_snippet=error_snippet,
+            )
+        except Exception:
+            logger.warning("Auto post-mortem recording failed", exc_info=True)
 
     def _wiki_context(self, message: str) -> str:
         """Query the wiki for relevant pages and return a compact context section."""
@@ -687,6 +734,24 @@ class BrainService:
                 "should_proceed": verification.should_proceed,
                 "approval_id": verification.approval_id,
             },
+        )
+        status_map = {
+            "executed": "ok",
+            "executed_autonomously": "ok",
+            "executed_with_approval": "ok",
+            "blocked": "failed",
+            "aborted_by_pre_check": "failed",
+            "awaiting_approval": "pending",
+        }
+        mapped_status = status_map.get(status, status)
+        error_snippet = verification.summary if mapped_status == "failed" else None
+        self._emit_verification_outcome(
+            session_id="brain.critical_action",
+            task_type="critical_action",
+            goal=action,
+            action_summary=(verification.summary or verification.recommendation or action),
+            verification_status=mapped_status,
+            error_snippet=error_snippet,
         )
 
 
