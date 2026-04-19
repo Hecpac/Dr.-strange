@@ -453,3 +453,69 @@ class RetrieveLessonsViaGraphTests(unittest.TestCase):
 
         self.assertIn("api key required", rendered)
         self.assertNotIn('via_graph="true"', rendered)
+
+
+class RetrieveLessonsObserveSignalTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from claw_v2.observe import ObserveStream
+        self.store = MemoryStore(Path(tempfile.mkdtemp()) / "test.db")
+        self.observe = ObserveStream(Path(tempfile.mkdtemp()) / "observe.db")
+        self.loop = LearningLoop(memory=self.store, observe=self.observe)
+
+    def _store(self, **kw):
+        return self.store.store_task_outcome_with_embedding(
+            embed_fn=strict_token_embed, **kw,
+        )
+
+    def test_emits_event_when_graph_contributes(self) -> None:
+        # Direct hit on "firecrawl" with shared tag.
+        self._store(
+            task_type="browse", task_id="s1:1",
+            description="firecrawl call", approach="a",
+            outcome="failure", lesson="key required", tags=["firecrawl"],
+        )
+        # Graph-only neighbor: shares tag "firecrawl" but mentions nothing about it.
+        self._store(
+            task_type="browse", task_id="s1:2",
+            description="another thing entirely", approach="a",
+            outcome="failure", lesson="set timeout", tags=["firecrawl"],
+        )
+        self.loop.retrieve_lessons(
+            "firecrawl", embed_fn=strict_token_embed,
+        )
+        events = self.observe.recent_events(limit=10)
+        kinds = [e["event_type"] for e in events]
+        self.assertIn("lessons_graph_hit", kinds)
+
+    def test_no_event_when_only_seeds(self) -> None:
+        # Single outcome with unique tag → seed only, no graph contribution.
+        self._store(
+            task_type="browse", task_id="s1:1",
+            description="solo", approach="a",
+            outcome="success", lesson="ok",
+        )
+        self.loop.retrieve_lessons(
+            "solo", embed_fn=strict_token_embed,
+        )
+        events = self.observe.recent_events(limit=10)
+        kinds = [e["event_type"] for e in events]
+        self.assertNotIn("lessons_graph_hit", kinds)
+
+    def test_no_event_when_observe_not_provided(self) -> None:
+        # Backward compat: LearningLoop without observe must not crash and must not emit.
+        loop_without_observe = LearningLoop(memory=self.store)
+        self._store(
+            task_type="browse", task_id="s1:1",
+            description="firecrawl", approach="a",
+            outcome="failure", lesson="key required", tags=["firecrawl"],
+        )
+        self._store(
+            task_type="browse", task_id="s1:2",
+            description="other", approach="a",
+            outcome="failure", lesson="timeout", tags=["firecrawl"],
+        )
+        # Should not crash; nothing to assert about observe since there isn't one.
+        rendered = loop_without_observe.retrieve_lessons(
+            "firecrawl", embed_fn=strict_token_embed,
+        )
+        self.assertIn("key required", rendered)
