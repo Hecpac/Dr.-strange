@@ -468,5 +468,35 @@ class BM25HelperTests(unittest.TestCase):
         self.assertGreater(scores[0], 0.0)
 
 
+class HybridFactSearchTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.store = MemoryStore(Path(tempfile.mkdtemp()) / "test.db")
+
+    def test_keyword_overlap_boosts_score(self) -> None:
+        # Both facts get an embedding, but the second has the exact query token in its key.
+        self.store.store_fact_with_embedding(
+            "general.preference", "user likes dark interfaces and minimal UI",
+            source="profile", confidence=0.5,
+        )
+        self.store.store_fact_with_embedding(
+            "tradingview.session", "TradingView session id renews every 24h",
+            source="profile", confidence=0.5,
+        )
+        results = self.store.search_facts_semantic("tradingview", limit=2)
+        self.assertGreaterEqual(len(results), 1)
+        # The exact-match fact should rank first, even if the embedding for the other
+        # vague fact happens to be close.
+        self.assertEqual(results[0]["key"], "tradingview.session")
+
+    def test_pure_semantic_match_still_works(self) -> None:
+        self.store.store_fact_with_embedding(
+            "weather.note", "It rained heavily yesterday",
+            source="user", confidence=0.5,
+        )
+        results = self.store.search_facts_semantic("storm", limit=1)
+        # Semantic similarity should still catch this even with no keyword overlap.
+        self.assertEqual(len(results), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
