@@ -142,5 +142,24 @@ class SessionStateLockTests(unittest.TestCase):
         self.assertTrue(state["current_goal"].startswith("goal-"))
 
 
+class OutcomeEmbeddingsSchemaTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.store = MemoryStore(Path(tempfile.mkdtemp()) / "test.db")
+
+    def test_outcome_embeddings_table_exists(self) -> None:
+        row = self.store._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='outcome_embeddings'"
+        ).fetchone()
+        self.assertIsNotNone(row)
+
+    def test_outcome_embeddings_columns(self) -> None:
+        cols = {r[1] for r in self.store._conn.execute("PRAGMA table_info(outcome_embeddings)").fetchall()}
+        self.assertEqual(cols, {"outcome_id", "embedding"})
+
+    def test_migration_is_idempotent(self) -> None:
+        MemoryStore(self.store.db_path)
+        MemoryStore(self.store.db_path)
+
+
 if __name__ == "__main__":
     unittest.main()
