@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 from claw_v2.brain import (
     BrainService,
+    _brain_system_prompt,
     _first_json_object,
     _normalize_recommendation,
     _normalize_risk_level,
@@ -129,7 +130,7 @@ class HandleMessageTests(unittest.TestCase):
 
     def test_stores_user_and_assistant_messages(self) -> None:
         self.router.ask.return_value = LLMResponse(
-            content="Hola Hector",
+            content="<response>Hola Hector</response>",
             lane="brain",
             provider="anthropic",
             model="claude-opus-4-7",
@@ -143,16 +144,22 @@ class HandleMessageTests(unittest.TestCase):
 
     def test_passes_system_prompt_to_router(self) -> None:
         self.router.ask.return_value = LLMResponse(
-            content="ok", lane="brain", provider="anthropic", model="test",
+            content="<response>ok</response>", lane="brain", provider="anthropic", model="test",
         )
         self.brain.handle_message("s1", "test")
         call_kwargs = self.router.ask.call_args
         self.assertIn("You are Claw.", call_kwargs.kwargs["system_prompt"])
         self.assertIn("<response>", call_kwargs.kwargs["system_prompt"])
+        self.assertIn("Self-healing loop", call_kwargs.kwargs["system_prompt"])
+
+    def test_brain_system_prompt_includes_self_healing_loop(self) -> None:
+        prompt = _brain_system_prompt("You are Claw.")
+        self.assertIn("Analyze: identify the likely cause", prompt)
+        self.assertIn("Only ask for help after 3 distinct strategies", prompt)
 
     def test_returns_llm_response(self) -> None:
         expected = LLMResponse(
-            content="response", lane="brain", provider="anthropic", model="test",
+            content="<response>response</response>", lane="brain", provider="anthropic", model="test",
         )
         self.router.ask.return_value = expected
         result = self.brain.handle_message("s1", "input")
@@ -160,13 +167,28 @@ class HandleMessageTests(unittest.TestCase):
 
     def test_links_provider_session_when_returned(self) -> None:
         resp = LLMResponse(
-            content="hi", lane="brain", provider="anthropic", model="test",
+            content="<response>hi</response>", lane="brain", provider="anthropic", model="test",
         )
         resp.artifacts["session_id"] = "sdk-abc-123"
         self.router.ask.return_value = resp
         self.brain.handle_message("s1", "test")
         session = self.memory.get_provider_session("s1", "anthropic")
         self.assertEqual(session, "sdk-abc-123")
+
+    def test_discards_unwrapped_sdk_output(self) -> None:
+        self.router.ask.return_value = LLMResponse(
+            content="I checked the files and fixed it.",
+            lane="brain",
+            provider="anthropic",
+            model="test",
+        )
+
+        result = self.brain.handle_message("s1", "hazlo")
+
+        self.assertEqual(result.content, "")
+        self.assertIn("Unwrapped SDK output", result.artifacts["reasoning_trace"])
+        msgs = self.memory.get_recent_messages("s1")
+        self.assertEqual(msgs[-1]["content"], "")
 
     def test_extracts_reasoning_trace_and_stores_visible_response(self) -> None:
         observe = ObserveStream(self.db_path)
@@ -252,7 +274,7 @@ class HandleStructuredTests(unittest.TestCase):
 
     def test_parses_clean_json(self) -> None:
         self.router.ask.return_value = LLMResponse(
-            content='{"name": "test", "value": 42}',
+            content='<response>{"name": "test", "value": 42}</response>',
             lane="brain", provider="anthropic", model="test",
         )
         result = self.brain.handle_structured("s1", "extract data", schema={
@@ -275,7 +297,7 @@ class HandleStructuredTests(unittest.TestCase):
     def test_retries_on_bad_json(self) -> None:
         self.router.ask.side_effect = [
             LLMResponse(content="not json at all", lane="brain", provider="anthropic", model="test"),
-            LLMResponse(content='{"fixed": true}', lane="brain", provider="anthropic", model="test"),
+            LLMResponse(content='<response>{"fixed": true}</response>', lane="brain", provider="anthropic", model="test"),
         ]
         result = self.brain.handle_structured("s1", "retry test", schema={
             "properties": {"fixed": {"type": "boolean"}},
@@ -292,7 +314,7 @@ class HandleStructuredTests(unittest.TestCase):
 
     def test_store_history_false_deletes_messages(self) -> None:
         self.router.ask.return_value = LLMResponse(
-            content='{"ok": true}', lane="brain", provider="anthropic", model="test",
+            content='<response>{"ok": true}</response>', lane="brain", provider="anthropic", model="test",
         )
         self.brain.handle_structured("s1", "ephemeral", schema={}, store_history=False)
         msgs = self.memory.get_recent_messages("s1")

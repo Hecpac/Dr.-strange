@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 from urllib.request import Request, urlopen
@@ -10,7 +11,8 @@ from urllib.request import Request, urlopen
 from claw_v2.memory import MemoryStore
 from claw_v2.network_proxy import DomainAllowlistEnforcer
 from claw_v2.sandbox import SandboxPolicy, sandbox_hook
-from claw_v2.types import AgentClass
+from claw_v2.sanitizer import extract_structured, sanitize
+from claw_v2.types import AgentClass, SanitizedContent
 
 if TYPE_CHECKING:
     from claw_v2.a2a import A2AService
@@ -64,6 +66,85 @@ class ToolDefinition:
     mutates_state: bool = False
     requires_network: bool = False
     parameter_schema: dict | None = None
+    ingests_external_content: bool = False
+    sanitize_fields: tuple[str, ...] = ()
+
+
+_CODE_FENCE_RE = re.compile(r"```[\s\S]*?```")
+_INLINE_CODE_RE = re.compile(r"`[^`]*`")
+
+
+def _strip_code_blocks(text: str) -> str:
+    without_fences = _CODE_FENCE_RE.sub(" ", text)
+    return _INLINE_CODE_RE.sub(" ", without_fences)
+
+
+def _collect_strings(value: object) -> list[str]:
+    """Recursively extract non-empty strings from nested lists/dicts."""
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, dict):
+        parts: list[str] = []
+        for v in value.values():
+            parts.extend(_collect_strings(v))
+        return parts
+    if isinstance(value, list):
+        parts = []
+        for item in value:
+            parts.extend(_collect_strings(item))
+        return parts
+    return []
+
+
+def _extract_sanitizable_text(result: dict, fields: tuple[str, ...]) -> tuple[str, str | None]:
+    """Return (text_to_scan, field_used). Checks declared fields first, then falls back to common keys."""
+    candidates = list(fields) if fields else ["content", "text", "body", "markdown", "result", "output"]
+    for field_name in candidates:
+        value = result.get(field_name)
+        if value is None:
+            continue
+        parts = _collect_strings(value)
+        if parts:
+            return "\n".join(parts), field_name
+    return "", None
+
+
+def sanitize_tool_output(
+    definition: "ToolDefinition",
+    result: dict,
+    *,
+    agent_class: AgentClass,
+    source_hint: str | None = None,
+) -> dict:
+    """Scan external-content tool output for prompt-injection patterns.
+
+    Patterns in code fences / backticks are ignored (quoted content is assumed inert).
+    Malicious outputs are replaced with a structured quarantine payload so the agent
+    can see that something was filtered instead of silently losing the result.
+    """
+    if not definition.ingests_external_content:
+        return result
+    text, field_name = _extract_sanitizable_text(result, definition.sanitize_fields)
+    if not text:
+        return result
+    scrubbed = _strip_code_blocks(text)
+    source = source_hint or definition.name
+    verdict: SanitizedContent = sanitize(scrubbed, source=source, target_agent_class=agent_class)
+    if verdict.verdict != "malicious":
+        return result
+    quarantine = extract_structured(
+        text,
+        source_url=result.get("url") if isinstance(result.get("url"), str) else None,
+        reason=verdict.reason or "suspicious pattern",
+    )
+    return {
+        "sanitized": True,
+        "verdict": "malicious",
+        "reason": verdict.reason,
+        "source": source,
+        "field_quarantined": field_name,
+        "quarantine": asdict(quarantine),
+    }
 
 
 class ToolRegistry:
@@ -125,7 +206,37 @@ class ToolRegistry:
             )
             if not decision.allowed:
                 raise PermissionError(decision.reason or "tool invocation blocked by sandbox")
-        return definition.handler(args)
+        result = definition.handler(args)
+        if definition.ingests_external_content and isinstance(result, dict):
+            return sanitize_tool_output(definition, result, agent_class=agent_class)
+        return result
+
+    async def execute_async(
+        self,
+        name: str,
+        args: dict,
+        *,
+        agent_class: AgentClass,
+        policy: SandboxPolicy | None = None,
+        network_enforcer: DomainAllowlistEnforcer | None = None,
+    ) -> dict:
+        """Async-safe wrapper: offloads blocking handlers to a worker thread.
+
+        Use from async call sites (bot, daemon) so that shell/HTTP/file I/O in
+        handlers never blocks the event loop. SQLite (WAL) and sandbox/sanitizer
+        helpers are thread-safe; handlers with thread-local state should not be
+        marked for async execution.
+        """
+        import asyncio
+
+        return await asyncio.to_thread(
+            self.execute,
+            name,
+            args,
+            agent_class=agent_class,
+            policy=policy,
+            network_enforcer=network_enforcer,
+        )
 
     @classmethod
     def default(
@@ -265,6 +376,8 @@ class ToolRegistry:
                 allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["WebSearch"],
                 handler=external_stub,
                 requires_network=True,
+                ingests_external_content=True,
+                sanitize_fields=("content", "markdown", "results", "text"),
             )
         )
         registry.register(
@@ -274,6 +387,8 @@ class ToolRegistry:
                 allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["WebFetch"],
                 handler=external_stub,
                 requires_network=True,
+                ingests_external_content=True,
+                sanitize_fields=("content", "markdown", "text", "body"),
             )
         )
         registry.register(
@@ -701,6 +816,8 @@ class ToolRegistry:
             description="Scrape a URL and return markdown content. Works with JS-rendered pages, SPAs, social media. Args: url (str, required), formats (list[str], default ['markdown']).",
             allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["FirecrawlScrape"],
             handler=firecrawl_scrape, requires_network=True,
+            ingests_external_content=True,
+            sanitize_fields=("markdown", "content", "html", "text"),
             parameter_schema={
                 "type": "object",
                 "properties": {
@@ -715,6 +832,8 @@ class ToolRegistry:
             description="Search the web and return scraped results with markdown content. Args: query (str, required), limit (int, default 5).",
             allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["FirecrawlSearch"],
             handler=firecrawl_search, requires_network=True,
+            ingests_external_content=True,
+            sanitize_fields=("markdown", "content", "results"),
             parameter_schema={
                 "type": "object",
                 "properties": {
@@ -729,6 +848,8 @@ class ToolRegistry:
             description="Extract structured data from a URL using a JSON schema. Args: url (str, required), schema (dict, required), prompt (str, optional guidance).",
             allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["FirecrawlExtract"],
             handler=firecrawl_extract, requires_network=True,
+            ingests_external_content=True,
+            sanitize_fields=("data", "extracted", "markdown", "content"),
             parameter_schema={
                 "type": "object",
                 "properties": {

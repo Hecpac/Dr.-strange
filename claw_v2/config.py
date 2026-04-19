@@ -293,6 +293,7 @@ class AppConfig:
     browserbase_api_url: str
     browserbase_region: str | None
     browserbase_keep_alive: bool
+    sandbox_capability_profile: str
     sdk_bypass_permissions: bool
     daily_cost_limit: float
     chrome_cdp_enabled: bool
@@ -388,6 +389,7 @@ class AppConfig:
             browserbase_api_url=os.getenv("BROWSERBASE_API_URL", "https://api.browserbase.com"),
             browserbase_region=os.getenv("BROWSERBASE_REGION"),
             browserbase_keep_alive=_env_bool("BROWSERBASE_KEEP_ALIVE", False),
+            sandbox_capability_profile=os.getenv("SANDBOX_CAPABILITY_PROFILE", "engineer"),
             sdk_bypass_permissions=_env_bool("SDK_BYPASS_PERMISSIONS", False),
             daily_cost_limit=_env_float("DAILY_COST_LIMIT", 0.0),
             chrome_cdp_enabled=_env_bool("CHROME_CDP_ENABLED", True),
@@ -429,6 +431,8 @@ class AppConfig:
                 raise ValueError(f"{field_name} must be one of {sorted(supported)}.")
         if self.browse_backend not in supported_browse_backends:
             raise ValueError(f"browse_backend must be one of {sorted(supported_browse_backends)}.")
+        if self.sandbox_capability_profile not in {"surgical", "engineer", "admin"}:
+            raise ValueError("sandbox_capability_profile must be one of: surgical, engineer, admin.")
         if self.computer_use_backend not in {"openai", "codex"}:
             raise ValueError("computer_use_backend must be 'openai' or 'codex'.")
         if self.web_chat_port <= 0:
