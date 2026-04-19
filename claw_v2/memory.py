@@ -83,6 +83,11 @@ CREATE TABLE IF NOT EXISTS task_outcomes (
     retries INTEGER NOT NULL DEFAULT 0,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS outcome_embeddings (
+    outcome_id INTEGER PRIMARY KEY REFERENCES task_outcomes(id),
+    embedding TEXT NOT NULL
+);
 """
 
 
@@ -225,6 +230,19 @@ class MemoryStore:
         if "last_message_id" not in provider_cols:
             try:
                 self._conn.execute(_MIGRATION_ADD_PROVIDER_LAST_MESSAGE_ID)
+                self._conn.commit()
+            except sqlite3.OperationalError:
+                pass
+        cursor = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='outcome_embeddings'"
+        )
+        if cursor.fetchone() is None:
+            try:
+                self._conn.execute(
+                    "CREATE TABLE IF NOT EXISTS outcome_embeddings ("
+                    "outcome_id INTEGER PRIMARY KEY REFERENCES task_outcomes(id), "
+                    "embedding TEXT NOT NULL)"
+                )
                 self._conn.commit()
             except sqlite3.OperationalError:
                 pass
