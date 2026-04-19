@@ -113,7 +113,11 @@ class ClaudeSDKExecutor:
                         usage = coerce_usage_dict(message.usage)
                         result_text = message.result
                         if message.is_error:
-                            raise AdapterError(message.result or "Claude SDK execution failed.")
+                            stderr_hint = " | ".join(stderr_lines[-5:]).strip()
+                            detail = message.result or "Claude SDK execution failed."
+                            if stderr_hint:
+                                detail = f"{detail} (stderr: {stderr_hint})"
+                            raise AdapterError(detail)
         except Exception as exc:  # pragma: no cover - runtime integration path
             stderr_excerpt = " | ".join(stderr_lines[-5:]).strip()
             self._emit_runtime_error(

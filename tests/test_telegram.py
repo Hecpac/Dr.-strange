@@ -132,7 +132,7 @@ class HandleTextTests(unittest.IsolatedAsyncioTestCase):
         update.message.reply_text.assert_awaited_once()
         self.assertEqual(
             update.message.reply_text.await_args.args[0],
-            "El runtime de Claude falló al iniciar esta solicitud. Intenta de nuevo en unos segundos.",
+            "El runtime de Claude falló: Claude SDK execution failed: Control request timeout: initialize",
         )
 
 
