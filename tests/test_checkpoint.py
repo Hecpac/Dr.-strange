@@ -326,3 +326,32 @@ class CheckpointHandlerTests(unittest.TestCase):
         # Unknown subcommand → still useful: show usage.
         reply = self.handler.handle_command(self._ctx("/checkpoints"))
         self.assertIn("/checkpoints list", reply)
+
+
+class CheckpointEndToEndTests(unittest.TestCase):
+    def test_restore_reverts_to_prior_state(self) -> None:
+        tmp = Path(tempfile.mkdtemp())
+        db_path = tmp / "claw.db"
+        snapshots_dir = tmp / "snapshots"
+
+        # Phase 1 — seed, snapshot, mutate, schedule.
+        store = MemoryStore(db_path)
+        store.store_fact("k", "before", source="test")
+        service = CheckpointService(memory=store, snapshots_dir=snapshots_dir)
+        ckpt_id = service.create(trigger_reason="seed")
+        store.store_fact("k", "after", source="test")
+        service.schedule_restore(ckpt_id)
+        store._conn.close()
+
+        # Phase 2 — reopen (simulates restart). Apply happens in __init__.
+        store2 = MemoryStore(db_path)
+        values = [f["value"] for f in store2.search_facts("k")]
+        self.assertIn("before", values)
+        self.assertNotIn("after", values)
+
+        row = store2._conn.execute(
+            "SELECT pending_restore, restored_at FROM checkpoints WHERE ckpt_id = ?",
+            (ckpt_id,),
+        ).fetchone()
+        self.assertEqual(row["pending_restore"], 0)
+        self.assertIsNotNone(row["restored_at"])
