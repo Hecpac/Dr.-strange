@@ -327,3 +327,54 @@ class LearningRecordCycleTests(unittest.TestCase):
             error_snippet=None,
         )
         self.assertIsNone(oid)
+
+
+class ExperienceReplayEndToEndTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.store = MemoryStore(Path(tempfile.mkdtemp()) / "test.db")
+        self.loop = LearningLoop(memory=self.store)
+
+    def _embed(self, text: str) -> list[float]:
+        t = text.lower()
+        if "pytest" in t or "no module" in t:
+            return [1.0, 0.0, 0.0]
+        if "chrome" in t:
+            return [0.0, 1.0, 0.0]
+        return [0.0, 0.0, 1.0]
+
+    def test_failure_in_cycle_n_is_recalled_in_cycle_n_plus_1(self) -> None:
+        self.store.store_task_outcome_with_embedding(
+            task_type="self_heal",
+            task_id="cycle-N",
+            description="pytest module not importable",
+            approach="tried running bare pytest",
+            outcome="failure",
+            lesson="the venv does not have pytest installed; run pip install pytest first",
+            error_snippet="No module named pytest",
+            embed_fn=self._embed,
+        )
+        lessons = self.loop.retrieve_lessons(
+            "# Current input\nTests are failing: the import for pytest blows up",
+            task_type="self_heal",
+            embed_fn=self._embed,
+        )
+        self.assertIn("pip install pytest", lessons)
+        self.assertIn("FAIL", lessons)
+
+    def test_success_also_recalled(self) -> None:
+        self.store.store_task_outcome_with_embedding(
+            task_type="self_heal",
+            task_id="cycle-N",
+            description="chrome cdp disconnect",
+            approach="dedicated user-data-dir + manual google login",
+            outcome="success",
+            lesson="always use a dedicated user-data-dir for chrome 146 CDP",
+            embed_fn=self._embed,
+        )
+        lessons = self.loop.retrieve_lessons(
+            "chrome is refusing my CDP connection again",
+            task_type="self_heal",
+            embed_fn=self._embed,
+        )
+        self.assertIn("user-data-dir", lessons)
+        self.assertIn("OK", lessons)
