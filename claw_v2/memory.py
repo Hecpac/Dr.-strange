@@ -278,6 +278,12 @@ ALTER TABLE session_state ADD COLUMN task_queue_json TEXT NOT NULL DEFAULT '[]';
 """
 
 
+# Graph-expansion neighbor scoring discount. Mirrors claw_v2/wiki.py:1046, where
+# graph-expanded pages are scored at 0.6 * the average seed score so they sort
+# below direct-match seeds but above the noise floor.
+_GRAPH_NEIGHBOR_DISCOUNT = 0.6
+
+
 class MemoryStore:
     def __init__(self, db_path: Path | str) -> None:
         self.db_path = Path(db_path)
@@ -1378,12 +1384,17 @@ class MemoryStore:
           1. Run search_outcomes_semantic to get hybrid-scored seeds.
           2. Take top `seed_k` seeds, look up their entity-tag neighbors via
              _outcome_graph_neighbors.
-          3. Fetch neighbor outcome rows in full, score each at 0.6 * avg(seed.score).
+          3. Fetch neighbor outcome rows in full, score each at
+             _GRAPH_NEIGHBOR_DISCOUNT * avg(seed.score).
           4. Merge, dedupe (seeds win on ties), sort by score descending.
 
         Each result dict includes via_graph: bool indicating whether it came from
         graph expansion (True) or direct hybrid match (False). Mirrors the
         seed-then-expand pattern at claw_v2/wiki.py:1032-1050.
+
+        Callers MUST sort by 'score', NOT by 'similarity' or 'keyword_score' —
+        graph hits have similarity=0.0 and keyword_score=0.0, so a sort on either
+        of those fields would silently relegate all graph results to the bottom.
         """
         seeds = self.search_outcomes_semantic(
             query, task_type=task_type, limit=max(limit, seed_k * 2),
@@ -1402,8 +1413,9 @@ class MemoryStore:
         if not neighbor_ids:
             return sorted(seeds, key=lambda r: r["score"], reverse=True)[:limit]
 
-        avg_seed_score = sum(s["score"] for s in seeds[:seed_k]) / max(len(seeds[:seed_k]), 1)
-        graph_score = round(avg_seed_score * 0.6, 4)
+        top = seeds[:seed_k]
+        avg_seed_score = sum(s["score"] for s in top) / max(len(top), 1)
+        graph_score = round(avg_seed_score * _GRAPH_NEIGHBOR_DISCOUNT, 4)
 
         placeholders = ",".join("?" for _ in neighbor_ids)
         rows = self._conn.execute(
