@@ -6,6 +6,8 @@ import logging
 import threading
 from typing import Any, Callable
 
+from claw_v2 import notebooklm_cdp
+
 logger = logging.getLogger(__name__)
 
 
@@ -34,6 +36,9 @@ class NotebookLMService:
         self._observe = observe
         self._running: dict[str, threading.Thread] = {}
         self._client_factory: Callable[[], Any] | None = None
+        # Optional override for CDP-backed methods (used by tests). Defaults to
+        # the real CDP driver in claw_v2.notebooklm_cdp.
+        self._cdp_create_notebook_fn: Callable[[str], dict] | None = None
 
     _ARTIFACT_LABELS = {
         "podcast": "podcast",
@@ -89,7 +94,14 @@ class NotebookLMService:
             return {"id": nb.id, "title": nb.title}
 
     def create_notebook(self, title: str) -> dict:
-        return self._run_async(self._async_create_notebook(title))
+        # Test mode: an injected SDK client_factory takes precedence so existing
+        # SDK-based test mocks keep working. Otherwise use the CDP path
+        # (production), which can be overridden via _cdp_create_notebook_fn for
+        # CDP-specific tests.
+        if self._client_factory is not None:
+            return self._run_async(self._async_create_notebook(title))
+        cdp_fn = self._cdp_create_notebook_fn or notebooklm_cdp.create_notebook
+        return cdp_fn(title)
 
     async def _async_delete_notebook(self, notebook_id: str) -> bool:
         full_id = await self._async_resolve_notebook_id(notebook_id)
