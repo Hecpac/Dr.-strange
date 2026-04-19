@@ -1084,6 +1084,20 @@ class MemoryStore:
 
     # --- Learning loop ---
 
+    def _index_outcome_tags(self, outcome_id: int, tags: Iterable[str]) -> None:
+        """Insert (outcome_id, tag) rows into outcome_entity_edges. Caller holds self._lock."""
+        seen: set[str] = set()
+        for tag in tags:
+            t = str(tag).strip().lower()
+            if not t or t in seen:
+                continue
+            seen.add(t)
+            self._conn.execute(
+                "INSERT OR IGNORE INTO outcome_entity_edges (outcome_id, entity_tag) "
+                "VALUES (?, ?)",
+                (outcome_id, t),
+            )
+
     def store_task_outcome(
         self,
         *,
@@ -1095,18 +1109,25 @@ class MemoryStore:
         lesson: str,
         error_snippet: str | None = None,
         retries: int = 0,
+        tags: Iterable[str] = (),
     ) -> int:
+        tag_list = list(tags)
         with self._lock:
             cursor = self._conn.execute(
                 """
                 INSERT INTO task_outcomes
-                    (task_type, task_id, description, approach, outcome, lesson, error_snippet, retries)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (task_type, task_id, description, approach, outcome, lesson,
+                     error_snippet, retries, tags)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (task_type, task_id, description, approach, outcome, lesson, error_snippet, retries),
+                (task_type, task_id, description, approach, outcome, lesson,
+                 error_snippet, retries, json.dumps(tag_list)),
             )
+            oid = cursor.lastrowid
+            if tag_list:
+                self._index_outcome_tags(oid, tag_list)
             self._conn.commit()
-        return cursor.lastrowid  # type: ignore[return-value]
+        return oid  # type: ignore[return-value]
 
     def store_task_outcome_with_embedding(
         self,
@@ -1119,9 +1140,11 @@ class MemoryStore:
         lesson: str,
         error_snippet: str | None = None,
         retries: int = 0,
+        tags: Iterable[str] = (),
         embed_fn: Callable[..., list[float]] | None = None,
     ) -> int:
         embedder = embed_fn or _simple_embedding
+        tag_list = list(tags)
         with self._lock:
             text = f"{description} | {approach} | {lesson}"
             if error_snippet:
@@ -1130,16 +1153,20 @@ class MemoryStore:
             cursor = self._conn.execute(
                 """
                 INSERT INTO task_outcomes
-                    (task_type, task_id, description, approach, outcome, lesson, error_snippet, retries)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (task_type, task_id, description, approach, outcome, lesson,
+                     error_snippet, retries, tags)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (task_type, task_id, description, approach, outcome, lesson, error_snippet, retries),
+                (task_type, task_id, description, approach, outcome, lesson,
+                 error_snippet, retries, json.dumps(tag_list)),
             )
             oid = cursor.lastrowid
             self._conn.execute(
                 "INSERT INTO outcome_embeddings (outcome_id, embedding) VALUES (?, ?)",
                 (oid, json.dumps(embedding)),
             )
+            if tag_list:
+                self._index_outcome_tags(oid, tag_list)
             self._conn.commit()
         return oid  # type: ignore[return-value]
 
