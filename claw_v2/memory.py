@@ -878,6 +878,28 @@ class MemoryStore:
             self._conn.commit()
         return len(rows)
 
+    def backfill_outcome_embeddings(
+        self, embed_fn: Callable[..., list[float]] | None = None,
+    ) -> int:
+        embedder = embed_fn or _simple_embedding
+        rows = self._conn.execute(
+            "SELECT id, description, approach, lesson, error_snippet "
+            "FROM task_outcomes "
+            "WHERE id NOT IN (SELECT outcome_id FROM outcome_embeddings)"
+        ).fetchall()
+        with self._lock:
+            for row in rows:
+                text = f"{row['description']} | {row['approach']} | {row['lesson']}"
+                if row["error_snippet"]:
+                    text += f" | {row['error_snippet']}"
+                embedding = embedder(text)
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO outcome_embeddings (outcome_id, embedding) VALUES (?, ?)",
+                    (row["id"], json.dumps(embedding)),
+                )
+            self._conn.commit()
+        return len(rows)
+
     # --- Learning loop ---
 
     def store_task_outcome(

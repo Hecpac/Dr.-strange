@@ -275,5 +275,36 @@ class OutcomeSemanticSearchTests(unittest.TestCase):
         self.assertEqual([h["task_id"] for h in hits], ["a"])
 
 
+class OutcomeBackfillTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.store = MemoryStore(Path(tempfile.mkdtemp()) / "test.db")
+
+    def test_backfills_missing_embeddings(self) -> None:
+        oid = self.store.store_task_outcome(
+            task_type="self_heal", task_id="legacy",
+            description="legacy row", approach="legacy", outcome="success",
+            lesson="ok",
+        )
+        before = self.store._conn.execute(
+            "SELECT COUNT(*) AS c FROM outcome_embeddings WHERE outcome_id = ?", (oid,)
+        ).fetchone()["c"]
+        self.assertEqual(before, 0)
+        filled = self.store.backfill_outcome_embeddings(embed_fn=lambda t: [1.0, 0.0])
+        self.assertEqual(filled, 1)
+        after = self.store._conn.execute(
+            "SELECT COUNT(*) AS c FROM outcome_embeddings WHERE outcome_id = ?", (oid,)
+        ).fetchone()["c"]
+        self.assertEqual(after, 1)
+
+    def test_backfill_is_idempotent(self) -> None:
+        self.store.store_task_outcome_with_embedding(
+            task_type="t", task_id="a",
+            description="d", approach="a", outcome="success", lesson="l",
+            embed_fn=lambda t: [1.0, 0.0],
+        )
+        filled = self.store.backfill_outcome_embeddings(embed_fn=lambda t: [1.0, 0.0])
+        self.assertEqual(filled, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
