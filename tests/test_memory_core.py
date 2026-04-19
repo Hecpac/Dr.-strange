@@ -161,5 +161,47 @@ class OutcomeEmbeddingsSchemaTests(unittest.TestCase):
         MemoryStore(self.store.db_path)
 
 
+class OutcomeEmbeddingStoreTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.store = MemoryStore(Path(tempfile.mkdtemp()) / "test.db")
+
+    def test_stores_outcome_and_embedding_together(self) -> None:
+        oid = self.store.store_task_outcome_with_embedding(
+            task_type="self_heal",
+            task_id="cycle-1",
+            description="pytest import failure",
+            approach="pip install pytest",
+            outcome="success",
+            lesson="always install pytest in the venv",
+        )
+        self.assertIsInstance(oid, int)
+        outcome = self.store.get_outcome(oid)
+        self.assertEqual(outcome["outcome"], "success")
+        row = self.store._conn.execute(
+            "SELECT embedding FROM outcome_embeddings WHERE outcome_id = ?", (oid,)
+        ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertTrue(row["embedding"].startswith("["))  # JSON-encoded list
+
+    def test_embedding_fn_is_used_when_provided(self) -> None:
+        captured: list[str] = []
+        def fake_embed(text: str) -> list[float]:
+            captured.append(text)
+            return [0.1, 0.2, 0.3]
+        oid = self.store.store_task_outcome_with_embedding(
+            task_type="self_heal",
+            task_id="cycle-2",
+            description="ping",
+            approach="pong",
+            outcome="success",
+            lesson="ok",
+            embed_fn=fake_embed,
+        )
+        self.assertEqual(len(captured), 1)
+        self.assertIn("ping", captured[0])
+        self.assertIn("pong", captured[0])
+        self.assertIn("ok", captured[0])
+
+
 if __name__ == "__main__":
     unittest.main()

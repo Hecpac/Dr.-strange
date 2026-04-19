@@ -904,6 +904,41 @@ class MemoryStore:
             self._conn.commit()
         return cursor.lastrowid  # type: ignore[return-value]
 
+    def store_task_outcome_with_embedding(
+        self,
+        *,
+        task_type: str,
+        task_id: str,
+        description: str,
+        approach: str,
+        outcome: str,
+        lesson: str,
+        error_snippet: str | None = None,
+        retries: int = 0,
+        embed_fn: Callable[..., list[float]] | None = None,
+    ) -> int:
+        embedder = embed_fn or _simple_embedding
+        with self._lock:
+            cursor = self._conn.execute(
+                """
+                INSERT INTO task_outcomes
+                    (task_type, task_id, description, approach, outcome, lesson, error_snippet, retries)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (task_type, task_id, description, approach, outcome, lesson, error_snippet, retries),
+            )
+            oid = cursor.lastrowid
+            text = f"{description} | {approach} | {lesson}"
+            if error_snippet:
+                text += f" | {error_snippet}"
+            embedding = embedder(text)
+            self._conn.execute(
+                "INSERT INTO outcome_embeddings (outcome_id, embedding) VALUES (?, ?)",
+                (oid, json.dumps(embedding)),
+            )
+            self._conn.commit()
+        return oid  # type: ignore[return-value]
+
     def search_past_outcomes(
         self, query: str, *, task_type: str | None = None, limit: int = 5,
     ) -> list[dict]:
