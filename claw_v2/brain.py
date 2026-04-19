@@ -629,12 +629,14 @@ class BrainService:
             )
 
         if autonomy_mode == "autonomous" and verification.should_proceed and verification.risk_level in {"low", "medium"}:
+            ckpt_id = self._maybe_pre_snapshot(action=action)
             result = executor()
             self._emit_execution_event(
                 action=action,
                 verification=verification,
                 status="executed_autonomously",
                 approval_status=approval_status,
+                checkpoint_id=ckpt_id,
             )
             return CriticalActionExecution(
                 action=action,
@@ -643,15 +645,18 @@ class BrainService:
                 verification=verification,
                 result=result,
                 approval_status=approval_status,
+                checkpoint_id=ckpt_id,
             )
 
         if verification.should_proceed:
+            ckpt_id = self._maybe_pre_snapshot(action=action)
             result = executor()
             self._emit_execution_event(
                 action=action,
                 verification=verification,
                 status="executed",
                 approval_status=approval_status,
+                checkpoint_id=ckpt_id,
             )
             return CriticalActionExecution(
                 action=action,
@@ -660,15 +665,18 @@ class BrainService:
                 verification=verification,
                 result=result,
                 approval_status=approval_status,
+                checkpoint_id=ckpt_id,
             )
 
         if approval_override:
+            ckpt_id = self._maybe_pre_snapshot(action=action)
             result = executor()
             self._emit_execution_event(
                 action=action,
                 verification=verification,
                 status="executed_with_approval",
                 approval_status=approval_status,
+                checkpoint_id=ckpt_id,
             )
             return CriticalActionExecution(
                 action=action,
@@ -678,6 +686,7 @@ class BrainService:
                 result=result,
                 approval_status=approval_status,
                 reason="human approval override",
+                checkpoint_id=ckpt_id,
             )
 
         if verification.requires_human_approval:
@@ -713,6 +722,18 @@ class BrainService:
             approval_status=approval_status,
         )
 
+    def _maybe_pre_snapshot(self, *, action: str, session_id: str | None = None) -> str | None:
+        if self.checkpoint is None:
+            return None
+        try:
+            return self.checkpoint.create(
+                trigger_reason=f"pre-critical-action:{action[:80]}",
+                session_id=session_id,
+            )
+        except Exception:
+            logger.warning("Pre-action checkpoint failed", exc_info=True)
+            return None
+
     def _emit_execution_event(
         self,
         *,
@@ -720,6 +741,7 @@ class BrainService:
         verification: CriticalActionVerification,
         status: str,
         approval_status: str | None,
+        checkpoint_id: str | None = None,
     ) -> None:
         if self.observe is None or verification.response is None:
             return
@@ -737,6 +759,7 @@ class BrainService:
                 "requires_human_approval": verification.requires_human_approval,
                 "should_proceed": verification.should_proceed,
                 "approval_id": verification.approval_id,
+                "checkpoint_id": checkpoint_id,
             },
         )
         status_map = {
