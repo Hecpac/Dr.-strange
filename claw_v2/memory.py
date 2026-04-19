@@ -92,6 +92,22 @@ CREATE TABLE IF NOT EXISTS outcome_embeddings (
     outcome_id INTEGER PRIMARY KEY REFERENCES task_outcomes(id),
     embedding TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS checkpoints (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ckpt_id TEXT NOT NULL UNIQUE,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    trigger_reason TEXT NOT NULL,
+    session_id TEXT,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    file_path TEXT NOT NULL,
+    pending_restore INTEGER NOT NULL DEFAULT 0,
+    restored_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_checkpoints_created_at ON checkpoints(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_checkpoints_pending_restore
+    ON checkpoints(pending_restore) WHERE pending_restore = 1;
 """
 
 
@@ -203,6 +219,12 @@ class MemoryStore:
     def __init__(self, db_path: Path | str) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        # Apply any pending checkpoint restore before opening the persistent connection.
+        try:
+            from claw_v2.checkpoint import apply_pending_restore_if_any as _apply_pending_restore
+            _apply_pending_restore(self.db_path)
+        except Exception:
+            logger.debug("Pending restore check failed", exc_info=True)
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
@@ -266,6 +288,30 @@ class MemoryStore:
                     self._conn.commit()
                 except sqlite3.OperationalError:
                     pass
+        cursor = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='checkpoints'"
+        )
+        if cursor.fetchone() is None:
+            try:
+                self._conn.executescript(
+                    "CREATE TABLE IF NOT EXISTS checkpoints ("
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                    "ckpt_id TEXT NOT NULL UNIQUE, "
+                    "created_at TEXT DEFAULT CURRENT_TIMESTAMP, "
+                    "trigger_reason TEXT NOT NULL, "
+                    "session_id TEXT, "
+                    "consecutive_failures INTEGER NOT NULL DEFAULT 0, "
+                    "file_path TEXT NOT NULL, "
+                    "pending_restore INTEGER NOT NULL DEFAULT 0, "
+                    "restored_at TEXT); "
+                    "CREATE INDEX IF NOT EXISTS idx_checkpoints_created_at "
+                    "ON checkpoints(created_at DESC); "
+                    "CREATE INDEX IF NOT EXISTS idx_checkpoints_pending_restore "
+                    "ON checkpoints(pending_restore) WHERE pending_restore = 1;"
+                )
+                self._conn.commit()
+            except sqlite3.OperationalError:
+                pass
         try:
             self.backfill_outcome_embeddings()
         except Exception:
@@ -1014,6 +1060,33 @@ class MemoryStore:
                 (limit,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def recent_outcomes_within(
+        self,
+        *,
+        within_minutes: int,
+        task_type: str | None = None,
+        session_id: str | None = None,
+        limit: int = 20,
+    ) -> list[dict]:
+        """Outcomes in the last `within_minutes`, newest first."""
+        clauses = ["created_at >= datetime('now', ?)"]
+        params: list[object] = [f"-{int(within_minutes)} minutes"]
+        if task_type is not None:
+            clauses.append("task_type = ?")
+            params.append(task_type)
+        if session_id is not None:
+            clauses.append("task_id = ?")
+            params.append(session_id)
+        params.append(limit)
+        sql = (
+            "SELECT task_type, task_id, description, approach, outcome, lesson, "
+            "error_snippet, retries, created_at, feedback "
+            "FROM task_outcomes WHERE " + " AND ".join(clauses)
+            + " ORDER BY id DESC LIMIT ?"
+        )
+        rows = self._conn.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
 
     def search_outcomes_semantic(
         self,
