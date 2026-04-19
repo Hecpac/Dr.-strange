@@ -924,6 +924,43 @@ class MemoryStore:
             self._conn.commit()
         return fact_id
 
+    def _hybrid_rank(
+        self,
+        *,
+        query_vec: list[float],
+        query_tokens: list[str],
+        candidates: list[dict],
+        corpus_tokens: list[list[str]],
+        min_similarity: float,
+    ) -> list[dict]:
+        """Combine cosine similarity (already on each candidate as 'similarity_raw')
+        with normalized BM25 keyword score, sorted by combined score descending.
+
+        Each candidate dict must have:
+          - 'similarity_raw' (float, raw cosine, may be negative)
+          - any other fields the caller wants preserved in the output
+
+        Mutates each candidate in place by adding 'similarity', 'keyword_score', 'score'
+        and removing 'similarity_raw'. Drops candidates where cosine < min_similarity AND
+        bm25_norm == 0. Returns a new sorted list.
+        """
+        keyword_scores = _bm25_scores(query_tokens, corpus_tokens)
+        max_keyword = max(keyword_scores) if keyword_scores else 0.0
+        scored: list[dict] = []
+        for idx, item in enumerate(candidates):
+            sim = max(0.0, item.pop("similarity_raw"))
+            raw_kw = keyword_scores[idx] if idx < len(keyword_scores) else 0.0
+            kw_norm = raw_kw / max_keyword if max_keyword > 0 else 0.0
+            score = (sim * 0.65) + (kw_norm * 0.35)
+            if sim < min_similarity and kw_norm == 0.0:
+                continue
+            item["similarity"] = round(sim, 4)
+            item["keyword_score"] = round(kw_norm, 4)
+            item["score"] = round(score, 4)
+            scored.append(item)
+        scored.sort(key=lambda x: x["score"], reverse=True)
+        return scored
+
     def search_facts_semantic(
         self,
         query: str,
@@ -954,31 +991,18 @@ class MemoryStore:
                 stored_vec = embedder(f"{row['key']} {row['value']}")
                 stale_ids.append((row["id"], row["key"], row["value"]))
             sim = _cosine_similarity(query_vec, stored_vec)
-            tokens = _tokenize(f"{row['key']} {row['value']}")
-            corpus_tokens.append(tokens)
+            corpus_tokens.append(_tokenize(f"{row['key']} {row['value']}"))
             candidates.append({
-                "id": row["id"], "key": row["key"], "value": row["value"],
-                "source": row["source"], "source_trust": row["source_trust"],
-                "confidence": row["confidence"], "similarity_raw": sim,
+                "key": row["key"], "value": row["value"],
+                "source": row["source"], "confidence": row["confidence"],
+                "similarity_raw": sim,
             })
 
-        keyword_scores = _bm25_scores(query_tokens, corpus_tokens)
-        max_keyword = max(keyword_scores) if keyword_scores else 0.0
-        scored: list[dict] = []
-        for idx, item in enumerate(candidates):
-            sim = max(0.0, item["similarity_raw"])
-            raw_kw = keyword_scores[idx] if idx < len(keyword_scores) else 0.0
-            kw_norm = raw_kw / max_keyword if max_keyword > 0 else 0.0
-            score = (sim * 0.65) + (kw_norm * 0.35)
-            if sim < min_similarity and kw_norm == 0.0:
-                continue
-            scored.append({
-                "key": item["key"], "value": item["value"],
-                "source": item["source"], "confidence": item["confidence"],
-                "similarity": round(sim, 4),
-                "keyword_score": round(kw_norm, 4),
-                "score": round(score, 4),
-            })
+        scored = self._hybrid_rank(
+            query_vec=query_vec, query_tokens=query_tokens,
+            candidates=candidates, corpus_tokens=corpus_tokens,
+            min_similarity=min_similarity,
+        )
 
         if stale_ids:
             with self._lock:
@@ -990,7 +1014,6 @@ class MemoryStore:
                     )
                 self._conn.commit()
 
-        scored.sort(key=lambda x: x["score"], reverse=True)
         return scored[:limit]
 
     def backfill_embeddings(self, embed_fn: Callable[..., list[float]] | None = None) -> int:
