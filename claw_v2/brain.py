@@ -318,6 +318,41 @@ class BrainService:
         blocks.extend(message)
         return blocks
 
+    def _emit_verification_outcome(
+        self,
+        *,
+        session_id: str,
+        task_type: str,
+        goal: str,
+        action_summary: str,
+        verification_status: str,
+        error_snippet: str | None,
+    ) -> None:
+        """Called at the end of a verification cycle. Emits observe + records a post-mortem."""
+        if self.observe is not None:
+            self.observe.emit(
+                "cycle_verification_complete",
+                payload={
+                    "session_id": session_id,
+                    "task_type": task_type,
+                    "verification_status": verification_status,
+                    "had_error": bool(error_snippet),
+                },
+            )
+        if self.learning is None:
+            return
+        try:
+            self.learning.record_cycle_outcome(
+                session_id=session_id,
+                task_type=task_type,
+                goal=goal,
+                action_summary=action_summary,
+                verification_status=verification_status,
+                error_snippet=error_snippet,
+            )
+        except Exception:
+            logger.warning("Auto post-mortem recording failed", exc_info=True)
+
     def _wiki_context(self, message: str) -> str:
         """Query the wiki for relevant pages and return a compact context section."""
         if self.wiki is None:
