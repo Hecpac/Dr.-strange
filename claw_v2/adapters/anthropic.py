@@ -98,22 +98,40 @@ class ClaudeSDKExecutor:
         query_session_id = request.session_id or "default"
 
         try:
-            async with sdk.ClaudeSDKClient(options=options) as client:
-                if isinstance(effective_input, str):
-                    await client.query(effective_input, session_id=query_session_id)
-                else:
-                    await client.query(_stream_user_content(effective_input), session_id=query_session_id)
-                async for message in client.receive_response():
-                    if isinstance(message, sdk.AssistantMessage):
-                        assistant_text_chunks.extend(_extract_assistant_text(message.content))
-                        model_name = getattr(message, "model", model_name) or model_name
-                    elif isinstance(message, sdk.ResultMessage):
-                        result_session_id = message.session_id or result_session_id
-                        total_cost = float(message.total_cost_usd or 0.0)
-                        usage = coerce_usage_dict(message.usage)
-                        result_text = message.result
-                        if message.is_error:
-                            raise AdapterError(message.result or "Claude SDK execution failed.")
+            async with asyncio.timeout(request.timeout):
+                async with sdk.ClaudeSDKClient(options=options) as client:
+                    if isinstance(effective_input, str):
+                        await client.query(effective_input, session_id=query_session_id)
+                    else:
+                        await client.query(
+                            _stream_user_content(effective_input),
+                            session_id=query_session_id,
+                        )
+                    async for message in client.receive_response():
+                        if isinstance(message, sdk.AssistantMessage):
+                            assistant_text_chunks.extend(_extract_assistant_text(message.content))
+                            model_name = getattr(message, "model", model_name) or model_name
+                        elif isinstance(message, sdk.ResultMessage):
+                            result_session_id = message.session_id or result_session_id
+                            total_cost = float(message.total_cost_usd or 0.0)
+                            usage = coerce_usage_dict(message.usage)
+                            result_text = message.result
+                            if message.is_error:
+                                raise AdapterError(message.result or "Claude SDK execution failed.")
+        except TimeoutError as exc:  # pragma: no cover - exercised with fake SDK tests
+            stderr_excerpt = " | ".join(stderr_lines[-5:]).strip()
+            partial_text = _coalesce_content(assistant_text_chunks, result_text)
+            self._emit_runtime_error(
+                request=request,
+                query_session_id=query_session_id,
+                result_session_id=result_session_id,
+                exc=exc,
+                stderr_excerpt=stderr_excerpt,
+                partial_text=partial_text,
+            )
+            raise AdapterError(
+                f"Claude SDK execution timed out after {request.timeout:.1f}s"
+            ) from exc
         except Exception as exc:  # pragma: no cover - runtime integration path
             stderr_excerpt = " | ".join(stderr_lines[-5:]).strip()
             self._emit_runtime_error(
