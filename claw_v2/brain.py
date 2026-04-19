@@ -736,6 +736,24 @@ class BrainService:
                 "approval_id": verification.approval_id,
             },
         )
+        status_map = {
+            "executed": "ok",
+            "executed_autonomously": "ok",
+            "executed_with_approval": "ok",
+            "blocked": "failed",
+            "aborted_by_pre_check": "failed",
+            "awaiting_approval": "pending",
+        }
+        mapped_status = status_map.get(status, status)
+        error_snippet = verification.summary if mapped_status == "failed" else None
+        self._emit_verification_outcome(
+            session_id="brain.critical_action",
+            task_type="critical_action",
+            goal=action,
+            action_summary=(verification.summary or verification.recommendation or action),
+            verification_status=mapped_status,
+            error_snippet=error_snippet,
+        )
 
 
 def _format_verifier_evidence(*, plan: str, diff: str, test_output: str) -> dict[str, str]:

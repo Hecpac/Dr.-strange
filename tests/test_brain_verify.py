@@ -432,5 +432,91 @@ class AutoPostMortemTests(unittest.TestCase):
         self.assertIn("cycle_verification_complete", kinds)
 
 
+class ExecutionEventRecordsOutcomeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.memory = MemoryStore(Path(tempfile.mkdtemp()) / "test.db")
+        self.observe = ObserveStream(Path(tempfile.mkdtemp()) / "events.db")
+        from claw_v2.learning import LearningLoop
+        self.loop = LearningLoop(memory=self.memory)
+
+    def _brain(self) -> "BrainService":
+        from claw_v2.brain import BrainService
+        router = MagicMock()
+        return BrainService(
+            router=router,
+            memory=self.memory,
+            system_prompt="You are Claw.",
+            learning=self.loop,
+            observe=self.observe,
+        )
+
+    @staticmethod
+    def _fake_verification(
+        *, summary: str = "Verifier approved the action.",
+        recommendation: str = "approve",
+        risk_level: str = "low",
+    ) -> "CriticalActionVerification":
+        from claw_v2.types import CriticalActionVerification
+        response = LLMResponse(
+            content="verifier output",
+            lane="verifier",
+            provider="openai",
+            model="gpt-5.4-mini",
+        )
+        return CriticalActionVerification(
+            recommendation=recommendation,
+            risk_level=risk_level,
+            summary=summary,
+            should_proceed=(recommendation == "approve"),
+            response=response,
+        )
+
+    def test_executed_status_records_success_outcome(self) -> None:
+        brain = self._brain()
+        verification = self._fake_verification()
+        brain._emit_execution_event(
+            action="rm -rf /tmp/foo",
+            verification=verification,
+            status="executed",
+            approval_status=None,
+        )
+        failures = self.memory.recent_failures(task_type="critical_action", limit=5)
+        self.assertEqual(failures, [])
+        rows = self.memory.search_past_outcomes("rm -rf", task_type="critical_action", limit=5)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["outcome"], "success")
+
+    def test_blocked_status_records_failure_outcome(self) -> None:
+        brain = self._brain()
+        verification = self._fake_verification(
+            summary="Blocker: no rollback plan.",
+            recommendation="deny",
+            risk_level="high",
+        )
+        brain._emit_execution_event(
+            action="deploy_prod",
+            verification=verification,
+            status="blocked",
+            approval_status=None,
+        )
+        failures = self.memory.recent_failures(task_type="critical_action", limit=5)
+        self.assertEqual(len(failures), 1)
+        self.assertIn("no rollback plan", failures[0]["error_snippet"])
+
+    def test_event_still_emits(self) -> None:
+        brain = self._brain()
+        verification = self._fake_verification()
+        brain._emit_execution_event(
+            action="deploy_docs",
+            verification=verification,
+            status="executed",
+            approval_status=None,
+        )
+        events = self.observe.recent_events(limit=10)
+        kinds = [e["event_type"] for e in events]
+        self.assertIn("critical_action_execution", kinds)
+        self.assertIn("cycle_verification_complete", kinds)
+
+
 if __name__ == "__main__":
     unittest.main()
