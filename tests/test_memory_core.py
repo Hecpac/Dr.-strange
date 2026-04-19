@@ -306,5 +306,22 @@ class OutcomeBackfillTests(unittest.TestCase):
         self.assertEqual(filled, 0)
 
 
+class MigrationBackfillsOutcomeEmbeddingsTests(unittest.TestCase):
+    def test_reopen_backfills_missing_embeddings(self) -> None:
+        tmp = Path(tempfile.mkdtemp()) / "test.db"
+        store = MemoryStore(tmp)
+        oid = store.store_task_outcome(
+            task_type="self_heal", task_id="legacy",
+            description="legacy row", approach="legacy", outcome="success", lesson="ok",
+        )
+        store._conn.execute("DELETE FROM outcome_embeddings WHERE outcome_id = ?", (oid,))
+        store._conn.commit()
+        MemoryStore(tmp)
+        row = store._conn.execute(
+            "SELECT COUNT(*) AS c FROM outcome_embeddings WHERE outcome_id = ?", (oid,)
+        ).fetchone()
+        self.assertEqual(row["c"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
