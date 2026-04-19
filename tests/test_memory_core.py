@@ -568,5 +568,35 @@ class HybridOutcomeSearchTests(unittest.TestCase):
         self.assertGreater(results[0]["keyword_score"], 0.0)
 
 
+class EntityEdgesSchemaTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.db_path = Path(tempfile.mkdtemp()) / "test.db"
+        self.store = MemoryStore(self.db_path)
+
+    def test_outcome_entity_edges_table_exists(self) -> None:
+        cursor = self.store._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='outcome_entity_edges'"
+        )
+        self.assertIsNotNone(cursor.fetchone())
+
+    def test_outcome_entity_edges_columns(self) -> None:
+        cursor = self.store._conn.execute("PRAGMA table_info(outcome_entity_edges)")
+        cols = {row[1] for row in cursor.fetchall()}
+        self.assertEqual(cols, {"outcome_id", "entity_tag"})
+
+    def test_outcome_entity_edges_index_exists(self) -> None:
+        cursor = self.store._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_outcome_entity_tag'"
+        )
+        self.assertIsNotNone(cursor.fetchone())
+
+    def test_migration_idempotent_on_reopen(self) -> None:
+        store2 = MemoryStore(self.db_path)
+        cursor = store2._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='outcome_entity_edges'"
+        )
+        self.assertIsNotNone(cursor.fetchone())
+
+
 if __name__ == "__main__":
     unittest.main()
