@@ -1101,6 +1101,7 @@ class MemoryStore:
                 try:
                     tags = json.loads(row["tags"])
                 except (json.JSONDecodeError, TypeError):
+                    logger.debug("Skipping outcome %s: malformed tags JSON", row["id"])
                     continue
                 if not tags:
                     continue
