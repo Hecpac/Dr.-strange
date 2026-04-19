@@ -1362,6 +1362,67 @@ class MemoryStore:
 
         return scored[:limit]
 
+    def search_outcomes_with_graph(
+        self,
+        query: str,
+        *,
+        task_type: str | None = None,
+        limit: int = 5,
+        seed_k: int = 3,
+        min_similarity: float = 0.1,
+        embed_fn: Callable[..., list[float]] | None = None,
+    ) -> list[dict]:
+        """Hybrid retrieval (BM25+cosine) plus graph expansion via shared entity tags.
+
+        Steps:
+          1. Run search_outcomes_semantic to get hybrid-scored seeds.
+          2. Take top `seed_k` seeds, look up their entity-tag neighbors via
+             _outcome_graph_neighbors.
+          3. Fetch neighbor outcome rows in full, score each at 0.6 * avg(seed.score).
+          4. Merge, dedupe (seeds win on ties), sort by score descending.
+
+        Each result dict includes via_graph: bool indicating whether it came from
+        graph expansion (True) or direct hybrid match (False). Mirrors the
+        seed-then-expand pattern at claw_v2/wiki.py:1032-1050.
+        """
+        seeds = self.search_outcomes_semantic(
+            query, task_type=task_type, limit=max(limit, seed_k * 2),
+            min_similarity=min_similarity, embed_fn=embed_fn,
+        )
+        for seed in seeds:
+            seed["via_graph"] = False
+
+        seed_ids = [s["id"] for s in seeds[:seed_k] if s.get("id") is not None]
+        if not seed_ids:
+            return seeds[:limit]
+
+        neighbor_ids = self._outcome_graph_neighbors(seed_ids)
+        seed_id_set = {s["id"] for s in seeds if s.get("id") is not None}
+        neighbor_ids = [nid for nid in neighbor_ids if nid not in seed_id_set]
+        if not neighbor_ids:
+            return sorted(seeds, key=lambda r: r["score"], reverse=True)[:limit]
+
+        avg_seed_score = sum(s["score"] for s in seeds[:seed_k]) / max(len(seeds[:seed_k]), 1)
+        graph_score = round(avg_seed_score * 0.6, 4)
+
+        placeholders = ",".join("?" for _ in neighbor_ids)
+        rows = self._conn.execute(
+            f"SELECT id, task_type, task_id, description, approach, outcome, lesson, "
+            f"error_snippet, retries, created_at, feedback "
+            f"FROM task_outcomes WHERE id IN ({placeholders})",
+            neighbor_ids,
+        ).fetchall()
+        for row in rows:
+            item = dict(row)
+            item["similarity"] = 0.0
+            item["keyword_score"] = 0.0
+            item["score"] = graph_score
+            item["via_graph"] = True
+            seeds.append(item)
+
+        seeds.sort(key=lambda r: r["score"], reverse=True)
+        return seeds[:limit]
+
     # --- Learning loop: feedback & retrieval helpers ---
 
     def get_outcome(self, outcome_id: int) -> dict | None:

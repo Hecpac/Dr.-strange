@@ -790,5 +790,117 @@ class OutcomeGraphNeighborsTests(unittest.TestCase):
         self.assertEqual(self.store._outcome_graph_neighbors([a]), [])
 
 
+def _strict_token_embed(text: str) -> list[float]:
+    """Test-only embedder: cosine ≈ 0 when texts share no literal tokens.
+
+    Each unique token hashes into its own slot in a wide (4096) vector. Collisions
+    are rare for small test corpora, so single-shared-token overlap is clearly
+    distinguishable from no-overlap. Avoids the bag-of-chars false-positives that
+    _simple_embedding produces for English text.
+    """
+    import hashlib
+    import re as _re
+    tokens = set(_re.findall(r"\w+", text.lower()))
+    dim = 4096
+    vec = [0.0] * dim
+    for t in tokens:
+        idx = int(hashlib.md5(t.encode()).hexdigest()[:8], 16) % dim
+        vec[idx] = 1.0
+    norm = (sum(x * x for x in vec)) ** 0.5 or 1.0
+    return [x / norm for x in vec]
+
+
+class SearchOutcomesWithGraphTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.store = MemoryStore(Path(tempfile.mkdtemp()) / "test.db")
+
+    def _store(self, **kw):
+        return self.store.store_task_outcome_with_embedding(
+            embed_fn=_strict_token_embed, **kw,
+        )
+
+    def _search_plain(self, q, **kw):
+        return self.store.search_outcomes_semantic(
+            q, embed_fn=_strict_token_embed, **kw,
+        )
+
+    def _search_graph(self, q, **kw):
+        return self.store.search_outcomes_with_graph(
+            q, embed_fn=_strict_token_embed, **kw,
+        )
+
+    def test_graph_expansion_surfaces_unrelated_text_neighbor(self) -> None:
+        self._store(
+            task_type="browse", task_id="s1:1",
+            description="Tradingview chart capture", approach="cdp",
+            outcome="failure", lesson="cdp needs user-data-dir",
+            tags=["tradingview", "cdp"],
+        )
+        self._store(
+            task_type="browse", task_id="s1:2",
+            description="Generic page failed", approach="default browser",
+            outcome="failure", lesson="Pages with auth need persistent profile",
+            tags=["cdp", "auth"],
+        )
+        self._store(
+            task_type="browse", task_id="s1:3",
+            description="Random other failure", approach="x",
+            outcome="failure", lesson="totally unrelated",
+            tags=["other"],
+        )
+        plain = {r["task_id"] for r in self._search_plain("tradingview", limit=5)}
+        with_graph = {r["task_id"] for r in self._search_graph("tradingview", limit=5)}
+        self.assertIn("s1:1", plain)
+        self.assertNotIn("s1:2", plain)
+        self.assertIn("s1:1", with_graph)
+        self.assertIn("s1:2", with_graph)
+
+    def test_graph_results_marked_via_graph(self) -> None:
+        self._store(
+            task_type="t", task_id="i:1",
+            description="Tradingview snapshot", approach="a",
+            outcome="success", lesson="l", tags=["tradingview"],
+        )
+        self._store(
+            task_type="t", task_id="i:2",
+            description="Other thing entirely", approach="a",
+            outcome="failure", lesson="l", tags=["tradingview"],
+        )
+        results = self._search_graph("tradingview", limit=5)
+        by_task = {r["task_id"]: r for r in results}
+        self.assertFalse(by_task["i:1"]["via_graph"])
+        self.assertTrue(by_task["i:2"]["via_graph"])
+
+    def test_graph_score_below_seed_score(self) -> None:
+        self._store(
+            task_type="t", task_id="i:1",
+            description="firecrawl tradingview", approach="a",
+            outcome="success", lesson="l", tags=["alpha"],
+        )
+        self._store(
+            task_type="t", task_id="i:2",
+            description="unrelated text content", approach="a",
+            outcome="failure", lesson="l", tags=["alpha"],
+        )
+        results = self._search_graph("firecrawl tradingview", limit=5)
+        by_task = {r["task_id"]: r for r in results}
+        self.assertGreater(by_task["i:1"]["score"], by_task["i:2"]["score"])
+
+    def test_no_seeds_returns_empty(self) -> None:
+        # Empty DB: hybrid finds nothing, graph has no anchor.
+        self.assertEqual(self._search_graph("anything"), [])
+
+    def test_seeds_with_no_neighbors_pass_through(self) -> None:
+        self._store(
+            task_type="t", task_id="i:1",
+            description="lonely outcome", approach="a",
+            outcome="success", lesson="l", tags=["unique-tag"],
+        )
+        results = self._search_graph("lonely", limit=5)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["task_id"], "i:1")
+        self.assertFalse(results[0]["via_graph"])
+
+
 if __name__ == "__main__":
     unittest.main()
