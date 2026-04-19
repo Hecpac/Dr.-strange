@@ -108,11 +108,19 @@ class LearningLoop:
 
         outcomes: list[dict] = []
         try:
-            outcomes = self.memory.search_outcomes_semantic(
+            outcomes = self.memory.search_outcomes_with_graph(
                 keywords, task_type=task_type, limit=limit, embed_fn=embed_fn,
             )
         except Exception:
-            logger.debug("Semantic outcome search failed, falling back to text search", exc_info=True)
+            logger.debug("Graph outcome search failed, falling back to semantic", exc_info=True)
+
+        if not outcomes:
+            try:
+                outcomes = self.memory.search_outcomes_semantic(
+                    keywords, task_type=task_type, limit=limit, embed_fn=embed_fn,
+                )
+            except Exception:
+                logger.debug("Semantic outcome search failed, falling back to text search", exc_info=True)
 
         if not outcomes:
             outcomes = self.memory.search_past_outcomes(keywords, task_type=task_type, limit=limit)
@@ -150,7 +158,9 @@ class LearningLoop:
             lesson = escape(str(o["lesson"]), quote=False)
             sim = o.get("similarity")
             sim_attr = f' similarity="{sim}"' if sim is not None else ""
-            out_lines.append(f'<learned_lesson status="{status}"{sim_attr}>')
+            via_graph = o.get("via_graph", False)
+            graph_attr = ' via_graph="true"' if via_graph else ""
+            out_lines.append(f'<learned_lesson status="{status}"{sim_attr}{graph_attr}>')
             out_lines.append(f"  <description>{description}</description>")
             out_lines.append(f"  <lesson>{lesson}</lesson>{fb}")
             if o.get("error_snippet"):
