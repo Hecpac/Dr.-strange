@@ -202,6 +202,20 @@ class OutcomeEmbeddingStoreTests(unittest.TestCase):
         self.assertIn("pong", captured[0])
         self.assertIn("ok", captured[0])
 
+    def test_embedder_failure_leaves_no_orphan_outcome(self) -> None:
+        def boom(text: str) -> list[float]:
+            raise RuntimeError("embedder down")
+        with self.assertRaises(RuntimeError):
+            self.store.store_task_outcome_with_embedding(
+                task_type="self_heal", task_id="cycle-X",
+                description="d", approach="a", outcome="success", lesson="l",
+                embed_fn=boom,
+            )
+        count = self.store._conn.execute("SELECT COUNT(*) AS c FROM task_outcomes").fetchone()["c"]
+        self.assertEqual(count, 0)
+        emb_count = self.store._conn.execute("SELECT COUNT(*) AS c FROM outcome_embeddings").fetchone()["c"]
+        self.assertEqual(emb_count, 0)
+
 
 if __name__ == "__main__":
     unittest.main()
