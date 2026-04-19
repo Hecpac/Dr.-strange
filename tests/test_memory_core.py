@@ -608,5 +608,57 @@ class EntityEdgesSchemaTests(unittest.TestCase):
         self.assertIsNotNone(cursor.fetchone())
 
 
+class EdgePopulationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.store = MemoryStore(Path(tempfile.mkdtemp()) / "test.db")
+
+    def _edges_for(self, outcome_id: int) -> set[str]:
+        rows = self.store._conn.execute(
+            "SELECT entity_tag FROM outcome_entity_edges WHERE outcome_id = ?",
+            (outcome_id,),
+        ).fetchall()
+        return {r[0] for r in rows}
+
+    def test_store_outcome_with_tags_creates_edges(self) -> None:
+        oid = self.store.store_task_outcome(
+            task_type="browse", task_id="s1:1",
+            description="d", approach="a", outcome="success", lesson="l",
+            tags=["tradingview", "cdp"],
+        )
+        self.assertEqual(self._edges_for(oid), {"tradingview", "cdp"})
+
+    def test_store_outcome_without_tags_creates_no_edges(self) -> None:
+        oid = self.store.store_task_outcome(
+            task_type="browse", task_id="s1:1",
+            description="d", approach="a", outcome="success", lesson="l",
+        )
+        self.assertEqual(self._edges_for(oid), set())
+
+    def test_store_outcome_with_embedding_also_indexes_tags(self) -> None:
+        oid = self.store.store_task_outcome_with_embedding(
+            task_type="browse", task_id="s1:2",
+            description="d", approach="a", outcome="failure", lesson="l",
+            tags=["firecrawl"],
+        )
+        self.assertEqual(self._edges_for(oid), {"firecrawl"})
+
+    def test_duplicate_tags_ignored(self) -> None:
+        oid = self.store.store_task_outcome(
+            task_type="browse", task_id="s1:3",
+            description="d", approach="a", outcome="success", lesson="l",
+            tags=["x", "x", "y"],
+        )
+        self.assertEqual(self._edges_for(oid), {"x", "y"})
+
+    def test_tags_normalized_to_lowercase(self) -> None:
+        # The helper lowercases and strips. Mixed case + whitespace must dedupe.
+        oid = self.store.store_task_outcome(
+            task_type="browse", task_id="s1:4",
+            description="d", approach="a", outcome="success", lesson="l",
+            tags=["TradingView", "tradingview", " cdp "],
+        )
+        self.assertEqual(self._edges_for(oid), {"tradingview", "cdp"})
+
+
 if __name__ == "__main__":
     unittest.main()
