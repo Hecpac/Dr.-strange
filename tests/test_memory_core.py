@@ -1,8 +1,6 @@
 """Tests for core MemoryStore operations: messages, facts, delete, build_context with history."""
 from __future__ import annotations
 
-import hashlib
-import re
 import tempfile
 import threading
 import unittest
@@ -10,6 +8,7 @@ from pathlib import Path
 
 from claw_v2.learning import LearningLoop
 from claw_v2.memory import MemoryStore
+from tests.helpers import strict_token_embed
 
 
 class MessageTests(unittest.TestCase):
@@ -792,41 +791,23 @@ class OutcomeGraphNeighborsTests(unittest.TestCase):
         self.assertEqual(self.store._outcome_graph_neighbors([a]), [])
 
 
-def _strict_token_embed(text: str) -> list[float]:
-    """Test-only embedder: cosine ≈ 0 when texts share no literal tokens.
-
-    Each unique token hashes into its own slot in a wide (4096) vector. Collisions
-    are rare for small test corpora, so single-shared-token overlap is clearly
-    distinguishable from no-overlap. Avoids the bag-of-chars false-positives that
-    _simple_embedding produces for English text.
-    """
-    tokens = set(re.findall(r"\w+", text.lower()))
-    dim = 4096
-    vec = [0.0] * dim
-    for t in tokens:
-        idx = int(hashlib.md5(t.encode()).hexdigest()[:8], 16) % dim
-        vec[idx] = 1.0
-    norm = (sum(x * x for x in vec)) ** 0.5 or 1.0
-    return [x / norm for x in vec]
-
-
 class SearchOutcomesWithGraphTests(unittest.TestCase):
     def setUp(self) -> None:
         self.store = MemoryStore(Path(tempfile.mkdtemp()) / "test.db")
 
     def _store(self, **kw):
         return self.store.store_task_outcome_with_embedding(
-            embed_fn=_strict_token_embed, **kw,
+            embed_fn=strict_token_embed, **kw,
         )
 
     def _search_plain(self, q, **kw):
         return self.store.search_outcomes_semantic(
-            q, embed_fn=_strict_token_embed, **kw,
+            q, embed_fn=strict_token_embed, **kw,
         )
 
     def _search_graph(self, q, **kw):
         return self.store.search_outcomes_with_graph(
-            q, embed_fn=_strict_token_embed, **kw,
+            q, embed_fn=strict_token_embed, **kw,
         )
 
     def test_graph_expansion_surfaces_unrelated_text_neighbor(self) -> None:

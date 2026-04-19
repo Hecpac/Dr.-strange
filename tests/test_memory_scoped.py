@@ -1,25 +1,12 @@
 from __future__ import annotations
 
-import hashlib
-import re
 import tempfile
 import unittest
 from pathlib import Path
 
 from claw_v2.learning import LearningLoop
 from claw_v2.memory import MemoryStore
-
-
-def _strict_token_embed_for_lessons(text: str) -> list[float]:
-    """Test-only token-hashing embedder: cosine ≈ 0 when texts share no literal tokens."""
-    tokens = set(re.findall(r"\w+", text.lower()))
-    dim = 4096
-    vec = [0.0] * dim
-    for t in tokens:
-        idx = int(hashlib.md5(t.encode()).hexdigest()[:8], 16) % dim
-        vec[idx] = 1.0
-    norm = (sum(x * x for x in vec)) ** 0.5 or 1.0
-    return [x / norm for x in vec]
+from tests.helpers import strict_token_embed
 
 
 class AgentScopedFactsTests(unittest.TestCase):
@@ -403,7 +390,7 @@ class RetrieveLessonsViaGraphTests(unittest.TestCase):
         # Use the same strict-token embedder pattern from
         # SearchOutcomesWithGraphTests so cosine reflects literal token overlap.
         return self.store.store_task_outcome_with_embedding(
-            embed_fn=_strict_token_embed_for_lessons, **kw,
+            embed_fn=strict_token_embed, **kw,
         )
 
     def test_retrieves_graph_neighbor_lesson(self) -> None:
@@ -425,7 +412,7 @@ class RetrieveLessonsViaGraphTests(unittest.TestCase):
         )
         rendered = self.loop.retrieve_lessons(
             "firecrawl scrape attempt",
-            embed_fn=_strict_token_embed_for_lessons,
+            embed_fn=strict_token_embed,
         )
         self.assertIn("firecrawl needs api key", rendered)
         self.assertIn("set explicit timeout for SPA pages", rendered)
@@ -440,6 +427,29 @@ class RetrieveLessonsViaGraphTests(unittest.TestCase):
         )
         rendered = self.loop.retrieve_lessons(
             "firecrawl",
-            embed_fn=_strict_token_embed_for_lessons,
+            embed_fn=strict_token_embed,
         )
         self.assertIn("api key required", rendered)
+
+    def test_falls_back_to_semantic_when_graph_raises(self) -> None:
+        # Force search_outcomes_with_graph to raise; semantic fallback must still produce content.
+        self._store(
+            task_type="browse", task_id="s1:1",
+            description="firecrawl scrape", approach="a",
+            outcome="failure", lesson="api key required",
+        )
+
+        original = self.store.search_outcomes_with_graph
+        def boom(*args, **kwargs):
+            raise RuntimeError("simulated graph failure")
+        self.store.search_outcomes_with_graph = boom  # type: ignore[method-assign]
+        try:
+            rendered = self.loop.retrieve_lessons(
+                "firecrawl",
+                embed_fn=strict_token_embed,
+            )
+        finally:
+            self.store.search_outcomes_with_graph = original  # type: ignore[method-assign]
+
+        self.assertIn("api key required", rendered)
+        self.assertNotIn('via_graph="true"', rendered)
