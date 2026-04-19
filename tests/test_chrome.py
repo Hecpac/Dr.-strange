@@ -78,10 +78,12 @@ class ManagedChromeTests(unittest.TestCase):
 
     @patch("claw_v2.chrome._check_port_pids")
     @patch("claw_v2.chrome._wait_for_port_free")
+    @patch("claw_v2.chrome._should_launch_headed_via_open")
     @patch("subprocess.Popen")
     @patch("claw_v2.chrome._wait_for_cdp_ready")
-    def test_start_headless_false(self, mock_ready, mock_popen, mock_wait, mock_pids) -> None:
+    def test_start_headless_false(self, mock_ready, mock_popen, mock_headed_open, mock_wait, mock_pids) -> None:
         mock_pids.return_value = []
+        mock_headed_open.return_value = False
         proc = MagicMock()
         proc.poll.return_value = None
         mock_popen.return_value = proc
@@ -89,6 +91,49 @@ class ManagedChromeTests(unittest.TestCase):
         mc.start(headless=False)
         args = mock_popen.call_args[0][0]
         self.assertNotIn("--headless=new", args)
+
+    @patch("claw_v2.chrome._check_port_pids")
+    @patch("claw_v2.chrome._find_chrome")
+    @patch("claw_v2.chrome._wait_for_port_free")
+    @patch("claw_v2.chrome._should_launch_headed_via_open")
+    @patch("subprocess.run")
+    @patch("subprocess.Popen")
+    @patch("claw_v2.chrome._wait_for_cdp_ready")
+    def test_start_headed_macos_uses_open(
+        self,
+        mock_ready,
+        mock_popen,
+        mock_run,
+        mock_headed_open,
+        mock_wait,
+        mock_find_chrome,
+        mock_pids,
+    ) -> None:
+        mock_pids.return_value = []
+        mock_find_chrome.return_value = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+        mock_headed_open.return_value = True
+        mc = ManagedChrome(port=9250, profile_dir="/tmp/test-profile")
+        mc.start(headless=False)
+        mock_popen.assert_not_called()
+        args = mock_run.call_args[0][0]
+        self.assertEqual(args[:4], ["open", "-na", "Google Chrome", "--args"])
+        self.assertIn("--remote-debugging-port=9250", args)
+        self.assertIn("--user-data-dir=/tmp/test-profile", args)
+        self.assertNotIn("--headless=new", args)
+
+    @patch("claw_v2.chrome._is_cdp_ready")
+    def test_is_running_uses_cdp_without_child_process(self, mock_ready) -> None:
+        mock_ready.return_value = True
+        mc = ManagedChrome(port=9250, profile_dir="/tmp/test-profile")
+        self.assertTrue(mc.is_running)
+
+    @patch("claw_v2.chrome._check_port_pids")
+    @patch("claw_v2.chrome._kill_pid")
+    def test_stop_kills_chrome_port_owner_without_child_process(self, mock_kill, mock_pids) -> None:
+        mock_pids.return_value = [(1234, "Google Chrome")]
+        mc = ManagedChrome(port=9250, profile_dir="/tmp/test-profile")
+        mc.stop()
+        mock_kill.assert_called_once_with(1234)
 
 
 if __name__ == "__main__":
