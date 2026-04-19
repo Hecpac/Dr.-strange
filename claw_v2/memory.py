@@ -919,6 +919,10 @@ class MemoryStore:
     ) -> int:
         embedder = embed_fn or _simple_embedding
         with self._lock:
+            text = f"{description} | {approach} | {lesson}"
+            if error_snippet:
+                text += f" | {error_snippet}"
+            embedding = embedder(text)
             cursor = self._conn.execute(
                 """
                 INSERT INTO task_outcomes
@@ -928,10 +932,6 @@ class MemoryStore:
                 (task_type, task_id, description, approach, outcome, lesson, error_snippet, retries),
             )
             oid = cursor.lastrowid
-            text = f"{description} | {approach} | {lesson}"
-            if error_snippet:
-                text += f" | {error_snippet}"
-            embedding = embedder(text)
             self._conn.execute(
                 "INSERT INTO outcome_embeddings (outcome_id, embedding) VALUES (?, ?)",
                 (oid, json.dumps(embedding)),
