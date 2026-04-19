@@ -246,7 +246,7 @@ class ClaudeSDKExecutor:
                 system_prompt["append"] = f"{effective_system_prompt}{SILENCE_DIRECTIVE}"
             else:
                 system_prompt["append"] = SILENCE_DIRECTIVE
-            permission_mode = "bypassPermissions" if self.config.sdk_bypass_permissions else "default"
+            permission_mode = "default"
             can_use_tool = self._build_can_use_tool(sdk, request)
 
         sdk_agents = self._build_agents(sdk, request)

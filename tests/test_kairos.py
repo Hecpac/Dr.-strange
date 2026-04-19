@@ -96,6 +96,7 @@ class DecideTests(unittest.TestCase):
         self.assertIn("## Examples", prompt)
         self.assertIn("critical approval pending", prompt)
         self.assertIn("status.example", prompt)
+        self.assertNotIn("approve_pending", prompt)
         self.assertNotIn("premiumhome.design and pachanodesign.com", prompt)
 
     def test_decide_action(self) -> None:
@@ -294,28 +295,17 @@ class ExecuteActionTests(unittest.TestCase):
             payload={"agent": "rook", "skill": "health-audit", "lane": "worker", "result": "skill-output"},
         )
 
-    def test_approve_pending_uses_internal_approval_path(self) -> None:
+    def test_approve_pending_is_not_executable(self) -> None:
         approvals = MagicMock()
-        approvals.approve_internal.return_value = True
-        svc, _, _, observe = _make_service(approvals=approvals)
+        svc, _, _, _ = _make_service(approvals=approvals)
         decision = TickDecision(
             action="approve_pending",
             reason="low risk",
             detail=json.dumps({"approval_id": "abc123"}),
         )
         result = svc._execute(decision, budget=10.0)
-        self.assertEqual(result.error, "")
-        approvals.approve_internal.assert_called_once_with("abc123")
-        observe.emit.assert_any_call(
-            "kairos_auto_approved",
-            trace_id=ANY,
-            root_trace_id=ANY,
-            span_id=ANY,
-            parent_span_id=ANY,
-            job_id=None,
-            artifact_id="approve_pending",
-            payload={"approval_id": "abc123"},
-        )
+        self.assertIn("unknown action", result.error)
+        approvals.approve_internal.assert_not_called()
 
     def test_unknown_action_returns_error(self) -> None:
         svc, _, _, observe = _make_service(bus=MagicMock(), approvals=MagicMock())

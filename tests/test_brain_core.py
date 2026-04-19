@@ -122,6 +122,7 @@ class HandleMessageTests(unittest.TestCase):
         self.db_path = Path(tempfile.mkdtemp()) / "test.db"
         self.memory = MemoryStore(self.db_path)
         self.router = MagicMock()
+        self.router.config.provider_for_lane.return_value = "anthropic"
         self.brain = BrainService(
             router=self.router,
             memory=self.memory,
@@ -174,6 +175,18 @@ class HandleMessageTests(unittest.TestCase):
         self.brain.handle_message("s1", "test")
         session = self.memory.get_provider_session("s1", "anthropic")
         self.assertEqual(session, "sdk-abc-123")
+
+    def test_resumes_configured_brain_provider_session(self) -> None:
+        self.router.config.provider_for_lane.return_value = "openai"
+        self.memory.link_provider_session("s1", "openai", "openai-session-1")
+        self.router.ask.return_value = LLMResponse(
+            content="<response>hi</response>", lane="brain", provider="openai", model="test",
+        )
+
+        self.brain.handle_message("s1", "test")
+
+        call_kwargs = self.router.ask.call_args.kwargs
+        self.assertEqual(call_kwargs["session_id"], "openai-session-1")
 
     def test_discards_unwrapped_sdk_output(self) -> None:
         self.router.ask.return_value = LLMResponse(
@@ -266,6 +279,7 @@ class HandleStructuredTests(unittest.TestCase):
         self.db_path = Path(tempfile.mkdtemp()) / "test.db"
         self.memory = MemoryStore(self.db_path)
         self.router = MagicMock()
+        self.router.config.provider_for_lane.return_value = "anthropic"
         self.brain = BrainService(
             router=self.router,
             memory=self.memory,

@@ -132,13 +132,32 @@ class SafetyTests(unittest.TestCase):
             self.assertFalse(decision.allowed)
             self.assertIn("whitelist", decision.reason)
 
-    def test_engineer_profile_allows_development_tools(self) -> None:
+    def test_engineer_profile_allows_safe_development_tools(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir) / "workspace"
             workspace.mkdir()
             policy = SandboxPolicy(workspace_root=workspace, capability_profile="engineer")
             self.assertIsNone(check_command("python3 --version", policy))
-            self.assertIsNone(check_command("npm --version", policy))
+            self.assertIsNone(check_command("node --version", policy))
+
+    def test_engineer_profile_blocks_package_managers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            policy = SandboxPolicy(workspace_root=workspace, capability_profile="engineer")
+            for command in ("pip --version", "pip3 --version", "npm --version", "npx --version"):
+                violation = check_command(command, policy)
+                self.assertIsNotNone(violation)
+                self.assertIn("whitelist", violation)
+
+    def test_sandbox_blocks_newline_command_separator(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            policy = SandboxPolicy(workspace_root=workspace, capability_profile="engineer")
+            violation = check_command("ls\nrm -rf /", policy)
+            self.assertIsNotNone(violation)
+            self.assertIn("separators", violation)
 
     def test_engineer_profile_blocks_python_inline_execution(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -182,8 +201,10 @@ class SafetyTests(unittest.TestCase):
             workspace = Path(tmpdir) / "workspace"
             workspace.mkdir()
             policy = SandboxPolicy(workspace_root=workspace, capability_profile="engineer")
-            self.assertIsNone(check_command("python3 -m ensurepip", policy))
             self.assertIsNone(check_command("python3 -m unittest tests.test_safety", policy))
+            violation = check_command("python3 -m ensurepip", policy)
+            self.assertIsNotNone(violation)
+            self.assertIn("python module", violation)
 
     def test_engineer_profile_blocks_node_inline_execution(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -194,13 +215,16 @@ class SafetyTests(unittest.TestCase):
             self.assertIsNotNone(violation)
             self.assertIn("inline node", violation)
 
-    def test_admin_profile_allows_admin_tools(self) -> None:
+    def test_admin_profile_blocks_filesystem_admin_tools(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir) / "workspace"
             workspace.mkdir()
             policy = SandboxPolicy(workspace_root=workspace, capability_profile="admin")
             self.assertIsNone(check_command("brew --version", policy))
-            self.assertIsNone(check_command("chmod --version", policy))
+            for command in ("chmod --version", "chown --version", "diskutil list"):
+                violation = check_command(command, policy)
+                self.assertIsNotNone(violation)
+                self.assertIn("whitelist", violation)
 
     def test_sandbox_blocks_symlink_escape_with_explicit_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
