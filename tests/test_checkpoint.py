@@ -250,3 +250,79 @@ class CheckpointScheduleRestoreTests(unittest.TestCase):
         (self.snapshots_dir / f"{ckpt_id}.db").unlink()
         with self.assertRaises(FileNotFoundError):
             self.service.schedule_restore(ckpt_id)
+
+
+class CheckpointHandlerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from claw_v2.checkpoint_handler import CheckpointHandler
+        from claw_v2.bot_commands import CommandContext
+        tmp = Path(tempfile.mkdtemp())
+        self.store = MemoryStore(tmp / "test.db")
+        self.service = CheckpointService(
+            memory=self.store, snapshots_dir=tmp / "snapshots",
+        )
+        self.handler = CheckpointHandler(checkpoint=self.service)
+        self._Context = CommandContext
+
+    def _ctx(self, text: str) -> "CommandContext":
+        return self._Context(user_id="u1", session_id="s1", text=text, stripped=text)
+
+    def test_commands_registers_rollback_and_checkpoints(self) -> None:
+        names = [c.name for c in self.handler.commands()]
+        self.assertIn("rollback", names)
+        self.assertIn("checkpoints", names)
+
+    def test_rollback_without_arg_returns_usage(self) -> None:
+        reply = self.handler.handle_command(self._ctx("/rollback"))
+        self.assertIn("Uso", reply)
+        self.assertIn("/rollback", reply)
+
+    def test_rollback_last_schedules_latest(self) -> None:
+        ckpt_id = self.service.create(trigger_reason="t")
+        reply = self.handler.handle_command(self._ctx("/rollback last"))
+        self.assertIn(ckpt_id, reply)
+        self.assertIn("/restart", reply)
+        row = self.store._conn.execute(
+            "SELECT pending_restore FROM checkpoints WHERE ckpt_id = ?",
+            (ckpt_id,),
+        ).fetchone()
+        self.assertEqual(row["pending_restore"], 1)
+
+    def test_rollback_by_id_schedules_exact(self) -> None:
+        a = self.service.create(trigger_reason="a")
+        b = self.service.create(trigger_reason="b")
+        reply = self.handler.handle_command(self._ctx(f"/rollback {a}"))
+        self.assertIn(a, reply)
+        row = self.store._conn.execute(
+            "SELECT ckpt_id FROM checkpoints WHERE pending_restore = 1"
+        ).fetchone()
+        self.assertEqual(row["ckpt_id"], a)
+
+    def test_rollback_unknown_id_returns_error(self) -> None:
+        reply = self.handler.handle_command(self._ctx("/rollback ckpt_deadbeef"))
+        self.assertIn("no encontrado", reply.lower())
+        count = self.store._conn.execute(
+            "SELECT COUNT(*) AS c FROM checkpoints WHERE pending_restore = 1"
+        ).fetchone()["c"]
+        self.assertEqual(count, 0)
+
+    def test_rollback_last_without_any_checkpoints_returns_error(self) -> None:
+        reply = self.handler.handle_command(self._ctx("/rollback last"))
+        self.assertIn("no hay checkpoints", reply.lower())
+
+    def test_checkpoints_list_renders_rows(self) -> None:
+        a = self.service.create(trigger_reason="pre-action")
+        b = self.service.create(trigger_reason="manual")
+        reply = self.handler.handle_command(self._ctx("/checkpoints list"))
+        self.assertIn(a, reply)
+        self.assertIn(b, reply)
+        self.assertIn("pre-action", reply)
+
+    def test_checkpoints_list_empty(self) -> None:
+        reply = self.handler.handle_command(self._ctx("/checkpoints list"))
+        self.assertIn("sin checkpoints", reply.lower())
+
+    def test_checkpoints_without_subcommand_returns_list_anyway(self) -> None:
+        # Unknown subcommand → still useful: show usage.
+        reply = self.handler.handle_command(self._ctx("/checkpoints"))
+        self.assertIn("/checkpoints list", reply)
