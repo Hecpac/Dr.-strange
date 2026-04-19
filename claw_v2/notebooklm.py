@@ -39,6 +39,7 @@ class NotebookLMService:
         # Optional override for CDP-backed methods (used by tests). Defaults to
         # the real CDP driver in claw_v2.notebooklm_cdp.
         self._cdp_create_notebook_fn: Callable[[str], dict] | None = None
+        self._cdp_research_fn: Callable[[str, str], int] | None = None
 
     _ARTIFACT_LABELS = {
         "podcast": "podcast",
@@ -179,15 +180,27 @@ class NotebookLMService:
     # --- Background research & podcast ---
 
     def start_research(self, notebook_id: str, query: str, mode: str = "deep") -> str:
-        full_id = self._resolve_notebook_id(notebook_id)
+        # CDP mode skips SDK-only id resolution and title lookup. The handler
+        # passes the full id from create_notebook, and the notify message uses
+        # the id as a stand-in title.
+        cdp_mode = self._client_factory is None
+        if cdp_mode:
+            full_id = notebook_id
+            title = notebook_id[:8]
+        else:
+            full_id = self._resolve_notebook_id(notebook_id)
+            title = self._get_notebook_title(full_id)
         if full_id in self._running and self._running[full_id].is_alive():
             return f"Ya hay una operación en curso para este notebook ({full_id[:8]}...)."
-        title = self._get_notebook_title(full_id)
         self._emit("nlm_research_started", notebook_id=full_id, query=query, mode=mode)
 
         def _worker():
             try:
-                result = self._run_async(self._async_research(full_id, query, mode))
+                if cdp_mode:
+                    cdp_fn = self._cdp_research_fn or notebooklm_cdp.deep_research
+                    result = cdp_fn(full_id, query)
+                else:
+                    result = self._run_async(self._async_research(full_id, query, mode))
                 self._emit("nlm_research_completed", notebook_id=full_id, sources_count=result)
                 self._notify(
                     f"Deep Research completado en notebook {title}\n"
