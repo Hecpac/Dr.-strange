@@ -780,6 +780,15 @@ class OutcomeGraphNeighborsTests(unittest.TestCase):
         # hybrid retrieval finds no high-similarity hits.
         self.assertEqual(self.store._outcome_graph_neighbors([]), [])
 
+    def test_seed_outcome_without_tags_returns_empty(self) -> None:
+        # Outcome exists but was stored without tags, so it has no rows in
+        # outcome_entity_edges. _outcome_graph_neighbors should return [], not raise.
+        a = self.store.store_task_outcome(
+            task_type="t", task_id="solo", description="d", approach="a",
+            outcome="success", lesson="l",
+        )
+        self.assertEqual(self.store._outcome_graph_neighbors([a]), [])
+
 
 if __name__ == "__main__":
     unittest.main()
