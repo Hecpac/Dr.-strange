@@ -355,3 +355,17 @@ class CheckpointEndToEndTests(unittest.TestCase):
         ).fetchone()
         self.assertEqual(row["pending_restore"], 0)
         self.assertIsNotNone(row["restored_at"])
+
+
+class CheckpointHandlerWiredInBotTests(unittest.TestCase):
+    def test_checkpoint_commands_registered_in_bot(self) -> None:
+        # This is a structural test — we don't want to construct the full bot
+        # (expensive; pulls in many dependencies). Instead, grep the source to
+        # assert the handler is instantiated and its commands are registered.
+        import pathlib
+        bot_src = pathlib.Path(
+            "/Users/hector/Projects/Dr.-strange/claw_v2/bot.py"
+        ).read_text()
+        self.assertIn("from claw_v2.checkpoint_handler import CheckpointHandler", bot_src)
+        self.assertIn("CheckpointHandler(", bot_src)
+        self.assertIn("self._checkpoint_handler.commands()", bot_src)
