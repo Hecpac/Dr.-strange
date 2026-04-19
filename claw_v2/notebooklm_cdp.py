@@ -99,9 +99,25 @@ def create_notebook(title: str, *, cdp_url: str = DEFAULT_CDP_URL) -> dict:
 
     pw, browser = _connect(cdp_url)
     try:
+        context = browser.contexts[0] if browser.contexts else None
+        if context is None:
+            raise CdpNotebookLMError("CDP browser has no contexts; is Chrome running?")
+
         page = _open_nlm_page(browser)
         if "/notebook/" in page.url:
             page.goto(NLM_HOME, wait_until="domcontentloaded", timeout=30_000)
+
+        # Snapshot existing notebook ids so we can identify the freshly-created
+        # one — NotebookLM may either redirect the current tab or open a NEW
+        # tab for the new notebook depending on session state.
+        before_ids: set[str] = set()
+        for p in context.pages:
+            try:
+                nb_id = _extract_notebook_id(p.url)
+                if nb_id and nb_id not in _TRANSIENT_NOTEBOOK_IDS:
+                    before_ids.add(nb_id)
+            except Exception:
+                continue
 
         try:
             page.locator("text=Crear cuaderno nuevo").first.click(timeout=15_000)
@@ -110,28 +126,42 @@ def create_notebook(title: str, *, cdp_url: str = DEFAULT_CDP_URL) -> dict:
                 f"Could not find 'Crear cuaderno nuevo' button: {exc}"
             ) from exc
 
-        try:
-            page.wait_for_url(_NOTEBOOK_URL_RE, timeout=30_000)
-        except Exception as exc:
-            raise CdpNotebookLMError(
-                f"Notebook URL did not appear after click: {exc}"
-            ) from exc
-
-        # NotebookLM first navigates to /notebook/creating (or similar transient
-        # placeholder) and then redirects to /notebook/{real-uuid}. Poll until
-        # the id is no longer in the transient set.
+        # Find the new notebook by scanning ALL tabs for a real id we haven't
+        # seen before. Handles in-place navigation and new-tab creation alike.
         notebook_id: str | None = None
-        deadline = time.monotonic() + 30
+        new_page = page
+        deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
-            candidate = _extract_notebook_id(page.url)
-            if candidate and candidate not in _TRANSIENT_NOTEBOOK_IDS:
-                notebook_id = candidate
+            for p in context.pages:
+                try:
+                    candidate = _extract_notebook_id(p.url)
+                except Exception:
+                    continue
+                if (
+                    candidate
+                    and candidate not in _TRANSIENT_NOTEBOOK_IDS
+                    and candidate not in before_ids
+                ):
+                    notebook_id = candidate
+                    new_page = p
+                    break
+            if notebook_id:
                 break
             time.sleep(0.5)
         if not notebook_id:
+            urls = [p.url for p in context.pages if "notebooklm" in p.url]
             raise CdpNotebookLMError(
-                f"Notebook URL did not settle past transient placeholder: {page.url}"
+                f"Notebook URL did not settle past transient placeholder. "
+                f"Current notebooklm tabs: {urls}"
             )
+
+        # The freshly-created notebook may live in a new tab; switch to it for
+        # the title rename step.
+        page = new_page
+        try:
+            page.bring_to_front()
+        except Exception:
+            pass
 
         # Set the title. The first text input on the notebook page (~y=12) is the title.
         # Use mouse.click + keyboard.type to satisfy Angular change detection.
