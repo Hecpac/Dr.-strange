@@ -221,3 +221,57 @@ class LearningRecordEmbeddingTests(unittest.TestCase):
         )
         self.assertIsInstance(oid, int)
         self.assertEqual(self.store.get_outcome(oid)["task_id"], "a")
+
+
+class LearningRetrieveSemanticTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.store = MemoryStore(Path(tempfile.mkdtemp()) / "test.db")
+        self.loop = LearningLoop(memory=self.store)
+
+    def _embed(self, text: str) -> list[float]:
+        t = text.lower()
+        if "pytest" in t:
+            return [1.0, 0.0, 0.0]
+        if "chrome" in t or "browser" in t:
+            return [0.0, 1.0, 0.0]
+        return [0.0, 0.0, 1.0]
+
+    def test_semantic_beats_text_match(self) -> None:
+        self.store.store_task_outcome_with_embedding(
+            task_type="self_heal", task_id="pytest-fix",
+            description="missing module: pytest",
+            approach="pip install pytest",
+            outcome="success",
+            lesson="ensure pytest is installed in the venv",
+            embed_fn=self._embed,
+        )
+        self.store.store_task_outcome_with_embedding(
+            task_type="self_heal", task_id="browser-fix",
+            description="chrome disconnected",
+            approach="relaunch",
+            outcome="success",
+            lesson="use a dedicated user-data-dir",
+            embed_fn=self._embed,
+        )
+        out = self.loop.retrieve_lessons(
+            "# Current input\npytest says No module named pytest",
+            task_type="self_heal",
+            embed_fn=self._embed,
+        )
+        self.assertIn("pytest", out)
+        self.assertNotIn("chrome", out.lower())
+
+    def test_falls_back_to_text_when_no_semantic_hits(self) -> None:
+        def flat(text: str) -> list[float]:
+            return [0.0, 0.0, 0.0]
+        self.store.store_task_outcome(
+            task_type="self_heal", task_id="legacy",
+            description="pytest missing",
+            approach="install",
+            outcome="success",
+            lesson="install pytest",
+        )
+        out = self.loop.retrieve_lessons(
+            "pytest missing again", task_type="self_heal", embed_fn=flat,
+        )
+        self.assertIn("install pytest", out)
