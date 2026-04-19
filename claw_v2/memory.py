@@ -4,6 +4,7 @@ from html import escape
 import json
 import logging
 import math
+import re
 import sqlite3
 import threading
 from pathlib import Path
@@ -120,8 +121,7 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
-import re as _re_for_tokenize
-_TOKEN_RE = _re_for_tokenize.compile(r"[\w][\w-]*", _re_for_tokenize.IGNORECASE)
+_TOKEN_RE = re.compile(r"[\w][\w-]*", re.IGNORECASE)
 
 
 def _tokenize(text: str) -> list[str]:

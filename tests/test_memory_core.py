@@ -457,8 +457,7 @@ class BM25HelperTests(unittest.TestCase):
 
     def test_bm25_ranks_matching_doc_higher(self) -> None:
         from claw_v2.memory import _bm25_scores
-        # Need >=3 docs so BM25Okapi's IDF (log((N-df+0.5)/(df+0.5))) stays positive
-        # for query terms with df=1 — at N=2/df=1 the formula collapses to log(1)=0.
+        # Need >=3 docs: at N=2/df=1, BM25Okapi IDF = log(1) = 0, so all scores collapse to 0.
         corpus = [
             ["python", "import", "error"],
             ["unrelated", "text", "here"],
