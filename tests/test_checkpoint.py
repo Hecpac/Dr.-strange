@@ -171,3 +171,39 @@ class CheckpointRotationTests(unittest.TestCase):
             "SELECT ckpt_id FROM checkpoints WHERE ckpt_id = ?", (new_ckpt,),
         ).fetchone()
         self.assertIsNotNone(row)
+
+
+class CheckpointListTests(unittest.TestCase):
+    def setUp(self) -> None:
+        tmp = Path(tempfile.mkdtemp())
+        self.store = MemoryStore(tmp / "test.db")
+        self.service = CheckpointService(
+            memory=self.store, snapshots_dir=tmp / "snapshots",
+        )
+
+    def test_list_empty(self) -> None:
+        self.assertEqual(self.service.list(), [])
+
+    def test_latest_returns_none_when_empty(self) -> None:
+        self.assertIsNone(self.service.latest())
+
+    def test_list_ordered_desc_by_created_at(self) -> None:
+        ids = [self.service.create(trigger_reason=f"t-{i}") for i in range(3)]
+        rows = self.service.list()
+        self.assertEqual([r["ckpt_id"] for r in rows], list(reversed(ids)))
+
+    def test_latest_returns_newest(self) -> None:
+        ids = [self.service.create(trigger_reason=f"t-{i}") for i in range(3)]
+        self.assertEqual(self.service.latest()["ckpt_id"], ids[-1])
+
+    def test_list_exposes_expected_fields(self) -> None:
+        self.service.create(
+            trigger_reason="t", session_id="s1", consecutive_failures=2,
+        )
+        rows = self.service.list()
+        self.assertEqual(len(rows), 1)
+        keys = set(rows[0].keys())
+        for expected in ("ckpt_id", "created_at", "trigger_reason",
+                         "session_id", "consecutive_failures",
+                         "file_path", "pending_restore", "restored_at"):
+            self.assertIn(expected, keys)

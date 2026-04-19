@@ -89,3 +89,16 @@ class CheckpointService:
             file_path.unlink(missing_ok=True)
             raise
         return ckpt_id
+
+    def list(self) -> list[dict]:
+        rows = self.memory._conn.execute(
+            "SELECT ckpt_id, created_at, trigger_reason, session_id, "
+            "consecutive_failures, file_path, pending_restore, restored_at "
+            "FROM checkpoints "
+            "ORDER BY created_at DESC, id DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def latest(self) -> dict | None:
+        rows = self.list()
+        return rows[0] if rows else None
