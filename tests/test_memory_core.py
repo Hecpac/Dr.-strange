@@ -437,5 +437,37 @@ class ApplyPendingRestoreOnInitTests(unittest.TestCase):
         self.assertIsNone(row["restored_at"])
 
 
+class BM25HelperTests(unittest.TestCase):
+    def test_tokenize_lowercases_and_splits(self) -> None:
+        from claw_v2.memory import _tokenize
+        self.assertEqual(_tokenize("Hello World-Foo"), ["hello", "world-foo"])
+
+    def test_tokenize_drops_punctuation(self) -> None:
+        from claw_v2.memory import _tokenize
+        self.assertEqual(_tokenize("foo, bar! baz?"), ["foo", "bar", "baz"])
+
+    def test_bm25_empty_query_returns_zeros(self) -> None:
+        from claw_v2.memory import _bm25_scores
+        scores = _bm25_scores([], [["doc", "one"], ["doc", "two"]])
+        self.assertEqual(scores, [0.0, 0.0])
+
+    def test_bm25_empty_corpus_returns_empty(self) -> None:
+        from claw_v2.memory import _bm25_scores
+        self.assertEqual(_bm25_scores(["q"], []), [])
+
+    def test_bm25_ranks_matching_doc_higher(self) -> None:
+        from claw_v2.memory import _bm25_scores
+        # Need >=3 docs so BM25Okapi's IDF (log((N-df+0.5)/(df+0.5))) stays positive
+        # for query terms with df=1 — at N=2/df=1 the formula collapses to log(1)=0.
+        corpus = [
+            ["python", "import", "error"],
+            ["unrelated", "text", "here"],
+            ["another", "filler", "doc"],
+        ]
+        scores = _bm25_scores(["python", "import"], corpus)
+        self.assertGreater(scores[0], scores[1])
+        self.assertGreater(scores[0], 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()
