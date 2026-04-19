@@ -24,6 +24,9 @@ logger = logging.getLogger(__name__)
 DEFAULT_CDP_URL = "http://localhost:9250"
 NLM_HOME = "https://notebooklm.google.com/"
 _NOTEBOOK_URL_RE = re.compile(r"notebooklm\.google\.com/notebook/([A-Za-z0-9_-]+)")
+# IDs that NotebookLM uses transiently while a notebook is being provisioned.
+# We must wait for the URL to settle past these before capturing the real id.
+_TRANSIENT_NOTEBOOK_IDS = {"creating", "loading", "new"}
 
 
 class CdpNotebookLMError(RuntimeError):
@@ -114,9 +117,21 @@ def create_notebook(title: str, *, cdp_url: str = DEFAULT_CDP_URL) -> dict:
                 f"Notebook URL did not appear after click: {exc}"
             ) from exc
 
-        notebook_id = _extract_notebook_id(page.url)
+        # NotebookLM first navigates to /notebook/creating (or similar transient
+        # placeholder) and then redirects to /notebook/{real-uuid}. Poll until
+        # the id is no longer in the transient set.
+        notebook_id: str | None = None
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            candidate = _extract_notebook_id(page.url)
+            if candidate and candidate not in _TRANSIENT_NOTEBOOK_IDS:
+                notebook_id = candidate
+                break
+            time.sleep(0.5)
         if not notebook_id:
-            raise CdpNotebookLMError(f"Could not parse notebook id from URL {page.url}")
+            raise CdpNotebookLMError(
+                f"Notebook URL did not settle past transient placeholder: {page.url}"
+            )
 
         # Set the title. The first text input on the notebook page (~y=12) is the title.
         # Use mouse.click + keyboard.type to satisfy Angular change detection.
