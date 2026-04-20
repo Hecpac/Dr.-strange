@@ -4,6 +4,7 @@ from __future__ import annotations
 from html import escape
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable
@@ -37,10 +38,17 @@ class LearningLoop:
         error_snippet: str | None = None,
         retries: int = 0,
         lesson: str | None = None,
+        tags: list[str] | None = None,
     ) -> int:
-        """Record a task outcome with embedding. Derives lesson via LLM if not provided."""
+        """Record a task outcome with embedding. Derives lesson+tags via LLM if not provided."""
         if not lesson:
-            lesson = self._derive_lesson(description, approach, outcome, error_snippet)
+            lesson, derived_tags = self._derive_outcome_metadata(
+                description, approach, outcome, error_snippet,
+            )
+            if tags is None:
+                tags = derived_tags
+        if tags is None:
+            tags = []
         oid = self.memory.store_task_outcome_with_embedding(
             task_type=task_type,
             task_id=task_id,
@@ -50,9 +58,13 @@ class LearningLoop:
             lesson=lesson,
             error_snippet=error_snippet,
             retries=retries,
+            tags=tags,
         )
         self._last_outcome_id = oid
-        logger.info("Learning loop recorded outcome #%d (%s/%s)", oid, task_type, outcome)
+        logger.info(
+            "Learning loop recorded outcome #%d (%s/%s) tags=%s",
+            oid, task_type, outcome, tags,
+        )
         return oid
 
     def record_cycle_outcome(
@@ -211,34 +223,54 @@ class LearningLoop:
             )
         return f"Feedback '{rating}' saved for outcome #{oid}: {existing['description'][:60]}"
 
-    # --- Derive lesson ---
+    # --- Derive metadata ---
 
-    def _derive_lesson(
+    def _derive_outcome_metadata(
         self, description: str, approach: str, outcome: str, error_snippet: str | None,
-    ) -> str:
-        """Use LLM to derive a lesson from the outcome. Falls back to heuristics."""
+    ) -> tuple[str, list[str]]:
+        """Use LLM to derive lesson AND operational tags in a single call.
+
+        Tags are normalized snake_case concepts (e.g. 'macos_permission_denied').
+        Falls back to heuristic lesson with empty tags on LLM failure.
+        """
         if self.router:
             try:
-                return self._derive_lesson_llm(description, approach, outcome, error_snippet)
+                return self._derive_metadata_llm(description, approach, outcome, error_snippet)
             except Exception:
-                logger.warning("LLM lesson derivation failed, falling back to heuristics")
-        return self._derive_lesson_heuristic(outcome, error_snippet)
+                logger.warning("LLM metadata derivation failed, falling back to heuristics")
+        return self._derive_lesson_heuristic(outcome, error_snippet), []
 
-    def _derive_lesson_llm(
+    def _derive_metadata_llm(
         self, description: str, approach: str, outcome: str, error_snippet: str | None,
-    ) -> str:
+    ) -> tuple[str, list[str]]:
         prompt = (
-            f"A task just completed. Extract ONE concise lesson (max 2 sentences) "
-            f"that would help a future AI agent avoid the same mistake or replicate the success.\n\n"
+            "Analyze this task outcome from an AI agent. Return JSON only.\n\n"
+            "Extract:\n"
+            "1. lesson: ONE concise lesson (max 2 sentences) to help a future agent "
+            "avoid the same mistake or replicate the success.\n"
+            "2. tags: 3-5 operational tags. NOT generic words like 'error', 'python', "
+            "'task'. Use normalized snake_case technical concepts naming the root "
+            "cause or affected component (e.g. 'macos_permission_denied', "
+            "'pip_dependency_conflict', 'openai_api_timeout', 'sqlite_lock_contention').\n\n"
             f"Task: {description[:300]}\n"
             f"Approach: {approach[:200]}\n"
             f"Outcome: {outcome}\n"
         )
         if error_snippet:
             prompt += f"Error: {error_snippet[:500]}\n"
-        prompt += "\nLesson:"
+        prompt += '\nReturn JSON: {"lesson": "...", "tags": ["...", "..."]}'
         resp = self.router.ask(prompt, lane="judge", max_budget=0.05, timeout=30.0)  # type: ignore[union-attr]
-        return resp.content.strip()[:500]
+        parsed = _parse_json_object(resp.content)
+        if not parsed:
+            return resp.content.strip()[:500], []
+        lesson = str(parsed.get("lesson") or "").strip()[:500]
+        raw_tags = parsed.get("tags") or []
+        if not isinstance(raw_tags, list):
+            raw_tags = []
+        tags = _normalize_tags(raw_tags)
+        if not lesson:
+            lesson = self._derive_lesson_heuristic(outcome, error_snippet)
+        return lesson, tags
 
     @staticmethod
     def _derive_lesson_heuristic(outcome: str, error_snippet: str | None) -> str:
@@ -435,6 +467,40 @@ def _sanitize_payload(payload: Any, *, depth: int = 0) -> Any:
 def _is_sensitive_key(key: str) -> bool:
     lowered = key.lower()
     return any(token in lowered for token in ("token", "secret", "password", "api_key", "authorization", "credential"))
+
+
+_TAG_GENERIC_STOPWORDS = frozenset({
+    "error", "failure", "success", "task", "agent", "problem",
+    "bug", "fix", "issue", "code", "python", "general", "other",
+    "unknown", "misc", "thing", "stuff",
+})
+_TAG_MIN_LEN = 3
+_TAG_MAX_LEN = 40
+
+
+def _normalize_tags(raw_tags: list[Any]) -> list[str]:
+    """Normalize LLM-proposed tags into snake_case graph-safe entity tags.
+
+    Lowercases, collapses non-[a-z0-9] runs to underscores, strips edge underscores,
+    dedupes, drops generic stop-words and length-outliers. Caps at 5 tags.
+    """
+    seen: set[str] = set()
+    tags: list[str] = []
+    for raw in raw_tags[:10]:
+        if not isinstance(raw, str):
+            continue
+        tag = re.sub(r"[^a-z0-9_]+", "_", raw.strip().lower()).strip("_")
+        if not tag or tag in seen:
+            continue
+        if len(tag) < _TAG_MIN_LEN or len(tag) > _TAG_MAX_LEN:
+            continue
+        if tag in _TAG_GENERIC_STOPWORDS:
+            continue
+        seen.add(tag)
+        tags.append(tag)
+        if len(tags) >= 5:
+            break
+    return tags
 
 
 def _parse_json_object(text: str) -> dict[str, Any] | None:
