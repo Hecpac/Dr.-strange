@@ -391,6 +391,7 @@ class BrowseHandler:
         outcome: str,
         error_snippet: str | None = None,
         lesson: str | None = None,
+        predicted_confidence: float | None = None,
     ) -> None:
         learning = self._get_learning()
         if learning is None:
@@ -405,6 +406,7 @@ class BrowseHandler:
                 outcome=outcome,
                 error_snippet=error_snippet,
                 lesson=lesson,
+                predicted_confidence=predicted_confidence,
             )
         except Exception:
             logger.debug("learning record failed for %s", task_type, exc_info=True)

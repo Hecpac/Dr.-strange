@@ -752,6 +752,7 @@ class BotService:
                 outcome="failure",
                 error_snippet=(raw_content or "empty_response")[:500],
                 lesson="When the brain returns empty output, ask a clarifying question and inspect prompt/context assembly.",
+                predicted_confidence=self.brain._last_confidence or None,
             )
         else:
             self._browse_handler._record_learning_outcome(
@@ -761,6 +762,7 @@ class BotService:
                 approach="brain.handle_message",
                 outcome="success",
                 lesson="The brain produced a usable reply for this conversational request.",
+                predicted_confidence=self.brain._last_confidence or None,
             )
         self._remember_assistant_turn_state(session_id, source_text, content)
         return content
@@ -864,6 +866,15 @@ class BotService:
         events = self.observe.trace_events(trace_id, limit=limit)
         if not events:
             return f"trace not found: {trace_id}"
+
+        html_path: str | None = None
+        try:
+            from claw_v2.visualizer import TraceVisualizerService
+            viz = TraceVisualizerService(self.observe)
+            html_path = str(viz.render(trace_id, limit=limit))
+        except Exception as exc:
+            logger.debug("Trace visualizer failed: %s", exc)
+
         replay = [
             {
                 "timestamp": event["timestamp"],
@@ -879,11 +890,10 @@ class BotService:
             }
             for event in events
         ]
-        return json.dumps(
-            {"trace_id": trace_id, "event_count": len(replay), "events": replay},
-            indent=2,
-            sort_keys=True,
-        )
+        result: dict[str, Any] = {"trace_id": trace_id, "event_count": len(replay), "events": replay}
+        if html_path:
+            result["html"] = html_path
+        return json.dumps(result, indent=2, sort_keys=True)
 
 
 

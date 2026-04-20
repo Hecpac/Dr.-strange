@@ -70,7 +70,7 @@ class PipelineService:
         _create_branch(repo, branch)
         wt_path = _create_worktree(repo, branch)
         run.worktree_path = str(wt_path)
-        past_lessons = self.learning.retrieve_lessons(issue.description, task_type="pipeline") if self.learning else _retrieve_lessons(self.memory, issue.description) if self.memory else ""
+        past_lessons = self.learning.retrieve_lessons(issue.description, task_type="pipeline")[0] if self.learning else _retrieve_lessons(self.memory, issue.description) if self.memory else ""
         try:
             for attempt in range(self.max_retries + 1):
                 prompt = _build_code_prompt(issue, run, past_lessons=past_lessons)
