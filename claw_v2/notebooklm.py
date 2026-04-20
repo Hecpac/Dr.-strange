@@ -41,6 +41,23 @@ class NotebookLMService:
         self._cdp_create_notebook_fn: Callable[[str], dict] | None = None
         self._cdp_research_fn: Callable[[str, str], int] | None = None
         self._cdp_artifact_fn: Callable[[str, str], None] | None = None
+        self._sdk_available = self._detect_sdk()
+
+    @staticmethod
+    def _detect_sdk() -> bool:
+        """Return True if the notebooklm-py SDK is installed and auth state exists."""
+        try:
+            import notebooklm  # noqa: F401
+            import pathlib
+            state = pathlib.Path.home() / ".notebooklm" / "storage_state.json"
+            return state.exists()
+        except ImportError:
+            return False
+
+    @property
+    def _use_sdk(self) -> bool:
+        """True when SDK should be used (either injected factory or auto-detected)."""
+        return self._client_factory is not None or self._sdk_available
 
     _ARTIFACT_LABELS = {
         "podcast": "podcast",
@@ -100,7 +117,7 @@ class NotebookLMService:
         # SDK-based test mocks keep working. Otherwise use the CDP path
         # (production), which can be overridden via _cdp_create_notebook_fn for
         # CDP-specific tests.
-        if self._client_factory is not None:
+        if self._use_sdk:
             return self._run_async(self._async_create_notebook(title))
         cdp_fn = self._cdp_create_notebook_fn or notebooklm_cdp.create_notebook
         return cdp_fn(title)
@@ -184,7 +201,7 @@ class NotebookLMService:
         # CDP mode skips SDK-only id resolution and title lookup. The handler
         # passes the full id from create_notebook, and the notify message uses
         # the id as a stand-in title.
-        cdp_mode = self._client_factory is None
+        cdp_mode = not self._use_sdk
         if cdp_mode:
             full_id = notebook_id
             title = notebook_id[:8]
@@ -255,7 +272,7 @@ class NotebookLMService:
         normalized_kind = kind.strip().lower()
         if normalized_kind not in self._ARTIFACT_LABELS:
             raise ValueError(f"Tipo de artefacto no soportado: {kind}")
-        cdp_mode = self._client_factory is None
+        cdp_mode = not self._use_sdk
         if cdp_mode:
             full_id = notebook_id
             title = notebook_id[:8]
