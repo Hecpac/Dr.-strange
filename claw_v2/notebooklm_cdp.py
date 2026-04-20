@@ -130,7 +130,8 @@ def create_notebook(title: str, *, cdp_url: str = DEFAULT_CDP_URL) -> dict:
         # seen before. Handles in-place navigation and new-tab creation alike.
         notebook_id: str | None = None
         new_page = page
-        deadline = time.monotonic() + 60
+        deadline = time.monotonic() + 120
+        reloaded = False
         while time.monotonic() < deadline:
             for p in context.pages:
                 try:
@@ -147,6 +148,17 @@ def create_notebook(title: str, *, cdp_url: str = DEFAULT_CDP_URL) -> dict:
                     break
             if notebook_id:
                 break
+            # If stuck at /creating for >45s, reload the page to nudge navigation
+            elapsed = 120 - (deadline - time.monotonic())
+            if not reloaded and elapsed > 45:
+                for p in context.pages:
+                    if "/notebook/creating" in p.url:
+                        try:
+                            p.reload(wait_until="domcontentloaded", timeout=15_000)
+                        except Exception:
+                            pass
+                        reloaded = True
+                        break
             time.sleep(0.5)
         if not notebook_id:
             urls = [p.url for p in context.pages if "notebooklm" in p.url]
