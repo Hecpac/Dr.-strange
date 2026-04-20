@@ -259,7 +259,18 @@ class LearningLoop:
         if error_snippet:
             prompt += f"Error: {error_snippet[:500]}\n"
         prompt += '\nReturn JSON: {"lesson": "...", "tags": ["...", "..."]}'
-        resp = self.router.ask(prompt, lane="judge", max_budget=0.05, timeout=30.0)  # type: ignore[union-attr]
+        evidence_pack = {
+            "task_outcome": {
+                "description": description[:300],
+                "approach": approach[:200],
+                "outcome": outcome,
+                "error_snippet": (error_snippet or "")[:500],
+            },
+        }
+        resp = self.router.ask(  # type: ignore[union-attr]
+            prompt, lane="judge", evidence_pack=evidence_pack,
+            max_budget=0.05, timeout=30.0,
+        )
         parsed = _parse_json_object(resp.content)
         if not parsed:
             return resp.content.strip()[:500], []
