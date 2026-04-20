@@ -6,7 +6,7 @@ import threading
 import unittest
 from pathlib import Path
 
-from claw_v2.learning import LearningLoop
+from claw_v2.learning import LearningLoop, _normalize_tags
 from claw_v2.memory import MemoryStore
 from tests.helpers import strict_token_embed
 
@@ -93,6 +93,64 @@ class BuildContextTests(unittest.TestCase):
         ctx = self.store.build_context("s1", message="go")
         self.assertIn("mode=coding", ctx)
         self.assertIn("current_goal=fix bug", ctx)
+
+
+class NormalizeTagsTests(unittest.TestCase):
+    def test_snake_cases_and_lowercases(self) -> None:
+        self.assertEqual(_normalize_tags(["MacOS Permission Denied"]), ["macos_permission_denied"])
+
+    def test_drops_generic_stopwords(self) -> None:
+        self.assertEqual(_normalize_tags(["error", "failure", "task"]), [])
+
+    def test_drops_length_outliers(self) -> None:
+        self.assertEqual(_normalize_tags(["ab", "x" * 50, "pip_dependency_conflict"]),
+                         ["pip_dependency_conflict"])
+
+    def test_dedupes(self) -> None:
+        self.assertEqual(
+            _normalize_tags(["openai_timeout", "OpenAI-Timeout", "openai_timeout"]),
+            ["openai_timeout"],
+        )
+
+    def test_caps_at_five(self) -> None:
+        tags = _normalize_tags([f"concept_number_{i}" for i in range(10)])
+        self.assertEqual(len(tags), 5)
+
+    def test_filters_non_string_entries(self) -> None:
+        self.assertEqual(_normalize_tags(["valid_tag", None, 42, ""]), ["valid_tag"])
+
+
+class LearningLoopTagSupplyTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.store = MemoryStore(Path(tempfile.mkdtemp()) / "test.db")
+
+    def test_record_with_explicit_tags_indexes_graph_edges(self) -> None:
+        loop = LearningLoop(self.store)
+        oid = loop.record(
+            task_type="coding", task_id="t-1",
+            description="install dep", approach="pip install",
+            outcome="failure", lesson="resolve version conflict first",
+            tags=["pip_dependency_conflict", "version_resolution"],
+        )
+        rows = self.store._conn.execute(
+            "SELECT entity_tag FROM outcome_entity_edges WHERE outcome_id = ?", (oid,),
+        ).fetchall()
+        self.assertEqual(
+            sorted(r[0] for r in rows),
+            ["pip_dependency_conflict", "version_resolution"],
+        )
+
+    def test_record_without_router_has_empty_tags(self) -> None:
+        loop = LearningLoop(self.store, router=None)
+        oid = loop.record(
+            task_type="coding", task_id="t-2",
+            description="x", approach="y", outcome="failure",
+        )
+        row = self.store._conn.execute(
+            "SELECT tags FROM task_outcomes WHERE id = ?", (oid,),
+        ).fetchone()
+        import json as _json
+        self.assertEqual(_json.loads(row[0]), [])
 
 
 class LearningLoopPromptTests(unittest.TestCase):
