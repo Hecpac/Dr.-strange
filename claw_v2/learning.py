@@ -19,6 +19,14 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
+class SparsityMetrics:
+    """Captures retrieval health for OOD detection."""
+    max_similarity: float = 0.0
+    graph_expansion_count: int = 0
+    total_relevant_lessons: int = 0
+
+
+@dataclass(slots=True)
 class LearningLoop:
     memory: MemoryStore
     router: LLMRouter | None = None
@@ -39,6 +47,7 @@ class LearningLoop:
         retries: int = 0,
         lesson: str | None = None,
         tags: list[str] | None = None,
+        predicted_confidence: float | None = None,
     ) -> int:
         """Record a task outcome with embedding. Derives lesson+tags via LLM if not provided."""
         if not lesson:
@@ -59,11 +68,17 @@ class LearningLoop:
             error_snippet=error_snippet,
             retries=retries,
             tags=tags,
+            predicted_confidence=predicted_confidence,
         )
         self._last_outcome_id = oid
+        if predicted_confidence is not None:
+            try:
+                self.memory.update_calibration_stats(task_type)
+            except Exception:
+                logger.debug("Calibration stats update failed", exc_info=True)
         logger.info(
-            "Learning loop recorded outcome #%d (%s/%s) tags=%s",
-            oid, task_type, outcome, tags,
+            "Learning loop recorded outcome #%d (%s/%s) conf=%.2f tags=%s",
+            oid, task_type, outcome, predicted_confidence or 0.0, tags,
         )
         return oid
 
@@ -77,6 +92,7 @@ class LearningLoop:
         verification_status: str,
         error_snippet: str | None,
         retries: int = 0,
+        predicted_confidence: float | None = None,
     ) -> int | None:
         """Record a post-mortem for a Brain cycle. Returns None if signal is too thin."""
         goal = (goal or "").strip()
@@ -97,6 +113,7 @@ class LearningLoop:
             outcome=outcome,
             error_snippet=(error_snippet or None),
             retries=retries,
+            predicted_confidence=predicted_confidence,
         )
 
     # --- Retrieve ---
@@ -108,11 +125,13 @@ class LearningLoop:
         task_type: str | None = None,
         limit: int = 3,
         embed_fn: Callable[..., list[float]] | None = None,
-    ) -> str:
+    ) -> tuple[str, SparsityMetrics]:
         """Retrieve relevant past lessons formatted for injection into a prompt.
 
+        Returns (lessons_text, sparsity_metrics) for OOD detection.
         Tries semantic search first; falls back to LIKE-based search, then to recent failures.
         """
+        empty_metrics = SparsityMetrics()
         clean = context
         for marker in ("# Current input\n", "# Profile facts\n", "# Recent messages\n", "# Learning rules\n"):
             if marker in clean:
@@ -172,7 +191,14 @@ class LearningLoop:
         if not outcomes:
             outcomes = self.memory.recent_failures(task_type=task_type, limit=limit)
         if not outcomes:
-            return ""
+            return "", empty_metrics
+
+        similarities = [float(o.get("similarity") or 0.0) for o in outcomes]
+        sparsity = SparsityMetrics(
+            max_similarity=max(similarities) if similarities else 0.0,
+            graph_expansion_count=sum(1 for o in outcomes if o.get("via_graph")),
+            total_relevant_lessons=len(outcomes),
+        )
 
         out_lines: list[str] = [
             "# Lessons from past tasks",
@@ -195,7 +221,7 @@ class LearningLoop:
             if o.get("error_snippet"):
                 out_lines.append(f"  <error>{escape(str(o['error_snippet'][:200]), quote=False)}</error>")
             out_lines.append("</learned_lesson>")
-        return "\n".join(out_lines)
+        return "\n".join(out_lines), sparsity
 
     # --- Feedback ---
 

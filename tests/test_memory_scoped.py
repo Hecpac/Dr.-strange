@@ -254,7 +254,7 @@ class LearningRetrieveSemanticTests(unittest.TestCase):
             lesson="use a dedicated user-data-dir",
             embed_fn=self._embed,
         )
-        out = self.loop.retrieve_lessons(
+        out, _ = self.loop.retrieve_lessons(
             "# Current input\npytest says No module named pytest",
             task_type="self_heal",
             embed_fn=self._embed,
@@ -272,7 +272,7 @@ class LearningRetrieveSemanticTests(unittest.TestCase):
             outcome="success",
             lesson="install pytest",
         )
-        out = self.loop.retrieve_lessons(
+        out, _ = self.loop.retrieve_lessons(
             "pytest missing again", task_type="self_heal", embed_fn=flat,
         )
         self.assertIn("install pytest", out)
@@ -354,7 +354,7 @@ class ExperienceReplayEndToEndTests(unittest.TestCase):
             error_snippet="No module named pytest",
             embed_fn=self._embed,
         )
-        lessons = self.loop.retrieve_lessons(
+        lessons, _ = self.loop.retrieve_lessons(
             "# Current input\nTests are failing: the import for pytest blows up",
             task_type="self_heal",
             embed_fn=self._embed,
@@ -372,7 +372,7 @@ class ExperienceReplayEndToEndTests(unittest.TestCase):
             lesson="always use a dedicated user-data-dir for chrome 146 CDP",
             embed_fn=self._embed,
         )
-        lessons = self.loop.retrieve_lessons(
+        lessons, _ = self.loop.retrieve_lessons(
             "chrome is refusing my CDP connection again",
             task_type="self_heal",
             embed_fn=self._embed,
@@ -410,7 +410,7 @@ class RetrieveLessonsViaGraphTests(unittest.TestCase):
             lesson="set explicit timeout for SPA pages",
             tags=["scrape", "spa"],
         )
-        rendered = self.loop.retrieve_lessons(
+        rendered, _ = self.loop.retrieve_lessons(
             "firecrawl scrape attempt",
             embed_fn=strict_token_embed,
         )
@@ -425,7 +425,7 @@ class RetrieveLessonsViaGraphTests(unittest.TestCase):
             description="firecrawl scrape", approach="a",
             outcome="failure", lesson="api key required",
         )
-        rendered = self.loop.retrieve_lessons(
+        rendered, _ = self.loop.retrieve_lessons(
             "firecrawl",
             embed_fn=strict_token_embed,
         )
@@ -444,7 +444,7 @@ class RetrieveLessonsViaGraphTests(unittest.TestCase):
             raise RuntimeError("simulated graph failure")
         self.store.search_outcomes_with_graph = boom  # type: ignore[method-assign]
         try:
-            rendered = self.loop.retrieve_lessons(
+            rendered, _ = self.loop.retrieve_lessons(
                 "firecrawl",
                 embed_fn=strict_token_embed,
             )
@@ -515,7 +515,7 @@ class RetrieveLessonsObserveSignalTests(unittest.TestCase):
             outcome="failure", lesson="timeout", tags=["firecrawl"],
         )
         # Should not crash; nothing to assert about observe since there isn't one.
-        rendered = loop_without_observe.retrieve_lessons(
+        rendered, _ = loop_without_observe.retrieve_lessons(
             "firecrawl", embed_fn=strict_token_embed,
         )
         self.assertIn("key required", rendered)

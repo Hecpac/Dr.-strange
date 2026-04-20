@@ -76,6 +76,8 @@ class BrainService:
     wiki: object | None = None  # WikiService, injected after init
     playbooks: PlaybookLoader = None  # type: ignore[assignment]
 
+    _last_confidence: float = 0.0
+
     def __post_init__(self) -> None:
         if self.playbooks is None:
             self.playbooks = PlaybookLoader()
@@ -159,6 +161,7 @@ class BrainService:
                 timeout=300.0,
             )
         response = _extract_visible_brain_response(response)
+        self._last_confidence = response.confidence
         provider_session_artifact = response.artifacts.get("session_id")
         self.memory.store_message(session_id, "user", stored_user_message)
         self.memory.store_message(session_id, "assistant", response.content)
@@ -273,7 +276,7 @@ class BrainService:
     ) -> UserPrompt:
         lessons = ""
         if self.learning:
-            lessons = self.learning.retrieve_lessons(stored_user_message, task_type=task_type)
+            lessons, sparsity = self.learning.retrieve_lessons(stored_user_message, task_type=task_type)
             if lessons and self.observe is not None:
                 first_tag_end = lessons.find("</learned_lesson>")
                 preview = lessons[:first_tag_end + len("</learned_lesson>")] if first_tag_end >= 0 else lessons[:400]
@@ -284,8 +287,50 @@ class BrainService:
                         "task_type": task_type,
                         "lesson_count": lessons.count("<learned_lesson"),
                         "preview": preview[:400],
+                        "max_similarity": sparsity.max_similarity,
+                        "graph_expansion_count": sparsity.graph_expansion_count,
                     },
                 )
+            is_ood = (sparsity.max_similarity < 0.4) and (sparsity.graph_expansion_count == 0)
+            if is_ood:
+                ood_block = (
+                    "<ood_warning>\n"
+                    "Sparsity Alert: Your memory search returned low-confidence results. "
+                    "You are currently in an Out-of-Distribution zone. "
+                    "No strong analogical patterns were found in your past experiences. "
+                    "Proceed with extreme caution, verify every assumption, and verbalize your uncertainty to the user.\n"
+                    "</ood_warning>"
+                )
+                lessons = f"{ood_block}\n{lessons}" if lessons else ood_block
+                if self.observe is not None:
+                    self.observe.emit(
+                        "ood_detected",
+                        payload={
+                            "session_id": session_id,
+                            "max_similarity": sparsity.max_similarity,
+                            "graph_expansion_count": sparsity.graph_expansion_count,
+                            "total_relevant_lessons": sparsity.total_relevant_lessons,
+                        },
+                    )
+        if task_type:
+            cal = self.memory.get_calibration_stats(task_type)
+            if cal and cal["sample_count"] >= 5 and abs(cal["calibration_delta"]) > 0.15:
+                delta_pct = abs(round(cal["calibration_delta"] * 100))
+                if cal["calibration_delta"] < 0:
+                    adj = "Be more critical of your certainty"
+                    direction = "higher"
+                else:
+                    adj = "Trust your intuition more"
+                    direction = "lower"
+                cal_block = (
+                    "<confidence_calibration>\n"
+                    f"Based on your historical performance in {task_type} tasks:\n"
+                    f"- Your predicted confidence is typically {delta_pct}% {direction} "
+                    f"than your actual success rate.\n"
+                    f"- Adjustment: {adj}.\n"
+                    "</confidence_calibration>"
+                )
+                lessons = f"{cal_block}\n{lessons}" if lessons else cal_block
         # Enrich with wiki context when available
         wiki_context = self._wiki_context(stored_user_message)
         if wiki_context:
@@ -330,6 +375,7 @@ class BrainService:
         action_summary: str,
         verification_status: str,
         error_snippet: str | None,
+        predicted_confidence: float | None = None,
     ) -> None:
         """Called at the end of a verification cycle. Emits observe + records a post-mortem."""
         if self.observe is not None:
@@ -340,6 +386,7 @@ class BrainService:
                     "task_type": task_type,
                     "verification_status": verification_status,
                     "had_error": bool(error_snippet),
+                    "predicted_confidence": predicted_confidence,
                 },
             )
         if self.learning is not None:
@@ -351,6 +398,7 @@ class BrainService:
                     action_summary=action_summary,
                     verification_status=verification_status,
                     error_snippet=error_snippet,
+                    predicted_confidence=predicted_confidence,
                 )
             except Exception:
                 logger.warning("Auto post-mortem recording failed", exc_info=True)
@@ -825,6 +873,7 @@ class BrainService:
             action_summary=(verification.summary or verification.recommendation or action),
             verification_status=mapped_status,
             error_snippet=error_snippet,
+            predicted_confidence=self._last_confidence or None,
         )
 
 

@@ -277,6 +277,20 @@ _MIGRATION_ADD_SESSION_STATE_TASK_QUEUE = """
 ALTER TABLE session_state ADD COLUMN task_queue_json TEXT NOT NULL DEFAULT '[]';
 """
 
+_MIGRATION_ADD_OUTCOME_PREDICTED_CONFIDENCE = """
+ALTER TABLE task_outcomes ADD COLUMN predicted_confidence REAL;
+"""
+
+_MIGRATION_CREATE_CALIBRATION_STATS = """
+CREATE TABLE IF NOT EXISTS calibration_stats (
+    task_type TEXT PRIMARY KEY,
+    avg_predicted_conf REAL NOT NULL DEFAULT 0.5,
+    actual_success_rate REAL NOT NULL DEFAULT 0.5,
+    calibration_delta REAL NOT NULL DEFAULT 0.0,
+    sample_count INTEGER NOT NULL DEFAULT 0
+);
+"""
+
 
 # Graph-expansion neighbor scoring discount. Mirrors claw_v2/wiki.py:1046, where
 # graph-expanded pages are scored at 0.6 * the average seed score so they sort
@@ -313,13 +327,26 @@ class MemoryStore:
                 pass
         cursor = self._conn.execute("PRAGMA table_info(task_outcomes)")
         outcome_cols = {row[1] for row in cursor.fetchall()}
-        for col, sql in [("feedback", _MIGRATION_ADD_OUTCOME_FEEDBACK), ("tags", _MIGRATION_ADD_OUTCOME_TAGS)]:
+        for col, sql in [
+            ("feedback", _MIGRATION_ADD_OUTCOME_FEEDBACK),
+            ("tags", _MIGRATION_ADD_OUTCOME_TAGS),
+            ("predicted_confidence", _MIGRATION_ADD_OUTCOME_PREDICTED_CONFIDENCE),
+        ]:
             if col not in outcome_cols:
                 try:
                     self._conn.execute(sql)
                     self._conn.commit()
                 except sqlite3.OperationalError:
                     pass
+        cursor_cal = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='calibration_stats'"
+        )
+        if cursor_cal.fetchone() is None:
+            try:
+                self._conn.executescript(_MIGRATION_CREATE_CALIBRATION_STATS)
+                self._conn.commit()
+            except sqlite3.OperationalError:
+                pass
         cursor = self._conn.execute("PRAGMA table_info(provider_sessions)")
         provider_cols = {row[1] for row in cursor.fetchall()}
         if "last_message_id" not in provider_cols:
@@ -1148,6 +1175,7 @@ class MemoryStore:
         error_snippet: str | None = None,
         retries: int = 0,
         tags: Iterable[str] = (),
+        predicted_confidence: float | None = None,
     ) -> int:
         tag_list = list(tags)
         with self._lock:
@@ -1155,11 +1183,11 @@ class MemoryStore:
                 """
                 INSERT INTO task_outcomes
                     (task_type, task_id, description, approach, outcome, lesson,
-                     error_snippet, retries, tags)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     error_snippet, retries, tags, predicted_confidence)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (task_type, task_id, description, approach, outcome, lesson,
-                 error_snippet, retries, json.dumps(tag_list)),
+                 error_snippet, retries, json.dumps(tag_list), predicted_confidence),
             )
             oid = cursor.lastrowid
             if tag_list:
@@ -1179,6 +1207,7 @@ class MemoryStore:
         error_snippet: str | None = None,
         retries: int = 0,
         tags: Iterable[str] = (),
+        predicted_confidence: float | None = None,
         embed_fn: Callable[..., list[float]] | None = None,
     ) -> int:
         embedder = embed_fn or _simple_embedding
@@ -1192,11 +1221,11 @@ class MemoryStore:
                 """
                 INSERT INTO task_outcomes
                     (task_type, task_id, description, approach, outcome, lesson,
-                     error_snippet, retries, tags)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     error_snippet, retries, tags, predicted_confidence)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (task_type, task_id, description, approach, outcome, lesson,
-                 error_snippet, retries, json.dumps(tag_list)),
+                 error_snippet, retries, json.dumps(tag_list), predicted_confidence),
             )
             oid = cursor.lastrowid
             self._conn.execute(
@@ -1207,6 +1236,55 @@ class MemoryStore:
                 self._index_outcome_tags(oid, tag_list)
             self._conn.commit()
         return oid  # type: ignore[return-value]
+
+    def update_calibration_stats(self, task_type: str) -> dict | None:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT outcome, predicted_confidence FROM task_outcomes "
+                "WHERE task_type = ? AND predicted_confidence IS NOT NULL",
+                (task_type,),
+            ).fetchall()
+        if not rows:
+            return None
+        total = len(rows)
+        successes = sum(1 for r in rows if r[0] == "success")
+        avg_conf = sum(r[1] for r in rows) / total
+        success_rate = successes / total
+        delta = success_rate - avg_conf
+        stats = {
+            "task_type": task_type,
+            "avg_predicted_conf": round(avg_conf, 4),
+            "actual_success_rate": round(success_rate, 4),
+            "calibration_delta": round(delta, 4),
+            "sample_count": total,
+        }
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO calibration_stats "
+                "(task_type, avg_predicted_conf, actual_success_rate, calibration_delta, sample_count) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (task_type, stats["avg_predicted_conf"], stats["actual_success_rate"],
+                 stats["calibration_delta"], total),
+            )
+            self._conn.commit()
+        return stats
+
+    def get_calibration_stats(self, task_type: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT task_type, avg_predicted_conf, actual_success_rate, "
+                "calibration_delta, sample_count FROM calibration_stats WHERE task_type = ?",
+                (task_type,),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "task_type": row[0],
+            "avg_predicted_conf": row[1],
+            "actual_success_rate": row[2],
+            "calibration_delta": row[3],
+            "sample_count": row[4],
+        }
 
     def search_past_outcomes(
         self, query: str, *, task_type: str | None = None, limit: int = 5,
