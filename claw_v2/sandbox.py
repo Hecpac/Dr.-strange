@@ -36,7 +36,35 @@ CAPABILITY_PROFILES = {
         "python3",
         "npm",
         "npx",
+        "pnpm",
         "node",
+        "bash",
+        "sh",
+        "echo",
+        "rm",
+        "cd",
+        "tsc",
+        "find",
+        "head",
+        "tail",
+        "wc",
+        "which",
+        "date",
+        "sort",
+        "uniq",
+        "env",
+        "tr",
+        "sed",
+        "awk",
+        "dirname",
+        "basename",
+        "lsof",
+        "kill",
+        "pgrep",
+        "pkill",
+        "ps",
+        "xargs",
+        "nohup",
     },
     "admin": SURGICAL_ALLOWED_BINARIES
     | {
@@ -46,6 +74,7 @@ CAPABILITY_PROFILES = {
         "python3",
         "npm",
         "npx",
+        "pnpm",
         "node",
         "brew",
         "chmod",
@@ -133,12 +162,13 @@ def _unwrap_command_tokens(tokens: list[str]) -> list[str]:
     return remaining
 
 
-_SHELL_OPERATORS_RE = __import__("re").compile(r"[;|&`<>]|\$\(")
+_re_mod = __import__("re")
+_SHELL_OPERATORS_RE = _re_mod.compile(r"[;|&`<>]|\$\(")
+_ALWAYS_BLOCKED_OPS_RE = _re_mod.compile(r"[;`<>]|\$\(")
+_COMPOUND_CMD_RE = _re_mod.compile(r"\s*(?:&&|\|\||\|)\s*")
 
 
-def check_command(command: str, policy: SandboxPolicy) -> str | None:
-    if _SHELL_OPERATORS_RE.search(command):
-        return "shell operators (;|&`<>$) are not allowed"
+def _check_single_command(command: str, policy: SandboxPolicy) -> str | None:
     try:
         tokens = shlex.split(command)
     except ValueError:
@@ -148,8 +178,6 @@ def check_command(command: str, policy: SandboxPolicy) -> str | None:
     tokens = _unwrap_command_tokens(tokens)
     if not tokens:
         return "unparseable command"
-    if "xargs" in [Path(token).name for token in tokens]:
-        return "xargs is not allowed"
     base_cmd = Path(tokens[0]).name
     if _network_disabled(policy) and base_cmd in {"curl", "wget"}:
         return "network access not allowed for this agent"
@@ -158,6 +186,26 @@ def check_command(command: str, policy: SandboxPolicy) -> str | None:
     interpreter_violation = _check_interpreter_invocation(base_cmd, tokens, policy)
     if interpreter_violation:
         return interpreter_violation
+    return None
+
+
+def check_command(command: str, policy: SandboxPolicy) -> str | None:
+    relaxed = policy.capability_profile in ("engineer", "admin")
+    if relaxed:
+        sanitized = _COMPOUND_CMD_RE.sub(" ", command).rstrip("& ")
+        if _ALWAYS_BLOCKED_OPS_RE.search(sanitized):
+            return "shell operators (;`<>$) are not allowed"
+        parts = [p.strip().rstrip("& ").strip() for p in _COMPOUND_CMD_RE.split(command)]
+    else:
+        if _SHELL_OPERATORS_RE.search(command):
+            return "shell operators (;|&`<>$) are not allowed"
+        parts = [command]
+    for part in parts:
+        if not part:
+            continue
+        violation = _check_single_command(part, policy)
+        if violation:
+            return violation
     return None
 
 
