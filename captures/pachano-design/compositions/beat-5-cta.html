@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=1920, height=1080">
+<style>
+  @font-face { font-family: 'Plus Jakarta Sans'; src: url('../assets/fonts/2fe89d53234c61d4-s.0k_.i63k_i_qa.woff2') format('woff2'); font-weight: 400; }
+  @font-face { font-family: 'IBM Plex Mono'; src: url('../assets/fonts/e390973e931a41c5-s.08hd0g.321csk.woff2') format('woff2'); font-weight: 500; }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  .scene {
+    width: 1920px;
+    height: 1080px;
+    overflow: hidden;
+    position: relative;
+    background: #F7F5F0;
+  }
+
+  .center-wrap {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
+  }
+
+  .logo-mark {
+    width: 200px;
+    height: 200px;
+    opacity: 0;
+  }
+
+  .frame-border {
+    position: absolute;
+    background: #CB2131;
+  }
+
+  .frame-top {
+    top: calc(50% - 180px);
+    left: calc(50% - 140px);
+    width: 280px;
+    height: 2px;
+    transform: scaleX(0);
+    transform-origin: left;
+  }
+
+  .frame-right {
+    top: calc(50% - 180px);
+    left: calc(50% + 140px - 2px);
+    width: 2px;
+    height: 280px;
+    transform: scaleY(0);
+    transform-origin: top;
+  }
+
+  .frame-bottom {
+    top: calc(50% + 100px - 2px);
+    left: calc(50% - 140px);
+    width: 280px;
+    height: 2px;
+    transform: scaleX(0);
+    transform-origin: right;
+  }
+
+  .frame-left {
+    top: calc(50% - 180px);
+    left: calc(50% - 140px);
+    width: 2px;
+    height: 280px;
+    transform: scaleY(0);
+    transform-origin: bottom;
+  }
+
+  .domain {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 28px;
+    font-weight: 500;
+    color: #21201B;
+    margin-top: 32px;
+    letter-spacing: 0.02em;
+  }
+
+  .tagline {
+    font-family: 'Plus Jakarta Sans', sans-serif;
+    font-size: 22px;
+    font-weight: 400;
+    color: #21201B;
+    margin-top: 12px;
+    opacity: 0;
+  }
+</style>
+</head>
+<body>
+<div class="scene" data-comp-id="beat-5-cta" data-composition-id="beat-5-cta" data-width="1920" data-height="1080" data-start="0" data-duration="4.0">
+  <div class="frame-border frame-top"></div>
+  <div class="frame-border frame-right"></div>
+  <div class="frame-border frame-bottom"></div>
+  <div class="frame-border frame-left"></div>
+  <div class="center-wrap">
+    <img class="logo-mark" src="../assets/svgs/logo-6.svg" alt="PHD">
+    <div class="domain">premiumhome.design</div>
+    <div class="tagline">Custom homes across DFW &amp; North Texas</div>
+  </div>
+</div>
+
+<script src="../assets/gsap.min.js"></script>
+<script>
+(function() {
+  const tl = gsap.timeline({ paused: true });
+
+  const logo = document.querySelector('.logo-mark');
+  const frameTop = document.querySelector('.frame-top');
+  const frameRight = document.querySelector('.frame-right');
+  const frameBottom = document.querySelector('.frame-bottom');
+  const frameLeft = document.querySelector('.frame-left');
+  const domain = document.querySelector('.domain');
+  const tagline = document.querySelector('.tagline');
+  const scene = document.querySelector('.scene');
+
+  // Logo scales in at 0s
+  tl.fromTo(logo,
+    { scale: 0.8, opacity: 0 },
+    { scale: 1, opacity: 1, duration: 0.4, ease: "power2.out" },
+    0
+  );
+
+  // Red frame border draws clockwise starting at 0.5s
+  tl.to(frameTop, { scaleX: 1, duration: 0.25, ease: "power2.out" }, 0.5);
+  tl.to(frameRight, { scaleY: 1, duration: 0.25, ease: "power2.out" }, 0.75);
+  tl.to(frameBottom, { scaleX: 1, duration: 0.25, ease: "power2.out" }, 1.0);
+  tl.to(frameLeft, { scaleY: 1, duration: 0.25, ease: "power2.out" }, 1.25);
+
+  // "premiumhome.design" types on character by character at 1.2s
+  var text = "premiumhome.design";
+  domain.innerHTML = text.split('').map(function(c) {
+    return '<span style="opacity:0">' + c + '</span>';
+  }).join('');
+  tl.to(domain.querySelectorAll('span'), {
+    opacity: 1,
+    duration: 0.05,
+    stagger: 0.028,
+    ease: "none"
+  }, 1.2);
+
+  // Tagline fades in at 2.0s
+  tl.fromTo(tagline,
+    { y: 10, opacity: 0 },
+    { y: 0, opacity: 1, duration: 0.3, ease: "power2.out" },
+    2.0
+  );
+
+  // Subtle fade to black at 3.2s
+  tl.to(scene, { opacity: 0, duration: 0.5, ease: "power2.in" }, 3.2);
+
+  window.__timelines = window.__timelines || {};
+  window.__timelines["beat-5-cta"] = tl;
+})();
+</script>
+</body>
+</html>

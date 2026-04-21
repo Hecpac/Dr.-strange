@@ -1,0 +1,327 @@
+[
+  {
+    "url": "https://phd-1qn1c5ado-hector-pachaos-projects.vercel.app/_next/image?url=%2Flogo%2FPHD_logo_white.png&w=1536&q=75&dpl=dpl_DT8dHQEX8ybL8zXmJNrVQ55XAKWU",
+    "type": "Image",
+    "contexts": [
+      "img[src]",
+      "img[srcset]"
+    ],
+    "notes": "PHD logo",
+    "description": "PHD logo",
+    "sectionClasses": "fixed top-0 z-50 w-full border-b transition-[background-color,border-color,box-shadow,backdrop-filter] duration-300 bord",
+    "aboveFold": true
+  },
+  {
+    "url": "https://phd-1qn1c5ado-hector-pachaos-projects.vercel.app/_next/image?url=%2Fhero-home.jpeg&w=1536&q=75&dpl=dpl_DT8dHQEX8ybL8zXmJNrVQ55XAKWU",
+    "type": "Image",
+    "contexts": [
+      "img[src]",
+      "img[srcset]"
+    ],
+    "notes": "Modern luxury kitchen with marble island and pendant lighting in a DFW custom home",
+    "description": "Modern luxury kitchen with marble island and pendant lighting in a DFW custom home",
+    "nearestHeading": "BESPOKE CUSTOM DESIGN",
+    "sectionClasses": "relative lg:sticky lg:top-0 lg:z-0 -mt-14 mb-14 h-[85dvh] w-full overflow-hidden md:h-dvh md:-mt-[72px] md:mb-[72px]",
+    "aboveFold": true
+  },
+  {
+    "url": "https://phd-1qn1c5ado-hector-pachaos-projects.vercel.app/_next/image?url=%2Fprojects%2Froxcliff%2F40.jpg&w=1536&q=75&dpl=dpl_DT8dHQEX8ybL8zXmJNrVQ55XAKWU",
+    "type": "Image",
+    "contexts": [
+      "img[src]",
+      "img[srcset]"
+    ],
+    "notes": "Rockcliff Residence front elevation at sunset with stone entry and floor-to-ceiling glass",
+    "description": "Rockcliff Residence front elevation at sunset with stone entry and floor-to-ceiling glass",
+    "nearestHeading": "Built work across DFW & North Texas",
+    "sectionClasses": "relative overflow-visible bg-[#1c1c1c] pt-24 pb-0 text-white sm:pt-32",
+    "aboveFold": false
+  },
+  {
+    "url": "https://phd-1qn1c5ado-hector-pachaos-projects.vercel.app/_next/image?url=%2Fprojects%2F1930-bickers%2Fhero.jpg&w=1536&q=75&dpl=dpl_DT8dHQEX8ybL8zXmJNrVQ55XAKWU",
+    "type": "Image",
+    "contexts": [
+      "img[src]",
+      "img[srcset]"
+    ],
+    "notes": "Bickers Residence staircase and double-height living space in Dallas",
+    "description": "Bickers Residence staircase and double-height living space in Dallas",
+    "nearestHeading": "Built work across DFW & North Texas",
+    "sectionClasses": "relative overflow-visible bg-[#1c1c1c] pt-24 pb-0 text-white sm:pt-32",
+    "aboveFold": false
+  },
+  {
+    "url": "https://phd-1qn1c5ado-hector-pachaos-projects.vercel.app/_next/image?url=%2Fprojects%2Fduplex%2Fhero.jpg&w=1536&q=75&dpl=dpl_DT8dHQEX8ybL8zXmJNrVQ55XAKWU",
+    "type": "Image",
+    "contexts": [
+      "img[src]",
+      "img[srcset]"
+    ],
+    "notes": "Modern duplex front elevation with black and white facade",
+    "description": "Modern duplex front elevation with black and white facade",
+    "nearestHeading": "Built work across DFW & North Texas",
+    "sectionClasses": "relative overflow-visible bg-[#1c1c1c] pt-24 pb-0 text-white sm:pt-32",
+    "aboveFold": false
+  },
+  {
+    "url": "https://phd-1qn1c5ado-hector-pachaos-projects.vercel.app/_next/image?url=%2Fprojects%2Fpueblo%2Fhero.jpg&w=1536&q=75&dpl=dpl_DT8dHQEX8ybL8zXmJNrVQ55XAKWU",
+    "type": "Image",
+    "contexts": [
+      "img[src]",
+      "img[srcset]"
+    ],
+    "notes": "Pueblo Residence front elevation with cedar and stone facade",
+    "description": "Pueblo Residence front elevation with cedar and stone facade",
+    "nearestHeading": "Built work across DFW & North Texas",
+    "sectionClasses": "relative overflow-visible bg-[#1c1c1c] pt-24 pb-0 text-white sm:pt-32",
+    "aboveFold": false
+  },
+  {
+    "url": "https://phd-1qn1c5ado-hector-pachaos-projects.vercel.app/_next/image?url=%2Fprojects%2Fgallagher%2Fhero.jpg&w=1536&q=75&dpl=dpl_DT8dHQEX8ybL8zXmJNrVQ55XAKWU",
+    "type": "Image",
+    "contexts": [
+      "img[src]",
+      "img[srcset]"
+    ],
+    "notes": "Gallagher Residence modern stucco exterior in North Dallas",
+    "description": "Gallagher Residence modern stucco exterior in North Dallas",
+    "nearestHeading": "Built work across DFW & North Texas",
+    "sectionClasses": "relative overflow-visible bg-[#1c1c1c] pt-24 pb-0 text-white sm:pt-32",
+    "aboveFold": false
+  },
+  {
+    "url": "https://phd-1qn1c5ado-hector-pachaos-projects.vercel.app/_next/image?url=%2Fprojects%2Fduplex%2Fkitchen-dining.jpg&w=1536&q=75&dpl=dpl_DT8dHQEX8ybL8zXmJNrVQ55XAKWU",
+    "type": "Image",
+    "contexts": [
+      "img[src]",
+      "img[srcset]"
+    ],
+    "notes": "Open kitchen and dining with marble island in a modern duplex in Dallas",
+    "description": "Open kitchen and dining with marble island in a modern duplex in Dallas",
+    "nearestHeading": "Design-Build Delivery",
+    "sectionClasses": "bento-cell flex flex-col justify-end p-6 sm:p-8 md:p-10 min-h-[clamp(20rem,52vw,34rem)] md:col-span-2 md:row-span-2 bran",
+    "aboveFold": false
+  },
+  {
+    "url": "https://phd-1qn1c5ado-hector-pachaos-projects.vercel.app/_next/image?url=%2Fprojects%2F806-mango%2Frear-pool.jpg&w=1536&q=75&dpl=dpl_DT8dHQEX8ybL8zXmJNrVQ55XAKWU",
+    "type": "Image",
+    "contexts": [
+      "img[src]",
+      "img[srcset]"
+    ],
+    "notes": "Rear exterior with pool of a modern home in Coppell, DFW",
+    "description": "Rear exterior with pool of a modern home in Coppell, DFW",
+    "nearestHeading": "DFW · North Texas",
+    "sectionClasses": "bento-cell flex flex-col justify-end p-6 sm:p-8 md:p-10 min-h-[clamp(14rem,34vw,19rem)] brand-red-outline relative overf",
+    "aboveFold": false
+  },
+  {
+    "url": "https://phd-1qn1c5ado-hector-pachaos-projects.vercel.app/media/render-3d.webm",
+    "type": "Video",
+    "contexts": [
+      "video source[src]"
+    ],
+    "notes": null
+  },
+  {
+    "url": "https://phd-1qn1c5ado-hector-pachaos-projects.vercel.app/media/render-3d.mp4",
+    "type": "Video",
+    "contexts": [
+      "video source[src]"
+    ],
+    "notes": null
+  },
+  {
+    "url": "https://phd-1qn1c5ado-hector-pachaos-projects.vercel.app/media/render-3d-poster.jpg",
+    "type": "Image",
+    "contexts": [
+      "video[poster]"
+    ],
+    "notes": null
+  },
+  {
+    "url": "https://phd-1qn1c5ado-hector-pachaos-projects.vercel.app/_next/static/media/fba5a26ea33df6a3-s.p.0eehd8tgys7nv.woff2?dpl=dpl_DT8dHQEX8ybL8zXmJNrVQ55XAKWU",
+    "type": "Font",
+    "contexts": [
+      "link[rel=\"preload\"]"
+    ],
+    "notes": null
+  },
+  {
+    "url": "https://phd-1qn1c5ado-hector-pachaos-projects.vercel.app/_next/static/chunks/0cdoqcaztmn.4.js?dpl=dpl_DT8dHQEX8ybL8zXmJNrVQ55XAKWU",
+    "type": "Other",
+    "contexts": [
+      "link[rel=\"preload\"]"
+    ],
+    "notes": null
+  },
+  {
+    "url": "https://phd-1qn1c5ado-hector-pachaos-projects.vercel.app/favicon.ico?favicon.0c6a55i1r8xo2.ico?dpl=dpl_DT8dHQEX8ybL8zXmJNrVQ55XAKWU",
+    "type": "Icon",
+    "contexts": [
+      "link[rel=\"icon\"]"
+    ],
+    "notes": null
+  },
+  {
+    "url": "https://www.premiumhome.design/og-default.jpg",
+    "type": "Image",
+    "contexts": [
+      "meta[og:image]",
+      "meta[twitter:image]"
+    ],
+    "notes": null
+  },
+  {
+    "url": "https://phd-1qn1c5ado-hector-pachaos-projects.vercel.app/media/0b1dc8ddaa74ba49-s.04o39dzmj.ey..woff2?dpl=dpl_DT8dHQEX8ybL8zXmJNrVQ55XAKWU",
+    "type": "Other",
+    "contexts": [
+      "css url()"
+    ],
+    "notes": null
+  },
+  {
+    "url": "https://phd-1qn1c5ado-hector-pachaos-projects.vercel.app/media/e629b5bc06499d58-s.0b_~8bw~gzh90.woff2?dpl=dpl_DT8dHQEX8ybL8zXmJNrVQ55XAKWU",
+    "type": "Other",
+    "contexts": [
+      "css url()"
+    ],
+    "notes": null
+  },
+  {
+    "url": "https://phd-1qn1c5ado-hector-pachaos-projects.vercel.app/media/1a099d89ee94ee96-s.0_qb~~5cn13jl.woff2?dpl=dpl_DT8dHQEX8ybL8zXmJNrVQ55XAKWU",
+    "type": "Other",
+    "contexts": [
+      "css url()"
+    ],
+    "notes": null
+  },
+  {
+    "url": "https://phd-1qn1c5ado-hector-pachaos-projects.vercel.app/media/fba5a26ea33df6a3-s.p.0eehd8tgys7nv.woff2?dpl=dpl_DT8dHQEX8ybL8zXmJNrVQ55XAKWU",
+    "type": "Other",
+    "contexts": [
+      "css url()"
+    ],
+    "notes": null
+  },
+  {
+    "url": "https://phd-1qn1c5ado-hector-pachaos-projects.vercel.app/media/e390973e931a41c5-s.08hd0g.321csk.woff2?dpl=dpl_DT8dHQEX8ybL8zXmJNrVQ55XAKWU",
+    "type": "Other",
+    "contexts": [
+      "css url()"
+    ],
+    "notes": null
+  },
+  {
+    "url": "https://phd-1qn1c5ado-hector-pachaos-projects.vercel.app/media/59b15b4bcd7b1eb5-s.0x08jh8vondwt.woff2?dpl=dpl_DT8dHQEX8ybL8zXmJNrVQ55XAKWU",
+    "type": "Other",
+    "contexts": [
+      "css url()"
+    ],
+    "notes": null
+  },
+  {
+    "url": "https://phd-1qn1c5ado-hector-pachaos-projects.vercel.app/media/e532fa1b9921e1cd-s.0~wrfy7sm-h4g.woff2?dpl=dpl_DT8dHQEX8ybL8zXmJNrVQ55XAKWU",
+    "type": "Other",
+    "contexts": [
+      "css url()"
+    ],
+    "notes": null
+  },
+  {
+    "url": "https://phd-1qn1c5ado-hector-pachaos-projects.vercel.app/media/2fe89d53234c61d4-s.0k_.i63k_i_qa.woff2?dpl=dpl_DT8dHQEX8ybL8zXmJNrVQ55XAKWU",
+    "type": "Other",
+    "contexts": [
+      "css url()"
+    ],
+    "notes": null
+  },
+  {
+    "url": "https://phd-1qn1c5ado-hector-pachaos-projects.vercel.app/media/99e609270109b47d-s.16-z~2sp29ex6.woff2?dpl=dpl_DT8dHQEX8ybL8zXmJNrVQ55XAKWU",
+    "type": "Other",
+    "contexts": [
+      "css url()"
+    ],
+    "notes": null
+  },
+  {
+    "url": "https://phd-1qn1c5ado-hector-pachaos-projects.vercel.app/media/5e05ae5b48faa55e-s.0m9hhkgdlzukj.woff2?dpl=dpl_DT8dHQEX8ybL8zXmJNrVQ55XAKWU",
+    "type": "Other",
+    "contexts": [
+      "css url()"
+    ],
+    "notes": null
+  },
+  {
+    "url": "https://phd-1qn1c5ado-hector-pachaos-projects.vercel.app/media/a7afbb44bec2bb18-s.0juuwbcf7uz~t.woff2?dpl=dpl_DT8dHQEX8ybL8zXmJNrVQ55XAKWU",
+    "type": "Other",
+    "contexts": [
+      "css url()"
+    ],
+    "notes": null
+  },
+  {
+    "url": "https://phd-1qn1c5ado-hector-pachaos-projects.vercel.app/media/02263ebadd758ea4-s.0qg7j5o.yrclm.woff2?dpl=dpl_DT8dHQEX8ybL8zXmJNrVQ55XAKWU",
+    "type": "Other",
+    "contexts": [
+      "css url()"
+    ],
+    "notes": null
+  },
+  {
+    "url": "https://phd-1qn1c5ado-hector-pachaos-projects.vercel.app/media/68757d6cddeff913-s.0hkrq11n-dhos.woff2?dpl=dpl_DT8dHQEX8ybL8zXmJNrVQ55XAKWU",
+    "type": "Other",
+    "contexts": [
+      "css url()"
+    ],
+    "notes": null
+  },
+  {
+    "url": "https://phd-1qn1c5ado-hector-pachaos-projects.vercel.app/media/effe91970fc4db64-s.07ig5l8azj~hy.woff2?dpl=dpl_DT8dHQEX8ybL8zXmJNrVQ55XAKWU",
+    "type": "Other",
+    "contexts": [
+      "css url()"
+    ],
+    "notes": null
+  },
+  {
+    "url": "https://phd-1qn1c5ado-hector-pachaos-projects.vercel.app/media/6ff74e33ebd7bca3-s.0_n_qwbzcushi.woff2?dpl=dpl_DT8dHQEX8ybL8zXmJNrVQ55XAKWU",
+    "type": "Other",
+    "contexts": [
+      "css url()"
+    ],
+    "notes": null
+  },
+  {
+    "url": "https://phd-1qn1c5ado-hector-pachaos-projects.vercel.app/media/1a69062cfe6f77f8-s.07r2ragk8ph~z.woff2?dpl=dpl_DT8dHQEX8ybL8zXmJNrVQ55XAKWU",
+    "type": "Other",
+    "contexts": [
+      "css url()"
+    ],
+    "notes": null
+  },
+  {
+    "url": "https://phd-1qn1c5ado-hector-pachaos-projects.vercel.app/media/9a4838fcda0d1bca-s.0787d67~10694.woff2?dpl=dpl_DT8dHQEX8ybL8zXmJNrVQ55XAKWU",
+    "type": "Other",
+    "contexts": [
+      "css url()"
+    ],
+    "notes": null
+  },
+  {
+    "url": "https://phd-1qn1c5ado-hector-pachaos-projects.vercel.app/media/2e95a7d252b9825a-s.0dgq8lqrj3gc_.woff2?dpl=dpl_DT8dHQEX8ybL8zXmJNrVQ55XAKWU",
+    "type": "Other",
+    "contexts": [
+      "css url()"
+    ],
+    "notes": null
+  },
+  {
+    "url": "https://phd-1qn1c5ado-hector-pachaos-projects.vercel.app/media/23b7a97ae3b5c134-s.0o14nraug8u5s.woff2?dpl=dpl_DT8dHQEX8ybL8zXmJNrVQ55XAKWU",
+    "type": "Other",
+    "contexts": [
+      "css url()"
+    ],
+    "notes": null
+  }
+]
