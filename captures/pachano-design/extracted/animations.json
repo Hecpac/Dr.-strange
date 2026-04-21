@@ -1,0 +1,132 @@
+{
+  "summary": {
+    "webAnimations": 3,
+    "cssDeclarations": 189,
+    "scrollTargets": 44,
+    "cdpAnimations": 103,
+    "canvases": 1
+  },
+  "namedAnimations": [
+    "swiss-marquee"
+  ],
+  "scrollTriggeredElements": 44,
+  "representativeAnimations": [
+    {
+      "type": "CSSAnimation",
+      "playState": "running",
+      "animationName": "swiss-marquee",
+      "targetSelector": "div.flex.whitespace-nowrap.will-change-transform",
+      "targetRect": {
+        "x": -111.45358276367188,
+        "y": 13404.953125,
+        "width": 1344,
+        "height": 40,
+        "top": 13404.953125,
+        "right": 1232.5464172363281,
+        "bottom": 13444.953125,
+        "left": -111.45358276367188
+      },
+      "keyframes": [
+        {
+          "offset": 0,
+          "easing": "linear",
+          "composite": "auto",
+          "transform": "translate(0px)",
+          "computedOffset": 0
+        },
+        {
+          "offset": 1,
+          "easing": "linear",
+          "composite": "auto",
+          "transform": "translate(-50%)",
+          "computedOffset": 1
+        }
+      ],
+      "timing": {
+        "duration": 24000,
+        "delay": 0,
+        "iterations": null,
+        "easing": "linear",
+        "direction": "normal"
+      }
+    },
+    {
+      "type": "CSSAnimation",
+      "playState": "running",
+      "animationName": "swiss-marquee",
+      "targetSelector": "div.flex.w-max.items-center",
+      "targetRect": {
+        "x": -1152.076171875,
+        "y": 14726.96875,
+        "width": 6760,
+        "height": 507,
+        "top": 14726.96875,
+        "right": 5607.923828125,
+        "bottom": 15233.96875,
+        "left": -1152.076171875
+      },
+      "keyframes": [
+        {
+          "offset": 0,
+          "easing": "linear",
+          "composite": "auto",
+          "transform": "translate(0px)",
+          "computedOffset": 0
+        },
+        {
+          "offset": 1,
+          "easing": "linear",
+          "composite": "auto",
+          "transform": "translate(-50%)",
+          "computedOffset": 1
+        }
+      ],
+      "timing": {
+        "duration": 112266.66666666667,
+        "delay": 0,
+        "iterations": null,
+        "easing": "linear",
+        "direction": "normal"
+      }
+    },
+    {
+      "type": "CSSAnimation",
+      "playState": "running",
+      "animationName": "swiss-marquee",
+      "targetSelector": "div.flex.w-max.items-center",
+      "targetRect": {
+        "x": -1995.4456787109375,
+        "y": 15297.96875,
+        "width": 5912,
+        "height": 507,
+        "top": 15297.96875,
+        "right": 3916.5543212890625,
+        "bottom": 15804.96875,
+        "left": -1995.4456787109375
+      },
+      "keyframes": [
+        {
+          "offset": 0,
+          "easing": "linear",
+          "composite": "auto",
+          "transform": "translate(0px)",
+          "computedOffset": 0
+        },
+        {
+          "offset": 1,
+          "easing": "linear",
+          "composite": "auto",
+          "transform": "translate(-50%)",
+          "computedOffset": 1
+        }
+      ],
+      "timing": {
+        "duration": 117760,
+        "delay": 0,
+        "iterations": null,
+        "easing": "linear",
+        "direction": "reverse"
+      }
+    }
+  ]
+}

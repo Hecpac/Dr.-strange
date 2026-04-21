@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=1920, height=1080">
+<style>
+  @font-face { font-family: 'Plus Jakarta Sans'; src: url('../assets/fonts/59b15b4bcd7b1eb5-s.0x08jh8vondwt.woff2') format('woff2'); font-weight: 700; }
+  @font-face { font-family: 'IBM Plex Mono'; src: url('../assets/fonts/e390973e931a41c5-s.08hd0g.321csk.woff2') format('woff2'); font-weight: 500; }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  .scene {
+    width: 1920px;
+    height: 1080px;
+    overflow: hidden;
+    position: relative;
+    background: #F7F5F0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+
+  .logo-mark {
+    position: absolute;
+    top: 32px;
+    left: 40px;
+    width: 40px;
+    height: 40px;
+    z-index: 5;
+  }
+
+  .headline {
+    font-family: 'Plus Jakarta Sans', sans-serif;
+    font-weight: 700;
+    font-size: 52px;
+    color: #21201B;
+    letter-spacing: 0.08em;
+    text-align: center;
+    margin-top: 80px;
+    opacity: 0;
+  }
+
+  .hero-image-wrap {
+    margin-top: 40px;
+    width: 60%;
+    opacity: 0;
+    overflow: hidden;
+  }
+
+  .hero-image {
+    width: 100%;
+    display: block;
+    border: 1px solid rgba(33, 32, 27, 0.1);
+  }
+
+  .phrases {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    margin-top: 48px;
+    gap: 20px;
+  }
+
+  .phrase {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    opacity: 0;
+  }
+
+  .phrase-bullet {
+    width: 8px;
+    height: 8px;
+    background: #CB2131;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .phrase-text {
+    font-family: 'IBM Plex Mono', monospace;
+    font-weight: 500;
+    font-size: 28px;
+    color: #21201B;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+  }
+
+  .phrase-underline {
+    height: 2px;
+    background: #CB2131;
+    width: 0%;
+    margin-top: 4px;
+    margin-left: 24px;
+  }
+</style>
+</head>
+<body>
+<div class="scene" data-comp-id="beat-2-promise" data-composition-id="beat-2-promise" data-width="1920" data-height="1080" data-start="0" data-duration="7.8">
+  <img class="logo-mark" src="../assets/svgs/logo-6.svg" alt="PHD">
+
+  <div class="headline">PREMIUM HOME DESIGN</div>
+
+  <div class="hero-image-wrap">
+    <img class="hero-image" src="../assets/og-image.jpg" alt="Premium Home Design">
+  </div>
+
+  <div class="phrases">
+    <div class="phrase-group">
+      <div class="phrase phrase-1">
+        <div class="phrase-bullet"></div>
+        <div class="phrase-text">One team.</div>
+      </div>
+      <div class="phrase-underline phrase-underline-1"></div>
+    </div>
+    <div class="phrase-group">
+      <div class="phrase phrase-2">
+        <div class="phrase-bullet"></div>
+        <div class="phrase-text">One contract.</div>
+      </div>
+      <div class="phrase-underline phrase-underline-2"></div>
+    </div>
+    <div class="phrase-group">
+      <div class="phrase phrase-3">
+        <div class="phrase-bullet"></div>
+        <div class="phrase-text">Design through handover.</div>
+      </div>
+      <div class="phrase-underline phrase-underline-3"></div>
+    </div>
+  </div>
+</div>
+
+<script src="../assets/gsap.min.js"></script>
+<script>
+(function() {
+  var tl = gsap.timeline({ paused: true });
+
+  var headline = document.querySelector('.headline');
+  var imageWrap = document.querySelector('.hero-image-wrap');
+  var heroImage = document.querySelector('.hero-image');
+  var phrase1 = document.querySelector('.phrase-1');
+  var phrase2 = document.querySelector('.phrase-2');
+  var phrase3 = document.querySelector('.phrase-3');
+  var underline1 = document.querySelector('.phrase-underline-1');
+  var underline2 = document.querySelector('.phrase-underline-2');
+  var underline3 = document.querySelector('.phrase-underline-3');
+  var scene = document.querySelector('.scene');
+
+  // "PREMIUM HOME DESIGN" scales in 95%->100%, opacity 0->1, 0.5s at 0s
+  tl.fromTo(headline,
+    { scale: 0.95, opacity: 0 },
+    { scale: 1, opacity: 1, duration: 0.5, ease: "power2.out" },
+    0
+  );
+
+  // House image fades in at 0.3s delay, 0.4s
+  tl.to(imageWrap,
+    { opacity: 1, duration: 0.4, ease: "power2.out" },
+    0.3
+  );
+
+  // Ken Burns zoom on image: scale 1->1.03 over full 8.4s
+  tl.fromTo(heroImage,
+    { scale: 1 },
+    { scale: 1.03, duration: 8.4, ease: "none" },
+    0
+  );
+
+  // "One team." stamps in at 4.2s (y:20->0, opacity 0->1, 0.25s)
+  tl.fromTo(phrase1,
+    { y: 20, opacity: 0 },
+    { y: 0, opacity: 1, duration: 0.25, ease: "power2.out" },
+    4.2
+  );
+
+  // Underline 1 draws left->right, 0.3s after stamp
+  tl.to(underline1,
+    { width: "100%", duration: 0.3, ease: "power2.out" },
+    4.45
+  );
+
+  // "One contract." stamps in at 4.7s
+  tl.fromTo(phrase2,
+    { y: 20, opacity: 0 },
+    { y: 0, opacity: 1, duration: 0.25, ease: "power2.out" },
+    4.7
+  );
+
+  // Underline 2 draws left->right, 0.3s after stamp
+  tl.to(underline2,
+    { width: "100%", duration: 0.3, ease: "power2.out" },
+    4.95
+  );
+
+  // "Design through handover." stamps in at 5.2s
+  tl.fromTo(phrase3,
+    { y: 20, opacity: 0 },
+    { y: 0, opacity: 1, duration: 0.25, ease: "power2.out" },
+    5.2
+  );
+
+  // Underline 3 draws left->right, 0.3s after stamp
+  tl.to(underline3,
+    { width: "100%", duration: 0.3, ease: "power2.out" },
+    5.45
+  );
+
+  // Exit: blur:20px + opacity:0, 0.3s power2.in at ~8.0s
+  tl.to(scene.children, {
+    opacity: 0,
+    filter: "blur(20px)",
+    duration: 0.3,
+    ease: "power2.in",
+    stagger: 0.02
+  }, 8.0);
+
+  window.__timelines = window.__timelines || {};
+  window.__timelines["beat-2-promise"] = tl;
+})();
+</script>
+</body>
+</html>

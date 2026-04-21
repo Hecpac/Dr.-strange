@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=1920, height=1080">
+<style>
+  @font-face { font-family: 'Plus Jakarta Sans'; src: url('assets/fonts/59b15b4bcd7b1eb5-s.0x08jh8vondwt.woff2') format('woff2'); font-weight: 700; }
+  @font-face { font-family: 'Plus Jakarta Sans'; src: url('assets/fonts/2fe89d53234c61d4-s.0k_.i63k_i_qa.woff2') format('woff2'); font-weight: 400; }
+  @font-face { font-family: 'IBM Plex Mono'; src: url('assets/fonts/e390973e931a41c5-s.08hd0g.321csk.woff2') format('woff2'); font-weight: 500; }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #000; width: 1920px; height: 1080px; overflow: hidden; }
+
+  .beat { position: absolute; top: 0; left: 0; width: 1920px; height: 1080px; overflow: hidden; visibility: hidden; }
+
+  /* ---- Beat 1: Reveal ---- */
+  #beat-1 { background: #21201B; }
+  #beat-1 .hero-image { position: absolute; top: 0; left: 0; width: 1920px; height: 1080px; object-fit: cover; }
+  #beat-1 .wipe-reveal { position: absolute; top: 0; right: 0; width: 100%; height: 100%; background: #21201B; z-index: 2; }
+  #beat-1 .wipe-line { position: absolute; top: 0; left: 0; width: 3px; height: 100%; background: #CB2131; z-index: 3; box-shadow: 0 0 20px rgba(203,33,49,0.6), 0 0 40px rgba(203,33,49,0.3); }
+  #beat-1 .label-from { position: absolute; top: 80px; left: 80px; font-family: 'IBM Plex Mono', monospace; font-size: 22px; font-weight: 500; color: #F4EEEE; letter-spacing: 0.15em; text-transform: uppercase; z-index: 4; opacity: 0; }
+  #beat-1 .label-to { position: absolute; top: 80px; right: 80px; font-family: 'IBM Plex Mono', monospace; font-size: 22px; font-weight: 500; color: #F4EEEE; letter-spacing: 0.15em; text-transform: uppercase; z-index: 4; opacity: 0; text-align: right; }
+  #beat-1 .logo-mark { position: absolute; bottom: 40px; right: 60px; width: 48px; height: 48px; z-index: 5; opacity: 0; }
+
+  /* ---- Beat 2: Promise ---- */
+  #beat-2 { background: #F7F5F0; display: flex; flex-direction: column; align-items: center; }
+  #beat-2 .logo-mark { position: absolute; top: 32px; left: 40px; width: 40px; height: 40px; z-index: 5; }
+  #beat-2 .headline { font-family: 'Plus Jakarta Sans', sans-serif; font-weight: 700; font-size: 52px; color: #21201B; letter-spacing: 0.08em; text-align: center; margin-top: 80px; opacity: 0; }
+  #beat-2 .hero-image-wrap { margin-top: 40px; width: 60%; opacity: 0; overflow: hidden; }
+  #beat-2 .hero-image { width: 100%; display: block; border: 1px solid rgba(33,32,27,0.1); }
+  #beat-2 .phrases { display: flex; flex-direction: column; align-items: flex-start; margin-top: 48px; gap: 20px; }
+  #beat-2 .phrase { display: flex; align-items: center; gap: 16px; opacity: 0; }
+  #beat-2 .phrase-bullet { width: 8px; height: 8px; background: #CB2131; border-radius: 50%; flex-shrink: 0; }
+  #beat-2 .phrase-text { font-family: 'IBM Plex Mono', monospace; font-weight: 500; font-size: 28px; color: #21201B; text-transform: uppercase; letter-spacing: 0.12em; }
+  #beat-2 .phrase-underline { height: 2px; background: #CB2131; width: 0%; margin-top: 4px; margin-left: 24px; }
+
+  /* ---- Beat 3: Proof ---- */
+  #beat-3 { background: #1C1C1C; }
+  #beat-3 .bg-photo { position: absolute; top: 0; left: 0; width: 1920px; height: 1080px; object-fit: cover; opacity: 0; filter: blur(2px); }
+  #beat-3 .stats-container { position: absolute; top: 0; left: 0; width: 1920px; height: 1080px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 60px; z-index: 2; }
+  #beat-3 .stat-group { display: flex; flex-direction: column; align-items: center; gap: 12px; }
+  #beat-3 .stat-number { font-family: 'Plus Jakarta Sans', sans-serif; font-size: 120px; font-weight: 700; color: #FFFFFF; line-height: 1; opacity: 0; }
+  #beat-3 .stat-label { font-family: 'IBM Plex Mono', monospace; font-size: 22px; font-weight: 500; color: #CB2131; letter-spacing: 0.15em; text-transform: uppercase; opacity: 0; }
+  #beat-3 .accent-line { width: 400px; height: 3px; background: #CB2131; transform-origin: left center; transform: scaleX(0); }
+
+  /* ---- Beat 4: Process ---- */
+  #beat-4 { background: linear-gradient(135deg, #2A0D13, #21201B); display: flex; align-items: center; justify-content: center; flex-direction: column; }
+  #beat-4 .gate-pipeline { display: flex; align-items: center; justify-content: space-between; width: 70%; position: relative; }
+  #beat-4 .gate-line-track { position: absolute; top: 30px; left: 30px; right: 30px; height: 2px; background: rgba(244,238,238,0.4); }
+  #beat-4 .gate-line-fill { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: #CB2131; transform: scaleX(0); transform-origin: left; }
+  #beat-4 .gate-node { display: flex; flex-direction: column; align-items: center; z-index: 1; }
+  #beat-4 .gate-circle { width: 60px; height: 60px; border-radius: 50%; border: 2px solid #F4EEEE; background: transparent; display: flex; align-items: center; justify-content: center; }
+  #beat-4 .gate-check { font-family: 'IBM Plex Mono', monospace; font-size: 24px; color: #F4EEEE; opacity: 0; transform: scale(0); }
+  #beat-4 .gate-label { font-family: 'IBM Plex Mono', monospace; font-weight: 500; font-size: 18px; text-transform: uppercase; letter-spacing: 0.1em; color: rgba(244,238,238,0.5); margin-top: 16px; }
+  #beat-4 .bottom-text { font-family: 'Plus Jakarta Sans', sans-serif; font-weight: 400; font-size: 24px; color: #F4EEEE; margin-top: 80px; overflow: hidden; white-space: nowrap; }
+  #beat-4 .bottom-text-inner { display: inline-block; }
+  #beat-4 .logo-mark { position: absolute; bottom: 40px; right: 60px; width: 40px; height: 40px; z-index: 5; }
+
+  /* ---- Beat 5: CTA ---- */
+  #beat-5 { background: #F7F5F0; }
+  #beat-5 .center-wrap { width: 100%; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0; }
+  #beat-5 .logo-mark { width: 200px; height: 200px; opacity: 0; }
+  #beat-5 .frame-border { position: absolute; background: #CB2131; }
+  #beat-5 .frame-top { top: calc(50% - 180px); left: calc(50% - 140px); width: 280px; height: 2px; transform: scaleX(0); transform-origin: left; }
+  #beat-5 .frame-right { top: calc(50% - 180px); left: calc(50% + 140px - 2px); width: 2px; height: 280px; transform: scaleY(0); transform-origin: top; }
+  #beat-5 .frame-bottom { top: calc(50% + 100px - 2px); left: calc(50% - 140px); width: 280px; height: 2px; transform: scaleX(0); transform-origin: right; }
+  #beat-5 .frame-left { top: calc(50% - 180px); left: calc(50% - 140px); width: 2px; height: 280px; transform: scaleY(0); transform-origin: bottom; }
+  #beat-5 .domain { font-family: 'IBM Plex Mono', monospace; font-size: 28px; font-weight: 500; color: #21201B; margin-top: 32px; letter-spacing: 0.02em; }
+  #beat-5 .tagline { font-family: 'Plus Jakarta Sans', sans-serif; font-size: 22px; font-weight: 400; color: #21201B; margin-top: 12px; opacity: 0; }
+</style>
+</head>
+<body>
+<div data-composition-id="phd-brand-reel" data-width="1920" data-height="1080" data-start="0" data-duration="26.5" style="width:1920px;height:1080px;position:relative;">
+
+<audio id="narration" src="narration.wav" data-start="0" data-duration="26.5" data-track-index="0" data-volume="1"></audio>
+
+<!-- Beat 1: Reveal (0-3.2s) -->
+<div id="beat-1" class="beat">
+  <img class="hero-image" src="assets/render-3d-poster.jpg" alt="Sketch to render">
+  <div class="wipe-reveal"></div>
+  <div class="wipe-line"></div>
+  <div class="label-from">FROM SKETCH</div>
+  <div class="label-to">TO STANDING STRUCTURE</div>
+  <img class="logo-mark" src="assets/svgs/logo-6.svg" alt="PHD">
+</div>
+
+<!-- Beat 2: Promise (3.2-11.0s) -->
+<div id="beat-2" class="beat">
+  <img class="logo-mark" src="assets/svgs/logo-6.svg" alt="PHD">
+  <div class="headline">PREMIUM HOME DESIGN</div>
+  <div class="hero-image-wrap">
+    <img class="hero-image" src="assets/og-image.jpg" alt="Premium Home Design">
+  </div>
+  <div class="phrases">
+    <div class="phrase-group">
+      <div class="phrase phrase-1"><div class="phrase-bullet"></div><div class="phrase-text">One team.</div></div>
+      <div class="phrase-underline phrase-underline-1"></div>
+    </div>
+    <div class="phrase-group">
+      <div class="phrase phrase-2"><div class="phrase-bullet"></div><div class="phrase-text">One contract.</div></div>
+      <div class="phrase-underline phrase-underline-2"></div>
+    </div>
+    <div class="phrase-group">
+      <div class="phrase phrase-3"><div class="phrase-bullet"></div><div class="phrase-text">Design through handover.</div></div>
+      <div class="phrase-underline phrase-underline-3"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Beat 3: Proof (11.0-16.4s) -->
+<div id="beat-3" class="beat">
+  <img class="bg-photo" id="bg-rockcliff" src="screenshots/scroll-031.png" alt="Rockcliff Residence">
+  <img class="bg-photo" id="bg-pueblo" src="screenshots/scroll-048.png" alt="Pueblo Residence">
+  <img class="bg-photo" id="bg-pool" src="assets/image.jpg" alt="Modern home with pool">
+  <div class="stats-container">
+    <div class="stat-group">
+      <div class="stat-number" id="stat-projects">0</div>
+      <div class="stat-label" id="label-projects">PROJECTS COMPLETED</div>
+    </div>
+    <div class="accent-line" id="accent-line"></div>
+    <div class="stat-group">
+      <div class="stat-number" id="stat-ontime">0</div>
+      <div class="stat-label" id="label-ontime">ON-TIME COMPLETION</div>
+    </div>
+  </div>
+</div>
+
+<!-- Beat 4: Process (16.4-22.5s) -->
+<div id="beat-4" class="beat">
+  <div class="gate-pipeline">
+    <div class="gate-line-track"><div class="gate-line-fill"></div></div>
+    <div class="gate-node"><div class="gate-circle"><span class="gate-check">&#10003;</span></div><div class="gate-label">DISCOVERY</div></div>
+    <div class="gate-node"><div class="gate-circle"><span class="gate-check">&#10003;</span></div><div class="gate-label">CONCEPT</div></div>
+    <div class="gate-node"><div class="gate-circle"><span class="gate-check">&#10003;</span></div><div class="gate-label">DOCS</div></div>
+    <div class="gate-node"><div class="gate-circle"><span class="gate-check">&#10003;</span></div><div class="gate-label">BUILD</div></div>
+  </div>
+  <div class="bottom-text"><span class="bottom-text-inner">You approve before anything moves forward</span></div>
+  <img class="logo-mark" src="assets/svgs/logo-6.svg" alt="PHD">
+</div>
+
+<!-- Beat 5: CTA (22.5-26.5s) -->
+<div id="beat-5" class="beat">
+  <div class="frame-border frame-top"></div>
+  <div class="frame-border frame-right"></div>
+  <div class="frame-border frame-bottom"></div>
+  <div class="frame-border frame-left"></div>
+  <div class="center-wrap">
+    <img class="logo-mark" src="assets/svgs/logo-6.svg" alt="PHD">
+    <div class="domain">premiumhome.design</div>
+    <div class="tagline">Custom homes across DFW &amp; North Texas</div>
+  </div>
+</div>
+
+</div>
+
+<script src="assets/gsap.min.js"></script>
+<script>
+(function() {
+  var master = gsap.timeline({ paused: true });
+  var $ = function(sel, ctx) { return (ctx || document).querySelector(sel); };
+  var $$ = function(sel, ctx) { return (ctx || document).querySelectorAll(sel); };
+
+  // ============ Beat 1: Reveal (0 - 3.2s) ============
+  var b1 = $('#beat-1');
+  master.set(b1, { visibility: 'visible' }, 0);
+
+  master.to($('.hero-image', b1), { scale: 1.02, duration: 3.8, ease: 'none' }, 0);
+  master.to($('.label-from', b1), { opacity: 1, duration: 0.4, ease: 'power2.out' }, 0.3);
+  master.fromTo($('.wipe-line', b1), { left: '100%' }, { left: '0%', duration: 1.5, ease: 'power2.inOut' }, 0.8);
+  master.to($('.wipe-reveal', b1), { width: '0%', duration: 1.5, ease: 'power2.inOut' }, 0.9);
+  master.fromTo($('.label-to', b1), { x: 60, opacity: 0 }, { x: 0, opacity: 1, duration: 0.5, ease: 'power2.out' }, 2.3);
+  master.to($('.logo-mark', b1), { opacity: 1, duration: 0.3, ease: 'power2.out' }, 3.0);
+
+  master.set(b1, { visibility: 'hidden' }, 3.2);
+
+  // ============ Beat 2: Promise (3.2 - 11.0s) ============
+  var b2 = $('#beat-2');
+  master.set(b2, { visibility: 'visible' }, 3.2);
+
+  master.fromTo($('.headline', b2), { scale: 0.95, opacity: 0 }, { scale: 1, opacity: 1, duration: 0.5, ease: 'power2.out' }, 3.2);
+  master.to($('.hero-image-wrap', b2), { opacity: 1, duration: 0.4, ease: 'power2.out' }, 3.5);
+  master.fromTo($('.hero-image', b2), { scale: 1 }, { scale: 1.03, duration: 8.4, ease: 'none' }, 3.2);
+
+  master.fromTo($('.phrase-1', b2), { y: 20, opacity: 0 }, { y: 0, opacity: 1, duration: 0.25, ease: 'power2.out' }, 7.4);
+  master.to($('.phrase-underline-1', b2), { width: '100%', duration: 0.3, ease: 'power2.out' }, 7.65);
+  master.fromTo($('.phrase-2', b2), { y: 20, opacity: 0 }, { y: 0, opacity: 1, duration: 0.25, ease: 'power2.out' }, 7.9);
+  master.to($('.phrase-underline-2', b2), { width: '100%', duration: 0.3, ease: 'power2.out' }, 8.15);
+  master.fromTo($('.phrase-3', b2), { y: 20, opacity: 0 }, { y: 0, opacity: 1, duration: 0.25, ease: 'power2.out' }, 8.4);
+  master.to($('.phrase-underline-3', b2), { width: '100%', duration: 0.3, ease: 'power2.out' }, 8.65);
+
+  master.to(b2.children, { opacity: 0, filter: 'blur(20px)', duration: 0.3, ease: 'power2.in', stagger: 0.02 }, 10.7);
+  master.set(b2, { visibility: 'hidden' }, 11.0);
+
+  // ============ Beat 3: Proof (11.0 - 16.4s) ============
+  var b3 = $('#beat-3');
+  var bgRockcliff = $('#bg-rockcliff');
+  var bgPueblo = $('#bg-pueblo');
+  var bgPool = $('#bg-pool');
+  var statProjects = $('#stat-projects');
+  var labelProjects = $('#label-projects');
+  var statOntime = $('#stat-ontime');
+  var labelOntime = $('#label-ontime');
+
+  master.set(b3, { visibility: 'visible' }, 11.0);
+
+  master.to(bgRockcliff, { opacity: 0.3, duration: 0.5, ease: 'power2.out' }, 11.0);
+  master.to(bgRockcliff, { x: 15, y: -8, duration: 5.8, ease: 'none' }, 11.0);
+  master.to(bgPool, { opacity: 0.15, duration: 1, ease: 'power2.out' }, 11.0);
+  master.to(bgPool, { x: 8, y: -5, duration: 5.8, ease: 'none' }, 11.0);
+  master.to(bgPueblo, { opacity: 0.3, duration: 1, ease: 'power2.inOut' }, 14.0);
+  master.to(bgRockcliff, { opacity: 0, duration: 1, ease: 'power2.inOut' }, 14.0);
+  master.to(bgPueblo, { x: -12, y: 6, duration: 2.8, ease: 'none' }, 14.0);
+
+  master.to(statProjects, { opacity: 1, duration: 0.3, ease: 'power2.out' }, 11.0);
+  var counterProjects = { val: 0 };
+  master.to(counterProjects, { val: 835, duration: 2, ease: 'power2.out', onUpdate: function() { statProjects.textContent = Math.round(counterProjects.val) + '+'; } }, 11.0);
+
+  var projectsText = 'PROJECTS COMPLETED';
+  master.to(labelProjects, { opacity: 1, duration: 0.01 }, 13.0);
+  master.to({ chars: 0 }, { chars: projectsText.length, duration: 0.4, ease: 'none', onUpdate: function() { labelProjects.textContent = projectsText.substring(0, Math.round(this.targets()[0].chars)); } }, 13.0);
+
+  master.to(statOntime, { opacity: 1, duration: 0.3, ease: 'power2.out' }, 13.9);
+  var counterOntime = { val: 0 };
+  master.to(counterOntime, { val: 94, duration: 1.5, ease: 'power2.out', onUpdate: function() { statOntime.textContent = Math.round(counterOntime.val) + '%'; } }, 13.9);
+
+  var ontimeText = 'ON-TIME COMPLETION';
+  master.to(labelOntime, { opacity: 1, duration: 0.01 }, 15.4);
+  master.to({ chars: 0 }, { chars: ontimeText.length, duration: 0.4, ease: 'none', onUpdate: function() { labelOntime.textContent = ontimeText.substring(0, Math.round(this.targets()[0].chars)); } }, 15.4);
+
+  master.to($('#accent-line'), { scaleX: 1, duration: 0.3, ease: 'power2.out' }, 15.8);
+
+  master.to($('.stats-container', b3), { scale: 1.2, filter: 'blur(20px)', opacity: 0, duration: 0.2, ease: 'power3.in' }, 16.2);
+  master.to($$('.bg-photo', b3), { scale: 1.2, filter: 'blur(20px)', opacity: 0, duration: 0.2, ease: 'power3.in' }, 16.2);
+  master.set(b3, { visibility: 'hidden' }, 16.4);
+
+  // ============ Beat 4: Process (16.4 - 22.5s) ============
+  var b4 = $('#beat-4');
+  var lineFill = $('.gate-line-fill', b4);
+  var circles = $$('.gate-circle', b4);
+  var checks = $$('.gate-check', b4);
+  var labels = $$('.gate-label', b4);
+  var bottomTextInner = $('.bottom-text-inner', b4);
+  var fullText = bottomTextInner.textContent;
+  var charCount = fullText.length;
+  bottomTextInner.textContent = '';
+
+  master.set(b4, { visibility: 'visible' }, 16.4);
+
+  master.to(lineFill, { scaleX: 1, duration: 4, ease: 'none' }, 16.4);
+
+  master.to(circles[0], { background: '#CB2131', borderColor: '#CB2131', boxShadow: '0 0 20px rgba(203,33,49,0.5)', duration: 0.3, ease: 'power2.out' }, 16.9);
+  master.to(labels[0], { color: '#FFFFFF', duration: 0.3, ease: 'power2.out' }, 16.9);
+  master.to(checks[0], { opacity: 1, scale: 1, duration: 0.2, ease: 'back.out(1.7)' }, 17.0);
+
+  master.to(circles[1], { background: '#CB2131', borderColor: '#CB2131', boxShadow: '0 0 20px rgba(203,33,49,0.5)', duration: 0.3, ease: 'power2.out' }, 17.9);
+  master.to(labels[1], { color: '#FFFFFF', duration: 0.3, ease: 'power2.out' }, 17.9);
+  master.to(checks[1], { opacity: 1, scale: 1, duration: 0.2, ease: 'back.out(1.7)' }, 18.0);
+
+  master.to(circles[2], { background: '#CB2131', borderColor: '#CB2131', boxShadow: '0 0 20px rgba(203,33,49,0.5)', duration: 0.3, ease: 'power2.out' }, 18.9);
+  master.to(labels[2], { color: '#FFFFFF', duration: 0.3, ease: 'power2.out' }, 18.9);
+  master.to(checks[2], { opacity: 1, scale: 1, duration: 0.2, ease: 'back.out(1.7)' }, 19.0);
+
+  master.to(circles[3], { background: '#CB2131', borderColor: '#CB2131', boxShadow: '0 0 20px rgba(203,33,49,0.5)', duration: 0.3, ease: 'power2.out' }, 19.9);
+  master.to(labels[3], { color: '#FFFFFF', duration: 0.3, ease: 'power2.out' }, 19.9);
+  master.to(checks[3], { opacity: 1, scale: 1, duration: 0.2, ease: 'back.out(1.7)' }, 20.0);
+  master.to(circles[3], { scale: 1.08, duration: 0.15, ease: 'power2.out' }, 19.9);
+  master.to(circles[3], { scale: 1, duration: 0.15, ease: 'power2.in' }, 20.05);
+
+  master.to(bottomTextInner, { duration: 1, ease: 'none', onUpdate: function() { var p = this.progress(); bottomTextInner.textContent = fullText.substring(0, Math.round(p * charCount)); } }, 20.6);
+
+  master.to(['.gate-pipeline', '#beat-4 .bottom-text', '#beat-4 .logo-mark'], { y: -150, filter: 'blur(30px)', opacity: 0, duration: 0.33, ease: 'power2.in', stagger: 0.02 }, 22.17);
+  master.set(b4, { visibility: 'hidden' }, 22.5);
+
+  // ============ Beat 5: CTA (22.5 - 26.5s) ============
+  var b5 = $('#beat-5');
+  var domainEl = $('.domain', b5);
+  var domainText = 'premiumhome.design';
+  domainEl.innerHTML = domainText.split('').map(function(c) { return '<span style="opacity:0">' + c + '</span>'; }).join('');
+
+  master.set(b5, { visibility: 'visible' }, 22.5);
+
+  master.fromTo($('.logo-mark', b5), { scale: 0.8, opacity: 0 }, { scale: 1, opacity: 1, duration: 0.4, ease: 'power2.out' }, 22.5);
+  master.to($('.frame-top', b5), { scaleX: 1, duration: 0.25, ease: 'power2.out' }, 23.0);
+  master.to($('.frame-right', b5), { scaleY: 1, duration: 0.25, ease: 'power2.out' }, 23.25);
+  master.to($('.frame-bottom', b5), { scaleX: 1, duration: 0.25, ease: 'power2.out' }, 23.5);
+  master.to($('.frame-left', b5), { scaleY: 1, duration: 0.25, ease: 'power2.out' }, 23.75);
+  master.to(domainEl.querySelectorAll('span'), { opacity: 1, duration: 0.05, stagger: 0.028, ease: 'none' }, 23.7);
+  master.fromTo($('.tagline', b5), { y: 10, opacity: 0 }, { y: 0, opacity: 1, duration: 0.3, ease: 'power2.out' }, 24.5);
+  master.to(b5, { opacity: 0, duration: 0.5, ease: 'power2.in' }, 25.7);
+
+  window.__timelines = window.__timelines || {};
+  window.__timelines['phd-brand-reel'] = master;
+})();
+</script>
+</body>
+</html>

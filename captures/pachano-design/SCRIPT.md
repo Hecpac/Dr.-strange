@@ -1,0 +1,19 @@
+# Narration Script
+
+## Video Type
+Brand reel — 25 seconds, landscape 1920x1080
+
+## Script
+
+From sketch to standing structure.
+
+Premium Home Design builds custom homes across Dallas-Fort Worth.
+One team. One contract. Design through handover.
+
+Eight hundred thirty five projects completed.
+Ninety four percent on time.
+
+Every phase has a decision gate.
+You approve scope and cost before anything moves forward.
+
+Start your project at premium home dot design.
