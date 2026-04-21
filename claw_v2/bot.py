@@ -267,6 +267,7 @@ class BotService:
         return [
             BotCommand("help", self._handle_help_command, exact=("/help",), prefixes=("/help ",)),
             BotCommand("status", self._handle_status_command, exact=("/status",)),
+            BotCommand("restart", self._handle_restart_command, exact=("/restart",)),
             BotCommand("config", self._handle_config_command, exact=("/config",)),
             BotCommand("tokens", self._handle_tokens_command, exact=("/tokens",)),
             BotCommand("spending", self._handle_spending_command, exact=("/spending",)),
@@ -314,6 +315,34 @@ class BotService:
 
     def _handle_status_command(self, context: CommandContext) -> str:
         return json.dumps(asdict(self.heartbeat.collect()), indent=2, sort_keys=True)
+
+    def _handle_restart_command(self, context: CommandContext) -> str:
+        import os
+        import signal
+        import threading
+        from datetime import UTC, datetime
+
+        marker_path = Path.home() / ".claw" / "restart_requested.json"
+        marker_path.parent.mkdir(parents=True, exist_ok=True)
+        marker_path.write_text(
+            json.dumps(
+                {
+                    "requested_at": datetime.now(UTC).isoformat(),
+                    "requested_by": context.user_id,
+                    "reason": "telegram_command",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        def _shutdown_self() -> None:
+            try:
+                os.kill(os.getpid(), signal.SIGTERM)
+            except Exception:
+                os._exit(0)
+
+        threading.Timer(2.0, _shutdown_self).start()
+        return "🔄 Reiniciando… vuelvo en ~5s (launchd KeepAlive)."
 
     def _handle_config_command(self, context: CommandContext) -> str:
         if self.config is None:
