@@ -36,6 +36,7 @@ from claw_v2.dream import AutoDreamService
 from claw_v2.github import GitHubPullRequestService
 from claw_v2.heartbeat import HeartbeatService
 from claw_v2.hooks import make_anti_distillation_hook, make_daily_cost_gate, make_decision_logger
+from claw_v2.jobs import JobService
 from claw_v2.kairos import KairosService
 from claw_v2.learning import LearningLoop
 from claw_v2.linear import LinearService, build_linear_api_caller
@@ -96,6 +97,7 @@ class ClawRuntime:
     observe: ObserveStream
     metrics: MetricsTracker
     approvals: ApprovalManager
+    jobs: JobService
     bus: AgentBus
     agent_store: FileAgentStore
     router: LLMRouter
@@ -299,14 +301,15 @@ def _wrap_job_handler(
     return wrapped
 
 
-def _setup_core_state(config: AppConfig) -> tuple[MemoryStore, ObserveStream, MetricsTracker, ApprovalManager, AgentBus, FileAgentStore]:
+def _setup_core_state(config: AppConfig) -> tuple[MemoryStore, ObserveStream, MetricsTracker, ApprovalManager, JobService, AgentBus, FileAgentStore]:
     memory = MemoryStore(config.db_path)
     observe = ObserveStream(config.db_path)
     metrics = MetricsTracker()
     approvals = ApprovalManager(config.approvals_root, config.approval_secret)
+    jobs = JobService(config.db_path, observe=observe)
     bus = AgentBus(config.agent_state_root / "_bus")
     agent_store = FileAgentStore(config.agent_state_root)
-    return memory, observe, metrics, approvals, bus, agent_store
+    return memory, observe, metrics, approvals, jobs, bus, agent_store
 
 
 def _setup_llm_stack(
@@ -469,6 +472,7 @@ def _setup_operational_services(
     memory: MemoryStore,
     observe: ObserveStream,
     approvals: ApprovalManager,
+    jobs: JobService,
     heartbeat: HeartbeatService,
     brain: BrainService,
     auto_research: AutoResearchAgentService,
@@ -513,6 +517,7 @@ def _setup_operational_services(
         computer=computer,
         browser_use=browser_use,
         observe=observe,
+        job_service=jobs,
     )
     for capability, reason in startup_health.degraded_capabilities().items():
         bot.set_capability_status(capability, available=False, reason=reason)
@@ -536,6 +541,7 @@ def _setup_operational_services(
         state_root=config.pipeline_state_root,
         memory=memory,
         learning=learning,
+        jobs=jobs,
     )
     bot.pipeline = pipeline
     bot.learning = learning
@@ -876,7 +882,7 @@ def build_runtime(
     config.validate()
     config.ensure_directories()
 
-    memory, observe, metrics, approvals, bus, agent_store = _setup_core_state(config)
+    memory, observe, metrics, approvals, jobs, bus, agent_store = _setup_core_state(config)
     startup_health = _run_startup_healthchecks(config, observe)
     router, learning, brain = _setup_llm_stack(
         config=config,
@@ -908,6 +914,7 @@ def build_runtime(
         memory=memory,
         observe=observe,
         approvals=approvals,
+        jobs=jobs,
         heartbeat=heartbeat,
         brain=brain,
         auto_research=auto_research,
@@ -947,6 +954,7 @@ def build_runtime(
         observe=observe,
         metrics=metrics,
         approvals=approvals,
+        jobs=jobs,
         bus=bus,
         agent_store=agent_store,
         router=router,

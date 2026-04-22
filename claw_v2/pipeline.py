@@ -14,6 +14,7 @@ from claw_v2.linear import LinearIssue, LinearService
 from claw_v2.llm import LLMRouter
 from claw_v2.learning import LearningLoop
 from claw_v2.memory import MemoryStore
+from claw_v2.jobs import JobService, TERMINAL_JOB_STATES
 from claw_v2.observe import ObserveStream
 
 TERMINAL_STATUSES = frozenset({"done", "failed"})
@@ -32,6 +33,7 @@ class PipelineRun:
     approval_id: str | None = None
     approval_token: str | None = None
     retries: int = 0
+    job_id: str | None = None
 
 
 class PipelineService:
@@ -47,6 +49,7 @@ class PipelineService:
         state_root: Path | None = None,
         memory: MemoryStore | None = None,
         learning: LearningLoop | None = None,
+        jobs: JobService | None = None,
     ) -> None:
         self.linear = linear
         self.router = router
@@ -59,6 +62,7 @@ class PipelineService:
         self.state_root.mkdir(parents=True, exist_ok=True)
         self.memory = memory
         self.learning = learning
+        self.jobs = jobs
         cleanup_stale_worktrees(default_repo_root)
 
     def process_issue(self, issue_id: str, *, repo_root: Path | None = None) -> PipelineRun:
@@ -66,22 +70,34 @@ class PipelineService:
         issue = self.linear.get_issue(issue_id)
         branch = _validate_branch_name(issue.branch_name or _slugify_branch(issue.id, issue.title))
         self.linear.update_status(issue_id, "In Progress")
-        run = PipelineRun(issue_id=issue_id, branch_name=branch, repo_root=str(repo), status="in_progress")
+        job = self._start_job(issue_id, payload={"phase": "process_issue", "branch": branch, "repo_root": str(repo)})
+        run = PipelineRun(
+            issue_id=issue_id,
+            branch_name=branch,
+            repo_root=str(repo),
+            status="in_progress",
+            job_id=job.job_id if job else None,
+        )
         _create_branch(repo, branch)
+        self._job_step(run, "branch_created", {"branch": branch})
         wt_path = _create_worktree(repo, branch)
         run.worktree_path = str(wt_path)
+        self._job_step(run, "worktree_created", {"worktree_path": str(wt_path)})
         past_lessons = self.learning.retrieve_lessons(issue.description, task_type="pipeline")[0] if self.learning else _retrieve_lessons(self.memory, issue.description) if self.memory else ""
         try:
             for attempt in range(self.max_retries + 1):
+                self._job_step(run, "attempt_started", {"attempt": attempt}, idempotency_key=f"{run.job_id}:attempt:{attempt}:started" if run.job_id else None)
                 prompt = _build_code_prompt(issue, run, past_lessons=past_lessons)
                 response = self.router.ask(
                     prompt, lane="worker", system_prompt="You are a coding agent. Implement the requested change.",
                     evidence_pack={"issue": issue.id, "description": issue.description},
                     cwd=str(wt_path),
                 )
+                self._job_step(run, "llm_completed", {"attempt": attempt, "model": response.model})
                 run.diff = _collect_diff(wt_path)
                 passed, output = _run_tests(wt_path)
                 run.test_output = output
+                self._job_step(run, "tests_completed", {"attempt": attempt, "passed": passed})
                 if passed:
                     run.status = "awaiting_approval"
                     self._record(issue, run, "success")
@@ -91,6 +107,7 @@ class PipelineService:
                     run.status = "failed"
                     self._record(issue, run, "failure")
                     self.linear.post_comment(issue_id, f"Pipeline failed after {self.max_retries} retries.\n\n```\n{output[:1000]}\n```")
+                    self._job_fail(run, error=output[:500])
                     self._save_run(run)
                     return run
             if run.status == "awaiting_approval":
@@ -102,6 +119,10 @@ class PipelineService:
                 run.approval_token = pending.token
                 summary = f"Pipeline ready for {issue_id}.\n\n**Changes:**\n```\n{(run.diff or '')[:500]}\n```\n\n**Tests:** {run.test_output[:200] if run.test_output else 'passed'}\n\nApprove via: `/pipeline_approve {pending.approval_id} {pending.token}`"
                 self.linear.post_comment(issue_id, summary)
+                self._job_waiting(run, {"approval_id": pending.approval_id})
+        except Exception as exc:
+            self._job_fail(run, error=str(exc)[:500])
+            raise
         finally:
             self._save_run(run)
             if run.status == "failed" and wt_path:
@@ -112,17 +133,21 @@ class PipelineService:
 
     def complete_pipeline(self, issue_id: str) -> PipelineRun:
         run = self._load_run(issue_id)
+        self._ensure_run_job(run, phase="complete_pipeline")
         if run.approval_id:
             status = self.approvals.status(run.approval_id)
             if status != "approved":
                 run.status = "blocked"
+                self._job_waiting(run, {"approval_status": status})
                 self._save_run(run)
                 return run
+            self._job_step(run, "approval_checked", {"approval_id": run.approval_id, "status": status})
         repo = Path(run.repo_root)
         wt_path = Path(run.worktree_path) if run.worktree_path else None
         if wt_path and wt_path.exists():
             _commit_worktree(wt_path, f"feat: {issue_id} pipeline implementation")
             _push_branch(repo, run.branch_name)
+            self._job_step(run, "branch_pushed", {"branch": run.branch_name})
         pr_result = self.pull_requests.create_pull_request(
             branch_name=run.branch_name,
             title=f"feat: {issue_id}",
@@ -131,11 +156,13 @@ class PipelineService:
         )
         run.pr_url = pr_result.url
         run.status = "pr_created"
+        self._job_step(run, "pull_request_created", {"pr_url": pr_result.url})
         self.linear.link_pr(issue_id, pr_result.url, pr_result.title)
         self.linear.update_status(issue_id, "In Review")
         if wt_path:
             _remove_worktree(repo, wt_path)
         self._save_run(run)
+        self._job_complete(run, {"pr_url": run.pr_url, "pipeline_status": run.status})
         return run
 
     def _record(self, issue: LinearIssue, run: PipelineRun, outcome: str) -> None:
@@ -156,18 +183,22 @@ class PipelineService:
     def merge_and_close(self, issue_id: str) -> PipelineRun:
         """Merge the PR for a pipeline run and close the Linear issue."""
         run = self._load_run(issue_id)
+        self._ensure_run_job(run, phase="merge_and_close")
         if run.status != "pr_created":
             return run
         if not run.pr_url:
             run.status = "failed"
+            self._job_fail(run, error="missing pr_url")
             self._save_run(run)
             return run
         pr_number = _parse_pr_number_from_url(run.pr_url)
         if pr_number is None:
             run.status = "failed"
+            self._job_fail(run, error="could not parse pr number")
             self._save_run(run)
             return run
         self.pull_requests.merge_pull_request(pr_number)
+        self._job_step(run, "pull_request_merged", {"pr_number": pr_number})
         run.status = "merged"
         self._save_run(run)
         self.linear.update_status(issue_id, "Done")
@@ -185,6 +216,7 @@ class PipelineService:
             )
         if self.observe:
             self.observe.emit("pipeline_done", payload={"issue": issue_id, "pr_url": run.pr_url})
+        self._job_complete(run, {"pr_url": run.pr_url, "pipeline_status": run.status})
         return run
 
     def poll_merges(self) -> list[PipelineRun]:
@@ -228,6 +260,46 @@ class PipelineService:
         safe_id = Path(run.issue_id).name
         path = self.state_root / f"{safe_id}.json"
         path.write_text(json.dumps(asdict(run), indent=2), encoding="utf-8")
+
+    def _pipeline_job_id(self, issue_id: str) -> str:
+        return f"pipeline:{issue_id}"
+
+    def _start_job(self, issue_id: str, *, payload: dict[str, Any]) -> object | None:
+        if self.jobs is None:
+            return None
+        job_id = self._pipeline_job_id(issue_id)
+        job = self.jobs.get(job_id)
+        if job is not None and job.state in TERMINAL_JOB_STATES:
+            job_id = f"{job_id}:{len(self.jobs.list_jobs(limit=100)) + 1}"
+        job = self.jobs.enqueue(kind="pipeline", job_id=job_id, payload={"issue_id": issue_id, **payload})
+        return self.jobs.start(job.job_id, lease_owner="pipeline")
+
+    def _ensure_run_job(self, run: PipelineRun, *, phase: str) -> None:
+        if self.jobs is None:
+            return
+        if run.job_id is None:
+            job = self._start_job(run.issue_id, payload={"phase": phase, "branch": run.branch_name})
+            run.job_id = job.job_id if job else None
+        elif self.jobs.get(run.job_id) is None:
+            self.jobs.enqueue(kind="pipeline", job_id=run.job_id, payload={"issue_id": run.issue_id, "phase": phase})
+        if run.job_id:
+            self.jobs.start(run.job_id, lease_owner="pipeline")
+
+    def _job_step(self, run: PipelineRun, name: str, payload: dict[str, Any], *, idempotency_key: str | None = None) -> None:
+        if self.jobs is not None and run.job_id:
+            self.jobs.record_step(run.job_id, name, payload=payload, idempotency_key=idempotency_key)
+
+    def _job_waiting(self, run: PipelineRun, payload: dict[str, Any]) -> None:
+        if self.jobs is not None and run.job_id:
+            self.jobs.waiting_approval(run.job_id, payload=payload)
+
+    def _job_complete(self, run: PipelineRun, payload: dict[str, Any]) -> None:
+        if self.jobs is not None and run.job_id:
+            self.jobs.complete(run.job_id, payload=payload)
+
+    def _job_fail(self, run: PipelineRun, *, error: str) -> None:
+        if self.jobs is not None and run.job_id:
+            self.jobs.fail(run.job_id, error=error)
 
     def _load_run(self, issue_id: str) -> PipelineRun:
         path = self.state_root / f"{issue_id}.json"
