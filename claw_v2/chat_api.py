@@ -5,6 +5,14 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from claw_v2.bot import BotService
+from claw_v2.chat_api_routes import (
+    approval_detail_payload,
+    approvals_payload,
+    job_detail_payload,
+    jobs_payload,
+    trace_replay_payload,
+    traces_payload,
+)
 from claw_v2.observe import ObserveStream
 
 
@@ -41,6 +49,8 @@ class LocalChatAPI:
         self._bot_service = bot_service
         self._default_user_id = default_user_id or bot_service.allowed_user_id or "local-user"
         self._observe = observe or getattr(bot_service, "observe", None)
+        self._jobs = getattr(bot_service, "job_service", None)
+        self._approvals = getattr(bot_service, "approvals", None)
         self._auth_token = auth_token.strip() if isinstance(auth_token, str) and auth_token.strip() else None
 
     def handle_http(
@@ -66,10 +76,26 @@ class LocalChatAPI:
         if normalized_path.startswith("/api/") and not self._is_authorized(headers):
             return ChatAPIResponse(status_code=401, payload={"error": "unauthorized"})
         if normalized_path == "/api/traces":
-            return self._dispatch_traces(method=method, path=path)
+            return self._payload_response(method, ["GET"], *traces_payload(self._observe, path=path))
         if normalized_path.startswith("/api/traces/"):
             trace_id = normalized_path.removeprefix("/api/traces/").strip()
-            return self._dispatch_trace_replay(method=method, trace_id=trace_id)
+            return self._payload_response(method, ["GET"], *trace_replay_payload(self._observe, trace_id=trace_id))
+        if normalized_path == "/api/jobs":
+            return self._payload_response(method, ["GET"], *jobs_payload(self._jobs, path=path))
+        if normalized_path.startswith("/api/jobs/"):
+            job_id = normalized_path.removeprefix("/api/jobs/").strip()
+            status, payload = job_detail_payload(self._jobs, method=method, job_id=job_id)
+            return ChatAPIResponse(status_code=status, payload=payload)
+        if normalized_path == "/api/approvals":
+            return self._payload_response(method, ["GET"], *approvals_payload(self._approvals))
+        if normalized_path.startswith("/api/approvals/"):
+            parts = normalized_path.removeprefix("/api/approvals/").strip("/").split("/")
+            approval_id = parts[0] if parts else ""
+            action = parts[1] if len(parts) > 1 else None
+            status, payload = approval_detail_payload(
+                self._approvals, method=method, approval_id=approval_id, body=body, action=action,
+            )
+            return ChatAPIResponse(status_code=status, payload=payload)
         if normalized_path != "/api/chat":
             return ChatAPIResponse(status_code=404, payload={"error": f"not found: {normalized_path}"})
         if method.upper() != "POST":
@@ -99,66 +125,6 @@ class LocalChatAPI:
                 "session_id": session_id.strip(),
                 "trace_id": None,
             },
-        )
-
-    def _dispatch_traces(self, *, method: str, path: str) -> ChatAPIResponse:
-        if method.upper() != "GET":
-            return ChatAPIResponse(status_code=405, payload={"error": "method not allowed", "allowed": ["GET"]})
-        if self._observe is None:
-            return ChatAPIResponse(status_code=503, payload={"error": "observe stream unavailable"})
-        limit = self._query_param_as_int(path, "limit", default=10)
-        events = self._observe.recent_events(limit=max(limit * 10, 50))
-        traces: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        for event in events:
-            trace_id = event.get("trace_id")
-            if not trace_id or trace_id in seen:
-                continue
-            seen.add(trace_id)
-            traces.append(
-                {
-                    "trace_id": trace_id,
-                    "timestamp": event.get("timestamp"),
-                    "last_event_type": event.get("event_type"),
-                    "lane": event.get("lane"),
-                    "provider": event.get("provider"),
-                    "model": event.get("model"),
-                    "artifact_id": event.get("artifact_id"),
-                    "job_id": event.get("job_id"),
-                }
-            )
-            if len(traces) >= limit:
-                break
-        return ChatAPIResponse(status_code=200, payload={"traces": traces})
-
-    def _dispatch_trace_replay(self, *, method: str, trace_id: str) -> ChatAPIResponse:
-        if method.upper() != "GET":
-            return ChatAPIResponse(status_code=405, payload={"error": "method not allowed", "allowed": ["GET"]})
-        if not trace_id:
-            return ChatAPIResponse(status_code=400, payload={"error": "trace_id must be provided"})
-        if self._observe is None:
-            return ChatAPIResponse(status_code=503, payload={"error": "observe stream unavailable"})
-        events = self._observe.trace_events(trace_id)
-        if not events:
-            return ChatAPIResponse(status_code=404, payload={"error": f"trace not found: {trace_id}"})
-        replay = [
-            {
-                "timestamp": event["timestamp"],
-                "event_type": event["event_type"],
-                "lane": event["lane"],
-                "provider": event["provider"],
-                "model": event["model"],
-                "span_id": event["span_id"],
-                "parent_span_id": event["parent_span_id"],
-                "artifact_id": event["artifact_id"],
-                "job_id": event["job_id"],
-                "payload": event["payload"],
-            }
-            for event in events
-        ]
-        return ChatAPIResponse(
-            status_code=200,
-            payload={"trace_id": trace_id, "event_count": len(replay), "events": replay},
         )
 
     def wsgi_app(self, environ: dict[str, Any], start_response: StartResponse) -> list[bytes]:
@@ -219,23 +185,10 @@ class LocalChatAPI:
             raise ValueError("request body must be a JSON object")
         return decoded
 
-    @staticmethod
-    def _query_param_as_int(path: str, name: str, *, default: int) -> int:
-        if "?" not in path:
-            return default
-        query = path.split("?", 1)[1]
-        for chunk in query.split("&"):
-            if "=" not in chunk:
-                continue
-            key, value = chunk.split("=", 1)
-            if key != name:
-                continue
-            try:
-                parsed = int(value)
-            except ValueError:
-                return default
-            return parsed if parsed > 0 else default
-        return default
+    def _payload_response(self, method: str, allowed: list[str], status: int, payload: JsonDict) -> ChatAPIResponse:
+        if method.upper() not in allowed and status == 200:
+            return ChatAPIResponse(status_code=405, payload={"error": "method not allowed", "allowed": allowed})
+        return ChatAPIResponse(status_code=status, payload=payload)
 
     @staticmethod
     def _reason_phrase(status_code: int) -> str:
