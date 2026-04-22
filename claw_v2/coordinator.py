@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from claw_v2.capability_registry import CapabilityManifest, CapabilityRegistry
 from claw_v2.tracing import attach_trace, child_trace_context, new_trace_context
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,7 @@ class WorkerTask:
     instruction: str
     lane: str = "research"
     assigned_agent: str | None = None
+    required_capabilities: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -59,12 +61,19 @@ class CoordinatorService:
         scratch_root: Path | str = Path.home() / ".claw" / "scratch",
         max_workers: int = 4,
         agent_registry: dict | None = None,
+        capability_registry: CapabilityRegistry | dict | None = None,
     ) -> None:
         self.router = router
         self.observe = observe
         self.scratch_root = Path(scratch_root)
         self.max_workers = max_workers
-        self.agent_registry = agent_registry or {}
+        if isinstance(capability_registry, CapabilityRegistry):
+            self.capability_registry = capability_registry
+        elif capability_registry is not None:
+            self.capability_registry = CapabilityRegistry.from_mapping(capability_registry)
+        else:
+            self.capability_registry = CapabilityRegistry.from_mapping(agent_registry)
+        self.agent_registry = self.capability_registry.as_router_registry()
 
     def run(
         self,
@@ -174,12 +183,20 @@ class CoordinatorService:
         start = time.time()
         try:
             task_trace = child_trace_context(trace_context, artifact_id=task.name)
+            selected_agent = self._select_agent(task)
             kwargs: dict[str, Any] = {
                 "lane": task.lane,
-                "evidence_pack": attach_trace({"coordinator_task": task.name}, task_trace),
+                "evidence_pack": attach_trace(
+                    {
+                        "coordinator_task": task.name,
+                        "selected_agent": selected_agent.name if selected_agent else task.assigned_agent,
+                        "required_capabilities": task.required_capabilities,
+                    },
+                    task_trace,
+                ),
             }
-            if task.assigned_agent and task.assigned_agent in self.agent_registry:
-                agent = self.agent_registry[task.assigned_agent]
+            if selected_agent is not None:
+                agent = self.agent_registry[selected_agent.name]
                 kwargs["provider"] = agent["provider"]
                 kwargs["model"] = agent["model"]
                 kwargs["system_prompt"] = agent.get("soul_text", "")
@@ -197,6 +214,15 @@ class CoordinatorService:
                 error=str(exc),
             )
 
+    def _select_agent(self, task: WorkerTask) -> CapabilityManifest | None:
+        if task.assigned_agent:
+            return self.capability_registry.get(task.assigned_agent)
+        return self.capability_registry.select(
+            required=task.required_capabilities,
+            lane=task.lane,
+            text=f"{task.name} {task.instruction}",
+        )
+
     def _synthesize(self, objective: str, research_results: list[WorkerResult], trace_context: dict[str, Any] | None = None) -> str:
         """Merge research findings into a coherent plan."""
         findings = "\n\n".join(
@@ -205,12 +231,9 @@ class CoordinatorService:
             for r in research_results
         )
 
+        agent_lines = self.capability_registry.describe_for_prompt()
         agent_context = ""
-        if self.agent_registry:
-            agent_lines = "\n".join(
-                f"- {name}: domains={caps.get('domains', [])}, model={caps.get('model', '?')}, skills={caps.get('skills', [])}"
-                for name, caps in self.agent_registry.items()
-            )
+        if agent_lines:
             agent_context = f"\n\n## Available Agents\n{agent_lines}"
 
         prompt = (
@@ -247,6 +270,7 @@ class CoordinatorService:
                 instruction=f"## Context from coordinator\n{synthesis}\n\n## Your task\n{t.instruction}",
                 lane=t.lane,
                 assigned_agent=t.assigned_agent,
+                required_capabilities=list(t.required_capabilities),
             )
             for t in tasks
         ]

@@ -1,0 +1,14 @@
+{
+  "capabilities": ["evaluation", "qa", "visual_review", "regression_testing"],
+  "domains": ["quality", "browser", "accessibility", "testing"],
+  "tools": ["playwright", "browser_use", "screenshots"],
+  "risk_policy": {
+    "production_changes": "deny",
+    "external_side_effects": "approval_required",
+    "evidence": "required"
+  },
+  "budget": {"daily_usd": 4.0},
+  "sla": {"response_minutes": 20},
+  "lanes": ["research", "judge", "verifier"],
+  "tags": ["qa", "verify", "grade"]
+}
