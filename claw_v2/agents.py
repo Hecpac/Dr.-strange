@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from claw_v2.brain import BrainService
+from claw_v2.capability_registry import CapabilityManifest, CapabilityRegistry, load_capability_manifest
 from claw_v2.llm import LLMRouter
 from claw_v2.tools import default_allowed_tools_for, is_valid_agent_class
 
@@ -896,6 +897,7 @@ class SubAgentDefinition:
     display_name: str
     provider: str
     model: str
+    capabilities: CapabilityManifest
     soul: str
     heartbeat_config: str
     user_context: str
@@ -943,11 +945,20 @@ class SubAgentService:
         skills = self._load_skills(agent_dir / "skills")
         provider, model = self._parse_model_from_soul(soul)
         display_name = self._parse_display_name(soul)
+        capabilities = load_capability_manifest(
+            agent_dir,
+            display_name=display_name,
+            provider=provider,
+            model=model,
+            skills=skills.keys(),
+            soul_text=soul,
+        )
         return SubAgentDefinition(
             name=agent_dir.name,
             display_name=display_name,
             provider=provider,
             model=model,
+            capabilities=capabilities,
             soul=soul,
             heartbeat_config=heartbeat,
             user_context=user_ctx,
@@ -1069,14 +1080,11 @@ class SubAgentService:
     def registry(self) -> dict[str, dict[str, Any]]:
         registry: dict[str, dict[str, Any]] = {}
         for name, defn in self._agents.items():
-            registry[name] = {
-                "display_name": defn.display_name,
-                "provider": defn.provider,
-                "model": defn.model,
-                "soul_text": self._build_system_prompt(defn),
-                "skills": list(defn.skills.keys()),
-            }
+            registry[name] = defn.capabilities.to_router_entry(self._build_system_prompt(defn))
         return registry
+
+    def capability_registry(self) -> CapabilityRegistry:
+        return CapabilityRegistry.from_mapping(self.registry())
 
     @staticmethod
     def _build_system_prompt(defn: SubAgentDefinition) -> str:

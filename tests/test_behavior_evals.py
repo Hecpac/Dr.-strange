@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from unittest.mock import patch
@@ -11,6 +12,7 @@ from claw_v2.types import LLMResponse
 
 
 BASELINE_PATH = Path(__file__).parent.parent / "evals" / "behavior_baseline.jsonl"
+THRESHOLDS_PATH = Path(__file__).parent.parent / "evals" / "thresholds.json"
 
 
 def _brain_response(request: LLMRequest) -> LLMResponse:
@@ -65,10 +67,11 @@ def _event_types_since(observe, cursor: int) -> list[str]:
 
 def test_behavior_eval_loader_reads_jsonl_cases() -> None:
     cases = EvalHarness.load_behavior_cases(BASELINE_PATH)
+    thresholds = json.loads(THRESHOLDS_PATH.read_text(encoding="utf-8"))
 
-    assert len(cases) == 10
+    assert len(cases) >= thresholds["behavior"]["minimum_cases"]
     assert all(isinstance(case.expected, BehaviorSnapshot) for case in cases)
-    assert {case.name for case in cases} == {
+    assert {
         "brain-greeting",
         "brain-status-question",
         "brain-debug-request",
@@ -79,7 +82,7 @@ def test_behavior_eval_loader_reads_jsonl_cases() -> None:
         "brain-runtime-capability",
         "brain-error-recovery",
         "brain-verify-request",
-    }
+    } <= {case.name for case in cases}
 
 
 def test_behavior_evals_pass_against_current_brain(tmp_path: Path) -> None:
@@ -108,6 +111,9 @@ def test_behavior_evals_pass_against_current_brain(tmp_path: Path) -> None:
     results = harness.run_behavior_suite(cases, snapshotter)
 
     failures = {result.name: result.failures for result in results if not result.passed}
+    thresholds = json.loads(THRESHOLDS_PATH.read_text(encoding="utf-8"))
+    pass_rate = (len(results) - len(failures)) / len(results)
+    assert pass_rate >= thresholds["behavior"]["minimum_pass_rate"]
     assert failures == {}
 
 

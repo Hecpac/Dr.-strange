@@ -6,11 +6,11 @@ import time
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Iterable, Literal
+
+from claw_v2.capability_registry import default_agent_names
 
 logger = logging.getLogger(__name__)
-
-KNOWN_AGENTS = ("hex", "rook", "alma", "eval")
 
 
 @dataclass(slots=True)
@@ -54,12 +54,21 @@ def _new_message(
 
 
 class AgentBus:
-    def __init__(self, bus_root: Path = Path.home() / ".claw" / "bus") -> None:
+    def __init__(
+        self,
+        bus_root: Path = Path.home() / ".claw" / "bus",
+        agent_names: Iterable[str] | None = None,
+    ) -> None:
         self.bus_root = bus_root
+        self.agent_names = tuple(agent_names or default_agent_names())
+        self._ensure_dirs()
+
+    def set_agent_names(self, agent_names: Iterable[str]) -> None:
+        self.agent_names = tuple(sorted(dict.fromkeys(agent_names)))
         self._ensure_dirs()
 
     def _ensure_dirs(self) -> None:
-        for agent in KNOWN_AGENTS:
+        for agent in self.agent_names:
             (self.bus_root / "inbox" / agent).mkdir(parents=True, exist_ok=True)
         (self.bus_root / "broadcast").mkdir(parents=True, exist_ok=True)
         (self.bus_root / "archive").mkdir(parents=True, exist_ok=True)
@@ -74,12 +83,11 @@ class AgentBus:
     def send(self, message: AgentMessage) -> str:
         """Persist message to recipient inbox. Broadcasts use eager fan-out."""
         if message.to_agent is not None:
-            self._write_message(
-                self.bus_root / "inbox" / message.to_agent / f"{message.id}.json",
-                message,
-            )
+            inbox = self.bus_root / "inbox" / message.to_agent
+            inbox.mkdir(parents=True, exist_ok=True)
+            self._write_message(inbox / f"{message.id}.json", message)
         else:
-            for agent in KNOWN_AGENTS:
+            for agent in self.agent_names:
                 if agent != message.from_agent:
                     self._write_message(
                         self.bus_root / "inbox" / agent / f"{message.id}.json",
@@ -133,7 +141,7 @@ class AgentBus:
     def pending_urgent(self) -> list[AgentMessage]:
         """All unconsumed messages with priority=urgent across all inboxes."""
         urgent: list[AgentMessage] = []
-        for agent in KNOWN_AGENTS:
+        for agent in self.agent_names:
             inbox = self.bus_root / "inbox" / agent
             for path in inbox.glob("*.json"):
                 try:
@@ -148,7 +156,7 @@ class AgentBus:
         """Scan all inboxes for intent=request messages past TTL without a reply."""
         now = time.time()
         expired: list[AgentMessage] = []
-        for agent in KNOWN_AGENTS:
+        for agent in self.agent_names:
             inbox = self.bus_root / "inbox" / agent
             for path in inbox.glob("*.json"):
                 try:
