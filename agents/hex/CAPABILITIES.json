@@ -1,0 +1,14 @@
+{
+  "capabilities": ["coding", "debugging", "refactoring", "code_review"],
+  "domains": ["code", "architecture", "tests"],
+  "tools": ["git", "filesystem", "pytest", "terminal"],
+  "risk_policy": {
+    "external_side_effects": "approval_required",
+    "commits": "approval_required",
+    "secrets": "deny"
+  },
+  "budget": {"daily_usd": 8.0},
+  "sla": {"response_minutes": 20},
+  "lanes": ["worker", "research"],
+  "tags": ["code", "bug", "pr", "refactor"]
+}

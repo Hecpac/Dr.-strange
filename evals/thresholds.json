@@ -1,0 +1,10 @@
+{
+  "behavior": {
+    "minimum_cases": 30,
+    "minimum_pass_rate": 1.0
+  },
+  "capability_registry": {
+    "minimum_route_cases": 5,
+    "minimum_pass_rate": 1.0
+  }
+}

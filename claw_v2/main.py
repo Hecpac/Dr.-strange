@@ -425,12 +425,13 @@ def _setup_agent_services(
     sub_agents = SubAgentService(config.agent_definitions_root, router, agent_store)
     discovered = sub_agents.discover()
     if discovered:
+        bus.set_agent_names(discovered)
         observe.emit("sub_agents_discovered", payload={"agents": discovered})
     coordinator = CoordinatorService(
         router=router,
         observe=observe,
         scratch_root=config.agent_state_root / "_scratch",
-        agent_registry=sub_agents.registry(),
+        capability_registry=sub_agents.capability_registry(),
     )
     task_board = TaskBoard(board_root=config.agent_state_root / "_board")
     registry_path = config.workspace_root / "claw_v2" / "AGENTS.md"

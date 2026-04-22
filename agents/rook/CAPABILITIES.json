@@ -1,0 +1,14 @@
+{
+  "capabilities": ["operations", "incident_response", "log_analysis", "health_audit"],
+  "domains": ["ops", "deploy", "security", "cron"],
+  "tools": ["logs", "terminal", "healthcheck"],
+  "risk_policy": {
+    "service_restart": "approval_required",
+    "credentials": "approval_required",
+    "destructive_changes": "deny"
+  },
+  "budget": {"daily_usd": 3.0},
+  "sla": {"response_minutes": 10},
+  "lanes": ["research", "worker"],
+  "tags": ["ops", "deploy", "incident", "cron"]
+}

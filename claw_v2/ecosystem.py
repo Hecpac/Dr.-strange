@@ -4,11 +4,11 @@ import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Iterable, Literal
+
+from claw_v2.capability_registry import default_agent_names
 
 logger = logging.getLogger(__name__)
-
-KNOWN_AGENTS = ("hex", "rook", "alma", "eval")
 
 
 @dataclass(slots=True)
@@ -34,11 +34,13 @@ class EcosystemHealthService:
         observe: Any,
         dream_states: dict[str, Any],
         heartbeat: Any,
+        agent_names: Iterable[str] | None = None,
     ) -> None:
         self.bus = bus
         self.observe = observe
         self.dream_states = dream_states
         self.heartbeat = heartbeat
+        self.agent_names = tuple(agent_names or default_agent_names())
 
     def collect(self) -> EcosystemHealth:
         metrics: list[EcosystemMetric] = []
@@ -53,7 +55,7 @@ class EcosystemHealthService:
         return EcosystemHealth(timestamp=time.time(), metrics=metrics, overall=worst)
 
     def _check_bus_lag(self) -> EcosystemMetric:
-        total = sum(self.bus.pending_count(agent) for agent in KNOWN_AGENTS)
+        total = sum(self.bus.pending_count(agent) for agent in self.agent_names)
         if total > 10:
             return EcosystemMetric(name="bus_lag", value=total, status="CRITICAL", detail=f"{total} messages pending")
         if total > 3:

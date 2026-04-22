@@ -1,0 +1,14 @@
+{
+  "capabilities": ["personal_assistant", "synthesis", "daily_brief"],
+  "domains": ["personal", "calendar", "telegram", "memory"],
+  "tools": ["memory", "calendar", "telegram"],
+  "risk_policy": {
+    "external_messages": "approval_required",
+    "calendar_changes": "approval_required",
+    "private_data": "least_privilege"
+  },
+  "budget": {"daily_usd": 6.0},
+  "sla": {"response_minutes": 5},
+  "lanes": ["research", "brain"],
+  "tags": ["assistant", "brief", "message"]
+}
