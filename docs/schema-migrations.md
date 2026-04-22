@@ -101,6 +101,7 @@ CREATE TABLE IF NOT EXISTS job_steps (
     started_at TEXT,
     completed_at TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state);
 CREATE INDEX IF NOT EXISTS idx_job_steps_job ON job_steps(job_id);
 PRAGMA user_version=103;
 ```

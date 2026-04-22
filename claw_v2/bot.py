@@ -29,6 +29,7 @@ from claw_v2.coordinator import CoordinatorService
 from claw_v2.content import ContentEngine
 from claw_v2.github import GitHubPullRequestService
 from claw_v2.heartbeat import HeartbeatService
+from claw_v2.job_commands import JobCommandPlugin
 from claw_v2.pipeline import PipelineService
 from claw_v2.social import SocialPublisher
 from claw_v2.bot_helpers import *  # noqa: F403
@@ -74,6 +75,7 @@ class BotService:
         computer_model: str = _DEFAULT_COMPUTER_MODEL,
         computer_system_prompt: str | None = None,
         observe: object | None = None,
+        job_service: object | None = None,
     ) -> None:
         self.brain = brain
         self.auto_research = auto_research
@@ -86,6 +88,7 @@ class BotService:
         self.config = config
         self._terminal_handler = TerminalHandler(terminal_bridge=terminal_bridge)
         self.observe = observe
+        self.job_service = job_service
         self.learning: Any | None = None
         self._wiki_handler = WikiHandler(memory=brain.memory)
         self._nlm_handler = NlmHandler(update_session_state=brain.memory.update_session_state)
@@ -141,6 +144,7 @@ class BotService:
         )
         self._core_commands = CoreCommandPlugin(self)
         self._post_commands = PostCommandPlugin(self)
+        self._job_commands = JobCommandPlugin(self)
         self._skill_commands = SkillCommandPlugin(self)
         self._pre_state_registry = self._build_pre_state_registry()
         self._post_shortcut_registry = self._build_post_shortcut_registry()
@@ -286,6 +290,7 @@ class BotService:
     def _build_post_shortcut_registry(self) -> HandlerRegistry:
         registry = HandlerRegistry("post_shortcut")
         registry.extend(self._agent_handler.commands())
+        registry.extend(self._job_commands.commands())
         registry.extend(self._post_commands.commands())
         registry.extend(self._nlm_handler.commands())
         return registry

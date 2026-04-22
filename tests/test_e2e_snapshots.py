@@ -169,7 +169,7 @@ def test_command_snapshot_fixtures_cover_current_command_inventory(tmp_path: Pat
     }
 
     assert fixture_keys == inventory_keys
-    assert len(fixture_keys) == 36
+    assert len(fixture_keys) == 37
 
 
 def test_command_snapshot_fixtures_dispatch_without_internal_mocks(tmp_path: Path) -> None:
