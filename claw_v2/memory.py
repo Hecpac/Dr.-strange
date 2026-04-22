@@ -13,6 +13,10 @@ from typing import Any, Callable, Iterable
 
 logger = logging.getLogger(__name__)
 
+V3_SCHEMA_BASELINE_VERSION = 100
+V3_IDEMPOTENCY_VERSION = 101
+CURRENT_SCHEMA_VERSION = V3_IDEMPOTENCY_VERSION
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
@@ -291,6 +295,16 @@ CREATE TABLE IF NOT EXISTS calibration_stats (
 );
 """
 
+_MIGRATION_CREATE_IDEMPOTENCY_KEYS = """
+CREATE TABLE IF NOT EXISTS idempotency_keys (
+    key TEXT PRIMARY KEY,
+    status TEXT NOT NULL DEFAULT 'running',
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    completed_at TEXT,
+    result TEXT
+);
+"""
+
 
 # Graph-expansion neighbor scoring discount. Mirrors claw_v2/wiki.py:1046, where
 # graph-expanded pages are scored at 0.6 * the average seed score so they sort
@@ -434,6 +448,26 @@ class MemoryStore:
             self.backfill_outcome_entity_edges()
         except Exception:
             logger.debug("Outcome entity edges backfill skipped", exc_info=True)
+        self._ensure_v3_schema_baseline()
+        self._ensure_idempotency_table()
+
+    def _ensure_v3_schema_baseline(self) -> None:
+        """Mark the current pre-v3 ad hoc schema as the v3 migration baseline."""
+        current = self._conn.execute("PRAGMA user_version").fetchone()[0]
+        if int(current or 0) < V3_SCHEMA_BASELINE_VERSION:
+            self._conn.execute(f"PRAGMA user_version={V3_SCHEMA_BASELINE_VERSION}")
+            self._conn.commit()
+
+    def _ensure_idempotency_table(self) -> None:
+        current = int(self._conn.execute("PRAGMA user_version").fetchone()[0] or 0)
+        exists = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='idempotency_keys'"
+        ).fetchone()
+        if exists is None or current < V3_IDEMPOTENCY_VERSION:
+            self._conn.executescript(_MIGRATION_CREATE_IDEMPOTENCY_KEYS)
+            if current < V3_IDEMPOTENCY_VERSION:
+                self._conn.execute(f"PRAGMA user_version={V3_IDEMPOTENCY_VERSION}")
+            self._conn.commit()
 
     def store_message(self, session_id: str, role: str, content: str) -> None:
         with self._lock:

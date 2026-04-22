@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from claw_v2.llm import LLMRouter
 from claw_v2.observe import ObserveStream
@@ -39,6 +39,35 @@ class EvalSuiteResult:
     results: list[EvalResult] = field(default_factory=list)
 
 
+@dataclass(slots=True)
+class BehaviorSnapshot:
+    intent: str
+    required_approval: bool
+    selected_agent: str | None
+    risk_lane: str
+    tool_plan: list[str] = field(default_factory=list)
+    emitted_events: list[str] = field(default_factory=list)
+    artifact_types: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class BehaviorEvalCase:
+    name: str
+    prompt: str | list[dict[str, Any]]
+    expected: BehaviorSnapshot
+    session_id: str | None = None
+    task_type: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class BehaviorEvalResult:
+    name: str
+    passed: bool
+    failures: list[str]
+    snapshot: BehaviorSnapshot
+
+
 class EvalHarness:
     def __init__(self, router: LLMRouter) -> None:
         self.router = router
@@ -70,6 +99,22 @@ class EvalHarness:
         passed = sum(1 for result in results if result.passed)
         failed = len(results) - passed
         return EvalSuiteResult(name=name, passed=passed, failed=failed, results=results)
+
+    def run_behavior_case(
+        self,
+        case: BehaviorEvalCase,
+        snapshotter: Callable[[BehaviorEvalCase], BehaviorSnapshot],
+    ) -> BehaviorEvalResult:
+        snapshot = snapshotter(case)
+        failures = _diff_behavior_snapshot(case.expected, snapshot)
+        return BehaviorEvalResult(case.name, not failures, failures, snapshot)
+
+    def run_behavior_suite(
+        self,
+        cases: list[BehaviorEvalCase],
+        snapshotter: Callable[[BehaviorEvalCase], BehaviorSnapshot],
+    ) -> list[BehaviorEvalResult]:
+        return [self.run_behavior_case(case, snapshotter) for case in cases]
 
     def run_self_improvement_gate(self, *, plan: str, diff: str, test_output: str) -> EvalResult:
         case = EvalCase(
@@ -123,6 +168,35 @@ class EvalHarness:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
         return EvalCase(**data)
 
+    @staticmethod
+    def load_behavior_cases(path: Path | str) -> list[BehaviorEvalCase]:
+        cases: list[BehaviorEvalCase] = []
+        for line in Path(path).read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            data = json.loads(line)
+            data["expected"] = BehaviorSnapshot(**data["expected"])
+            cases.append(BehaviorEvalCase(**data))
+        return cases
+
 
 def _normalize_text(value: str) -> str:
     return " ".join(value.split())
+
+
+def _diff_behavior_snapshot(expected: BehaviorSnapshot, actual: BehaviorSnapshot) -> list[str]:
+    failures: list[str] = []
+    for field_name in (
+        "intent",
+        "required_approval",
+        "selected_agent",
+        "risk_lane",
+        "tool_plan",
+        "emitted_events",
+        "artifact_types",
+    ):
+        expected_value = getattr(expected, field_name)
+        actual_value = getattr(actual, field_name)
+        if actual_value != expected_value:
+            failures.append(f"{field_name}: expected {expected_value!r}, got {actual_value!r}")
+    return failures
