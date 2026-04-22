@@ -30,6 +30,7 @@
     {"phase": "pre", "name": "rollback", "text": "/rollback"},
     {"phase": "pre", "name": "checkpoints", "text": "/checkpoints"},
     {"phase": "post", "name": "agents", "text": "/agents"},
+    {"phase": "post", "name": "jobs", "text": "/jobs"},
     {"phase": "post", "name": "approvals", "text": "/approvals"},
     {"phase": "post", "name": "traces", "text": "/traces"},
     {"phase": "post", "name": "feedback", "text": "/feedback"},

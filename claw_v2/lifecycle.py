@@ -150,7 +150,7 @@ async def run() -> int:
                     _loop,
                 )
 
-        nlm_service = NotebookLMService(notify=_nlm_notify, observe=runtime.observe)
+        nlm_service = NotebookLMService(notify=_nlm_notify, observe=runtime.observe, jobs=runtime.jobs)
         runtime.bot.notebooklm = nlm_service
 
         # NotebookLM → Wiki sync (every 12h)

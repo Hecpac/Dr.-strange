@@ -31,9 +31,11 @@ class NotebookLMService:
         self,
         notify: Callable[[str], None] | None = None,
         observe: Any | None = None,
+        jobs: Any | None = None,
     ) -> None:
         self._notify = notify or (lambda msg: None)
         self._observe = observe
+        self._jobs = jobs
         self._running: dict[str, threading.Thread] = {}
         self._client_factory: Callable[[], Any] | None = None
         # Optional override for CDP-backed methods (used by tests). Defaults to
@@ -117,7 +119,7 @@ class NotebookLMService:
         # SDK-based test mocks keep working. Otherwise use the CDP path
         # (production), which can be overridden via _cdp_create_notebook_fn for
         # CDP-specific tests.
-        if self._use_sdk:
+        if self._client_factory is not None or (self._sdk_available and self._cdp_create_notebook_fn is None):
             return self._run_async(self._async_create_notebook(title))
         cdp_fn = self._cdp_create_notebook_fn or notebooklm_cdp.create_notebook
         return cdp_fn(title)
@@ -201,7 +203,7 @@ class NotebookLMService:
         # CDP mode skips SDK-only id resolution and title lookup. The handler
         # passes the full id from create_notebook, and the notify message uses
         # the id as a stand-in title.
-        cdp_mode = not self._use_sdk
+        cdp_mode = self._client_factory is None and (self._cdp_research_fn is not None or not self._sdk_available)
         if cdp_mode:
             full_id = notebook_id
             title = notebook_id[:8]
@@ -210,6 +212,9 @@ class NotebookLMService:
             title = self._get_notebook_title(full_id)
         if full_id in self._running and self._running[full_id].is_alive():
             return f"Ya hay una operación en curso para este notebook ({full_id[:8]}...)."
+        if active_job_id := self._active_job_for_notebook(full_id):
+            return f"Ya hay una operación en curso para este notebook ({full_id[:8]}...). Job: {active_job_id}"
+        job_id = self._create_job("research", full_id, {"query": query, "mode": mode})
         self._emit("nlm_research_started", notebook_id=full_id, query=query, mode=mode)
 
         def _worker():
@@ -219,6 +224,8 @@ class NotebookLMService:
                     result = cdp_fn(full_id, query)
                 else:
                     result = self._run_async(self._async_research(full_id, query, mode))
+                self._job_step(job_id, "research_completed", {"sources_count": result})
+                self._job_complete(job_id, {"sources_count": result})
                 self._emit("nlm_research_completed", notebook_id=full_id, sources_count=result)
                 self._notify(
                     f"Deep Research completado en notebook {title}\n"
@@ -227,6 +234,7 @@ class NotebookLMService:
                 )
             except Exception as exc:
                 logger.exception("Background research failed for %s", full_id)
+                self._job_fail(job_id, str(exc))
                 self._emit("nlm_error", notebook_id=full_id, operation="research", error=str(exc))
                 self._notify(f"Error en research: {exc}")
             finally:
@@ -235,7 +243,8 @@ class NotebookLMService:
         thread = threading.Thread(target=_worker, daemon=True)
         self._running[full_id] = thread
         thread.start()
-        return f"Deep Research iniciado para '{query}' en notebook {title}..."
+        suffix = f"\nJob: {job_id}" if job_id else ""
+        return f"Deep Research iniciado para '{query}' en notebook {title}...{suffix}"
 
     async def _async_research(self, notebook_id: str, query: str, mode: str) -> int:
         async with self._client_ctx(timeout=300) as client:
@@ -272,7 +281,7 @@ class NotebookLMService:
         normalized_kind = kind.strip().lower()
         if normalized_kind not in self._ARTIFACT_LABELS:
             raise ValueError(f"Tipo de artefacto no soportado: {kind}")
-        cdp_mode = not self._use_sdk
+        cdp_mode = self._client_factory is None and (self._cdp_artifact_fn is not None or not self._sdk_available)
         if cdp_mode:
             full_id = notebook_id
             title = notebook_id[:8]
@@ -282,6 +291,9 @@ class NotebookLMService:
             title = self._get_notebook_title(full_id)
         if full_id in self._running and self._running[full_id].is_alive():
             return f"Ya hay una operación en curso para este notebook ({full_id[:8]}...)."
+        if active_job_id := self._active_job_for_notebook(full_id):
+            return f"Ya hay una operación en curso para este notebook ({full_id[:8]}...). Job: {active_job_id}"
+        job_id = self._create_job(normalized_kind, full_id, {"artifact_kind": normalized_kind})
         self._emit(f"nlm_{normalized_kind}_started", notebook_id=full_id)
 
         def _worker():
@@ -291,6 +303,8 @@ class NotebookLMService:
                     cdp_fn(full_id, normalized_kind)
                 else:
                     self._run_async(self._async_generate_artifact(full_id, normalized_kind))
+                self._job_step(job_id, f"{normalized_kind}_completed", {"artifact_kind": normalized_kind})
+                self._job_complete(job_id, {"artifact_kind": normalized_kind})
                 self._emit(f"nlm_{normalized_kind}_completed", notebook_id=full_id)
                 self._notify(
                     f"{self._artifact_name(normalized_kind)} generado para notebook {title}\n"
@@ -298,6 +312,7 @@ class NotebookLMService:
                 )
             except Exception as exc:
                 logger.exception("Background %s failed for %s", normalized_kind, full_id)
+                self._job_fail(job_id, str(exc))
                 self._emit("nlm_error", notebook_id=full_id, operation=normalized_kind, error=str(exc))
                 self._notify(f"Error en {self._artifact_name(normalized_kind)}: {exc}")
             finally:
@@ -306,7 +321,8 @@ class NotebookLMService:
         thread = threading.Thread(target=_worker, daemon=True)
         self._running[full_id] = thread
         thread.start()
-        return f"Generando {self._artifact_name(normalized_kind)} para notebook {title}..."
+        suffix = f"\nJob: {job_id}" if job_id else ""
+        return f"Generando {self._artifact_name(normalized_kind)} para notebook {title}...{suffix}"
 
     async def _async_generate_artifact(self, notebook_id: str, kind: str) -> None:
         async with self._client_ctx() as client:
@@ -357,3 +373,32 @@ class NotebookLMService:
         except Exception:
             pass
         return full_id[:8]
+
+    def _active_job_for_notebook(self, notebook_id: str) -> str | None:
+        if self._jobs is None or not hasattr(self._jobs, "list_jobs"):
+            return None
+        for job in self._jobs.list_jobs(limit=100, include_terminal=False):
+            if job.payload.get("notebook_id") == notebook_id:
+                return job.job_id
+        return None
+
+    def _create_job(self, kind: str, notebook_id: str, payload: dict[str, Any]) -> str | None:
+        if self._jobs is None:
+            return None
+        job = self._jobs.enqueue(
+            kind=f"notebooklm.{kind}",
+            payload={"notebook_id": notebook_id, **payload},
+        )
+        return self._jobs.start(job.job_id, lease_owner="notebooklm").job_id
+
+    def _job_step(self, job_id: str | None, name: str, payload: dict[str, Any]) -> None:
+        if self._jobs is not None and job_id:
+            self._jobs.record_step(job_id, name, payload=payload)
+
+    def _job_complete(self, job_id: str | None, payload: dict[str, Any]) -> None:
+        if self._jobs is not None and job_id:
+            self._jobs.complete(job_id, payload=payload)
+
+    def _job_fail(self, job_id: str | None, error: str) -> None:
+        if self._jobs is not None and job_id:
+            self._jobs.fail(job_id, error=error)
