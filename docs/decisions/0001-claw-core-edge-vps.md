@@ -2,8 +2,8 @@
 
 ## Status
 
-Proposed. No Core/Edge implementation code should be written or merged until
-Hector approves this ADR.
+Accepted after review. Core/Edge implementation can start after this ADR
+revision is merged; implementation PRs must preserve the constraints below.
 
 ## Context
 
@@ -36,7 +36,8 @@ Core and Edge communicate over HTTPS using versioned A2A messages:
 - `GET /.well-known/claw-edge.json`: edge identity, protocol version,
   supported capabilities, auth key id, and health summary.
 - `POST /a2a/v1/tasks`: submit an idempotent task with `job_id`, `trace_id`,
-  `capability`, `action`, `payload`, `deadline_ms`, and `idempotency_key`.
+  `capability`, `action`, `payload`, `deadline_ms`, `idempotency_key`, and an
+  optional `callback_url` for long-running tasks.
 - `GET /a2a/v1/tasks/{task_id}`: poll status and result metadata.
 - `POST /a2a/v1/tasks/{task_id}/cancel`: request cancellation.
 - `GET /a2a/v1/health`: liveness, readiness, load, queue depth, and degraded
@@ -46,6 +47,24 @@ All messages include `protocol_version`, `schema_version`, `trace_id`,
 `root_trace_id`, `span_id`, `job_id`, and `artifact_id` when available. Payloads
 must be JSON only. Large artifacts are referenced by artifact id or signed URL,
 not embedded in task payloads.
+
+Polling remains the baseline contract. `callback_url` is an optimization for
+multi-minute Computer Use tasks; callbacks must be signed, idempotent, and
+advisory. Core verifies final task state with `GET /a2a/v1/tasks/{task_id}`
+before marking the job step complete.
+
+## Connectivity Layer
+
+Core must not require public inbound ports on the Mac. The approved
+connectivity options are:
+
+- Preferred: a private mesh network such as Tailscale or WireGuard.
+- Acceptable fallback: Cloudflare Tunnel or equivalent outbound-only tunnel.
+
+Router port forwarding and dynamic DNS to the Mac are rejected for the initial
+implementation. Edge advertises its private overlay or tunnel URL in
+`/.well-known/claw-edge.json`; Core stores only that endpoint and capability
+state. TLS and A2A HMAC still apply inside the private connectivity layer.
 
 ## Latency Budget
 
@@ -58,7 +77,7 @@ Edge execution.
 - Interactive Computer Use step target: p95 under 5 seconds per action after
   admission.
 - Core timeout for unavailable Edge: 2 seconds for health, 10 seconds for task
-  admission, then mark capability degraded.
+  admission after health is ready, then mark capability degraded.
 
 If the latency budget is exceeded, Core records a degraded capability event and
 continues with text-only behavior where possible.
@@ -107,7 +126,12 @@ user intent and job policy. Core may continue unrelated text-only work.
 
 ## Degraded Mode
 
-When the Mac is off or Edge is unreachable:
+The Edge health check is the source of truth for dispatch. If health fails,
+times out, or reports readiness false, Core immediately enters degraded mode for
+Edge capabilities and does not attempt task admission. This covers Mac sleep,
+hibernation, shutdown, network partition, and tunnel failure.
+
+When the Mac is off, asleep, or Edge is unreachable:
 
 - Core remains online and processes Telegram/Web text messages.
 - Core marks Edge capabilities as `unavailable` or `degraded` with a concrete
@@ -121,6 +145,18 @@ When the Mac is off or Edge is unreachable:
 Degraded mode must never look like a generic exception, empty response, or
 silent timeout.
 
+## Artifact Ownership
+
+Edge owns temporary raw binary artifacts produced by Edge-local capabilities,
+including screenshots, Chrome dumps, screen recordings, and browser exports.
+Edge uploads large artifacts to object storage such as S3/R2 or keeps them in
+Edge-local temporary storage behind signed URLs. Core stores artifact metadata,
+lineage, checksum, content type, size, retention, and signed URL only.
+
+Core must not store raw browser profiles, cookies, screenshots, or large binary
+dumps in SQLite. Signed URLs must expire, and Edge remains responsible for raw
+artifact cleanup according to the advertised retention policy.
+
 ## Secret Management
 
 Core and Edge keep separate environment files and separate service identities.
@@ -128,6 +164,8 @@ Core and Edge keep separate environment files and separate service identities.
 - Core owns LLM, Telegram/Web, database, approvals, and dashboard secrets.
 - Edge owns local browser, Computer Use, terminal bridge, and Mac-specific
   secrets.
+- Edge owns credentials needed to upload Edge artifacts to object storage.
+- Mesh VPN or tunnel credentials are separate from A2A and approval secrets.
 - Secrets are never sent over A2A payloads.
 - Rotating `A2A_SECRET` requires dual-key support: current key and next key.
 - Logs and artifacts must redact tokens, signed URLs, cookies, and browser
@@ -168,12 +206,14 @@ product audit path.
 ## Rollout Plan
 
 1. Add contract tests and fixtures for Core-only mode and Edge protocol.
-2. Add Edge capability health abstraction behind the capability registry.
-3. Add Core-side Edge client with auth, retries, idempotency, and backpressure.
-4. Move local-only handlers behind Edge capability calls.
-5. Run Core locally with Edge disconnected and prove text-only flows work.
-6. Run Core on VPS with Edge disconnected and prove degraded mode.
-7. Reconnect Edge and prove capability recovery.
+2. Establish private connectivity with Tailscale/WireGuard or a tunnel.
+3. Add Edge capability health abstraction behind the capability registry.
+4. Add Core-side Edge client with auth, retries, idempotency, and backpressure.
+5. Move local-only handlers behind Edge capability calls.
+6. Add signed URL artifact handoff for Edge-owned raw artifacts.
+7. Run Core locally with Edge disconnected and prove text-only flows work.
+8. Run Core on VPS with Edge disconnected and prove degraded mode.
+9. Reconnect Edge and prove capability recovery.
 
 Each step must keep existing evals green.
 
@@ -185,13 +225,20 @@ Each step must keep existing evals green.
   text response while the Mac is off.
 - **Use raw SSH from Core to Mac:** rejected because it makes auth, backpressure,
   versioning, and audit lineage harder to control.
+- **Expose the Mac with port forwarding or dynamic DNS:** rejected because NAT
+  traversal and public inbound access add avoidable fragility and risk.
 
 ## Acceptance Criteria
 
 - Core can answer Telegram/Web text messages while Edge is disconnected.
+- Core reaches Edge through private mesh networking or outbound-only tunneling,
+  with no public inbound ports on the Mac.
 - Edge capabilities are explicitly unavailable or degraded with a reason.
+- Failed Edge health immediately blocks task dispatch and enters degraded mode.
 - Reconnecting Edge restores capability routing without restarting Core.
 - A2A contract tests cover auth failure, retry, backpressure, schema mismatch,
-  version skew, and degraded mode.
+  version skew, signed callbacks, and degraded mode.
+- Raw Edge artifacts are stored by Edge/object storage and referenced in Core by
+  metadata plus signed URL.
 - Existing behavior evals and capability registry evals pass in both connected
   and disconnected modes.
