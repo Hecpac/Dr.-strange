@@ -7,7 +7,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock
 
+from claw_v2.approval import ApprovalManager
 from claw_v2.chat_api import LocalChatAPI
+from claw_v2.jobs import JobService
 from claw_v2.observe import ObserveStream
 from tests.helpers import make_config
 
@@ -250,6 +252,62 @@ class LocalChatAPITests(unittest.TestCase):
             self.assertEqual(status_code, 404)
             payload = json.loads(body.decode("utf-8"))
             self.assertEqual(payload["error"], "trace not found: trace-missing")
+
+    def test_get_jobs_returns_durable_job_index(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jobs = JobService(Path(tmpdir) / "claw.db")
+            job = jobs.enqueue(kind="pipeline", job_id="pipeline:HEC-1", payload={"issue_id": "HEC-1"})
+            jobs.start(job.job_id)
+            bot_service = MagicMock()
+            bot_service.allowed_user_id = "123"
+            bot_service.job_service = jobs
+            api = LocalChatAPI(bot_service=bot_service)
+
+            status_code, _, body = api.handle_http(method="GET", path="/api/jobs", body=b"")
+
+            self.assertEqual(status_code, 200)
+            payload = json.loads(body.decode("utf-8"))
+            self.assertEqual(payload["jobs"][0]["id"], "pipeline:HEC-1")
+            self.assertEqual(payload["jobs"][0]["state"], "running")
+
+    def test_delete_job_cancels_durable_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jobs = JobService(Path(tmpdir) / "claw.db")
+            jobs.start(jobs.enqueue(kind="pipeline", job_id="pipeline:HEC-1").job_id)
+            bot_service = MagicMock()
+            bot_service.allowed_user_id = "123"
+            bot_service.job_service = jobs
+            api = LocalChatAPI(bot_service=bot_service)
+
+            status_code, _, body = api.handle_http(method="DELETE", path="/api/jobs/pipeline:HEC-1", body=b"")
+
+            self.assertEqual(status_code, 200)
+            payload = json.loads(body.decode("utf-8"))
+            self.assertEqual(payload["job"]["state"], "cancelled")
+
+    def test_approval_api_lists_and_approves_without_token_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            approvals = ApprovalManager(Path(tmpdir) / "approvals", "secret")
+            pending = approvals.create(action="deploy", summary="Deploy prod")
+            bot_service = MagicMock()
+            bot_service.allowed_user_id = "123"
+            bot_service.approvals = approvals
+            api = LocalChatAPI(bot_service=bot_service)
+
+            status_code, _, body = api.handle_http(method="GET", path="/api/approvals", body=b"")
+            self.assertEqual(status_code, 200)
+            listing = json.loads(body.decode("utf-8"))
+            self.assertEqual(listing["approvals"][0]["approval_id"], pending.approval_id)
+            self.assertNotIn("token_hash", listing["approvals"][0])
+
+            status_code, _, body = api.handle_http(
+                method="POST",
+                path=f"/api/approvals/{pending.approval_id}/approve",
+                body=json.dumps({"token": pending.token}).encode("utf-8"),
+            )
+            self.assertEqual(status_code, 200)
+            approved = json.loads(body.decode("utf-8"))
+            self.assertTrue(approved["approved"])
 
 
 class MakeConfigCompatibilityTests(unittest.TestCase):
