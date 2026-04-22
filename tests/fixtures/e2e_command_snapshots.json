@@ -1,0 +1,92 @@
+{
+  "commands": [
+    {"phase": "pre", "name": "help", "text": "/help"},
+    {"phase": "pre", "name": "status", "text": "/status"},
+    {"phase": "pre", "name": "restart", "text": "/restart"},
+    {"phase": "pre", "name": "config", "text": "/config"},
+    {"phase": "pre", "name": "tokens", "text": "/tokens"},
+    {"phase": "pre", "name": "spending", "text": "/spending"},
+    {"phase": "pre", "name": "task_run", "text": "/task_run"},
+    {"phase": "pre", "name": "autonomy", "text": "/autonomy"},
+    {"phase": "pre", "name": "task_state", "text": "/task_loop"},
+    {"phase": "pre", "name": "task_transition", "text": "/task_done"},
+    {"phase": "pre", "name": "browse", "text": "/browse ftp://invalid"},
+    {"phase": "pre", "name": "terminal", "text": "/terminal_read"},
+    {"phase": "pre", "name": "chrome", "text": "/chrome_pages"},
+    {"phase": "pre", "name": "computer", "text": "/computer"},
+    {"phase": "pre", "name": "action", "text": "/action_abort missing"},
+    {"phase": "pre", "name": "buddy", "text": "/buddy"},
+    {"phase": "pre", "name": "wiki", "text": "/wiki"},
+    {"phase": "pre", "name": "playbooks", "text": "/playbooks"},
+    {"phase": "pre", "name": "backtest", "text": "/backtest"},
+    {"phase": "pre", "name": "grill", "text": "/grill"},
+    {"phase": "pre", "name": "tdd", "text": "/tdd"},
+    {"phase": "pre", "name": "improve_arch", "text": "/improve_arch"},
+    {"phase": "pre", "name": "effort", "text": "/effort"},
+    {"phase": "pre", "name": "verify", "text": "/verify"},
+    {"phase": "pre", "name": "focus", "text": "/focus"},
+    {"phase": "pre", "name": "voice", "text": "/voice"},
+    {"phase": "pre", "name": "design", "text": "/design"},
+    {"phase": "pre", "name": "rollback", "text": "/rollback"},
+    {"phase": "pre", "name": "checkpoints", "text": "/checkpoints"},
+    {"phase": "post", "name": "agents", "text": "/agents"},
+    {"phase": "post", "name": "approvals", "text": "/approvals"},
+    {"phase": "post", "name": "traces", "text": "/traces"},
+    {"phase": "post", "name": "feedback", "text": "/feedback"},
+    {"phase": "post", "name": "pipeline", "text": "/pipeline_status"},
+    {"phase": "post", "name": "social", "text": "/social_status"},
+    {"phase": "post", "name": "notebooklm", "text": "/nlm_list"}
+  ],
+  "behavior_cases": [
+    {
+      "name": "simple-message",
+      "intent": "telegram_message",
+      "required_approval": false,
+      "selected_agent": null,
+      "risk_lane": "brain",
+      "tool_plan": [],
+      "emitted_events": ["brain_turn_start", "llm_decision", "llm_response", "brain_turn_complete"],
+      "artifact_types": []
+    },
+    {
+      "name": "approval-required-critical-action",
+      "intent": "critical_action",
+      "required_approval": true,
+      "selected_agent": null,
+      "risk_lane": "verifier",
+      "tool_plan": ["verify", "approval"],
+      "emitted_events": ["llm_decision", "llm_response", "critical_action_verification", "critical_action_execution"],
+      "artifact_types": ["approval_id", "verifier_votes"]
+    },
+    {
+      "name": "pipeline-awaiting-approval",
+      "intent": "pipeline",
+      "required_approval": true,
+      "selected_agent": null,
+      "risk_lane": "worker",
+      "tool_plan": ["linear", "worker", "tests", "approval"],
+      "emitted_events": ["llm_decision", "llm_response", "pipeline_checkpoint"],
+      "artifact_types": ["approval_id", "diff", "test_output"]
+    },
+    {
+      "name": "coordinator-agent-delegation",
+      "intent": "coordinator",
+      "required_approval": false,
+      "selected_agent": "hex",
+      "risk_lane": "research",
+      "tool_plan": ["research", "synthesis"],
+      "emitted_events": ["coordinator_start", "llm_decision", "llm_response", "coordinator_complete"],
+      "artifact_types": ["assigned_agent"]
+    },
+    {
+      "name": "error-path-graceful-degradation",
+      "intent": "bot_command:chrome",
+      "required_approval": false,
+      "selected_agent": null,
+      "risk_lane": "none",
+      "tool_plan": [],
+      "emitted_events": [],
+      "artifact_types": ["degraded_capability"]
+    }
+  ]
+}
