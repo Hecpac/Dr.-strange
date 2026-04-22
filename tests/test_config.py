@@ -139,6 +139,34 @@ class CodexConfigTests(unittest.TestCase):
             config.computer_use_backend = "codex"
             config.validate()
 
+    def test_edge_config_defaults_to_disabled(self) -> None:
+        previous_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.chdir(tmpdir)
+            try:
+                with patch.dict(os.environ, {}, clear=True):
+                    config = AppConfig.from_env()
+            finally:
+                os.chdir(previous_cwd)
+        self.assertFalse(config.edge_enabled)
+        self.assertIsNone(config.edge_endpoint)
+        self.assertEqual(config.edge_key_id, "core")
+        self.assertEqual(config.edge_capabilities, ["computer_use", "computer_control", "chrome_cdp", "browser_use"])
+
+    def test_edge_enabled_requires_https_endpoint_and_secret(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from tests.helpers import make_config
+            config = make_config(Path(tmpdir))
+            config.edge_enabled = True
+            config.edge_endpoint = "http://mac.local"
+            config.edge_secret = "secret"
+            with self.assertRaisesRegex(ValueError, "edge_endpoint must use https"):
+                config.validate()
+            config.edge_endpoint = "https://mac.tailnet.ts.net"
+            config.edge_secret = None
+            with self.assertRaisesRegex(ValueError, "edge_secret"):
+                config.validate()
+
     def test_anthropic_advisory_model_does_not_reuse_codex_worker_model(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             from tests.helpers import make_config

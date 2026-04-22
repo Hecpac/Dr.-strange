@@ -84,6 +84,11 @@ def make_config(root: Path) -> AppConfig:
         codex_cli_path="codex",
         codex_model="codex-mini-latest",
         computer_use_backend="openai",
+        edge_enabled=False,
+        edge_endpoint=None,
+        edge_key_id="core",
+        edge_secret=None,
+        edge_capabilities=["computer_use", "computer_control", "chrome_cdp", "browser_use"],
     )
     config.validate()
     config.ensure_directories()

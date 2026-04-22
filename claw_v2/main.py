@@ -33,6 +33,8 @@ from claw_v2.coordinator import CoordinatorService
 from claw_v2.cron import CronScheduler, ScheduledJob
 from claw_v2.daemon import ClawDaemon
 from claw_v2.dream import AutoDreamService
+from claw_v2.edge_client import CoreEdgeClient
+from claw_v2.edge_runtime import apply_edge_health_to_report, make_edge_client
 from claw_v2.github import GitHubPullRequestService
 from claw_v2.heartbeat import HeartbeatService
 from claw_v2.hooks import make_anti_distillation_hook, make_daily_cost_gate, make_decision_logger
@@ -114,6 +116,7 @@ class ClawRuntime:
     bot: BotService
     skill_registry: SkillRegistry | None = None
     a2a: A2AService | None = None
+    edge_client: CoreEdgeClient | None = None
     startup_health: StartupHealthReport | None = None
 
 
@@ -173,7 +176,16 @@ def _find_local_chrome() -> str | None:
     return None
 
 
-def _run_startup_healthchecks(config: AppConfig, observe: ObserveStream) -> StartupHealthReport:
+def _edge_owns_capability(config: AppConfig, capability: str) -> bool:
+    return config.edge_enabled and capability in config.edge_capabilities
+
+
+def _run_startup_healthchecks(
+    config: AppConfig,
+    observe: ObserveStream,
+    *,
+    edge_client: CoreEdgeClient | None = None,
+) -> StartupHealthReport:
     report = StartupHealthReport()
 
     for name, path in (
@@ -212,59 +224,65 @@ def _run_startup_healthchecks(config: AppConfig, observe: ObserveStream) -> Star
         else:
             report.add_ok("pytest", pytest_path, capability="pytest")
 
-    if config.chrome_cdp_enabled and config.browse_backend in {"auto", "chrome_cdp"}:
-        chrome_path = _find_local_chrome()
-        if chrome_path is None:
+    if not _edge_owns_capability(config, "chrome_cdp"):
+        if config.chrome_cdp_enabled and config.browse_backend in {"auto", "chrome_cdp"}:
+            chrome_path = _find_local_chrome()
+            if chrome_path is None:
+                report.add_degraded(
+                    "chrome_cdp",
+                    "Chrome no está instalado o no es accesible; la navegación autenticada por CDP quedará degradada",
+                    capability="chrome_cdp",
+                )
+            else:
+                report.add_ok("chrome_cdp", chrome_path, capability="chrome_cdp")
+        elif not config.chrome_cdp_enabled:
             report.add_degraded(
                 "chrome_cdp",
-                "Chrome no está instalado o no es accesible; la navegación autenticada por CDP quedará degradada",
+                "Chrome CDP está desactivado en la configuración",
                 capability="chrome_cdp",
             )
+
+    if not _edge_owns_capability(config, "computer_use"):
+        if config.computer_use_enabled:
+            report.add_ok("computer_use", "desktop control enabled", capability="computer_use")
         else:
-            report.add_ok("chrome_cdp", chrome_path, capability="chrome_cdp")
-    elif not config.chrome_cdp_enabled:
-        report.add_degraded(
-            "chrome_cdp",
-            "Chrome CDP está desactivado en la configuración",
-            capability="chrome_cdp",
-        )
-
-    if config.computer_use_enabled:
-        report.add_ok("computer_use", "desktop control enabled", capability="computer_use")
-    else:
-        report.add_degraded(
-            "computer_use",
-            "Computer Use está desactivado en la configuración",
-            capability="computer_use",
-        )
-
-    if config.computer_use_backend == "codex":
-        codex_path = shutil.which(config.codex_cli_path) if config.codex_cli_path else None
-        if codex_path is None:
             report.add_degraded(
-                "codex_cli",
-                f"Codex CLI no está disponible en '{config.codex_cli_path}'",
+                "computer_use",
+                "Computer Use está desactivado en la configuración",
+                capability="computer_use",
+            )
+
+    if not _edge_owns_capability(config, "computer_control"):
+        if config.computer_use_backend == "codex":
+            codex_path = shutil.which(config.codex_cli_path) if config.codex_cli_path else None
+            if codex_path is None:
+                report.add_degraded(
+                    "codex_cli",
+                    f"Codex CLI no está disponible en '{config.codex_cli_path}'",
+                    capability="computer_control",
+                )
+            else:
+                report.add_ok("codex_cli", codex_path, capability="computer_control")
+        elif config.computer_use_enabled and not sys.modules.get("openai") and importlib.util.find_spec("openai") is None:
+            report.add_degraded(
+                "openai_sdk",
+                "OpenAI SDK no está instalado; el control de escritorio asistido quedará degradado",
                 capability="computer_control",
             )
         else:
-            report.add_ok("codex_cli", codex_path, capability="computer_control")
-    elif config.computer_use_enabled and not sys.modules.get("openai") and importlib.util.find_spec("openai") is None:
-        report.add_degraded(
-            "openai_sdk",
-            "OpenAI SDK no está instalado; el control de escritorio asistido quedará degradado",
-            capability="computer_control",
-        )
-    else:
-        report.add_ok("computer_control", config.computer_use_backend, capability="computer_control")
+            report.add_ok("computer_control", config.computer_use_backend, capability="computer_control")
 
-    if importlib.util.find_spec("browser_use") is None:
-        report.add_degraded(
-            "browser_use",
-            "El paquete browser_use no está instalado; la automatización web guiada quedará degradada",
-            capability="browser_use",
-        )
-    else:
-        report.add_ok("browser_use", "browser_use available", capability="browser_use")
+    if not _edge_owns_capability(config, "browser_use"):
+        if importlib.util.find_spec("browser_use") is None:
+            report.add_degraded(
+                "browser_use",
+                "El paquete browser_use no está instalado; la automatización web guiada quedará degradada",
+                capability="browser_use",
+            )
+        else:
+            report.add_ok("browser_use", "browser_use available", capability="browser_use")
+
+    apply_edge_health_to_report(config, report, edge_client)
 
     for item in report.ok:
         observe.emit("startup_healthcheck_ok", payload={"name": item.name, "detail": item.detail})
@@ -884,7 +902,8 @@ def build_runtime(
     config.ensure_directories()
 
     memory, observe, metrics, approvals, jobs, bus, agent_store = _setup_core_state(config)
-    startup_health = _run_startup_healthchecks(config, observe)
+    edge_client = make_edge_client(config, observe=observe, jobs=jobs)
+    startup_health = _run_startup_healthchecks(config, observe, edge_client=edge_client)
     router, learning, brain = _setup_llm_stack(
         config=config,
         memory=memory,
@@ -972,6 +991,7 @@ def build_runtime(
         bot=bot,
         skill_registry=skill_registry,
         a2a=a2a,
+        edge_client=edge_client,
         startup_health=startup_health,
     )
 
