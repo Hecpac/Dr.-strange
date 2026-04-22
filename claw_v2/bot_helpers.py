@@ -1404,6 +1404,7 @@ def _help_response(topic: str | None = None) -> str:
         return (
             "Comandos principales:\n"
             "/status - salud general del bot\n"
+            "/restart - reiniciar el bot (launchd lo relanza)\n"
             "/approvals - aprobaciones pendientes\n"
             "/traces [limit] - traces recientes\n"
             "/trace <trace_id> [limit] - replay de una traza\n"

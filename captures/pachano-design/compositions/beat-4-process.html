@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=1920, height=1080">
+<style>
+  @font-face { font-family: 'Plus Jakarta Sans'; src: url('../assets/fonts/59b15b4bcd7b1eb5-s.0x08jh8vondwt.woff2') format('woff2'); font-weight: 700; }
+  @font-face { font-family: 'Plus Jakarta Sans'; src: url('../assets/fonts/2fe89d53234c61d4-s.0k_.i63k_i_qa.woff2') format('woff2'); font-weight: 400; }
+  @font-face { font-family: 'IBM Plex Mono'; src: url('../assets/fonts/e390973e931a41c5-s.08hd0g.321csk.woff2') format('woff2'); font-weight: 500; }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  .scene {
+    width: 1920px;
+    height: 1080px;
+    overflow: hidden;
+    position: relative;
+    background: linear-gradient(135deg, #2A0D13, #21201B);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+  }
+
+  .gate-pipeline {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 70%;
+    position: relative;
+  }
+
+  .gate-line-track {
+    position: absolute;
+    top: 30px;
+    left: 30px;
+    right: 30px;
+    height: 2px;
+    background: rgba(244, 238, 238, 0.4);
+  }
+
+  .gate-line-fill {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: #CB2131;
+    transform: scaleX(0);
+    transform-origin: left;
+  }
+
+  .gate-node {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    z-index: 1;
+  }
+
+  .gate-circle {
+    width: 60px;
+    height: 60px;
+    border-radius: 50%;
+    border: 2px solid #F4EEEE;
+    background: transparent;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .gate-check {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 24px;
+    color: #F4EEEE;
+    opacity: 0;
+    transform: scale(0);
+  }
+
+  .gate-label {
+    font-family: 'IBM Plex Mono', monospace;
+    font-weight: 500;
+    font-size: 18px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: rgba(244, 238, 238, 0.5);
+    margin-top: 16px;
+  }
+
+  .bottom-text {
+    font-family: 'Plus Jakarta Sans', sans-serif;
+    font-weight: 400;
+    font-size: 24px;
+    color: #F4EEEE;
+    margin-top: 80px;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+
+  .bottom-text-inner {
+    display: inline-block;
+  }
+
+  .logo-mark {
+    position: absolute;
+    bottom: 40px;
+    right: 60px;
+    width: 40px;
+    height: 40px;
+    z-index: 5;
+  }
+</style>
+</head>
+<body>
+<div class="scene" data-comp-id="beat-4-process" data-composition-id="beat-4-process" data-width="1920" data-height="1080" data-start="0" data-duration="6.1">
+  <div class="gate-pipeline">
+    <div class="gate-line-track">
+      <div class="gate-line-fill"></div>
+    </div>
+    <div class="gate-node">
+      <div class="gate-circle"><span class="gate-check">&#10003;</span></div>
+      <div class="gate-label">DISCOVERY</div>
+    </div>
+    <div class="gate-node">
+      <div class="gate-circle"><span class="gate-check">&#10003;</span></div>
+      <div class="gate-label">CONCEPT</div>
+    </div>
+    <div class="gate-node">
+      <div class="gate-circle"><span class="gate-check">&#10003;</span></div>
+      <div class="gate-label">DOCS</div>
+    </div>
+    <div class="gate-node">
+      <div class="gate-circle"><span class="gate-check">&#10003;</span></div>
+      <div class="gate-label">BUILD</div>
+    </div>
+  </div>
+  <div class="bottom-text"><span class="bottom-text-inner">You approve before anything moves forward</span></div>
+  <img class="logo-mark" src="../assets/svgs/logo-6.svg" alt="PHD">
+</div>
+
+<script src="../assets/gsap.min.js"></script>
+<script>
+(function() {
+  var tl = gsap.timeline({ paused: true });
+
+  var scene = document.querySelector('.scene');
+  var lineFill = document.querySelector('.gate-line-fill');
+  var nodes = document.querySelectorAll('.gate-node');
+  var circles = document.querySelectorAll('.gate-circle');
+  var checks = document.querySelectorAll('.gate-check');
+  var labels = document.querySelectorAll('.gate-label');
+  var bottomTextInner = document.querySelector('.bottom-text-inner');
+  var bottomText = document.querySelector('.bottom-text');
+
+  // Gate connecting line draws left-to-right over 4s
+  tl.to(lineFill, {
+    scaleX: 1,
+    duration: 4,
+    ease: "none"
+  }, 0);
+
+  // Gate 1 — DISCOVERY fills at 0.5s
+  tl.to(circles[0], {
+    background: "#CB2131",
+    borderColor: "#CB2131",
+    boxShadow: "0 0 20px rgba(203, 33, 49, 0.5)",
+    duration: 0.3,
+    ease: "power2.out"
+  }, 0.5);
+  tl.to(labels[0], { color: "#FFFFFF", duration: 0.3, ease: "power2.out" }, 0.5);
+  tl.to(checks[0], { opacity: 1, scale: 1, duration: 0.2, ease: "back.out(1.7)" }, 0.6);
+
+  // Gate 2 — CONCEPT fills at 1.5s
+  tl.to(circles[1], {
+    background: "#CB2131",
+    borderColor: "#CB2131",
+    boxShadow: "0 0 20px rgba(203, 33, 49, 0.5)",
+    duration: 0.3,
+    ease: "power2.out"
+  }, 1.5);
+  tl.to(labels[1], { color: "#FFFFFF", duration: 0.3, ease: "power2.out" }, 1.5);
+  tl.to(checks[1], { opacity: 1, scale: 1, duration: 0.2, ease: "back.out(1.7)" }, 1.6);
+
+  // Gate 3 — DOCS fills at 2.5s
+  tl.to(circles[2], {
+    background: "#CB2131",
+    borderColor: "#CB2131",
+    boxShadow: "0 0 20px rgba(203, 33, 49, 0.5)",
+    duration: 0.3,
+    ease: "power2.out"
+  }, 2.5);
+  tl.to(labels[2], { color: "#FFFFFF", duration: 0.3, ease: "power2.out" }, 2.5);
+  tl.to(checks[2], { opacity: 1, scale: 1, duration: 0.2, ease: "back.out(1.7)" }, 2.6);
+
+  // Gate 4 — BUILD fills at 3.5s with scale pulse
+  tl.to(circles[3], {
+    background: "#CB2131",
+    borderColor: "#CB2131",
+    boxShadow: "0 0 20px rgba(203, 33, 49, 0.5)",
+    duration: 0.3,
+    ease: "power2.out"
+  }, 3.5);
+  tl.to(labels[3], { color: "#FFFFFF", duration: 0.3, ease: "power2.out" }, 3.5);
+  tl.to(checks[3], { opacity: 1, scale: 1, duration: 0.2, ease: "back.out(1.7)" }, 3.6);
+  // Scale pulse on gate 4 circle
+  tl.to(circles[3], { scale: 1.08, duration: 0.15, ease: "power2.out" }, 3.5);
+  tl.to(circles[3], { scale: 1, duration: 0.15, ease: "power2.in" }, 3.65);
+
+  // Bottom text — type on character by character at 4.2s, 1s duration
+  var fullText = bottomTextInner.textContent;
+  var charCount = fullText.length;
+  bottomTextInner.textContent = "";
+  tl.to(bottomTextInner, {
+    duration: 1,
+    ease: "none",
+    onUpdate: function() {
+      var progress = this.progress();
+      var visibleCount = Math.round(progress * charCount);
+      bottomTextInner.textContent = fullText.substring(0, visibleCount);
+    }
+  }, 4.2);
+
+  // Exit transition
+  tl.to([".gate-pipeline", ".bottom-text", ".logo-mark"], {
+    y: -150,
+    filter: "blur(30px)",
+    opacity: 0,
+    duration: 0.33,
+    ease: "power2.in",
+    stagger: 0.02
+  }, 6.1);
+
+  window.__timelines = window.__timelines || {};
+  window.__timelines["beat-4-process"] = tl;
+})();
+</script>
+</body>
+</html>

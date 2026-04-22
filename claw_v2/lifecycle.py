@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import signal
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -18,6 +20,21 @@ from claw_v2.web_transport import WebTransport
 logger = logging.getLogger(__name__)
 
 _DEFAULT_PID_PATH = Path.home() / ".claw" / "claw.pid"
+_STARTED_AT_PATH = Path.home() / ".claw" / "started_at.txt"
+_RESTART_MARKER_PATH = Path.home() / ".claw" / "restart_requested.json"
+_LIVENESS_STAMP_PATH = Path.home() / ".claw" / "liveness_last_sent.txt"
+_LIVENESS_HOUR = 9
+
+
+def _format_uptime(seconds: int) -> str:
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, _ = divmod(rem, 60)
+    if days:
+        return f"{days}d {hours}h {minutes}m"
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
 
 
 def load_soul(soul_path: Path | None = None) -> str:
@@ -66,6 +83,8 @@ class PidLock:
 async def run() -> int:
     pid_lock = PidLock()
     pid_lock.acquire()
+    _STARTED_AT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _STARTED_AT_PATH.write_text(str(int(time.time())), encoding="utf-8")
     try:
         system_prompt = load_soul()
         runtime = build_runtime(system_prompt=system_prompt)
@@ -96,6 +115,30 @@ async def run() -> int:
 
         # Wire NotebookLM with Telegram notify callback
         _loop = asyncio.get_running_loop()
+
+        def _send_telegram(text: str, *, parse_mode: str | None = None) -> None:
+            if not (runtime.config.telegram_allowed_user_id and transport._app):
+                return
+            kwargs = {"chat_id": int(runtime.config.telegram_allowed_user_id), "text": text}
+            if parse_mode:
+                kwargs["parse_mode"] = parse_mode
+            asyncio.run_coroutine_threadsafe(
+                transport._app.bot.send_message(**kwargs),
+                _loop,
+            )
+
+        if _RESTART_MARKER_PATH.exists():
+            try:
+                marker = json.loads(_RESTART_MARKER_PATH.read_text(encoding="utf-8"))
+                reason = marker.get("reason", "unknown")
+                requested_at = marker.get("requested_at", "-")
+                _send_telegram(
+                    f"✅ Restart completado (motivo: {reason}, solicitado: {requested_at})"
+                )
+            except Exception:
+                logger.warning("Failed to process restart marker", exc_info=True)
+            finally:
+                _RESTART_MARKER_PATH.unlink(missing_ok=True)
 
         def _nlm_notify(message: str) -> None:
             if runtime.config.telegram_allowed_user_id and transport._app:
@@ -195,6 +238,65 @@ async def run() -> int:
             name="fitness_reminder",
             interval_seconds=300,
             handler=_fitness_reminder,
+        ))
+
+        def _daily_liveness_report() -> None:
+            now = datetime.now()
+            if now.hour != _LIVENESS_HOUR:
+                return
+            today_key = now.strftime("%Y-%m-%d")
+            if (
+                _LIVENESS_STAMP_PATH.exists()
+                and _LIVENESS_STAMP_PATH.read_text(encoding="utf-8").strip() == today_key
+            ):
+                return
+            _LIVENESS_STAMP_PATH.parent.mkdir(parents=True, exist_ok=True)
+            _LIVENESS_STAMP_PATH.write_text(today_key, encoding="utf-8")
+
+            uptime_str = "desconocido"
+            try:
+                started_ts = int(_STARTED_AT_PATH.read_text(encoding="utf-8").strip())
+                uptime_str = _format_uptime(int(time.time()) - started_ts)
+            except Exception:
+                pass
+
+            pending = "?"
+            try:
+                pending = str(runtime.heartbeat.collect().pending_approvals)
+            except Exception:
+                pass
+
+            cost_str = "n/a"
+            try:
+                snapshot = runtime.metrics.snapshot()
+                cost_today = sum(
+                    float(entry.get("cost", 0.0))
+                    for entry in snapshot.values()
+                    if isinstance(entry, dict)
+                )
+                cost_str = f"${cost_today:.2f}"
+            except Exception:
+                pass
+
+            cap_parts = []
+            for cap in ("chrome_cdp", "computer_use"):
+                status = runtime.bot._capability_status.get(cap, {})
+                available = status.get("available", True)
+                cap_parts.append(f"{cap}={'OK' if available else 'degraded'}")
+
+            msg = (
+                f"✅ Claw online — {now.strftime('%Y-%m-%d %H:%M')}\n\n"
+                f"• Uptime: {uptime_str}\n"
+                f"• Approvals pendientes: {pending}\n"
+                f"• Costo hoy: {cost_str}\n"
+                f"• Capacidades: {' | '.join(cap_parts)}"
+            )
+            _send_telegram(msg)
+
+        runtime.scheduler.register(_SJ(
+            name="daily_liveness",
+            interval_seconds=300,
+            handler=_daily_liveness_report,
         ))
 
         # Wire ManagedChrome
