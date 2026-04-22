@@ -4,6 +4,7 @@ import logging
 from dataclasses import dataclass
 
 from claw_v2.approval import ApprovalManager
+from claw_v2.artifacts import ApprovalArtifact, VerificationArtifact
 from claw_v2.brain_verifier_votes import (
     _aggregate_verifier_votes,
     _format_verifier_evidence,
@@ -122,25 +123,47 @@ class VerifierVotingService:
             approval_id = pending.approval_id
             approval_token = pending.token
 
+        event_payload = {
+            "action": action,
+            "recommendation": parsed["recommendation"],
+            "risk_level": parsed["risk_level"],
+            "consensus_status": parsed["consensus_status"],
+            "verifier_votes": _serializable_verifier_votes(votes),
+            "requires_human_approval": requires_human_approval,
+            "should_proceed": should_proceed,
+            "approval_id": approval_id,
+            "confidence": parsed["confidence"],
+            "blocker_count": len(parsed["blockers"]),
+            "missing_check_count": len(parsed["missing_checks"]),
+        }
+        verification_artifact_id = None
+        if isinstance(self.observe, ObserveStream):
+            artifact = VerificationArtifact(summary=parsed["summary"], payload=event_payload)
+            verification_artifact_id = self.observe.record_artifact(artifact)
+            if approval_id:
+                self.observe.record_artifact(
+                    ApprovalArtifact(
+                        artifact_id=f"approval:{approval_id}",
+                        summary=f"{parsed['risk_level']}/{parsed['recommendation']}: {parsed['summary']}",
+                        parent_artifact_id=verification_artifact_id,
+                        payload={
+                            "action": action,
+                            "approval_id": approval_id,
+                            "recommendation": parsed["recommendation"],
+                            "risk_level": parsed["risk_level"],
+                            "requires_human_approval": requires_human_approval,
+                        },
+                    )
+                )
+
         if self.observe is not None:
             self.observe.emit(
                 "critical_action_verification",
                 lane=response.lane if response is not None else "verifier",
                 provider=response.provider if response is not None else "none",
                 model=response.model if response is not None else "none",
-                payload={
-                    "action": action,
-                    "recommendation": parsed["recommendation"],
-                    "risk_level": parsed["risk_level"],
-                    "consensus_status": parsed["consensus_status"],
-                    "verifier_votes": _serializable_verifier_votes(votes),
-                    "requires_human_approval": requires_human_approval,
-                    "should_proceed": should_proceed,
-                    "approval_id": approval_id,
-                    "confidence": parsed["confidence"],
-                    "blocker_count": len(parsed["blockers"]),
-                    "missing_check_count": len(parsed["missing_checks"]),
-                },
+                artifact_id=verification_artifact_id,
+                payload=event_payload,
             )
 
         return CriticalActionVerification(
@@ -158,6 +181,7 @@ class VerifierVotingService:
             response=response,
             verifier_votes=_serializable_verifier_votes(votes),
             consensus_status=parsed["consensus_status"],
+            artifact_id=verification_artifact_id,
         )
 
     def collect_vote(self, *, evidence: dict, provider: str, model: str, role: str) -> dict:
