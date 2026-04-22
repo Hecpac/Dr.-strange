@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass
-from pathlib import Path
 from typing import Any
 
 from claw_v2.bot_commands import BotCommand, CommandContext
@@ -48,7 +47,9 @@ class CoreCommandPlugin:
         import threading
         from datetime import UTC, datetime
 
-        marker_path = Path.home() / ".claw" / "restart_requested.json"
+        from claw_v2 import bot as bot_module
+
+        marker_path = bot_module.Path.home() / ".claw" / "restart_requested.json"
         marker_path.parent.mkdir(parents=True, exist_ok=True)
         marker_path.write_text(
             json.dumps(

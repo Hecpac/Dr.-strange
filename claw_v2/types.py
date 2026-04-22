@@ -10,6 +10,7 @@ SanitizerVerdict = Literal["clean", "malicious", "unsure"]
 VerificationRecommendation = Literal["approve", "needs_approval", "deny"]
 RiskLevel = Literal["low", "medium", "high", "critical"]
 CriticalActionStatus = Literal["executed", "executed_autonomously", "executed_with_approval", "awaiting_approval", "blocked"]
+ArtifactKind = Literal["plan", "execution", "verification", "approval", "job"]
 
 
 @dataclass(slots=True)
@@ -62,6 +63,7 @@ class CriticalActionVerification:
     response: LLMResponse | None = None
     verifier_votes: list[dict[str, Any]] = field(default_factory=list)
     consensus_status: str = "single"
+    artifact_id: str | None = None
 
 
 @dataclass(slots=True)

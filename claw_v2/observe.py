@@ -5,6 +5,9 @@ import sqlite3
 import threading
 from pathlib import Path
 
+from claw_v2.artifacts import ArtifactRecord, ArtifactStore
+from claw_v2.observe_rows import events_from_rows, spending_payload
+
 
 OBSERVE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS observe_stream (
@@ -35,6 +38,7 @@ class ObserveStream:
         self._conn.executescript(OBSERVE_SCHEMA)
         self._lock = threading.Lock()
         self._ensure_schema()
+        self.artifacts = ArtifactStore(self.db_path)
 
     def emit(
         self,
@@ -76,6 +80,44 @@ class ObserveStream:
                 ),
             )
             self._conn.commit()
+
+    def record_artifact(self, artifact: ArtifactRecord) -> str:
+        return self.artifacts.record(artifact)
+
+    def emit_artifact(
+        self,
+        event_type: str,
+        artifact: ArtifactRecord,
+        *,
+        lane: str | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+        payload: dict | None = None,
+    ) -> str:
+        artifact_id = self.record_artifact(artifact)
+        self.emit(
+            event_type,
+            lane=lane,
+            provider=provider,
+            model=model,
+            trace_id=artifact.trace_id,
+            root_trace_id=artifact.root_trace_id,
+            span_id=artifact.span_id,
+            parent_span_id=artifact.parent_span_id,
+            job_id=artifact.job_id,
+            artifact_id=artifact_id,
+            payload={**artifact.event_payload(), **(payload or {})},
+        )
+        return artifact_id
+
+    def recent_artifacts(self, *, limit: int = 20, artifact_type: str | None = None) -> list[ArtifactRecord]:
+        return self.artifacts.recent(limit=limit, artifact_type=artifact_type)
+
+    def trace_artifacts(self, trace_id: str) -> list[ArtifactRecord]:
+        return self.artifacts.trace_artifacts(trace_id)
+
+    def artifact_lineage(self, artifact_id: str) -> list[ArtifactRecord]:
+        return self.artifacts.lineage(artifact_id)
 
     def _ensure_schema(self) -> None:
         existing = {
@@ -168,36 +210,7 @@ class ObserveStream:
                 ORDER BY cost DESC
                 """,
             ).fetchall()
-        by_lane: dict[str, float] = {}
-        by_provider: dict[str, float] = {}
-        by_model: dict[str, float] = {}
-        rows_payload: list[dict] = []
-        total = 0.0
-        for lane, provider, model, cost, requests in rows:
-            cost = float(cost or 0.0)
-            total += cost
-            lane_key = lane or "unknown"
-            provider_key = provider or "unknown"
-            model_key = model or "unknown"
-            by_lane[lane_key] = by_lane.get(lane_key, 0.0) + cost
-            by_provider[provider_key] = by_provider.get(provider_key, 0.0) + cost
-            by_model[model_key] = by_model.get(model_key, 0.0) + cost
-            rows_payload.append(
-                {
-                    "lane": lane_key,
-                    "provider": provider_key,
-                    "model": model_key,
-                    "requests": int(requests or 0),
-                    "cost": round(cost, 6),
-                }
-            )
-        return {
-            "total": round(total, 6),
-            "by_lane": {key: round(value, 6) for key, value in sorted(by_lane.items())},
-            "by_provider": {key: round(value, 6) for key, value in sorted(by_provider.items())},
-            "by_model": {key: round(value, 6) for key, value in sorted(by_model.items())},
-            "rows": rows_payload,
-        }
+        return spending_payload(rows)
 
     def recent_events(self, limit: int = 20) -> list[dict]:
         with self._lock:
@@ -212,23 +225,7 @@ class ObserveStream:
                 """,
                 (limit,),
             ).fetchall()
-        return [
-            {
-                "event_type": row[0],
-                "lane": row[1],
-                "provider": row[2],
-                "model": row[3],
-                "trace_id": row[4],
-                "root_trace_id": row[5],
-                "span_id": row[6],
-                "parent_span_id": row[7],
-                "job_id": row[8],
-                "artifact_id": row[9],
-                "payload": json.loads(row[10]),
-                "timestamp": row[11],
-            }
-            for row in rows
-        ]
+        return events_from_rows(rows)
 
     def trace_events(self, trace_id: str, *, limit: int | None = None) -> list[dict]:
         query = """
@@ -245,20 +242,4 @@ class ObserveStream:
             params = (trace_id, limit)
         with self._lock:
             rows = self._conn.execute(query, params).fetchall()
-        return [
-            {
-                "event_type": row[0],
-                "lane": row[1],
-                "provider": row[2],
-                "model": row[3],
-                "trace_id": row[4],
-                "root_trace_id": row[5],
-                "span_id": row[6],
-                "parent_span_id": row[7],
-                "job_id": row[8],
-                "artifact_id": row[9],
-                "payload": json.loads(row[10]),
-                "timestamp": row[11],
-            }
-            for row in rows
-        ]
+        return events_from_rows(rows)

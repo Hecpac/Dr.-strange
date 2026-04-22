@@ -48,17 +48,19 @@ PRAGMA user_version=100;
 
 ```sql
 CREATE TABLE IF NOT EXISTS artifacts (
-    id TEXT PRIMARY KEY,
-    type TEXT NOT NULL,
-    schema_version INTEGER DEFAULT 1,
-    job_id TEXT,
+    artifact_id TEXT PRIMARY KEY,
+    artifact_type TEXT NOT NULL,
+    created_at TEXT NOT NULL,
     trace_id TEXT,
+    root_trace_id TEXT,
     span_id TEXT,
+    parent_span_id TEXT,
+    job_id TEXT,
     parent_artifact_id TEXT,
-    causation_id TEXT,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-    data TEXT NOT NULL DEFAULT '{}'
+    summary TEXT NOT NULL,
+    payload TEXT NOT NULL DEFAULT '{}'
 );
+CREATE INDEX IF NOT EXISTS idx_artifacts_type ON artifacts(artifact_type);
 CREATE INDEX IF NOT EXISTS idx_artifacts_trace ON artifacts(trace_id);
 CREATE INDEX IF NOT EXISTS idx_artifacts_job ON artifacts(job_id);
 CREATE INDEX IF NOT EXISTS idx_artifacts_parent ON artifacts(parent_artifact_id);

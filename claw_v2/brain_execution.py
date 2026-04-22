@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, TYPE_CHECKING
 
 from claw_v2.approval import ApprovalManager
+from claw_v2.artifacts import ExecutionArtifact
 from claw_v2.brain_lifecycle import VerificationOutcomeRecorder
 from claw_v2.observe import ObserveStream
 from claw_v2.types import CriticalActionExecution, CriticalActionVerification
@@ -49,22 +50,33 @@ class ExecutionEventEmitter:
     ) -> None:
         if self.observe is None or verification.response is None:
             return
+        event_payload = {
+            "action": action,
+            "status": status,
+            "approval_status": approval_status,
+            "recommendation": verification.recommendation,
+            "risk_level": verification.risk_level,
+            "requires_human_approval": verification.requires_human_approval,
+            "should_proceed": verification.should_proceed,
+            "approval_id": verification.approval_id,
+            "checkpoint_id": checkpoint_id,
+        }
+        artifact_id = None
+        if isinstance(self.observe, ObserveStream):
+            artifact_id = self.observe.record_artifact(
+                ExecutionArtifact(
+                    summary=f"{status}: {action}",
+                    parent_artifact_id=verification.artifact_id,
+                    payload=event_payload,
+                )
+            )
         self.observe.emit(
             "critical_action_execution",
             lane=verification.response.lane,
             provider=verification.response.provider,
             model=verification.response.model,
-            payload={
-                "action": action,
-                "status": status,
-                "approval_status": approval_status,
-                "recommendation": verification.recommendation,
-                "risk_level": verification.risk_level,
-                "requires_human_approval": verification.requires_human_approval,
-                "should_proceed": verification.should_proceed,
-                "approval_id": verification.approval_id,
-                "checkpoint_id": checkpoint_id,
-            },
+            artifact_id=artifact_id,
+            payload=event_payload,
         )
         status_map = {
             "executed": "ok",
