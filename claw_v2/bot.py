@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import asdict
-from pathlib import Path
 from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
@@ -14,7 +12,10 @@ from claw_v2.browse_handler import BrowseHandler
 from claw_v2.task_handler import TaskHandler
 from claw_v2.approval import ApprovalManager
 from claw_v2.brain import BrainService
-from claw_v2.bot_commands import BotCommand, CommandContext, dispatch_commands
+from claw_v2.bot_commands import CommandContext, HandlerRegistry
+from claw_v2.bot_core_commands import CoreCommandPlugin
+from claw_v2.bot_post_commands import PostCommandPlugin
+from claw_v2.bot_skill_commands import SkillCommandPlugin
 from claw_v2.checkpoint_handler import CheckpointHandler
 from claw_v2.chrome_handler import ChromeHandler
 from claw_v2.computer_handler import ComputerHandler
@@ -137,8 +138,13 @@ class BotService:
             auto_research=auto_research,
             pull_requests=pull_requests,
         )
-        self._pre_state_commands = self._build_pre_state_commands()
-        self._post_shortcut_commands = self._build_post_shortcut_commands()
+        self._core_commands = CoreCommandPlugin(self)
+        self._post_commands = PostCommandPlugin(self)
+        self._skill_commands = SkillCommandPlugin(self)
+        self._pre_state_registry = self._build_pre_state_registry()
+        self._post_shortcut_registry = self._build_post_shortcut_registry()
+        self._pre_state_commands = self._pre_state_registry.commands
+        self._post_shortcut_commands = self._post_shortcut_registry.commands
 
     @property
     def terminal_bridge(self) -> object | None:
@@ -214,7 +220,7 @@ class BotService:
             raise PermissionError("user is not allowed to access this bot")
         stripped = text.strip()
         context = CommandContext(user_id=user_id, session_id=session_id, text=text, stripped=stripped)
-        command_response = dispatch_commands(self._pre_state_commands, context)
+        command_response = self._pre_state_registry.execute(context)
         if isinstance(command_response, _BrainShortcut):
             return self._brain_text_response(
                 session_id, command_response.text, memory_text=command_response.memory_text,
@@ -253,7 +259,7 @@ class BotService:
             self.brain.memory.store_message(session_id, "assistant", coordinated_response[:4000])
             self._remember_assistant_turn_state(session_id, stripped, coordinated_response)
             return coordinated_response
-        command_response = dispatch_commands(self._post_shortcut_commands, context)
+        command_response = self._post_shortcut_registry.execute(context)
         if command_response is not None:
             return command_response
 
@@ -263,480 +269,30 @@ class BotService:
 
         return self._brain_text_response(session_id, stripped)
 
-    def _build_pre_state_commands(self) -> list[BotCommand]:
-        return [
-            BotCommand("help", self._handle_help_command, exact=("/help",), prefixes=("/help ",)),
-            BotCommand("status", self._handle_status_command, exact=("/status",)),
-            BotCommand("restart", self._handle_restart_command, exact=("/restart",)),
-            BotCommand("config", self._handle_config_command, exact=("/config",)),
-            BotCommand("tokens", self._handle_tokens_command, exact=("/tokens",)),
-            BotCommand("spending", self._handle_spending_command, exact=("/spending",)),
-            BotCommand("task_run", self._handle_task_run_command, exact=("/task_run",), prefixes=("/task_run ",)),
-            BotCommand("autonomy", self._handle_autonomy_command, exact=("/autonomy", "/autonomy_policy"), prefixes=("/autonomy ",)),
-            BotCommand("task_state", self._handle_task_state_command, exact=("/task_loop", "/task_queue", "/task_pending", "/session_state"), prefixes=("/task_queue ",)),
-            BotCommand("task_transition", self._handle_task_transition_command, exact=("/task_done", "/task_defer"), prefixes=("/task_done ", "/task_defer ")),
-            BotCommand("browse", self._handle_browse_command, prefixes=("/browse ",)),
-            *self._terminal_handler.commands(),
-            *self._chrome_handler.commands(),
-            *self._computer_handler.commands(),
-            BotCommand("buddy", self._handle_buddy_command, exact=("/buddy", "/buddy card", "/buddy hatch", "/buddy stats"), prefixes=("/buddy rename ",)),
-            *self._wiki_handler.commands(),
-            BotCommand("playbooks", self._handle_playbook_command, exact=("/playbooks",), prefixes=("/playbook ",)),
-            BotCommand("backtest", self._handle_backtest_command, exact=("/backtest",), prefixes=("/backtest ",)),
-            BotCommand("grill", self._handle_grill_command, exact=("/grill",), prefixes=("/grill ",)),
-            BotCommand("tdd", self._handle_tdd_command, exact=("/tdd",), prefixes=("/tdd ",)),
-            BotCommand("improve_arch", self._handle_improve_arch_command, exact=("/improve_arch",), prefixes=("/improve_arch ",)),
-            BotCommand("effort", self._handle_effort_command, exact=("/effort",), prefixes=("/effort ",)),
-            BotCommand("verify", self._handle_verify_command, exact=("/verify",), prefixes=("/verify ",)),
-            BotCommand("focus", self._handle_focus_command, exact=("/focus",)),
-            BotCommand("voice", self._handle_voice_command, exact=("/voice",), prefixes=("/voice ",)),
-            *self._design_handler.commands(),
-            *(self._checkpoint_handler.commands() if self._checkpoint_handler is not None else []),
-        ]
+    def _build_pre_state_registry(self) -> HandlerRegistry:
+        registry = HandlerRegistry("pre_state")
+        registry.extend(self._core_commands.commands())
+        registry.extend(self._terminal_handler.commands())
+        registry.extend(self._chrome_handler.commands())
+        registry.extend(self._computer_handler.commands())
+        registry.extend(self._skill_commands.commands())
+        registry.extend(self._wiki_handler.commands())
+        registry.extend(self._design_handler.commands())
+        if self._checkpoint_handler is not None:
+            registry.extend(self._checkpoint_handler.commands())
+        return registry
 
-    def _build_post_shortcut_commands(self) -> list[BotCommand]:
-        return [
-            *self._agent_handler.commands(),
-            BotCommand("approvals", self._handle_approvals_command, exact=("/approvals",), prefixes=("/approval_status ", "/approve ", "/task_approve ", "/task_abort ")),
-            BotCommand("traces", self._handle_traces_command, exact=("/traces",), prefixes=("/traces ", "/trace ")),
-            BotCommand("feedback", self._handle_feedback_command, exact=("/feedback",), prefixes=("/feedback ",)),
-            BotCommand("pipeline", self._handle_pipeline_command, exact=("/pipeline", "/pipeline_approve", "/pipeline_merge", "/pipeline_status"), prefixes=("/pipeline_approve ", "/pipeline_merge ", "/pipeline ")),
-            BotCommand("social", self._handle_social_command, exact=("/social_preview", "/social_publish", "/social_status"), prefixes=("/social_preview ", "/social_publish ")),
-            *self._nlm_handler.commands(),
-        ]
-
-    def _handle_help_command(self, context: CommandContext) -> str:
-        if context.stripped == "/help":
-            return self._help_response()
-        parts = context.stripped.split(maxsplit=1)
-        if len(parts) != 2:
-            return self._help_response()
-        return self._help_response(parts[1])
-
-    def _handle_status_command(self, context: CommandContext) -> str:
-        return json.dumps(asdict(self.heartbeat.collect()), indent=2, sort_keys=True)
-
-    def _handle_restart_command(self, context: CommandContext) -> str:
-        import os
-        import signal
-        import threading
-        from datetime import UTC, datetime
-
-        marker_path = Path.home() / ".claw" / "restart_requested.json"
-        marker_path.parent.mkdir(parents=True, exist_ok=True)
-        marker_path.write_text(
-            json.dumps(
-                {
-                    "requested_at": datetime.now(UTC).isoformat(),
-                    "requested_by": context.user_id,
-                    "reason": "telegram_command",
-                }
-            ),
-            encoding="utf-8",
-        )
-
-        def _shutdown_self() -> None:
-            try:
-                os.kill(os.getpid(), signal.SIGTERM)
-            except Exception:
-                os._exit(0)
-
-        threading.Timer(2.0, _shutdown_self).start()
-        return "🔄 Reiniciando… vuelvo en ~5s (launchd KeepAlive)."
-
-    def _handle_config_command(self, context: CommandContext) -> str:
-        if self.config is None:
-            return "config not available"
-        c = self.config
-        lanes = {}
-        for lane in ("brain", "worker", "verifier", "research", "judge"):
-            lanes[lane] = {
-                "provider": c.provider_for_lane(lane),
-                "model": c.model_for_lane(lane),
-                "effort": c.effort_for_lane(lane),
-                "context_window": c.context_window_for_lane(lane),
-                "max_output": c.max_output_for_lane(lane),
-            }
-        return json.dumps({"lanes": lanes, "max_budget_usd": c.max_budget_usd, "daily_token_budget": c.daily_token_budget}, indent=2)
-
-    def _handle_tokens_command(self, context: CommandContext) -> str:
-        return self._tokens_info_response(context.session_id)
-
-    def _handle_spending_command(self, context: CommandContext) -> str:
-        return self._spending_response()
-
-    def _handle_task_run_command(self, context: CommandContext) -> str:
-        if context.stripped == "/task_run":
-            return "usage: /task_run <objective>"
-        parts = context.stripped.split(maxsplit=1)
-        if len(parts) != 2:
-            return "usage: /task_run <objective>"
-        return self._task_handler.coordinated_task_response(context.session_id, parts[1], forced=True)
-
-    def _handle_autonomy_command(self, context: CommandContext) -> str:
-        if context.stripped == "/autonomy":
-            return json.dumps(self.brain.memory.get_session_state(context.session_id), indent=2, sort_keys=True)
-        if context.stripped == "/autonomy_policy":
-            return json.dumps(_autonomy_policy_payload(self.brain.memory.get_session_state(context.session_id)), indent=2, sort_keys=True)
-        parts = context.stripped.split(maxsplit=1)
-        if len(parts) != 2:
-            return "usage: /autonomy <manual|assisted|autonomous>"
-        try:
-            return self._set_autonomy_mode_response(context.session_id, parts[1])
-        except ValueError as exc:
-            return str(exc)
-
-    def _handle_task_state_command(self, context: CommandContext) -> str:
-        state = self.brain.memory.get_session_state(context.session_id)
-        if context.stripped == "/task_loop":
-            return json.dumps(state, indent=2, sort_keys=True)
-        if context.stripped == "/task_queue":
-            return json.dumps(state.get("task_queue") or [], indent=2, sort_keys=True)
-        if context.stripped.startswith("/task_queue "):
-            parts = context.stripped.split(maxsplit=1)
-            if len(parts) != 2:
-                return "usage: /task_queue [mode]"
-            return json.dumps(_filter_task_queue_by_mode(state.get("task_queue") or [], parts[1]), indent=2, sort_keys=True)
-        if context.stripped == "/task_pending":
-            return json.dumps(state.get("pending_approvals") or [], indent=2, sort_keys=True)
-        return json.dumps(state, indent=2, sort_keys=True)
-
-    def _handle_task_transition_command(self, context: CommandContext) -> str:
-        if context.stripped == "/task_done":
-            return "usage: /task_done <task_id>"
-        if context.stripped == "/task_defer":
-            return "usage: /task_defer <task_id>"
-        parts = context.stripped.split(maxsplit=1)
-        if len(parts) != 2:
-            return "usage: /task_done <task_id>" if context.stripped.startswith("/task_done") else "usage: /task_defer <task_id>"
-        to_status = "done" if context.stripped.startswith("/task_done") else "deferred"
-        return self._task_handler.task_queue_transition_response(context.session_id, parts[1], to_status=to_status)
-
-    def _handle_browse_command(self, context: CommandContext) -> str:
-        parts = context.stripped.split(maxsplit=1)
-        if len(parts) != 2:
-            return "usage: /browse <url>"
-        return self._browse_handler.browse_response(parts[1], session_id=context.session_id)
-
-    def _handle_buddy_command(self, context: CommandContext) -> str:
-        stripped = context.stripped
-        if stripped == "/buddy hatch":
-            return self._buddy_hatch_response(context.user_id)
-        if stripped == "/buddy stats":
-            return self._buddy_stats_response(context.user_id)
-        if stripped.startswith("/buddy rename "):
-            parts = stripped.split(maxsplit=2)
-            if len(parts) != 3:
-                return "usage: /buddy rename <name>"
-            return self._buddy_rename_response(context.user_id, parts[2])
-        return self._buddy_card_response(context.user_id)
-
-
-    def _handle_playbook_command(self, context: CommandContext) -> str:
-        playbooks = self.brain.playbooks
-        if not playbooks._loaded:
-            playbooks.load()
-        if context.stripped == "/playbooks":
-            if not playbooks.playbooks:
-                return "No hay playbooks disponibles."
-            lines = [f"- **{pb.name}** (triggers: {', '.join(pb.triggers[:4])})" for pb in playbooks.playbooks]
-            return "Playbooks disponibles:\n" + "\n".join(lines)
-        parts = context.stripped.split(maxsplit=1)
-        if len(parts) != 2:
-            return "usage: /playbook <name>"
-        name = parts[1].strip().lower()
-        for pb in playbooks.playbooks:
-            if pb.name.lower() == name or name in pb.name.lower():
-                return f"## {pb.name}\n{pb.content}"
-        return f"Playbook no encontrado: {name}\nUsa /playbooks para ver disponibles."
-
-    def _handle_backtest_command(self, context: CommandContext) -> str:
-        playbooks = self.brain.playbooks
-        if not playbooks._loaded:
-            playbooks.load()
-        pb_context = ""
-        for pb in playbooks.playbooks:
-            if "backtest" in pb.name.lower() or "qts" in pb.name.lower():
-                pb_context = pb.content
-                break
-        if context.stripped == "/backtest":
-            if pb_context:
-                return f"QTS Backtesting listo.\n\nUso: /backtest <instrucción>\nEjemplo: /backtest corre ICT strategy para BTC 1h últimos 30 días\n\n{pb_context[:500]}"
-            return "usage: /backtest <instrucción>"
-        parts = context.stripped.split(maxsplit=1)
-        instruction = parts[1]
-        prompt = f"{instruction}\n\n<playbook-context>\n{pb_context}\n</playbook-context>" if pb_context else instruction
-        return self._brain_text_response(context.session_id, prompt)
-
-    def _load_skill_content(self, skill_name: str) -> str:
-        skill_path = Path(__file__).parent.parent / "skills" / skill_name / "skill.md"
-        if not skill_path.is_file():
-            return ""
-        text = skill_path.read_text(encoding="utf-8")
-        # Strip YAML frontmatter
-        if text.startswith("---"):
-            end = text.find("---", 3)
-            if end != -1:
-                text = text[end + 3:].strip()
-        return text
-
-    def _handle_grill_command(self, context: CommandContext) -> str:
-        if context.stripped == "/grill":
-            return "Uso: /grill <descripción del plan o diseño>\nEjemplo: /grill migrar auth a OAuth2 con refresh tokens"
-        parts = context.stripped.split(maxsplit=1)
-        skill_content = self._load_skill_content("grill-me")
-        prompt = f"<skill-context>\n{skill_content}\n</skill-context>\n\n{parts[1]}" if skill_content else parts[1]
-        return self._brain_text_response(context.session_id, prompt)
-
-    def _handle_tdd_command(self, context: CommandContext) -> str:
-        if context.stripped == "/tdd":
-            return "Uso: /tdd <feature o bug a implementar>\nEjemplo: /tdd agregar validación de email en registro"
-        parts = context.stripped.split(maxsplit=1)
-        skill_content = self._load_skill_content("tdd")
-        prompt = f"<skill-context>\n{skill_content}\n</skill-context>\n\n{parts[1]}" if skill_content else parts[1]
-        return self._brain_text_response(context.session_id, prompt)
-
-    def _handle_improve_arch_command(self, context: CommandContext) -> str:
-        skill_content = self._load_skill_content("improve-codebase-architecture")
-        if context.stripped == "/improve_arch":
-            instruction = "Analiza la arquitectura del codebase actual y sugiere mejoras."
-        else:
-            parts = context.stripped.split(maxsplit=1)
-            instruction = parts[1]
-        prompt = f"<skill-context>\n{skill_content}\n</skill-context>\n\n{instruction}" if skill_content else instruction
-        return self._brain_text_response(context.session_id, prompt)
-
-    _VALID_EFFORTS = ("low", "medium", "high", "xhigh", "max")
-
-    def _handle_effort_command(self, context: CommandContext) -> str:
-        if self.config is None:
-            return "config not available"
-        if context.stripped == "/effort":
-            return (
-                f"Effort actual:\n"
-                f"  brain: {self.config.brain_effort}\n"
-                f"  worker: {self.config.worker_effort}\n"
-                f"  judge: {self.config.judge_effort}\n"
-                f"\nUso: /effort <level> [lane]\n"
-                f"Niveles: {', '.join(self._VALID_EFFORTS)}\n"
-                f"Lanes: brain, worker, judge (omitir = todas)"
-            )
-        parts = context.stripped.split()
-        level = parts[1].lower() if len(parts) >= 2 else ""
-        if level not in self._VALID_EFFORTS:
-            return f"Nivel inválido: {level}\nVálidos: {', '.join(self._VALID_EFFORTS)}"
-        lane = parts[2].lower() if len(parts) >= 3 else None
-        if lane and lane not in ("brain", "worker", "judge"):
-            return f"Lane inválido: {lane}\nVálidos: brain, worker, judge"
-        if lane:
-            setattr(self.config, f"{lane}_effort", level)
-        else:
-            self.config.brain_effort = level
-            self.config.worker_effort = level
-            self.config.judge_effort = level
-        applied = lane or "todas las lanes"
-        return f"Effort → **{level}** para {applied}"
-
-    def _handle_verify_command(self, context: CommandContext) -> str:
-        playbooks = self.brain.playbooks
-        if not playbooks._loaded:
-            playbooks.load()
-        pb_context = ""
-        for pb in playbooks.playbooks:
-            if "verification" in pb.name.lower():
-                pb_context = pb.content
-                break
-        if context.stripped == "/verify":
-            instruction = (
-                "Ejecuta el Verification Pipeline completo sobre el trabajo actual:\n"
-                "Phase 1: Tests — corre pytest, reporta resultados\n"
-                "Phase 2: Simplify — revisa git diff, busca mejoras de calidad\n"
-                "Phase 3: PR — resume y pregunta si crear PR"
-            )
-        else:
-            parts = context.stripped.split(maxsplit=1)
-            instruction = f"Ejecuta verification pipeline sobre: {parts[1]}"
-        prompt = f"<playbook-context>\n{pb_context}\n</playbook-context>\n\n{instruction}" if pb_context else instruction
-        return self._brain_text_response(context.session_id, prompt)
-
-    def _handle_focus_command(self, context: CommandContext) -> str:
-        if not hasattr(self, "_focus_sessions"):
-            self._focus_sessions: set[str] = set()
-        sid = context.session_id
-        if sid in self._focus_sessions:
-            self._focus_sessions.discard(sid)
-            return "Focus mode **desactivado**. Verás trabajo intermedio."
-        self._focus_sessions.add(sid)
-        return "Focus mode **activado**. Solo verás resultados finales."
-
-    _VALID_VOICES = ("alloy", "echo", "fable", "onyx", "nova", "shimmer")
-
-    def _handle_voice_command(self, context: CommandContext) -> str:
-        if not hasattr(self, "_voice_sessions"):
-            self._voice_sessions: dict[str, str] = {}
-        sid = context.session_id
-        if context.stripped == "/voice":
-            if sid in self._voice_sessions:
-                voice = self._voice_sessions.pop(sid)
-                return f"Voice mode **desactivado** (era: {voice})."
-            self._voice_sessions[sid] = "nova"
-            return "Voice mode **activado** (voz: nova). Responderé por audio.\nUsa `/voice <voz>` para cambiar: alloy, echo, fable, onyx, nova, shimmer"
-        parts = context.stripped.split(maxsplit=1)
-        voice = parts[1].lower().strip()
-        if voice == "off":
-            self._voice_sessions.pop(sid, None)
-            return "Voice mode **desactivado**."
-        if voice not in self._VALID_VOICES:
-            return f"Voz inválida: {voice}\nVálidas: {', '.join(self._VALID_VOICES)}"
-        self._voice_sessions[sid] = voice
-        return f"Voice mode **activado** (voz: {voice})."
+    def _build_post_shortcut_registry(self) -> HandlerRegistry:
+        registry = HandlerRegistry("post_shortcut")
+        registry.extend(self._agent_handler.commands())
+        registry.extend(self._post_commands.commands())
+        registry.extend(self._nlm_handler.commands())
+        return registry
 
     def is_voice_mode(self, session_id: str) -> str | None:
         if not hasattr(self, "_voice_sessions"):
             return None
         return self._voice_sessions.get(session_id)
-
-    def _handle_approvals_command(self, context: CommandContext) -> str:
-        stripped = context.stripped
-        if stripped == "/approvals":
-            return json.dumps(self.approvals.list_pending(), indent=2, sort_keys=True)
-        if stripped.startswith("/approval_status "):
-            parts = stripped.split(maxsplit=1)
-            if len(parts) != 2:
-                return "usage: /approval_status <approval_id>"
-            return self.approvals.status(parts[1])
-        if stripped.startswith("/approve "):
-            parts = stripped.split(maxsplit=2)
-            if len(parts) != 3:
-                return "usage: /approve <approval_id> <token>"
-            approved = self.approvals.approve(parts[1], parts[2])
-            return "approval recorded" if approved else "approval rejected"
-        if stripped.startswith("/task_approve "):
-            parts = stripped.split(maxsplit=2)
-            if len(parts) != 3:
-                return "usage: /task_approve <approval_id> <token>"
-            return self._task_handler.task_approve_response(parts[1], parts[2])
-        parts = stripped.split(maxsplit=1)
-        if len(parts) != 2:
-            return "usage: /task_abort <approval_id>"
-        return self._task_handler.task_abort_response(parts[1])
-
-    def _handle_traces_command(self, context: CommandContext) -> str:
-        stripped = context.stripped
-        if stripped == "/traces":
-            return self._traces_response(limit=10)
-        if stripped.startswith("/traces "):
-            parts = stripped.split(maxsplit=1)
-            if len(parts) != 2:
-                return "usage: /traces [limit]"
-            try:
-                limit = _parse_positive_int(parts[1], field_name="limit")
-            except ValueError as exc:
-                return str(exc)
-            return self._traces_response(limit=limit)
-        parts = stripped.split(maxsplit=2)
-        if len(parts) < 2:
-            return "usage: /trace <trace_id> [limit]"
-        limit = 100
-        if len(parts) == 3:
-            try:
-                limit = _parse_positive_int(parts[2], field_name="limit")
-            except ValueError as exc:
-                return str(exc)
-        return self._trace_replay_response(parts[1], limit=limit)
-
-    def _handle_feedback_command(self, context: CommandContext) -> str:
-        if self.learning is None:
-            return "learning loop not available"
-        parts = context.stripped.split(maxsplit=2)
-        if len(parts) < 2:
-            return "usage: /feedback <positive|negative|note> [outcome_id]"
-        rating = parts[1]
-        oid = int(parts[2]) if len(parts) == 3 else None
-        return self.learning.feedback(oid, rating)
-
-    def _handle_pipeline_command(self, context: CommandContext) -> str:
-        stripped = context.stripped
-        if stripped.startswith("/pipeline_approve "):
-            parts = stripped.split(maxsplit=2)
-            if len(parts) != 3:
-                return "usage: /pipeline_approve <approval_id> <token>"
-            approved = self.approvals.approve(parts[1], parts[2])
-            if not approved:
-                return "approval rejected"
-            if self.pipeline is None:
-                return "pipeline service unavailable"
-            for run in self.pipeline.list_active():
-                if run.approval_id == parts[1]:
-                    result = self.pipeline.complete_pipeline(run.issue_id)
-                    return json.dumps({"status": result.status, "pr_url": result.pr_url}, indent=2)
-            return "approval recorded but no matching pipeline run found"
-        if stripped.startswith("/pipeline_merge "):
-            if self.pipeline is None:
-                return "pipeline service unavailable"
-            parts = stripped.split(maxsplit=1)
-            issue_id = parts[1].strip()
-            try:
-                run = self.pipeline.merge_and_close(issue_id)
-                return json.dumps({"issue": run.issue_id, "status": run.status, "pr_url": run.pr_url}, indent=2)
-            except Exception:
-                logger.exception("pipeline merge error for %s", issue_id)
-                return "merge error — check logs for details"
-        if stripped.startswith("/pipeline_status"):
-            if self.pipeline is None:
-                return "pipeline service unavailable"
-            active = self.pipeline.list_active()
-            if not active:
-                return "no active pipeline runs"
-            return json.dumps([{"issue": r.issue_id, "status": r.status, "branch": r.branch_name} for r in active], indent=2)
-        if stripped.startswith("/pipeline "):
-            if self.pipeline is None:
-                return "pipeline service unavailable"
-            parts = stripped.split(maxsplit=2)
-            issue_id = parts[1]
-            repo_root = Path(parts[2]) if len(parts) == 3 else None
-            try:
-                run = self.pipeline.process_issue(issue_id, repo_root=repo_root)
-                return json.dumps({"issue": run.issue_id, "status": run.status, "branch": run.branch_name, "approval_id": run.approval_id, "approve_command": f"/pipeline_approve {run.approval_id}"}, indent=2)
-            except Exception:
-                logger.exception("pipeline error for %s", issue_id)
-                return "pipeline error — check logs for details"
-        return f"usage: {stripped} <argument>"
-
-    def _handle_social_command(self, context: CommandContext) -> str:
-        stripped = context.stripped
-        if stripped == "/social_status":
-            if self.content_engine is None:
-                return "social content engine unavailable"
-            accounts_root = self.content_engine.accounts_root
-            accounts = sorted(p.name for p in accounts_root.iterdir() if p.is_dir())
-            return json.dumps([{"account": a} for a in accounts], indent=2)
-        if stripped.startswith("/social_preview "):
-            if self.content_engine is None:
-                return "social content engine unavailable"
-            parts = stripped.split(maxsplit=1)
-            account = parts[1]
-            try:
-                drafts = self.content_engine.generate_batch(account)
-                return json.dumps([{"platform": d.platform, "text": d.text, "hashtags": d.hashtags} for d in drafts], indent=2)
-            except FileNotFoundError:
-                return f"account not found: {account}"
-            except Exception:
-                logger.exception("social_preview error for %s", account)
-                return "error generating preview — check logs"
-        if stripped.startswith("/social_publish "):
-            if self.content_engine is None or self.social_publisher is None:
-                return "social services unavailable"
-            parts = stripped.split(maxsplit=1)
-            account = parts[1]
-            try:
-                drafts = self.content_engine.generate_batch(account)
-                results = [self.social_publisher.publish(d) for d in drafts]
-                return json.dumps([{"platform": r.platform, "post_id": r.post_id, "url": r.url} for r in results], indent=2)
-            except Exception:
-                logger.exception("social_publish error for %s", account)
-                return "error publishing — check logs"
-        return f"usage: {stripped} <argument>"
 
     def _help_response(self, topic: str | None = None) -> str:
         return _help_response(topic)
@@ -1023,4 +579,3 @@ class BotService:
                 return self._chrome_handler.browse_response("https://ads.google.com", session_id=session_id)
 
         return None
-
