@@ -99,6 +99,9 @@ class LLMRouter:
         try:
             response = adapter.complete(request)
         except AdapterError as exc:
+            # Never fallback on tool-capable lanes — tools may have already mutated state
+            if lane not in self.NON_TOOL_LANES:
+                raise
             fallback_provider = self._pick_fallback(selected_provider, lane)
             if fallback_provider is None:
                 raise
@@ -121,7 +124,7 @@ class LLMRouter:
             self._audit(
                 "llm_fallback",
                 response,
-                {"requested_provider": selected_provider, "fallback_provider": fallback_provider, "response_text": response.content},
+                {"requested_provider": selected_provider, "fallback_provider": fallback_provider, "response_len": len(response.content)},
                 request=request,
             )
             return response
@@ -134,7 +137,7 @@ class LLMRouter:
         self._audit(
             "llm_response",
             response,
-            {"session_id": session_id, "response_text": response.content},
+            {"session_id": session_id, "response_len": len(response.content)},
             request=request,
         )
         return response

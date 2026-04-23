@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
+from pathlib import Path
 from typing import Callable
 
 from claw_v2.adapters.base import (
@@ -13,6 +15,12 @@ from claw_v2.adapters.base import (
     build_effective_system_prompt,
 )
 from claw_v2.types import LLMResponse
+
+_SCRUB_ENV_KEYS = frozenset({
+    "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOGLE_API_KEY",
+    "TELEGRAM_BOT_TOKEN", "AWS_SECRET_ACCESS_KEY", "HEYGEN_API_KEY",
+    "FIRECRAWL_API_KEY", "X_API_SECRET", "X_ACCESS_TOKEN_SECRET",
+})
 
 
 class CodexAdapter(ProviderAdapter):
@@ -61,15 +69,22 @@ class CodexAdapter(ProviderAdapter):
 
         full_prompt = f"{system}\n\n{prompt}" if system else str(prompt)
 
+        workspace = str(Path.home() / "Projects" / "Dr.-strange")
+        cwd = request.cwd or workspace
+        if not Path(cwd).resolve().is_relative_to(Path(workspace).resolve()):
+            raise AdapterError(f"Codex cwd '{cwd}' is outside workspace root.")
+
         cmd = [
             resolved, "exec",
             "--model", model,
             "--full-auto",
             "--color", "never",
         ]
-        if request.cwd:
-            cmd += ["-C", request.cwd]
+        if cwd != workspace:
+            cmd += ["-C", cwd]
         cmd += ["--", full_prompt]
+
+        env = {k: v for k, v in os.environ.items() if k not in _SCRUB_ENV_KEYS}
 
         try:
             result = subprocess.run(
@@ -77,6 +92,8 @@ class CodexAdapter(ProviderAdapter):
                 capture_output=True,
                 text=True,
                 timeout=request.timeout,
+                stdin=subprocess.DEVNULL,
+                env=env,
             )
         except FileNotFoundError as exc:
             raise AdapterUnavailableError(

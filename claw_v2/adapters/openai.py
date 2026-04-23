@@ -49,18 +49,18 @@ class OpenAIAdapter(ProviderAdapter):
         try:
             kwargs: dict[str, Any] = dict(
                 model=request.model,
-                input=build_effective_input(request),
+                input=_normalize_input(build_effective_input(request)),
                 instructions=build_effective_system_prompt(request),
                 previous_response_id=request.session_id,
             )
             if request.effort and _supports_reasoning(request.model):
                 kwargs["reasoning"] = {"effort": request.effort}
 
-            # Attach tools if available and requested
-            use_tools = self.tool_capable and request.allowed_tools is not None
+            # Attach tools only when the caller explicitly listed allowed names
+            use_tools = self.tool_capable and request.allowed_tools
             if use_tools:
-                allowed = set(request.allowed_tools or [])
-                schemas = [s for s in self._tool_schemas if not allowed or s["name"] in allowed]
+                allowed = set(request.allowed_tools)
+                schemas = [s for s in self._tool_schemas if s["name"] in allowed]
                 if schemas:
                     kwargs["tools"] = schemas
 
@@ -140,6 +140,31 @@ class OpenAIAdapter(ProviderAdapter):
             raise AdapterUnavailableError(
                 "openai is not installed. Install the 'openai' Python package to enable OpenAI provider support."
             ) from exc
+
+
+def _normalize_input(prompt: str | list) -> str | list:
+    """Convert Anthropic-style content blocks to OpenAI Responses API format."""
+    if isinstance(prompt, str):
+        return prompt
+    if not isinstance(prompt, list):
+        return str(prompt)
+    if not prompt:
+        return prompt
+    first = prompt[0]
+    if isinstance(first, dict) and first.get("type") in ("text", "image"):
+        content: list[dict[str, Any]] = []
+        for block in prompt:
+            btype = block.get("type", "")
+            if btype == "text":
+                content.append({"type": "input_text", "text": block.get("text", "")})
+            elif btype == "image":
+                src = block.get("source", {})
+                url = src.get("url") or f"data:{src.get('media_type','image/png')};base64,{src.get('data','')}"
+                content.append({"type": "input_image", "image_url": url})
+            else:
+                content.append({"type": "input_text", "text": json.dumps(block, default=str)})
+        return [{"type": "message", "role": "user", "content": content}]
+    return prompt
 
 
 _REASONING_MODELS = {"o3", "o3-mini", "o4-mini", "gpt-5.4", "gpt-5.4-mini"}
