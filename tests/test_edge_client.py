@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json as json_lib
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-from claw_v2.edge_client import CoreEdgeClient, EdgeHttpResponse
+from claw_v2.edge_client import CoreEdgeClient, EdgeHttpResponse, HttpxEdgeTransport
 from claw_v2.edge_protocol import EdgeTaskRequest, canonical_json, verify_headers
 from claw_v2.jobs import JobService
 
@@ -10,7 +13,7 @@ from claw_v2.jobs import JobService
 class FakeTransport:
     def __init__(self) -> None:
         self.gets: list[tuple[str, dict[str, str]]] = []
-        self.posts: list[tuple[str, dict, dict[str, str]]] = []
+        self.posts: list[tuple[str, dict, bytes, dict[str, str]]] = []
         self.health = EdgeHttpResponse(
             200,
             {
@@ -40,14 +43,32 @@ class FakeTransport:
             return self.health
         return EdgeHttpResponse(200, {"task_id": "task-1", "status": "completed", "result": {"ok": True}})
 
-    def post(self, url: str, *, json: dict, headers: dict[str, str], timeout: float) -> EdgeHttpResponse:
-        self.posts.append((url, json, headers))
+    def post(
+        self,
+        url: str,
+        *,
+        json: dict | None = None,
+        content: bytes | None = None,
+        headers: dict[str, str],
+        timeout: float,
+    ) -> EdgeHttpResponse:
+        payload = json if json is not None else json_lib.loads((content or b"{}").decode("utf-8"))
+        self.posts.append((url, payload, content or b"", headers))
         return self.post_responses.pop(0)
 
 
 class FlakyPostTransport(FakeTransport):
-    def post(self, url: str, *, json: dict, headers: dict[str, str], timeout: float) -> EdgeHttpResponse:
-        self.posts.append((url, json, headers))
+    def post(
+        self,
+        url: str,
+        *,
+        json: dict | None = None,
+        content: bytes | None = None,
+        headers: dict[str, str],
+        timeout: float,
+    ) -> EdgeHttpResponse:
+        payload = json if json is not None else json_lib.loads((content or b"{}").decode("utf-8"))
+        self.posts.append((url, payload, content or b"", headers))
         if len(self.posts) == 1:
             raise TimeoutError("network partition")
         return EdgeHttpResponse(200, {"task_id": "task-1", "status": "queued"})
@@ -131,13 +152,14 @@ def test_submit_task_signs_payload_and_records_job_step(tmp_path: Path) -> None:
 
     assert result.status == "queued"
     assert len(transport.posts) == 1
-    url, payload, headers = transport.posts[0]
+    url, payload, body, headers = transport.posts[0]
     assert url == "https://mac.tailnet.ts.net/a2a/v1/tasks"
     assert payload["callback_url"] == "https://core/a2a/v1/callbacks/task-1"
+    assert body == canonical_json(payload)
     ok, reason = verify_headers(
         method="POST",
         path="/a2a/v1/tasks",
-        body=canonical_json(payload),
+        body=body,
         headers=headers,
         secrets={"core": "secret"},
         now=1000,
@@ -161,6 +183,7 @@ def test_submit_task_retries_503_then_uses_existing_idempotency_key() -> None:
     assert result.status == "queued"
     assert len(transport.posts) == 2
     assert transport.posts[0][1]["idempotency_key"] == transport.posts[1][1]["idempotency_key"]
+    assert transport.posts[0][2] == transport.posts[1][2]
 
 
 def test_submit_task_retries_transport_errors() -> None:
@@ -179,3 +202,38 @@ def test_task_status_fetches_final_edge_state() -> None:
 
     assert result.status == "completed"
     assert result.result == {"ok": True}
+
+
+def test_httpx_transport_sends_canonical_content_bytes() -> None:
+    received: dict[str, bytes] = {}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            received["body"] = self.rfile.read(length)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"ok": true}')
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    body = canonical_json({"z": 1, "a": {"b": 2}})
+    try:
+        response = HttpxEdgeTransport().post(
+            f"http://127.0.0.1:{server.server_port}/a2a/v1/tasks",
+            content=body,
+            headers={"Content-Type": "application/json"},
+            timeout=2.0,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+    assert response.status_code == 200
+    assert received["body"] == body

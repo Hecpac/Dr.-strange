@@ -25,7 +25,15 @@ class EdgeTransport(Protocol):
     def get(self, url: str, *, headers: dict[str, str], timeout: float) -> EdgeHttpResponse:
         ...
 
-    def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str], timeout: float) -> EdgeHttpResponse:
+    def post(
+        self,
+        url: str,
+        *,
+        json: dict[str, Any] | None = None,
+        content: bytes | None = None,
+        headers: dict[str, str],
+        timeout: float,
+    ) -> EdgeHttpResponse:
         ...
 
 
@@ -36,10 +44,18 @@ class HttpxEdgeTransport:
         response = httpx.get(url, headers=headers, timeout=timeout)
         return EdgeHttpResponse(response.status_code, _json_payload(response), response.text)
 
-    def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str], timeout: float) -> EdgeHttpResponse:
+    def post(
+        self,
+        url: str,
+        *,
+        json: dict[str, Any] | None = None,
+        content: bytes | None = None,
+        headers: dict[str, str],
+        timeout: float,
+    ) -> EdgeHttpResponse:
         import httpx
 
-        response = httpx.post(url, json=json, headers=headers, timeout=timeout)
+        response = httpx.post(url, json=json, content=content, headers=headers, timeout=timeout)
         return EdgeHttpResponse(response.status_code, _json_payload(response), response.text)
 
 
@@ -147,7 +163,7 @@ class CoreEdgeClient:
     def _post_task(self, payload: dict[str, Any]) -> EdgeHttpResponse:
         path = "/a2a/v1/tasks"
         body = canonical_json(payload)
-        return self.transport.post(self._url(path), json=payload, headers=self._headers("POST", path, body), timeout=10.0)
+        return self.transport.post(self._url(path), content=body, headers=self._headers("POST", path, body), timeout=10.0)
 
     def _headers(self, method: str, path: str, body: bytes) -> dict[str, str]:
         headers = sign_headers(
