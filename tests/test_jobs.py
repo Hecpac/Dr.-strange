@@ -47,6 +47,20 @@ def test_job_steps_are_idempotent_by_key(tmp_path: Path) -> None:
     assert len(jobs.steps(job.job_id)) == 1
 
 
+def test_terminal_jobs_are_not_reopened_by_lifecycle_transitions(tmp_path: Path) -> None:
+    jobs = JobService(tmp_path / "claw.db")
+    job = jobs.enqueue(kind="pipeline", job_id="pipeline:HEC-1")
+    completed = jobs.complete(job.job_id)
+
+    reopened = jobs.start(job.job_id, lease_owner="pipeline")
+    stored = jobs.get(job.job_id)
+
+    assert reopened.state == "completed"
+    assert reopened.version == completed.version
+    assert stored is not None
+    assert stored.state == "completed"
+
+
 def test_job_schema_sets_user_version_without_downgrade(tmp_path: Path) -> None:
     db_path = tmp_path / "future.db"
     conn = sqlite3.connect(db_path)
@@ -107,6 +121,37 @@ def test_pipeline_records_durable_job_until_approval(tmp_path: Path) -> None:
     assert job.state == "waiting_approval"
     assert job.payload["approval_id"] == run.approval_id
     assert {"branch_created", "worktree_created", "tests_completed"} <= {step.name for step in jobs.steps(job.job_id)}
+
+
+def test_pipeline_retry_after_100_jobs_uses_unique_job_id(tmp_path: Path) -> None:
+    jobs = JobService(tmp_path / "claw.db")
+    jobs.complete(jobs.enqueue(kind="pipeline", job_id="pipeline:HEC-1").job_id)
+    jobs.complete(jobs.enqueue(kind="pipeline", job_id="pipeline:HEC-1:101").job_id)
+    for index in range(100):
+        jobs.complete(jobs.enqueue(kind="filler", job_id=f"filler:{index}").job_id)
+    svc = PipelineService(
+        linear=MagicMock(),
+        router=MagicMock(),
+        approvals=ApprovalManager(tmp_path / "approvals", "secret"),
+        pull_requests=MagicMock(),
+        observe=None,
+        default_repo_root=tmp_path,
+        state_root=tmp_path / "pipeline",
+        jobs=jobs,
+    )
+
+    retry_job = svc._start_job("HEC-1", payload={"phase": "retry"})
+
+    assert retry_job is not None
+    assert retry_job.state == "running"
+    assert retry_job.job_id.startswith("pipeline:HEC-1:")
+    assert retry_job.job_id not in {"pipeline:HEC-1", "pipeline:HEC-1:101"}
+    base_job = jobs.get("pipeline:HEC-1")
+    collided_job = jobs.get("pipeline:HEC-1:101")
+    assert base_job is not None
+    assert collided_job is not None
+    assert base_job.state == "completed"
+    assert collided_job.state == "completed"
 
 
 def test_notebooklm_background_research_updates_job_state(tmp_path: Path) -> None:
