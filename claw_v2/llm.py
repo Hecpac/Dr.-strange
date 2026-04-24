@@ -143,8 +143,8 @@ class LLMRouter:
         )
         return response
 
-    # Fallback order: anthropic ↔ openai; advisory-only providers fall back to Anthropic.
-    _FALLBACK_MAP: dict[str, str] = {"anthropic": "openai", "openai": "anthropic"}
+    # Fallback order: anthropic → codex (ChatGPT Pro subscription); openai → anthropic.
+    _FALLBACK_MAP: dict[str, str] = {"anthropic": "codex", "openai": "anthropic"}
 
     def _pick_fallback(self, failed_provider: str, lane: Lane) -> str | None:
         candidate = self._FALLBACK_MAP.get(failed_provider)

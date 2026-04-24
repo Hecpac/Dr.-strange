@@ -146,9 +146,9 @@ class TelegramTransport:
         model = getattr(self._bot_service, "config", None)
         if model is not None:
             model = getattr(model, "brain_model", None)
-        if not model:
+        if not isinstance(model, str) or not model.strip():
             return ""
-        short = model.replace("claude-", "").replace("opus-", "o").replace("sonnet-", "s")
+        short = model.strip().replace("claude-", "").replace("opus-", "o").replace("sonnet-", "s")
         return f"-{short}"
 
     def _emit_latency(
@@ -250,8 +250,16 @@ class TelegramTransport:
     def is_polling_healthy(self, stale_seconds: float = 600.0) -> bool:
         if self._app is None or self._token is None:
             return True
-        if self._last_update_at == 0.0:
+        updater = getattr(self._app, "updater", None)
+        if updater is None:
             return False
+        running = getattr(updater, "running", None)
+        if running is None:
+            running = getattr(updater, "is_running", None)
+        if running is not None:
+            return bool(running)
+        if self._last_update_at == 0.0:
+            return True
         return (time.time() - self._last_update_at) < stale_seconds
 
     async def restart_polling(self) -> None:

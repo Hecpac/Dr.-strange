@@ -157,6 +157,12 @@ class HandleMessageTests(unittest.TestCase):
         self.assertIn("Analyze: identify the likely cause", prompt)
         self.assertIn("Only ask for help after 3 distinct strategies", prompt)
 
+    def test_brain_system_prompt_keeps_claw_identity_over_runtime(self) -> None:
+        prompt = _brain_system_prompt("You are Claw.")
+        self.assertIn("You are Claw when handling user chat", prompt)
+        self.assertIn("Claude Code", prompt)
+        self.assertIn("not your user-facing identity", prompt)
+
     def test_returns_llm_response(self) -> None:
         expected = LLMResponse(
             content="<response>response</response>", lane="brain", provider="anthropic", model="test",
