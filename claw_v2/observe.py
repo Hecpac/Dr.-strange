@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 from pathlib import Path
+from typing import Callable
+
+logger = logging.getLogger(__name__)
+
+EventCallback = Callable[[dict], None]
 
 
 OBSERVE_SCHEMA = """
@@ -32,7 +38,17 @@ class ObserveStream:
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.executescript(OBSERVE_SCHEMA)
         self._lock = threading.Lock()
+        self._subscribers: dict[str, list[EventCallback]] = {}
         self._ensure_schema()
+
+    def subscribe(self, event_type: str, callback: EventCallback) -> None:
+        """Register a callback to fire whenever `event_type` is emitted.
+
+        Callbacks must be cheap and non-blocking; long work belongs in a
+        consumer thread. Exceptions inside callbacks are logged and
+        swallowed so they cannot break the emit path.
+        """
+        self._subscribers.setdefault(event_type, []).append(callback)
 
     def emit(
         self,
@@ -74,6 +90,14 @@ class ObserveStream:
                 ),
             )
             self._conn.commit()
+        callbacks = self._subscribers.get(event_type)
+        if callbacks:
+            event_payload = payload or {}
+            for cb in callbacks:
+                try:
+                    cb(event_payload)
+                except Exception:
+                    logger.exception("observe subscriber for %s failed", event_type)
 
     def _ensure_schema(self) -> None:
         existing = {
