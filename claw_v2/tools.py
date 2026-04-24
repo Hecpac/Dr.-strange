@@ -31,9 +31,16 @@ _FIRECRAWL_CONTENT_LIMIT = 12_000
 #   Tier 1: Read, Glob, Grep, SearchMemory, WebSearch, WebFetch, WikiSearch,
 #           WikiGraph, SkillList, A2ACard, A2APeers, FirecrawlScrape,
 #           FirecrawlSearch, FirecrawlExtract
-#   Tier 2: Write, Edit, Bash, WikiLint, SkillGenerate, SkillExecute,
-#           GPTImage-analysis (AnalyzeImage)
-#   Tier 3: WikiDelete, A2ASend, HeyGenVideo, GPTImage
+#     note (Bash): Tier 2 assumes the handler stays `external_stub` and the SDK
+#       runtime enforces its own shell approval. If Bash ever executes locally,
+#       promote to Tier 3.
+#     note (Firecrawl): consumes paid credits (~$0.001/call). Rate-limit by
+#       credit budget is the circuit breaker. Tier 1 accepted.
+#     note (SkillExecute): Tier 3 (fail-safe). A registered skill may invoke
+#       sub-tools of any tier; without tier-introspection of the skill body the
+#       conservative default is to treat every skill run as approval-gated.
+#   Tier 2: Write, Edit, Bash, WikiLint, SkillGenerate, AnalyzeImage
+#   Tier 3: WikiDelete, A2ASend, HeyGenVideo, GPTImage, SkillExecute
 TIER_READ_ONLY = 1
 TIER_LOCAL_MUTATION = 2
 TIER_REQUIRES_APPROVAL = 3
@@ -171,10 +178,20 @@ def sanitize_tool_output(
     }
 
 
+ApprovalGate = Callable[["ToolDefinition", dict], None]
+
+
 class ToolRegistry:
-    def __init__(self, *, workspace_root: Path | str, memory: MemoryStore | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        workspace_root: Path | str,
+        memory: MemoryStore | None = None,
+        observe: object | None = None,
+    ) -> None:
         self.workspace_root = Path(workspace_root)
         self.memory = memory
+        self.observe = observe
         self._definitions: dict[str, ToolDefinition] = {}
 
     def register(self, definition: ToolDefinition) -> None:
@@ -216,6 +233,7 @@ class ToolRegistry:
         agent_class: AgentClass,
         policy: SandboxPolicy | None = None,
         network_enforcer: DomainAllowlistEnforcer | None = None,
+        approval_gate: ApprovalGate | None = None,
     ) -> dict:
         definition = self.get(name)
         if agent_class not in definition.allowed_agent_classes:
@@ -230,10 +248,41 @@ class ToolRegistry:
             )
             if not decision.allowed:
                 raise PermissionError(decision.reason or "tool invocation blocked by sandbox")
+        # Tier enforcement (HEC-14): bypass approval for Tier 1/2, gate Tier 3.
+        # Logged to observe stream for audit. approval_gate may raise to block.
+        if tool_requires_approval(definition.tier):
+            if approval_gate is None:
+                raise PermissionError(
+                    f"Tool '{name}' is Tier {definition.tier} (requires approval) "
+                    f"but no approval_gate was provided to the dispatcher."
+                )
+            approval_gate(definition, args)
+            self._emit_autonomy_event("AUTONOMY_APPROVED", definition, agent_class)
+        else:
+            self._emit_autonomy_event("AUTONOMY_BYPASS", definition, agent_class)
         result = definition.handler(args)
         if definition.ingests_external_content and isinstance(result, dict):
             return sanitize_tool_output(definition, result, agent_class=agent_class)
         return result
+
+    def _emit_autonomy_event(
+        self, event: str, definition: "ToolDefinition", agent_class: AgentClass
+    ) -> None:
+        if self.observe is None:
+            return
+        try:
+            self.observe.emit(  # type: ignore[attr-defined]
+                event,
+                lane="tool_dispatcher",
+                payload={
+                    "tool": definition.name,
+                    "tier": definition.tier,
+                    "agent_class": agent_class,
+                },
+            )
+        except Exception:
+            # Observability is best-effort; never block execution on log failure.
+            pass
 
     async def execute_async(
         self,
@@ -243,6 +292,7 @@ class ToolRegistry:
         agent_class: AgentClass,
         policy: SandboxPolicy | None = None,
         network_enforcer: DomainAllowlistEnforcer | None = None,
+        approval_gate: ApprovalGate | None = None,
     ) -> dict:
         """Async-safe wrapper: offloads blocking handlers to a worker thread.
 
@@ -260,6 +310,7 @@ class ToolRegistry:
             agent_class=agent_class,
             policy=policy,
             network_enforcer=network_enforcer,
+            approval_gate=approval_gate,
         )
 
     @classmethod
@@ -546,7 +597,7 @@ class ToolRegistry:
             description="Execute a registered skill. Args: name (str), kwargs (dict, optional).",
             allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["SkillExecute"],
             handler=skill_execute, mutates_state=True,
-            tier=TIER_LOCAL_MUTATION,
+            tier=TIER_REQUIRES_APPROVAL,
         ))
 
         # --- A2A Protocol tools ---
