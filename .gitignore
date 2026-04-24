@@ -55,3 +55,10 @@ scripts/aistudio_*.py
 scripts/gemini_think.py
 scripts/cdp_*.py
 scripts/close_chrome_tabs.py
+scripts/_*.py
+
+# Session-scratch artifacts (do not contaminate architecture branches)
+captures/
+output/
+sgc-video/
+.commit_msg.txt

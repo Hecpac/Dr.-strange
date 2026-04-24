@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from claw_v2.a2a import A2AService
     from claw_v2.skills import SkillRegistry
 
+from claw_v2.approval_gate import system_approval_mode
 from claw_v2.tracing import attach_trace, child_trace_context, new_trace_context
 
 logger = logging.getLogger(__name__)
@@ -94,6 +95,14 @@ class KairosService:
         self.state.ticks += 1
         self.state.last_tick_at = start
 
+        # Paso 3 Last-Mile (HEC-14): any Tier 3 tool call triggered during this
+        # tick is an autonomous scheduler action, not an interactive one.
+        # Switch the shared tool executor to auto-approve-with-audit mode so
+        # the daemon doesn't deadlock on ApprovalPending while leaving a trail.
+        with system_approval_mode(reason="Scheduled Kairos Tick"):
+            return self._tick_body(start, trace)
+
+    def _tick_body(self, start: float, trace: dict) -> TickDecision:
         try:
             context = self._gather_context()
             decision = self._decide(context, trace)

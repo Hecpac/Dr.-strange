@@ -22,6 +22,36 @@ if TYPE_CHECKING:
 ToolHandler = Callable[[dict], dict]
 _FIRECRAWL_CONTENT_LIMIT = 12_000
 
+# Autonomy tiers (per SOUL.md). Enforced in code, not prompt.
+#   1 = read-only / local-safe / observation  -> auto-execute, no approval
+#   2 = local mutation / run scripts / web read -> auto-execute, logged
+#   3 = irreversible / spends money / sends externally -> requires approval
+#
+# Canonical mapping for default tools (audited 2026-04-24 per HEC-14):
+#   Tier 1: Read, Glob, Grep, SearchMemory, WebSearch, WebFetch, WikiSearch,
+#           WikiGraph, SkillList, A2ACard, A2APeers, FirecrawlScrape,
+#           FirecrawlSearch, FirecrawlExtract
+#     note (Bash): Tier 2 assumes the handler stays `external_stub` and the SDK
+#       runtime enforces its own shell approval. If Bash ever executes locally,
+#       promote to Tier 3.
+#     note (Firecrawl): consumes paid credits (~$0.001/call). Rate-limit by
+#       credit budget is the circuit breaker. Tier 1 accepted.
+#     note (SkillExecute): Tier 3 (fail-safe). A registered skill may invoke
+#       sub-tools of any tier; without tier-introspection of the skill body the
+#       conservative default is to treat every skill run as approval-gated.
+#   Tier 2: Write, Edit, Bash, WikiLint, SkillGenerate, AnalyzeImage
+#   Tier 3: WikiDelete, A2ASend, HeyGenVideo, GPTImage, SkillExecute
+TIER_READ_ONLY = 1
+TIER_LOCAL_MUTATION = 2
+TIER_REQUIRES_APPROVAL = 3
+DEFAULT_TOOL_TIER = TIER_LOCAL_MUTATION
+
+
+def tool_requires_approval(tier: int) -> bool:
+    """Return True iff a tool of this tier must go through ApprovalManager."""
+    return tier >= TIER_REQUIRES_APPROVAL
+
+
 SUPPORTED_AGENT_CLASSES: tuple[AgentClass, ...] = ("researcher", "operator", "deployer")
 DEFAULT_TOOL_AGENT_CLASSES: dict[str, tuple[AgentClass, ...]] = {
     "Read": ("researcher", "operator", "deployer"),
@@ -68,6 +98,7 @@ class ToolDefinition:
     parameter_schema: dict | None = None
     ingests_external_content: bool = False
     sanitize_fields: tuple[str, ...] = ()
+    tier: int = DEFAULT_TOOL_TIER
 
 
 _CODE_FENCE_RE = re.compile(r"```[\s\S]*?```")
@@ -147,10 +178,20 @@ def sanitize_tool_output(
     }
 
 
+ApprovalGate = Callable[["ToolDefinition", dict], None]
+
+
 class ToolRegistry:
-    def __init__(self, *, workspace_root: Path | str, memory: MemoryStore | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        workspace_root: Path | str,
+        memory: MemoryStore | None = None,
+        observe: object | None = None,
+    ) -> None:
         self.workspace_root = Path(workspace_root)
         self.memory = memory
+        self.observe = observe
         self._definitions: dict[str, ToolDefinition] = {}
 
     def register(self, definition: ToolDefinition) -> None:
@@ -192,6 +233,7 @@ class ToolRegistry:
         agent_class: AgentClass,
         policy: SandboxPolicy | None = None,
         network_enforcer: DomainAllowlistEnforcer | None = None,
+        approval_gate: ApprovalGate | None = None,
     ) -> dict:
         definition = self.get(name)
         if agent_class not in definition.allowed_agent_classes:
@@ -206,10 +248,41 @@ class ToolRegistry:
             )
             if not decision.allowed:
                 raise PermissionError(decision.reason or "tool invocation blocked by sandbox")
+        # Tier enforcement (HEC-14): bypass approval for Tier 1/2, gate Tier 3.
+        # Logged to observe stream for audit. approval_gate may raise to block.
+        if tool_requires_approval(definition.tier):
+            if approval_gate is None:
+                raise PermissionError(
+                    f"Tool '{name}' is Tier {definition.tier} (requires approval) "
+                    f"but no approval_gate was provided to the dispatcher."
+                )
+            approval_gate(definition, args)
+            self._emit_autonomy_event("AUTONOMY_APPROVED", definition, agent_class)
+        else:
+            self._emit_autonomy_event("AUTONOMY_BYPASS", definition, agent_class)
         result = definition.handler(args)
         if definition.ingests_external_content and isinstance(result, dict):
             return sanitize_tool_output(definition, result, agent_class=agent_class)
         return result
+
+    def _emit_autonomy_event(
+        self, event: str, definition: "ToolDefinition", agent_class: AgentClass
+    ) -> None:
+        if self.observe is None:
+            return
+        try:
+            self.observe.emit(  # type: ignore[attr-defined]
+                event,
+                lane="tool_dispatcher",
+                payload={
+                    "tool": definition.name,
+                    "tier": definition.tier,
+                    "agent_class": agent_class,
+                },
+            )
+        except Exception:
+            # Observability is best-effort; never block execution on log failure.
+            pass
 
     async def execute_async(
         self,
@@ -219,6 +292,7 @@ class ToolRegistry:
         agent_class: AgentClass,
         policy: SandboxPolicy | None = None,
         network_enforcer: DomainAllowlistEnforcer | None = None,
+        approval_gate: ApprovalGate | None = None,
     ) -> dict:
         """Async-safe wrapper: offloads blocking handlers to a worker thread.
 
@@ -236,6 +310,7 @@ class ToolRegistry:
             agent_class=agent_class,
             policy=policy,
             network_enforcer=network_enforcer,
+            approval_gate=approval_gate,
         )
 
     @classmethod
@@ -319,6 +394,7 @@ class ToolRegistry:
                 description="Read a file from the workspace.",
                 allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["Read"],
                 handler=read_file,
+                tier=TIER_READ_ONLY,
                 parameter_schema={"type": "object", "properties": {"path": {"type": "string", "description": "Absolute file path"}}, "required": ["path"]},
             )
         )
@@ -348,6 +424,7 @@ class ToolRegistry:
                 description="List files matching a glob pattern.",
                 allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["Glob"],
                 handler=glob_files,
+                tier=TIER_READ_ONLY,
                 parameter_schema={"type": "object", "properties": {"pattern": {"type": "string", "description": "Glob pattern (e.g. **/*.py)"}, "root": {"type": "string", "description": "Root directory (optional)"}}, "required": ["pattern"]},
             )
         )
@@ -357,6 +434,7 @@ class ToolRegistry:
                 description="Search text content across files.",
                 allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["Grep"],
                 handler=grep_files,
+                tier=TIER_READ_ONLY,
                 parameter_schema={"type": "object", "properties": {"query": {"type": "string", "description": "Text to search for"}, "root": {"type": "string", "description": "Root directory (optional)"}}, "required": ["query"]},
             )
         )
@@ -367,6 +445,7 @@ class ToolRegistry:
                 allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["Bash"],
                 handler=external_stub,
                 mutates_state=True,
+                tier=TIER_LOCAL_MUTATION,
             )
         )
         registry.register(
@@ -378,6 +457,7 @@ class ToolRegistry:
                 requires_network=True,
                 ingests_external_content=True,
                 sanitize_fields=("content", "markdown", "results", "text"),
+                tier=TIER_READ_ONLY,
             )
         )
         registry.register(
@@ -389,6 +469,7 @@ class ToolRegistry:
                 requires_network=True,
                 ingests_external_content=True,
                 sanitize_fields=("content", "markdown", "text", "body"),
+                tier=TIER_READ_ONLY,
             )
         )
         registry.register(
@@ -397,6 +478,7 @@ class ToolRegistry:
                 description="Search stored semantic facts.",
                 allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["SearchMemory"],
                 handler=search_memory,
+                tier=TIER_READ_ONLY,
                 parameter_schema={"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer", "default": 10}}, "required": ["query"]},
             )
         )
@@ -420,6 +502,7 @@ class ToolRegistry:
                 description="Semantic search across wiki pages. Args: query (str), limit (int, default 5).",
                 allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["WikiSearch"],
                 handler=wiki_search,
+                tier=TIER_READ_ONLY,
                 parameter_schema={"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer", "default": 5}}, "required": ["query"]},
             )
         )
@@ -429,6 +512,7 @@ class ToolRegistry:
                 description="Audit wiki health. Args: deep (bool) for LLM-powered analysis, auto_fix (bool) to auto-deprecate stale pages and create gap stubs.",
                 allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["WikiLint"],
                 handler=wiki_lint,
+                tier=TIER_LOCAL_MUTATION,
                 parameter_schema={"type": "object", "properties": {"deep": {"type": "boolean", "default": False}, "auto_fix": {"type": "boolean", "default": False}}, "required": []},
             )
         )
@@ -461,6 +545,7 @@ class ToolRegistry:
                 allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["WikiDelete"],
                 handler=wiki_delete,
                 mutates_state=True,
+                tier=TIER_REQUIRES_APPROVAL,
                 parameter_schema={"type": "object", "properties": {"slug": {"type": "string"}}, "required": ["slug"]},
             )
         )
@@ -470,6 +555,7 @@ class ToolRegistry:
                 description="Query the knowledge graph. Args: slug (str, optional) for a node's edges & neighbors, depth (int, default 1). Without slug returns graph summary.",
                 allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["WikiGraph"],
                 handler=wiki_graph,
+                tier=TIER_READ_ONLY,
                 parameter_schema={"type": "object", "properties": {"slug": {"type": "string"}, "depth": {"type": "integer", "default": 1}}, "required": []},
             )
         )
@@ -497,18 +583,21 @@ class ToolRegistry:
         registry.register(ToolDefinition(
             name="SkillList", description="List all registered skills and stats.",
             allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["SkillList"], handler=skill_list,
+            tier=TIER_READ_ONLY,
         ))
         registry.register(ToolDefinition(
             name="SkillGenerate",
             description="Generate a new skill from description. Args: task (str), tags (list[str], optional).",
             allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["SkillGenerate"],
             handler=skill_generate, mutates_state=True,
+            tier=TIER_LOCAL_MUTATION,
         ))
         registry.register(ToolDefinition(
             name="SkillExecute",
             description="Execute a registered skill. Args: name (str), kwargs (dict, optional).",
             allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["SkillExecute"],
             handler=skill_execute, mutates_state=True,
+            tier=TIER_REQUIRES_APPROVAL,
         ))
 
         # --- A2A Protocol tools ---
@@ -534,16 +623,19 @@ class ToolRegistry:
         registry.register(ToolDefinition(
             name="A2ACard", description="Get this agent's A2A identity card.",
             allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["A2ACard"], handler=a2a_card,
+            tier=TIER_READ_ONLY,
         ))
         registry.register(ToolDefinition(
             name="A2APeers", description="List registered A2A peer agents and stats.",
             allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["A2APeers"], handler=a2a_peers,
+            tier=TIER_READ_ONLY,
         ))
         registry.register(ToolDefinition(
             name="A2ASend",
             description="Send a task to an A2A peer. Args: to_agent (str), action (str), payload (dict).",
             allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["A2ASend"],
             handler=a2a_send, mutates_state=True, requires_network=True,
+            tier=TIER_REQUIRES_APPROVAL,
         ))
 
         # --- HeyGen Video tool ---
@@ -593,6 +685,7 @@ class ToolRegistry:
             description="Generate a video with a talking avatar. Args: text (str, required), avatar_id (str, optional), voice_id (str, optional), title (str, optional).",
             allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["HeyGenVideo"],
             handler=heygen_video, mutates_state=True, requires_network=True,
+            tier=TIER_REQUIRES_APPROVAL,
             parameter_schema={"type": "object", "properties": {"text": {"type": "string"}, "avatar_id": {"type": "string"}, "voice_id": {"type": "string"}, "title": {"type": "string"}}, "required": ["text"]},
         ))
 
@@ -657,6 +750,7 @@ class ToolRegistry:
             description="Generate images using GPT Image API. Args: prompt (str, required), size (str, default '1024x1024'), quality (str, default 'auto').",
             allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["GPTImage"],
             handler=gpt_image, mutates_state=True, requires_network=True,
+            tier=TIER_REQUIRES_APPROVAL,
             parameter_schema={"type": "object", "properties": {"prompt": {"type": "string", "description": "Image description"}, "size": {"type": "string", "enum": ["1024x1024", "1536x1024", "1024x1536"], "default": "1024x1024"}, "quality": {"type": "string", "enum": ["auto", "low", "medium", "high"], "default": "auto"}}, "required": ["prompt"]},
         ))
 
@@ -700,6 +794,7 @@ class ToolRegistry:
             description="Analyze an image using GPT vision. Args: image_path (str) or image_url (str), question (str, optional).",
             allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["AnalyzeImage"],
             handler=analyze_image, requires_network=True,
+            tier=TIER_LOCAL_MUTATION,
             parameter_schema={
                 "type": "object",
                 "properties": {
@@ -818,6 +913,7 @@ class ToolRegistry:
             handler=firecrawl_scrape, requires_network=True,
             ingests_external_content=True,
             sanitize_fields=("markdown", "content", "html", "text"),
+            tier=TIER_READ_ONLY,
             parameter_schema={
                 "type": "object",
                 "properties": {
@@ -834,6 +930,7 @@ class ToolRegistry:
             handler=firecrawl_search, requires_network=True,
             ingests_external_content=True,
             sanitize_fields=("markdown", "content", "results"),
+            tier=TIER_READ_ONLY,
             parameter_schema={
                 "type": "object",
                 "properties": {
@@ -850,6 +947,7 @@ class ToolRegistry:
             handler=firecrawl_extract, requires_network=True,
             ingests_external_content=True,
             sanitize_fields=("data", "extracted", "markdown", "content"),
+            tier=TIER_READ_ONLY,
             parameter_schema={
                 "type": "object",
                 "properties": {
