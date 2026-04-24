@@ -109,7 +109,11 @@ async def run() -> int:
             port=runtime.config.web_chat_port,
         )
 
-        await transport.start()
+        try:
+            await transport.start()
+        except Exception:
+            logger.error("Telegram transport failed to start", exc_info=True)
+            raise
         if runtime.config.web_chat_enabled:
             await web_transport.start()
 
@@ -323,6 +327,17 @@ async def run() -> int:
         if managed_chrome is not None:
             from claw_v2.computer import BrowserUseService
             runtime.bot.browser_use = BrowserUseService(cdp_url=managed_chrome.cdp_url)
+
+        def _telegram_health_check() -> None:
+            if not transport.is_polling_healthy(stale_seconds=600.0):
+                logger.warning("Telegram polling stale, scheduling restart")
+                asyncio.run_coroutine_threadsafe(transport.restart_polling(), _loop)
+
+        runtime.scheduler.register(_SJ(
+            name="telegram_health",
+            interval_seconds=120,
+            handler=_telegram_health_check,
+        ))
 
         try:
             await runtime.daemon.run_loop(shutdown)
