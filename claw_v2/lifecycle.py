@@ -197,6 +197,57 @@ async def run() -> int:
             handler=_fitness_reminder,
         ))
 
+        # Daemon health check at 20:58 local — Observer Pattern.
+        # Kairos emits daemon_health_check_notification; this consumer
+        # forwards to Telegram via call_soon_threadsafe (cross-thread safe).
+        def _daemon_health_consumer(payload: dict) -> None:
+            status = payload.get("status", "unknown")
+            ts = payload.get("ts", "")
+            if status == "ok":
+                msg = f"🦞 Salud del Daemon verificada a las {ts}. Todo operativo."
+            elif status == "anomaly":
+                tokens = ", ".join(payload.get("anomaly_tokens_found", [])) or "?"
+                msg = f"⚠️ Salud del Daemon ({ts}): anomalía detectada (tokens: {tokens}). Revisar logs/claw.log."
+            else:
+                err = payload.get("error", "unknown")
+                msg = f"⚠️ Health check falló ({ts}): {err}"
+            if runtime.config.telegram_allowed_user_id and transport._app:
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        transport._app.bot.send_message(
+                            chat_id=int(runtime.config.telegram_allowed_user_id),
+                            text=msg,
+                        ),
+                        _loop,
+                    )
+                except Exception:
+                    logger.exception("daemon health consumer failed to enqueue telegram send")
+
+        runtime.observe.subscribe(
+            "daemon_health_check_notification", _daemon_health_consumer
+        )
+
+        _health_check_state = {"last_fire_minute_key": ""}
+
+        def _daemon_health_guard() -> None:
+            now = datetime.now()
+            if now.hour != 20 or now.minute != 58:
+                return
+            minute_key = now.strftime("%Y-%m-%dT%H:%M")
+            if _health_check_state["last_fire_minute_key"] == minute_key:
+                return
+            _health_check_state["last_fire_minute_key"] = minute_key
+            try:
+                runtime.kairos.run_health_check()
+            except Exception:
+                logger.exception("daemon health guard run_health_check raised")
+
+        runtime.scheduler.register(_SJ(
+            name="daemon_health_check_guard",
+            interval_seconds=60,
+            handler=_daemon_health_guard,
+        ))
+
         # Wire ManagedChrome
         managed_chrome = None
         if runtime.config.chrome_cdp_enabled and runtime.config.browse_backend in {"auto", "chrome_cdp"}:
