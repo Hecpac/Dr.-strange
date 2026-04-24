@@ -14,6 +14,7 @@ from claw_v2.adapters.base import (
     build_effective_system_prompt,
     coerce_usage_dict,
 )
+from claw_v2.approval_gate import ApprovalPending
 from claw_v2.types import LLMResponse
 
 logger = logging.getLogger(__name__)
@@ -70,6 +71,10 @@ class OpenAIAdapter(ProviderAdapter):
             if use_tools:
                 response = self._tool_loop(client, request, response)
 
+        except ApprovalPending:
+            # Tier 3 soft-block — propagate past the adapter boundary so the
+            # bot can format /approve for Hector.
+            raise
         except Exception as exc:
             raise AdapterError(f"OpenAI Responses request failed: {exc}") from exc
 
@@ -97,6 +102,10 @@ class OpenAIAdapter(ProviderAdapter):
                 try:
                     result = self._tool_executor(name, arguments)  # type: ignore[misc]
                     output = json.dumps(result, default=str)
+                except ApprovalPending:
+                    # Tier 3 pending approval is a soft block, not a tool error:
+                    # propagate so the bot can surface /approve to Hector.
+                    raise
                 except Exception as exc:
                     output = json.dumps({"error": str(exc)})
                     logger.warning("OpenAI tool %s failed: %s", name, exc)

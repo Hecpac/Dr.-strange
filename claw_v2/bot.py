@@ -13,6 +13,7 @@ from claw_v2.agent_handler import AgentHandler
 from claw_v2.browse_handler import BrowseHandler
 from claw_v2.task_handler import TaskHandler
 from claw_v2.approval import ApprovalManager
+from claw_v2.approval_gate import ApprovalPending
 from claw_v2.brain import BrainService
 from claw_v2.bot_commands import BotCommand, CommandContext, dispatch_commands
 from claw_v2.checkpoint_handler import CheckpointHandler
@@ -46,6 +47,16 @@ _CAPABILITY_MESSAGES = {
     "computer_control": "Lo siento, mi módulo de control de escritorio está actualmente degradado y no puedo ejecutar acciones interactivas.",
     "browser_use": "Lo siento, mi backend de automatización web está actualmente degradado y no puedo completar ese flujo web.",
 }
+
+
+def _format_approval_pending(exc: ApprovalPending) -> str:
+    """Convert a Tier 3 soft-block into Telegram-ready instructions for Hector."""
+    return (
+        "⚠️ Acción de Tier 3 detectada. Requiere aprobación de Hector.\n\n"
+        f"Tool: `{exc.tool}`\n"
+        f"Resumen: {exc.summary}\n\n"
+        f"Comando: `/approve {exc.approval_id} {exc.token}`"
+    )
 
 
 class BotService:
@@ -722,12 +733,15 @@ class BotService:
             prompt_text = _format_tweet_analysis_prompt(text, enriched)
         if runtime_capability_question:
             prompt_text = _format_runtime_capability_prompt(prompt_text)
-        response = self.brain.handle_message(
-            session_id,
-            prompt_text,
-            memory_text=source_text,
-            task_type="telegram_message",
-        )
+        try:
+            response = self.brain.handle_message(
+                session_id,
+                prompt_text,
+                memory_text=source_text,
+                task_type="telegram_message",
+            )
+        except ApprovalPending as exc:
+            return _format_approval_pending(exc)
 
         raw_content = response.content or ""
         content = raw_content.strip()
@@ -779,12 +793,15 @@ class BotService:
             raise PermissionError("TELEGRAM_ALLOWED_USER_ID must be configured")
         if user_id != self.allowed_user_id:
             raise PermissionError("user is not allowed to access this bot")
-        return self.brain.handle_message(
-            session_id,
-            content_blocks,
-            memory_text=memory_text,
-            task_type="telegram_message",
-        ).content
+        try:
+            return self.brain.handle_message(
+                session_id,
+                content_blocks,
+                memory_text=memory_text,
+                task_type="telegram_message",
+            ).content
+        except ApprovalPending as exc:
+            return _format_approval_pending(exc)
 
 
     def _tokens_info_response(self, session_id: str) -> str:

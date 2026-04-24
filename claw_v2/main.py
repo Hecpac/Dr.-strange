@@ -21,6 +21,11 @@ from claw_v2.agents import (
     SubAgentService,
 )
 from claw_v2.approval import ApprovalManager
+from claw_v2.approval_gate import (
+    build_system_auto_approve_gate,
+    build_telegram_approval_gate,
+    current_daemon_reason,
+)
 from claw_v2.bot import BotService
 from claw_v2.brain import BrainService
 from claw_v2.browser import DevBrowserService
@@ -363,8 +368,28 @@ def _setup_llm_stack(
     tool_registry = ToolRegistry.default(workspace_root=config.workspace_root, memory=memory)
     openai_tool_schemas = tool_registry.openai_tool_schemas()
 
+    # Paso 4 (HEC-14): wire ApprovalManager into the dispatcher via a gate.
+    # The shared closure picks the gate based on the active context:
+    #   - Telegram/interactive (default) -> build_telegram_approval_gate raises
+    #     ApprovalPending so the bot can surface `/approve <id> <token>`.
+    #   - Daemon/Kairos (inside `system_approval_mode(reason=...)`) -> the
+    #     system auto-approve gate records an audit entry with the scheduler's
+    #     reason and proceeds without blocking.
+    telegram_gate = build_telegram_approval_gate(approvals)
+
     def openai_tool_executor(name: str, args: dict) -> dict:
-        return tool_registry.execute(name, args, agent_class="operator")
+        daemon_reason = current_daemon_reason()
+        gate = (
+            build_system_auto_approve_gate(approvals, reason=daemon_reason)
+            if daemon_reason is not None
+            else telegram_gate
+        )
+        return tool_registry.execute(
+            name,
+            args,
+            agent_class="operator",
+            approval_gate=gate,
+        )
 
     router = LLMRouter.default(
         config,

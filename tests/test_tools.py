@@ -8,7 +8,15 @@ from pathlib import Path
 from claw_v2.memory import MemoryStore
 from claw_v2.network_proxy import DomainAllowlistEnforcer
 from claw_v2.sandbox import SandboxPolicy
-from claw_v2.tools import ToolDefinition, ToolRegistry, sanitize_tool_output
+from claw_v2.tools import (
+    TIER_LOCAL_MUTATION,
+    TIER_READ_ONLY,
+    TIER_REQUIRES_APPROVAL,
+    ToolDefinition,
+    ToolRegistry,
+    sanitize_tool_output,
+    tool_requires_approval,
+)
 
 
 class ToolRegistryTests(unittest.TestCase):
@@ -162,6 +170,155 @@ class ExecuteAsyncTests(unittest.TestCase):
             )
             self.assertEqual(result["written"], 4)
             self.assertEqual(target.read_text(encoding="utf-8"), "hola")
+
+
+class _RecordingObserve:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict]] = []
+
+    def emit(self, event: str, **kwargs: object) -> None:
+        self.events.append((event, dict(kwargs)))
+
+
+class TierEnforcementTests(unittest.TestCase):
+    """Tier-based autonomy enforcement in ToolRegistry.execute (HEC-14)."""
+
+    def test_canonical_tier_mapping(self) -> None:
+        """Regression guard on the audited tier table (see tools.py header)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            registry = ToolRegistry.default(workspace_root=Path(tmpdir))
+            expected = {
+                "Read": TIER_READ_ONLY,
+                "Glob": TIER_READ_ONLY,
+                "Grep": TIER_READ_ONLY,
+                "WebSearch": TIER_READ_ONLY,
+                "WebFetch": TIER_READ_ONLY,
+                "SearchMemory": TIER_READ_ONLY,
+                "WikiSearch": TIER_READ_ONLY,
+                "WikiGraph": TIER_READ_ONLY,
+                "SkillList": TIER_READ_ONLY,
+                "A2ACard": TIER_READ_ONLY,
+                "A2APeers": TIER_READ_ONLY,
+                "FirecrawlScrape": TIER_READ_ONLY,
+                "FirecrawlSearch": TIER_READ_ONLY,
+                "FirecrawlExtract": TIER_READ_ONLY,
+                "Write": TIER_LOCAL_MUTATION,
+                "Edit": TIER_LOCAL_MUTATION,
+                "Bash": TIER_LOCAL_MUTATION,
+                "WikiLint": TIER_LOCAL_MUTATION,
+                "SkillGenerate": TIER_LOCAL_MUTATION,
+                "AnalyzeImage": TIER_LOCAL_MUTATION,
+                "WikiDelete": TIER_REQUIRES_APPROVAL,
+                "A2ASend": TIER_REQUIRES_APPROVAL,
+                "HeyGenVideo": TIER_REQUIRES_APPROVAL,
+                "GPTImage": TIER_REQUIRES_APPROVAL,
+                "SkillExecute": TIER_REQUIRES_APPROVAL,
+            }
+            for name, expected_tier in expected.items():
+                self.assertEqual(
+                    registry.get(name).tier,
+                    expected_tier,
+                    f"Tier drift on {name}: audited={expected_tier}, current={registry.get(name).tier}",
+                )
+
+    def test_tier1_bypasses_approval_and_logs(self) -> None:
+        """Tier 1 tool executes directly, never calls approval_gate, emits AUTONOMY_BYPASS."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            target = workspace / "note.txt"
+            target.write_text("hello", encoding="utf-8")
+            observe = _RecordingObserve()
+            registry = ToolRegistry.default(workspace_root=workspace)
+            registry.observe = observe
+            gate_calls: list[str] = []
+
+            def gate(defn: ToolDefinition, args: dict) -> None:
+                gate_calls.append(defn.name)
+
+            result = registry.execute(
+                "Read", {"path": str(target)}, agent_class="researcher", approval_gate=gate
+            )
+            self.assertEqual(result["content"], "hello")
+            self.assertEqual(gate_calls, [], "Tier 1 must not invoke approval_gate")
+            events = [e[0] for e in observe.events]
+            self.assertIn("AUTONOMY_BYPASS", events)
+            self.assertNotIn("AUTONOMY_APPROVED", events)
+
+    def test_tier3_without_gate_raises(self) -> None:
+        """Tier 3 tool must refuse to execute when no approval_gate is wired in."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            registry = ToolRegistry.default(workspace_root=Path(tmpdir))
+            with self.assertRaises(PermissionError) as ctx:
+                registry.execute(
+                    "WikiDelete", {"slug": "something"}, agent_class="operator"
+                )
+            self.assertIn("Tier 3", str(ctx.exception))
+
+    def test_tier3_with_gate_invokes_approval(self) -> None:
+        """Tier 3 tool calls approval_gate before executing."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = _RecordingObserve()
+            registry = ToolRegistry(workspace_root=Path(tmpdir), observe=observe)
+            executed: list[str] = []
+            gate_calls: list[str] = []
+
+            def handler(args: dict) -> dict:
+                executed.append(args.get("id", ""))
+                return {"ok": True}
+
+            def gate(defn: ToolDefinition, args: dict) -> None:
+                gate_calls.append(defn.name)
+
+            registry.register(
+                ToolDefinition(
+                    name="DangerousOp",
+                    description="fake",
+                    allowed_agent_classes=("operator",),
+                    handler=handler,
+                    mutates_state=True,
+                    tier=TIER_REQUIRES_APPROVAL,
+                )
+            )
+            registry.execute(
+                "DangerousOp", {"id": "x"}, agent_class="operator", approval_gate=gate
+            )
+            self.assertEqual(gate_calls, ["DangerousOp"])
+            self.assertEqual(executed, ["x"])
+            self.assertIn("AUTONOMY_APPROVED", [e[0] for e in observe.events])
+
+    def test_tier3_gate_blocks_via_exception(self) -> None:
+        """approval_gate can raise to block execution; handler must not run."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            registry = ToolRegistry(workspace_root=Path(tmpdir))
+            executed: list[str] = []
+
+            def handler(args: dict) -> dict:
+                executed.append("ran")
+                return {}
+
+            def deny_gate(defn: ToolDefinition, args: dict) -> None:
+                raise PermissionError("user rejected approval")
+
+            registry.register(
+                ToolDefinition(
+                    name="DangerousOp",
+                    description="fake",
+                    allowed_agent_classes=("operator",),
+                    handler=handler,
+                    tier=TIER_REQUIRES_APPROVAL,
+                )
+            )
+            with self.assertRaises(PermissionError):
+                registry.execute(
+                    "DangerousOp", {}, agent_class="operator", approval_gate=deny_gate
+                )
+            self.assertEqual(executed, [], "Handler must not run when gate blocks")
+
+    def test_tool_requires_approval_helper(self) -> None:
+        self.assertFalse(tool_requires_approval(TIER_READ_ONLY))
+        self.assertFalse(tool_requires_approval(TIER_LOCAL_MUTATION))
+        self.assertTrue(tool_requires_approval(TIER_REQUIRES_APPROVAL))
 
 
 if __name__ == "__main__":
