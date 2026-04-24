@@ -168,6 +168,14 @@ class SubAgentServiceTests(unittest.TestCase):
         self.assertEqual(SubAgentService._parse_model_from_soul(hex_soul), ("codex", "codex-mini-latest"))
         self.assertEqual(SubAgentService._parse_model_from_soul(lux_soul), ("openai", "gpt-5.4"))
 
+    def test_parse_model_recognizes_gpt_5_5(self) -> None:
+        """MAX POWER fase 1: parser must route 'GPT-5.5' to gpt-5.5, not the
+        gpt-5.4 catch-all."""
+        soul = "- **Model:** GPT-5.5 — reasoning frontier\n"
+        self.assertEqual(
+            SubAgentService._parse_model_from_soul(soul), ("openai", "gpt-5.5")
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -983,6 +983,8 @@ class SubAgentService:
             return ("anthropic", "claude-sonnet-4-6")
         if "gemini" in text:
             return ("google", "gemini-2.5-pro")
+        if "gpt-5.5" in text:
+            return ("openai", "gpt-5.5")
         if "gpt-5.4" in text:
             return ("openai", "gpt-5.4")
         if "gpt-5.4-mini" in text:

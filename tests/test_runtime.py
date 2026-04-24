@@ -98,8 +98,8 @@ class RuntimeTests(unittest.TestCase):
 
                 hex_def = runtime.sub_agents.get_agent("hex")
                 eval_def = runtime.sub_agents.get_agent("eval")
-                self.assertEqual((hex_def.provider, hex_def.model), ("codex", "codex-mini-latest"))
-                self.assertEqual((eval_def.provider, eval_def.model), ("anthropic", "claude-sonnet-4-6"))
+                self.assertEqual((hex_def.provider, hex_def.model), ("openai", "gpt-5.5"))
+                self.assertEqual((eval_def.provider, eval_def.model), ("anthropic", "claude-opus-4-7"))
 
     def test_daemon_tick_runs_scheduled_jobs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
