@@ -6,6 +6,7 @@ from typing import Callable
 from claw_v2.adapters.anthropic import AnthropicAgentAdapter
 from claw_v2.adapters.base import AdapterError, LLMRequest, PostLLMHook, PreLLMHook, ProviderAdapter, UserPrompt
 from claw_v2.adapters.codex import CodexAdapter
+from claw_v2.adapters.deep_research import DeepResearchAdapter
 from claw_v2.adapters.google import GoogleAdapter
 from claw_v2.adapters.ollama import OllamaAdapter
 from claw_v2.adapters.openai import OpenAIAdapter
@@ -217,6 +218,9 @@ class LLMRouter:
                 "codex": CodexAdapter(
                     cli_path=config.codex_cli_path,
                     transport=codex_transport,
+                ),
+                "deep_research": DeepResearchAdapter(
+                    api_key=config.google_api_key,
                 ),
             },
             audit_sink=audit_sink,

@@ -167,7 +167,7 @@ def _normalize_input(prompt: str | list) -> str | list:
     return prompt
 
 
-_REASONING_MODELS = {"o3", "o3-mini", "o4-mini", "gpt-5.4", "gpt-5.4-mini"}
+_REASONING_MODELS = {"o3", "o3-mini", "o4-mini", "gpt-5.4", "gpt-5.4-mini", "gpt-5.5"}
 
 
 def _supports_reasoning(model: str) -> bool:

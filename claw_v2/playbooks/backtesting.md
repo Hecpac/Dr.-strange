@@ -43,3 +43,20 @@ priority: 8
 - Track `peak_equity` solo sobre capital **realizado** (no unrealized P&L)
 - Si equity DD supera umbral, bloquear nuevas entradas
 - Bug conocido: peak_equity inflado con ganancias no realizadas causa bloqueo permanente
+
+## QTS Multi-Agent DAG (2026-04-22)
+Módulo: `claw_v2/qts/`
+- `agents.py` — 4 agentes especializados (researcher, analyst, risk, executor)
+- `features.py` — LLM feature extractor (sentiment, regime, volatility)
+- `dag.py` — DAG Planner que orquesta agentes en capas paralelas/secuenciales
+
+### Arquitectura
+```
+[researcher] ──┐
+               ├──> [analyst] ──> [risk] ──> [executor]
+[features]  ───┘
+```
+- **Regime gate**: si confidence < 0.5 o regime = choppy, no opera
+- **Risk veto**: si position_size < 0.05, no opera
+- Agentes producen señales (-1.0 a 1.0), nunca ejecutan órdenes directamente
+- Basado en: AgenticTrading (NeurIPS, Sharpe 2.63) + LLM-DRL Hybrid (PeerJ)
