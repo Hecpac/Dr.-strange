@@ -4,6 +4,7 @@ import asyncio
 import base64
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from claw_v2.telegram import TelegramTransport, _split_message
@@ -70,9 +71,51 @@ class TransportStartTests(unittest.IsolatedAsyncioTestCase):
                 "terminal_list",
                 "nlm_list",
                 "nlm_create",
+                "grill",
+                "tdd",
+                "improve_arch",
+                "playbooks",
+                "backtest",
+                "effort",
+                "verify",
+                "focus",
+                "voice",
+                "design",
                 "help",
             ],
         )
+
+
+class PollingHealthTests(unittest.TestCase):
+    def test_running_updater_is_healthy_even_without_recent_messages(self) -> None:
+        transport = TelegramTransport(bot_service=MagicMock(), token="test-token")
+        transport._app = MagicMock()
+        transport._app.updater = MagicMock()
+        transport._app.updater.running = True
+        transport._last_update_at = 0.0
+
+        self.assertTrue(transport.is_polling_healthy())
+
+    def test_stopped_updater_is_unhealthy(self) -> None:
+        transport = TelegramTransport(bot_service=MagicMock(), token="test-token")
+        transport._app = MagicMock()
+        transport._app.updater = MagicMock()
+        transport._app.updater.running = False
+
+        self.assertFalse(transport.is_polling_healthy())
+
+
+class SessionTagTests(unittest.TestCase):
+    def test_uses_brain_model_tag_when_configured(self) -> None:
+        bot_service = SimpleNamespace(config=SimpleNamespace(brain_model="claude-opus-4-7"))
+        transport = TelegramTransport(bot_service=bot_service, token="test-token")
+
+        self.assertEqual(transport._model_tag, "-o4-7")
+
+    def test_ignores_non_string_mock_config_model(self) -> None:
+        transport = TelegramTransport(bot_service=MagicMock(), token="test-token")
+
+        self.assertEqual(transport._model_tag, "")
 
 
 class HandleTextTests(unittest.IsolatedAsyncioTestCase):

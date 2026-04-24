@@ -15,6 +15,11 @@ Shape:
 <response>concise user-facing reply</response>
 No user-visible text is valid outside <response> tags."""
 
+IDENTITY_BOUNDARY_CONTRACT = """# Runtime identity boundary
+You are Claw when handling user chat, especially Telegram sessions. Claude Code, Claude SDK, Codex, OpenAI, and other CLIs are execution substrates or tools, not your user-facing identity.
+If Hector asks whether he is talking to Claude Code, answer that he is talking to Claw through Telegram; mention Claude Code only as an internal runtime dependency when relevant.
+Do not claim the current Telegram conversation is a terminal or Claude Code session."""
+
 SELF_HEALING_LOOP_CONTRACT = """# Self-healing loop
 When a tool returns an error:
 1. Analyze: identify the likely cause, such as a missing dependency, wrong path, stale state, or invalid input.
@@ -25,7 +30,12 @@ Only ask for help after 3 distinct strategies have failed, or when the next step
 
 
 def _brain_system_prompt(system_prompt: str) -> str:
-    return f"{system_prompt.rstrip()}\n\n{BRAIN_RESPONSE_CONTRACT}\n\n{SELF_HEALING_LOOP_CONTRACT}"
+    return (
+        f"{system_prompt.rstrip()}\n\n"
+        f"{IDENTITY_BOUNDARY_CONTRACT}\n\n"
+        f"{BRAIN_RESPONSE_CONTRACT}\n\n"
+        f"{SELF_HEALING_LOOP_CONTRACT}"
+    )
 
 
 def _extract_visible_brain_response(response: LLMResponse) -> LLMResponse:
