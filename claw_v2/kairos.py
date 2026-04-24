@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import datetime
 import json
 import logging
 import subprocess
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.request import Request, urlopen
 
@@ -370,6 +372,7 @@ class KairosService:
             "publish_task": self._handle_publish_task,
             "claim_task": self._handle_claim_task,
             "morning_video_brief": self._handle_morning_video_brief,
+            "daemon_health_check": self._handle_daemon_health_check,
         }
         handler = handlers.get(decision.action)
         if handler is None:
@@ -882,3 +885,93 @@ class KairosService:
 
         import threading
         threading.Thread(target=_poll_heygen, daemon=True, name=f"heygen-poll-{video_id[:8]}").start()
+
+    def run_health_check(self) -> TickDecision:
+        """Trigger a daemon health check as a scheduler-driven autonomous action.
+
+        Wraps the dispatch in `system_approval_mode` so any Tier 3 tool calls
+        triggered downstream are auto-approved with audit reason 'Scheduled
+        Daemon Health Check'.
+        """
+        with system_approval_mode(reason="Scheduled Daemon Health Check"):
+            return self.handle_event("daemon_health_check", payload={})
+
+    def _handle_daemon_health_check(
+        self, decision: TickDecision, trace_context: dict[str, Any] | None = None
+    ) -> None:
+        """Self-inspect daemon health and emit notification event.
+
+        Fail-safe: every IO/exec failure is captured and reported as
+        status="check_failed" — the handler must never crash the daemon
+        it is verifying.
+        """
+        ts = datetime.datetime.now().isoformat(timespec="seconds")
+        pids: list[str] = []
+        log_tail: list[str] = []
+        anomaly_tokens_found: list[str] = []
+        status = "ok"
+        error: str | None = None
+        anomaly_tokens = ("ERROR", "Traceback", "CRITICAL", "FATAL")
+        try:
+            try:
+                proc = subprocess.run(
+                    ["pgrep", "-fl", "claw_v2"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                pids = [
+                    line.split()[0]
+                    for line in proc.stdout.strip().splitlines()
+                    if line.strip()
+                ]
+            except Exception as exc:
+                error = f"pgrep_failed: {exc}"
+                status = "check_failed"
+
+            if status != "check_failed":
+                log_path = Path("logs/claw.log")
+                if log_path.exists():
+                    try:
+                        all_lines = log_path.read_text(
+                            encoding="utf-8", errors="replace"
+                        ).splitlines()
+                        log_tail = all_lines[-20:]
+                        for line in log_tail:
+                            for token in anomaly_tokens:
+                                if token in line and token not in anomaly_tokens_found:
+                                    anomaly_tokens_found.append(token)
+                        if anomaly_tokens_found:
+                            status = "anomaly"
+                    except Exception as exc:
+                        error = f"log_read_failed: {exc}"
+                        status = "check_failed"
+        except Exception as exc:
+            error = f"unexpected: {exc}"
+            status = "check_failed"
+
+        payload = {
+            "event": "daemon_health_check",
+            "ts": ts,
+            "status": status,
+            "pids": pids,
+            "log_tail_count": len(log_tail),
+            "anomaly_tokens_found": anomaly_tokens_found,
+            "auto_approved_reason": "Scheduled Daemon Health Check",
+            "error": error,
+        }
+        try:
+            self.observe.emit(
+                "daemon_health_check_notification",
+                trace_id=trace_context.get("trace_id") if trace_context else None,
+                root_trace_id=trace_context.get("root_trace_id") if trace_context else None,
+                span_id=trace_context.get("span_id") if trace_context else None,
+                parent_span_id=trace_context.get("parent_span_id") if trace_context else None,
+                job_id=trace_context.get("job_id") if trace_context else None,
+                artifact_id=trace_context.get("artifact_id") if trace_context else None,
+                payload=payload,
+            )
+        except Exception:
+            logger.exception("daemon_health_check: failed to emit notification event")
+        logger.info("KAIROS daemon_health_check: status=%s pids=%d tokens=%s",
+                     status, len(pids), anomaly_tokens_found)
