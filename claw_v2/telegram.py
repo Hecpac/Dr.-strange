@@ -140,6 +140,16 @@ class TelegramTransport:
         self._rate_window = 60.0  # seconds
         self._last_update_at: float = 0.0
         self._polling_restarts: int = 0
+        self._model_tag = self._build_model_tag()
+
+    def _build_model_tag(self) -> str:
+        model = getattr(self._bot_service, "config", None)
+        if model is not None:
+            model = getattr(model, "brain_model", None)
+        if not model:
+            return ""
+        short = model.replace("claude-", "").replace("opus-", "o").replace("sonnet-", "s")
+        return f"-{short}"
 
     def _emit_latency(
         self,
@@ -299,7 +309,7 @@ class TelegramTransport:
         if self._is_rate_limited(user_id):
             await update.message.reply_text("Demasiados mensajes. Espera un momento.")
             return
-        session_id = f"tg-{update.effective_chat.id}"
+        session_id = f"tg-{update.effective_chat.id}{self._model_tag}"
         text = update.message.text or ""
         self._last_update_at = time.time()
         started_at = time.perf_counter()
@@ -562,7 +572,7 @@ class TelegramTransport:
         mime_type: str | None = None,
     ) -> None:
         user_id = str(update.effective_user.id)
-        session_id = f"tg-{update.effective_chat.id}"
+        session_id = f"tg-{update.effective_chat.id}{self._model_tag}"
         started_at = time.perf_counter()
         await _maybe_send_chat_action(update.message, "typing")
         file = await context.bot.get_file(file_id)
@@ -629,7 +639,7 @@ class TelegramTransport:
             await update.message.reply_text("No pude descargar el archivo. Intenta de nuevo.")
             return
         user_id = str(update.effective_user.id)
-        session_id = f"tg-{update.effective_chat.id}"
+        session_id = f"tg-{update.effective_chat.id}{self._model_tag}"
         started_at = time.perf_counter()
         await _maybe_send_chat_action(update.message, "typing")
         text_content = _extract_document_text(tmp_path, doc.mime_type, doc.file_name)
@@ -691,7 +701,7 @@ class TelegramTransport:
 
     async def _handle_text_content(self, update: Update, text: str) -> None:
         user_id = str(update.effective_user.id)
-        session_id = f"tg-{update.effective_chat.id}"
+        session_id = f"tg-{update.effective_chat.id}{self._model_tag}"
         started_at = time.perf_counter()
         try:
             response = await asyncio.to_thread(
