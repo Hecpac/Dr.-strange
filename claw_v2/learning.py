@@ -441,7 +441,13 @@ class LearningLoop:
             f"{json.dumps(signals[:40], ensure_ascii=True, sort_keys=True)}"
         )
         try:
-            response = self.router.ask(prompt, lane="judge", max_budget=0.15, timeout=60.0)
+            response = self.router.ask(
+                prompt,
+                lane="judge",
+                max_budget=0.15,
+                timeout=60.0,
+                evidence_pack={"signals": signals[:40], "outcomes": outcomes[:20], "events": events[:20]},
+            )
             parsed = _parse_json_object(response.content)
             if parsed is None:
                 return _heuristic_soul_update_proposal(signals, outcomes, events)

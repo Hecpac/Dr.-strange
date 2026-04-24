@@ -832,8 +832,9 @@ def _setup_scheduler(
     kairos.wiki = wiki
     scheduler.register(ScheduledJob(name="wiki_lint", interval_seconds=86400, handler=wiki.lint))
     scheduler.register(ScheduledJob(name="wiki_confidence", interval_seconds=604800, handler=wiki.recompute_confidence))
-    scheduler.register(ScheduledJob(name="wiki_research", interval_seconds=43200, handler=wiki.auto_research))
-    scheduler.register(ScheduledJob(name="wiki_scrape", interval_seconds=43200, handler=wiki.auto_scrape_sources))
+    # FROZEN 2026-04-22: AutoResearch loop paused — switching to implementation phase
+    # scheduler.register(ScheduledJob(name="wiki_research", interval_seconds=43200, handler=wiki.auto_research))
+    # scheduler.register(ScheduledJob(name="wiki_scrape", interval_seconds=43200, handler=wiki.auto_scrape_sources))
 
     _register_site_monitor_jobs(scheduler=scheduler, observe=observe, sites=config.monitored_sites)
 
