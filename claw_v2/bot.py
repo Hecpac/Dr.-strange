@@ -535,6 +535,10 @@ class BotService:
             return None
 
         normalized = _normalize_command_text(text)
+
+        if any(kw in normalized for kw in ("notebooklm", "notebook lm", "notebook.lm")):
+            return self._nlm_handler.natural_language_response(session_id, text)
+
         extracted_url = _extract_url_candidate(text)
         normalized_url: str | None = None
         if extracted_url is not None:
