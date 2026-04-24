@@ -138,6 +138,18 @@ class TelegramTransport:
         self._rate_limits: dict[str, list[float]] = {}
         self._rate_max = 10  # max requests per window
         self._rate_window = 60.0  # seconds
+        self._last_update_at: float = 0.0
+        self._polling_restarts: int = 0
+        self._model_tag = self._build_model_tag()
+
+    def _build_model_tag(self) -> str:
+        model = getattr(self._bot_service, "config", None)
+        if model is not None:
+            model = getattr(model, "brain_model", None)
+        if not isinstance(model, str) or not model.strip():
+            return ""
+        short = model.strip().replace("claude-", "").replace("opus-", "o").replace("sonnet-", "s")
+        return f"-{short}"
 
     def _emit_latency(
         self,
@@ -206,7 +218,12 @@ class TelegramTransport:
         ))
         await self._app.initialize()
         await self._app.start()
-        await self._app.updater.start_polling()
+        try:
+            await self._app.updater.start_polling()
+            self._last_update_at = time.time()
+        except Exception:
+            logger.error("Telegram start_polling() failed", exc_info=True)
+            raise
         await self._set_commands()
         await self._notify_startup()
 
@@ -229,6 +246,39 @@ class TelegramTransport:
         await self._app.updater.stop()
         await self._app.stop()
         await self._app.shutdown()
+
+    def is_polling_healthy(self, stale_seconds: float = 600.0) -> bool:
+        if self._app is None or self._token is None:
+            return True
+        updater = getattr(self._app, "updater", None)
+        if updater is None:
+            return False
+        running = getattr(updater, "running", None)
+        if running is None:
+            running = getattr(updater, "is_running", None)
+        if running is not None:
+            return bool(running)
+        if self._last_update_at == 0.0:
+            return True
+        return (time.time() - self._last_update_at) < stale_seconds
+
+    async def restart_polling(self) -> None:
+        if self._app is None or self._app.updater is None:
+            logger.warning("restart_polling called but app/updater is None")
+            return
+        logger.warning("Restarting Telegram polling (stale)")
+        try:
+            await self._app.updater.stop()
+        except Exception:
+            logger.warning("Stop updater failed", exc_info=True)
+        await asyncio.sleep(2)
+        try:
+            await self._app.updater.start_polling()
+            self._polling_restarts += 1
+            self._last_update_at = time.time()
+            logger.info("Telegram polling restarted (total restarts: %d)", self._polling_restarts)
+        except Exception:
+            logger.error("restart_polling: start_polling() failed", exc_info=True)
 
     async def _set_commands(self) -> None:
         from telegram import BotCommand
@@ -267,8 +317,9 @@ class TelegramTransport:
         if self._is_rate_limited(user_id):
             await update.message.reply_text("Demasiados mensajes. Espera un momento.")
             return
-        session_id = f"tg-{update.effective_chat.id}"
+        session_id = f"tg-{update.effective_chat.id}{self._model_tag}"
         text = update.message.text or ""
+        self._last_update_at = time.time()
         started_at = time.perf_counter()
         await _maybe_send_chat_action(update.message, "typing")
         try:
@@ -529,7 +580,7 @@ class TelegramTransport:
         mime_type: str | None = None,
     ) -> None:
         user_id = str(update.effective_user.id)
-        session_id = f"tg-{update.effective_chat.id}"
+        session_id = f"tg-{update.effective_chat.id}{self._model_tag}"
         started_at = time.perf_counter()
         await _maybe_send_chat_action(update.message, "typing")
         file = await context.bot.get_file(file_id)
@@ -596,7 +647,7 @@ class TelegramTransport:
             await update.message.reply_text("No pude descargar el archivo. Intenta de nuevo.")
             return
         user_id = str(update.effective_user.id)
-        session_id = f"tg-{update.effective_chat.id}"
+        session_id = f"tg-{update.effective_chat.id}{self._model_tag}"
         started_at = time.perf_counter()
         await _maybe_send_chat_action(update.message, "typing")
         text_content = _extract_document_text(tmp_path, doc.mime_type, doc.file_name)
@@ -658,7 +709,7 @@ class TelegramTransport:
 
     async def _handle_text_content(self, update: Update, text: str) -> None:
         user_id = str(update.effective_user.id)
-        session_id = f"tg-{update.effective_chat.id}"
+        session_id = f"tg-{update.effective_chat.id}{self._model_tag}"
         started_at = time.perf_counter()
         try:
             response = await asyncio.to_thread(

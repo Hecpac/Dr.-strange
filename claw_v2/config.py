@@ -39,10 +39,10 @@ def _env_float(name: str, default: float) -> float:
 
 _SECONDARY_PROVIDER_DEFAULT_MODELS: dict[str, str] = {
     "anthropic": "claude-sonnet-4-6",
-    "openai": "gpt-5.4-mini",
+    "openai": "gpt-5.5",
     "google": "gemini-2.5-pro",
     "ollama": "gemma4",
-    "codex": "codex-mini-latest",
+    "codex": "gpt-5.5",
 }
 
 
@@ -306,6 +306,11 @@ class AppConfig:
     codex_cli_path: str
     codex_model: str
     computer_use_backend: str
+    edge_enabled: bool
+    edge_endpoint: str | None
+    edge_key_id: str
+    edge_secret: str | None
+    edge_capabilities: list[str]
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -336,15 +341,15 @@ class AppConfig:
             brain_model=os.getenv("BRAIN_MODEL", "claude-opus-4-7"),
             worker_provider=os.getenv("WORKER_PROVIDER", "anthropic"),
             worker_model=os.getenv("WORKER_MODEL", "claude-sonnet-4-6"),
-            verifier_provider=os.getenv("VERIFIER_PROVIDER"),
-            verifier_model=os.getenv("VERIFIER_MODEL"),
-            research_provider=os.getenv("RESEARCH_PROVIDER"),
-            research_model=os.getenv("RESEARCH_MODEL"),
-            judge_provider=os.getenv("JUDGE_PROVIDER"),
-            judge_model=os.getenv("JUDGE_MODEL"),
+            verifier_provider=os.getenv("VERIFIER_PROVIDER", "codex"),
+            verifier_model=os.getenv("VERIFIER_MODEL", "gpt-5.5"),
+            research_provider=os.getenv("RESEARCH_PROVIDER", "deep_research"),
+            research_model=os.getenv("RESEARCH_MODEL", "deep-research-preview-04-2026"),
+            judge_provider=os.getenv("JUDGE_PROVIDER", "codex"),
+            judge_model=os.getenv("JUDGE_MODEL", "gpt-5.5"),
             worker_effort=os.getenv("WORKER_EFFORT", "high"),
             brain_effort=os.getenv("BRAIN_EFFORT", "high"),
-            judge_effort=os.getenv("JUDGE_EFFORT", "medium"),
+            judge_effort=os.getenv("JUDGE_EFFORT", "xhigh"),
             max_budget_usd=_env_float("MAX_BUDGET_USD", 0.50),
             db_path=Path(os.getenv("DB_PATH", "data/claw.db")),
             heartbeat_interval=_env_int("HEARTBEAT_INTERVAL", 1800),
@@ -402,6 +407,18 @@ class AppConfig:
             codex_cli_path=os.getenv("CODEX_CLI_PATH") or shutil.which("codex") or "codex",
             codex_model=os.getenv("CODEX_MODEL", "codex-mini-latest"),
             computer_use_backend=os.getenv("COMPUTER_USE_BACKEND", "openai"),
+            edge_enabled=_env_bool("EDGE_ENABLED", False),
+            edge_endpoint=os.getenv("EDGE_ENDPOINT"),
+            edge_key_id=os.getenv("EDGE_KEY_ID", "core"),
+            edge_secret=os.getenv("EDGE_SECRET") or os.getenv("A2A_SECRET"),
+            edge_capabilities=[
+                item.strip()
+                for item in os.getenv(
+                    "EDGE_CAPABILITIES",
+                    "computer_use:computer_control:chrome_cdp:browser_use",
+                ).split(":")
+                if item.strip()
+            ],
         )
 
     def ensure_directories(self) -> None:
@@ -435,6 +452,17 @@ class AppConfig:
             raise ValueError("sandbox_capability_profile must be one of: surgical, engineer, admin.")
         if self.computer_use_backend not in {"openai", "codex"}:
             raise ValueError("computer_use_backend must be 'openai' or 'codex'.")
+        if self.edge_enabled:
+            if not self.edge_endpoint:
+                raise ValueError("edge_endpoint must be configured when edge_enabled is true.")
+            if not self.edge_endpoint.startswith("https://"):
+                raise ValueError("edge_endpoint must use https://.")
+            if not self.edge_key_id:
+                raise ValueError("edge_key_id must not be empty when edge_enabled is true.")
+            if not self.edge_secret:
+                raise ValueError("edge_secret must be configured when edge_enabled is true.")
+            if not self.edge_capabilities:
+                raise ValueError("edge_capabilities must not be empty when edge_enabled is true.")
         if self.web_chat_port <= 0:
             raise ValueError("web_chat_port must be positive.")
         for site in self.monitored_sites:

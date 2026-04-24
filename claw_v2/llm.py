@@ -6,6 +6,7 @@ from typing import Callable
 from claw_v2.adapters.anthropic import AnthropicAgentAdapter
 from claw_v2.adapters.base import AdapterError, LLMRequest, PostLLMHook, PreLLMHook, ProviderAdapter, UserPrompt
 from claw_v2.adapters.codex import CodexAdapter
+from claw_v2.adapters.deep_research import DeepResearchAdapter
 from claw_v2.adapters.google import GoogleAdapter
 from claw_v2.adapters.ollama import OllamaAdapter
 from claw_v2.adapters.openai import OpenAIAdapter
@@ -99,6 +100,9 @@ class LLMRouter:
         try:
             response = adapter.complete(request)
         except AdapterError as exc:
+            # Never fallback on tool-capable lanes — tools may have already mutated state
+            if lane not in self.NON_TOOL_LANES:
+                raise
             fallback_provider = self._pick_fallback(selected_provider, lane)
             if fallback_provider is None:
                 raise
@@ -121,7 +125,7 @@ class LLMRouter:
             self._audit(
                 "llm_fallback",
                 response,
-                {"requested_provider": selected_provider, "fallback_provider": fallback_provider, "response_text": response.content},
+                {"requested_provider": selected_provider, "fallback_provider": fallback_provider, "response_len": len(response.content)},
                 request=request,
             )
             return response
@@ -134,13 +138,13 @@ class LLMRouter:
         self._audit(
             "llm_response",
             response,
-            {"session_id": session_id, "response_text": response.content},
+            {"session_id": session_id, "response_len": len(response.content)},
             request=request,
         )
         return response
 
-    # Fallback order: anthropic ↔ openai; advisory-only providers fall back to Anthropic.
-    _FALLBACK_MAP: dict[str, str] = {"anthropic": "openai", "openai": "anthropic"}
+    # Fallback order: anthropic → codex (ChatGPT Pro subscription); openai → anthropic.
+    _FALLBACK_MAP: dict[str, str] = {"anthropic": "codex", "openai": "anthropic"}
 
     def _pick_fallback(self, failed_provider: str, lane: Lane) -> str | None:
         candidate = self._FALLBACK_MAP.get(failed_provider)
@@ -214,6 +218,9 @@ class LLMRouter:
                 "codex": CodexAdapter(
                     cli_path=config.codex_cli_path,
                     transport=codex_transport,
+                ),
+                "deep_research": DeepResearchAdapter(
+                    api_key=config.google_api_key,
                 ),
             },
             audit_sink=audit_sink,

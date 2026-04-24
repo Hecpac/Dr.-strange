@@ -108,6 +108,8 @@ class JobService:
         job = self.get(job_id)
         if job is None:
             raise KeyError(job_id)
+        if job.state in TERMINAL_JOB_STATES:
+            return job
         merged_payload = {**job.payload, **(payload or {})}
         now = now_utc()
         with self._lock:

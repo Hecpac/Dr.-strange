@@ -4,6 +4,7 @@ import json
 import re
 import shutil
 import subprocess
+import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -270,7 +271,7 @@ class PipelineService:
         job_id = self._pipeline_job_id(issue_id)
         job = self.jobs.get(job_id)
         if job is not None and job.state in TERMINAL_JOB_STATES:
-            job_id = f"{job_id}:{len(self.jobs.list_jobs(limit=100)) + 1}"
+            job_id = f"{job_id}:{uuid.uuid4().hex}"
         job = self.jobs.enqueue(kind="pipeline", job_id=job_id, payload={"issue_id": issue_id, **payload})
         return self.jobs.start(job.job_id, lease_owner="pipeline")
 

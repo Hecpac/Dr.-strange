@@ -120,7 +120,7 @@ class WikiService:
     # Ingest (two-step chain-of-thought)
     # ------------------------------------------------------------------
 
-    def ingest(self, title: str, content: str, *, source_type: str = "article") -> dict:
+    def ingest(self, title: str, content: str, *, source_type: str = "article", dedup_threshold: float = 0.85) -> dict:
         """Two-step ingest: (1) analyze → entities & relations, (2) generate wiki pages."""
         slug = _slugify(title)
         now = _now_iso()
@@ -130,7 +130,7 @@ class WikiService:
             return {"slug": slug, "raw_path": str(raw_path), "pages_written": 0, "skipped": True}
 
         # Dedup: skip if content is too similar to an existing page
-        dup = self._find_duplicate(content)
+        dup = self._find_duplicate(content, threshold=dedup_threshold)
         if dup:
             logger.info("Skipping ingest of '%s': duplicate of '%s'", title, dup)
             return {"slug": slug, "raw_path": "", "pages_written": 0, "skipped": True, "duplicate_of": dup}
