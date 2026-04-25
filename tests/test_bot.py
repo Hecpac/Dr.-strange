@@ -1064,6 +1064,37 @@ class BotTests(unittest.TestCase):
                 self.assertEqual(jobs["summary"], {"cancelled": 1})
                 self.assertEqual(jobs["jobs"][0]["task_id"], "s1:running-task")
 
+    def test_jobs_command_includes_generic_job_service_records(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                job = runtime.job_service.enqueue(
+                    kind="notebooklm.research",
+                    payload={"notebook_id": "nb1"},
+                    resume_key="nlm:nb1",
+                )
+
+                jobs = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/jobs"))
+                self.assertEqual(jobs["system_summary"], {"queued": 1})
+                self.assertEqual(jobs["system_jobs"][0]["job_id"], job.job_id)
+
+                status = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text=f"/job_status {job.job_id}"))
+                self.assertEqual(status["source"], "job_service")
+                self.assertEqual(status["kind"], "notebooklm.research")
+
+                cancel = runtime.bot.handle_text(user_id="123", session_id="s1", text=f"/job_cancel {job.job_id}")
+                self.assertIn("Job cancelado", cancel)
+                self.assertEqual(runtime.job_service.get(job.job_id).status, "cancelled")
+
     def test_autonomous_policy_blocks_sensitive_automatic_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

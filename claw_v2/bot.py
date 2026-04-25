@@ -91,6 +91,7 @@ class BotService:
         computer_system_prompt: str | None = None,
         observe: object | None = None,
         task_ledger: object | None = None,
+        job_service: object | None = None,
         model_registry: ModelRegistry | None = None,
     ) -> None:
         self.brain = brain
@@ -105,6 +106,7 @@ class BotService:
         self._terminal_handler = TerminalHandler(terminal_bridge=terminal_bridge)
         self.observe = observe
         self.task_ledger = task_ledger
+        self.job_service = job_service
         self.model_registry = model_registry or ModelRegistry.default()
         self.learning: Any | None = None
         self._wiki_handler = WikiHandler(memory=brain.memory)
@@ -563,12 +565,23 @@ class BotService:
                     for task in self.task_ledger.list(session_id=session_id, limit=20)
                 ],
             }
+            if self.job_service is not None:
+                payload["system_summary"] = self.job_service.summary()
+                payload["system_jobs"] = [
+                    job.to_dict()
+                    for job in self.job_service.list(limit=20)
+                ]
             return json.dumps(payload, indent=2, sort_keys=True)
         if command == "/job_status":
             if len(parts) != 2:
                 return "usage: /job_status <task_id>"
             record = self.task_ledger.get(parts[1])
-            payload = record.to_dict() if record else {"error": "task not found"}
+            if record is not None:
+                payload = {"source": "task_ledger", **record.to_dict()}
+            elif self.job_service is not None and (job := self.job_service.get(parts[1])) is not None:
+                payload = {"source": "job_service", **job.to_dict()}
+            else:
+                payload = {"error": "job not found"}
             return json.dumps(payload, indent=2, sort_keys=True)
         if command == "/job_trace":
             if len(parts) not in {2, 3}:
@@ -587,6 +600,13 @@ class BotService:
         if command in {"/task_cancel", "/job_cancel"}:
             if len(parts) != 2:
                 return f"usage: {command} <task_id>"
+            if command == "/job_cancel" and self.task_ledger.get(parts[1]) is None:
+                if self.job_service is None:
+                    return "job service unavailable"
+                record = self.job_service.cancel(parts[1], reason=f"cancelled_by:{context.session_id}")
+                if record is None:
+                    return f"job {parts[1]} not found"
+                return f"Job cancelado: `{parts[1]}`"
             return self._task_handler.cancel_task_response(context.session_id, parts[1])
         return "usage: /jobs | /job_status <task_id> | /task_resume <task_id> | /task_cancel <task_id>"
 

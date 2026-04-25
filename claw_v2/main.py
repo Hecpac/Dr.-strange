@@ -42,6 +42,7 @@ from claw_v2.dream import AutoDreamService
 from claw_v2.github import GitHubPullRequestService
 from claw_v2.heartbeat import HeartbeatService
 from claw_v2.hooks import make_anti_distillation_hook, make_daily_cost_gate, make_decision_logger
+from claw_v2.jobs import JobService
 from claw_v2.kairos import KairosService
 from claw_v2.learning import LearningLoop
 from claw_v2.linear import LinearService, build_linear_api_caller
@@ -122,6 +123,7 @@ class ClawRuntime:
     agent_runtime: AgentRuntime
     agent_workspace: AgentWorkspace
     task_ledger: TaskLedger
+    job_service: JobService
     model_registry: ModelRegistry
     skill_registry: SkillRegistry | None = None
     a2a: A2AService | None = None
@@ -507,6 +509,7 @@ def _setup_operational_services(
     coordinator: CoordinatorService,
     task_board: TaskBoard,
     task_ledger: TaskLedger,
+    job_service: JobService,
     model_registry: ModelRegistry,
     buddy: BuddyService,
     learning: LearningLoop,
@@ -547,6 +550,7 @@ def _setup_operational_services(
         browser_use=browser_use,
         observe=observe,
         task_ledger=task_ledger,
+        job_service=job_service,
         model_registry=model_registry,
     )
     for capability, reason in startup_health.degraded_capabilities().items():
@@ -913,6 +917,7 @@ def build_runtime(
 
     memory, observe, metrics, approvals, bus, agent_store = _setup_core_state(config)
     task_ledger = TaskLedger(config.db_path, observe=observe)
+    job_service = JobService(config.db_path, observe=observe)
     model_registry = ModelRegistry.default()
     startup_health = _run_startup_healthchecks(config, observe)
     agent_workspace = AgentWorkspace(config.workspace_root, template_root=Path(__file__).parent)
@@ -956,6 +961,7 @@ def build_runtime(
         coordinator=coordinator,
         task_board=task_board,
         task_ledger=task_ledger,
+        job_service=job_service,
         model_registry=model_registry,
         buddy=buddy,
         learning=learning,
@@ -1011,6 +1017,7 @@ def build_runtime(
         agent_runtime=agent_runtime,
         agent_workspace=agent_workspace,
         task_ledger=task_ledger,
+        job_service=job_service,
         model_registry=model_registry,
         skill_registry=skill_registry,
         a2a=a2a,
