@@ -14,7 +14,7 @@ from claw_v2.types import LLMResponse
 
 def fake_anthropic(request: LLMRequest) -> LLMResponse:
     return LLMResponse(
-        content=f"handled:{request.lane}",
+        content=f"<response>handled:{request.lane}</response>",
         lane=request.lane,
         provider="anthropic",
         model=request.model,
@@ -33,6 +33,7 @@ class RuntimeTests(unittest.TestCase):
                 "AGENT_STATE_ROOT": str(root / "agents"),
                 "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
                 "APPROVALS_ROOT": str(root / "approvals"),
+                "PIPELINE_STATE_ROOT": str(root / "pipeline"),
                 "JUDGE_PROVIDER": "ollama",
                 "JUDGE_MODEL": "",
             }
@@ -62,6 +63,7 @@ class RuntimeTests(unittest.TestCase):
                 "AGENT_STATE_ROOT": str(root / "agents"),
                 "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
                 "APPROVALS_ROOT": str(root / "approvals"),
+                "PIPELINE_STATE_ROOT": str(root / "pipeline"),
                 "TELEGRAM_ALLOWED_USER_ID": "123",
             }
             with patch.dict(os.environ, env, clear=False):
@@ -80,6 +82,7 @@ class RuntimeTests(unittest.TestCase):
                 "AGENT_STATE_ROOT": str(root / "agents"),
                 "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
                 "APPROVALS_ROOT": str(root / "approvals"),
+                "PIPELINE_STATE_ROOT": str(root / "pipeline"),
             }
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
@@ -101,6 +104,26 @@ class RuntimeTests(unittest.TestCase):
                 self.assertEqual((hex_def.provider, hex_def.model), ("openai", "gpt-5.5"))
                 self.assertEqual((eval_def.provider, eval_def.model), ("anthropic", "claude-opus-4-7"))
 
+    def test_runtime_registry_writes_to_agent_state_not_tracked_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workspace_registry = root / "workspace" / "claw_v2" / "AGENTS.md"
+            workspace_registry.parent.mkdir(parents=True)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "PIPELINE_STATE_ROOT": str(root / "pipeline"),
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                self.assertEqual(runtime.heartbeat.registry_path, root / "agents" / "AGENTS.md")
+                runtime.heartbeat.emit()
+                self.assertTrue((root / "agents" / "AGENTS.md").exists())
+                self.assertFalse(workspace_registry.exists())
+
     def test_daemon_tick_runs_scheduled_jobs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -110,6 +133,7 @@ class RuntimeTests(unittest.TestCase):
                 "AGENT_STATE_ROOT": str(root / "agents"),
                 "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
                 "APPROVALS_ROOT": str(root / "approvals"),
+                "PIPELINE_STATE_ROOT": str(root / "pipeline"),
                 "WORKER_PROVIDER": "anthropic",  # isolate from host env
             }
             with patch.dict(os.environ, env, clear=False):
@@ -141,6 +165,7 @@ class RuntimeTests(unittest.TestCase):
                 "AGENT_STATE_ROOT": str(root / "agents"),
                 "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
                 "APPROVALS_ROOT": str(root / "approvals"),
+                "PIPELINE_STATE_ROOT": str(root / "pipeline"),
                 "RUNTIME_CONFIG_PATH": str(runtime_config),
             }
             with patch.dict(os.environ, env, clear=False):
@@ -161,6 +186,7 @@ class RuntimeTests(unittest.TestCase):
                 "AGENT_STATE_ROOT": str(root / "agents"),
                 "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
                 "APPROVALS_ROOT": str(root / "approvals"),
+                "PIPELINE_STATE_ROOT": str(root / "pipeline"),
             }
             seen_session_ids: list[str | None] = []
 
@@ -168,7 +194,7 @@ class RuntimeTests(unittest.TestCase):
                 seen_session_ids.append(request.session_id)
                 provider_session_id = request.session_id or "sdk-session-1"
                 return LLMResponse(
-                    content=f"handled:{request.lane}",
+                    content=f"<response>handled:{request.lane}</response>",
                     lane=request.lane,
                     provider="anthropic",
                     model=request.model,
@@ -193,6 +219,7 @@ class RuntimeTests(unittest.TestCase):
                 "AGENT_STATE_ROOT": str(root / "agents"),
                 "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
                 "APPROVALS_ROOT": str(root / "approvals"),
+                "PIPELINE_STATE_ROOT": str(root / "pipeline"),
                 "TELEGRAM_ALLOWED_USER_ID": "123",
             }
             seen_prompts: list[object] = []
@@ -200,7 +227,7 @@ class RuntimeTests(unittest.TestCase):
             def multimodal_anthropic(request: LLMRequest) -> LLMResponse:
                 seen_prompts.append(request.prompt)
                 return LLMResponse(
-                    content="handled:brain",
+                    content="<response>handled:brain</response>",
                     lane=request.lane,
                     provider="anthropic",
                     model=request.model,
@@ -249,6 +276,7 @@ class RuntimeTests(unittest.TestCase):
                 "AGENT_STATE_ROOT": str(root / "agents"),
                 "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
                 "APPROVALS_ROOT": str(root / "approvals"),
+                "PIPELINE_STATE_ROOT": str(root / "pipeline"),
                 "TELEGRAM_ALLOWED_USER_ID": "123",
             }
             seen_prompts: list[object] = []
@@ -256,7 +284,7 @@ class RuntimeTests(unittest.TestCase):
             def capture_anthropic(request: LLMRequest) -> LLMResponse:
                 seen_prompts.append(request.prompt)
                 return LLMResponse(
-                    content="handled",
+                    content="<response>handled</response>",
                     lane=request.lane,
                     provider="anthropic",
                     model=request.model,
@@ -298,6 +326,7 @@ class RuntimeTests(unittest.TestCase):
                 "AGENT_STATE_ROOT": str(root / "agents"),
                 "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
                 "APPROVALS_ROOT": str(root / "approvals"),
+                "PIPELINE_STATE_ROOT": str(root / "pipeline"),
                 "TELEGRAM_ALLOWED_USER_ID": "123",
             }
             seen_prompts: list[object] = []
@@ -305,7 +334,7 @@ class RuntimeTests(unittest.TestCase):
             def capture_anthropic(request: LLMRequest) -> LLMResponse:
                 seen_prompts.append(request.prompt)
                 return LLMResponse(
-                    content="handled",
+                    content="<response>handled</response>",
                     lane=request.lane,
                     provider="anthropic",
                     model=request.model,
@@ -336,6 +365,7 @@ class RuntimeTests(unittest.TestCase):
                 "AGENT_STATE_ROOT": str(root / "agents"),
                 "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
                 "APPROVALS_ROOT": str(root / "approvals"),
+                "PIPELINE_STATE_ROOT": str(root / "pipeline"),
             }
             seen_prompts: list[object] = []
             seen_session_ids: list[str | None] = []
@@ -345,7 +375,7 @@ class RuntimeTests(unittest.TestCase):
                 seen_session_ids.append(request.session_id)
                 provider_session_id = request.session_id or "sdk-session-1"
                 return LLMResponse(
-                    content="handled:brain",
+                    content="<response>handled:brain</response>",
                     lane=request.lane,
                     provider="anthropic",
                     model=request.model,
@@ -382,6 +412,7 @@ class RuntimeTests(unittest.TestCase):
                 "AGENT_STATE_ROOT": str(root / "agents"),
                 "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
                 "APPROVALS_ROOT": str(root / "approvals"),
+                "PIPELINE_STATE_ROOT": str(root / "pipeline"),
                 "TELEGRAM_ALLOWED_USER_ID": "123",
                 "DAILY_COST_LIMIT": "0.10",
             }
@@ -415,13 +446,14 @@ class RuntimeTests(unittest.TestCase):
                 "AGENT_STATE_ROOT": str(root / "agents"),
                 "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
                 "APPROVALS_ROOT": str(root / "approvals"),
+                "PIPELINE_STATE_ROOT": str(root / "pipeline"),
                 "TELEGRAM_ALLOWED_USER_ID": "123",
             }
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
-                self.assertIsNotNone(runtime.bot.computer)
+                self.assertIsNotNone(runtime.bot._computer_handler.computer)
                 # Mock the screenshot since we can't run screencapture in tests
-                runtime.bot.computer.capture_screenshot = lambda: {"data": "test_data", "media_type": "image/png"}
+                runtime.bot._computer_handler.computer.capture_screenshot = lambda: {"data": "test_data", "media_type": "image/png"}
                 result = runtime.bot.handle_text(user_id="123", session_id="s1", text="/screen")
                 self.assertIn("screenshot_data", result)
 
