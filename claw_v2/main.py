@@ -56,6 +56,7 @@ from claw_v2.content import ContentEngine
 from claw_v2.task_board import TaskBoard
 from claw_v2.terminal_bridge import TerminalBridgeService
 from claw_v2.types import LLMResponse
+from claw_v2.workspace import AgentWorkspace
 from claw_v2.wiki import WikiService
 
 logger = logging.getLogger(__name__)
@@ -117,6 +118,7 @@ class ClawRuntime:
     daemon: ClawDaemon
     bot: BotService
     agent_runtime: AgentRuntime
+    agent_workspace: AgentWorkspace
     skill_registry: SkillRegistry | None = None
     a2a: A2AService | None = None
     startup_health: StartupHealthReport | None = None
@@ -903,6 +905,10 @@ def build_runtime(
 
     memory, observe, metrics, approvals, bus, agent_store = _setup_core_state(config)
     startup_health = _run_startup_healthchecks(config, observe)
+    agent_workspace = AgentWorkspace(config.workspace_root, template_root=Path(__file__).parent)
+    workspace_bootstrap = agent_workspace.ensure()
+    observe.emit("agent_workspace_bootstrap", payload=workspace_bootstrap.to_dict())
+    system_prompt = agent_workspace.system_prompt(fallback=system_prompt)
     router, learning, brain = _setup_llm_stack(
         config=config,
         memory=memory,
@@ -988,6 +994,7 @@ def build_runtime(
         daemon=daemon,
         bot=bot,
         agent_runtime=agent_runtime,
+        agent_workspace=agent_workspace,
         skill_registry=skill_registry,
         a2a=a2a,
         startup_health=startup_health,
