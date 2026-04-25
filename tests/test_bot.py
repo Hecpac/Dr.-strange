@@ -969,6 +969,83 @@ class BotTests(unittest.TestCase):
                 self.assertEqual(tasks_payload["summary"], {"succeeded": 1})
                 self.assertEqual(tasks_payload["tasks"][0]["task_id"], task_id)
 
+    def test_task_resume_command_restarts_lost_autonomous_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.task_ledger.create(
+                    task_id="s1:lost-task",
+                    session_id="s1",
+                    objective="corrige el bug del login",
+                    mode="coding",
+                    runtime="coordinator",
+                    status="lost",
+                    metadata={"autonomous": True},
+                )
+                runtime.bot.coordinator = MagicMock()
+                runtime.bot.coordinator.run.return_value = CoordinatorResult(
+                    task_id="s1:lost-task",
+                    phase_results={
+                        "research": [WorkerResult(task_name="scope_and_risks", content="scope ok", duration_seconds=0.1)],
+                        "verification": [WorkerResult(task_name="verify_change", content="Verification Status: passed", duration_seconds=0.1)],
+                    },
+                    synthesis="resumed and verified",
+                )
+
+                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/task_resume s1:lost-task")
+                self.assertIn("Tarea reanudada", reply)
+                self.assertTrue(runtime.bot._task_handler.wait_for_task("s1:lost-task", timeout=2))
+
+                runtime.bot.coordinator.run.assert_called_once()
+                record = runtime.task_ledger.get("s1:lost-task")
+                self.assertEqual(record.status, "succeeded")
+                self.assertEqual(record.metadata["resume_reason"], "manual_resume")
+                self.assertEqual(record.metadata["resume_count"], 1)
+
+    def test_task_cancel_command_marks_running_task_cancelled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.task_ledger.create(
+                    task_id="s1:running-task",
+                    session_id="s1",
+                    objective="corrige el bug del login",
+                    mode="coding",
+                    runtime="coordinator",
+                    status="running",
+                    metadata={"autonomous": True},
+                )
+
+                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/task_cancel s1:running-task")
+                self.assertIn("Tarea cancelada", reply)
+
+                record = runtime.task_ledger.get("s1:running-task")
+                self.assertEqual(record.status, "cancelled")
+                self.assertEqual(record.verification_status, "cancelled")
+                status = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/job_status s1:running-task"))
+                self.assertEqual(status["status"], "cancelled")
+                jobs = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/jobs"))
+                self.assertEqual(jobs["summary"], {"cancelled": 1})
+                self.assertEqual(jobs["jobs"][0]["task_id"], "s1:running-task")
+
     def test_autonomous_policy_blocks_sensitive_automatic_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

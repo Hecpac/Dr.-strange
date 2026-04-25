@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 from claw_v2.adapters.base import LLMRequest
 from claw_v2.main import build_runtime
+from claw_v2.task_ledger import TaskLedger
 from claw_v2.types import LLMResponse
 
 
@@ -164,6 +165,44 @@ class RuntimeTests(unittest.TestCase):
                 self.assertIn("heartbeat", tick.executed_jobs)
                 self.assertIn("morning_brief", tick.executed_jobs)
                 self.assertIn("daily_metrics", tick.executed_jobs)
+
+    def test_build_runtime_resumes_interrupted_autonomous_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            db_path = root / "data" / "claw.db"
+            seed_ledger = TaskLedger(db_path)
+            seed_ledger.create(
+                task_id="tg-123:interrupted",
+                session_id="tg-123",
+                objective="corrige el bug del login",
+                mode="coding",
+                runtime="coordinator",
+                provider="anthropic",
+                model="claude-sonnet-4-6",
+                status="running",
+                route={"channel": "telegram", "external_session_id": "123"},
+                metadata={"autonomous": True},
+            )
+            seed_ledger._conn.close()
+            env = {
+                "DB_PATH": str(db_path),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "PIPELINE_STATE_ROOT": str(root / "pipeline"),
+                "WORKER_PROVIDER": "anthropic",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                self.assertTrue(runtime.bot._task_handler.wait_for_task("tg-123:interrupted", timeout=2))
+
+                record = runtime.task_ledger.get("tg-123:interrupted")
+                self.assertEqual(record.status, "succeeded")
+                self.assertEqual(record.metadata["resume_reason"], "startup_recovery")
+                self.assertEqual(record.metadata["resume_count"], 1)
+                state = runtime.memory.get_session_state("tg-123")
+                self.assertEqual(state["active_object"]["active_task"]["status"], "completed")
 
     def test_build_runtime_registers_sites_and_sub_agent_jobs_from_runtime_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -41,6 +41,7 @@ class TaskHandler:
         self._update_session_state = update_session_state
         self._store_message = store_message
         self._task_threads: dict[str, threading.Thread] = {}
+        self._cancelled_tasks: set[str] = set()
         self._task_lock = threading.Lock()
 
     def task_approve_response(self, approval_id: str, token: str) -> str:
@@ -314,6 +315,9 @@ class TaskHandler:
 
     def _run_autonomous_task(self, session_id: str, task_id: str, objective: str, mode: str) -> None:
         try:
+            if self._is_cancelled(task_id):
+                self._mark_cancelled_task_state(session_id, task_id, objective, reason="cancelled_before_start")
+                return
             response = self._run_coordinated_task(
                 session_id,
                 objective,
@@ -321,6 +325,9 @@ class TaskHandler:
                 forced=False,
                 task_id=task_id,
             )
+            if self._is_cancelled(task_id):
+                self._mark_cancelled_task_state(session_id, task_id, objective, reason="cancelled_during_run")
+                return
             state = self._get_session_state(session_id)
             active_object = dict(state.get("active_object") or {})
             active_task = dict(active_object.get("active_task") or {})
@@ -400,6 +407,7 @@ class TaskHandler:
         finally:
             with self._task_lock:
                 self._task_threads.pop(task_id, None)
+                self._cancelled_tasks.discard(task_id)
 
     def wait_for_task(self, task_id: str, timeout: float = 5.0) -> bool:
         with self._task_lock:
@@ -408,6 +416,192 @@ class TaskHandler:
             return True
         thread.join(timeout=timeout)
         return not thread.is_alive()
+
+    def resume_interrupted_autonomous_tasks(self, *, limit: int = 20) -> int:
+        if self.task_ledger is None:
+            return 0
+        count = 0
+        for record in self.task_ledger.list(statuses=("running",), limit=limit):
+            if not self._is_resumable_record(record, automatic=True):
+                continue
+            if self._has_live_task_thread(record.task_id):
+                continue
+            self._resume_autonomous_record(record, reason="startup_recovery")
+            count += 1
+        return count
+
+    def resume_task_response(self, session_id: str, task_id: str) -> str:
+        if self.task_ledger is None:
+            return "task ledger unavailable"
+        record = self.task_ledger.get(task_id)
+        if record is None:
+            return f"task {task_id} not found"
+        if record.status == "succeeded":
+            return f"task {task_id} already succeeded"
+        if self._has_live_task_thread(task_id):
+            return f"task {task_id} is already running"
+        if not self._is_resumable_record(record, automatic=False):
+            return f"task {task_id} is not resumable"
+        self._resume_autonomous_record(record, reason="manual_resume", requested_by_session=session_id)
+        return f"Tarea reanudada: `{task_id}`\nEstado: running"
+
+    def cancel_task_response(self, session_id: str, task_id: str) -> str:
+        if self.task_ledger is None:
+            return "task ledger unavailable"
+        record = self.task_ledger.get(task_id)
+        if record is None:
+            return f"task {task_id} not found"
+        if record.status == "cancelled":
+            return f"task {task_id} already cancelled"
+        live_thread = self._has_live_task_thread(task_id)
+        if record.status not in {"queued", "running"} and not live_thread:
+            return f"task {task_id} is already terminal: {record.status}"
+        with self._task_lock:
+            self._cancelled_tasks.add(task_id)
+        self._mark_cancelled_task_state(
+            record.session_id or session_id,
+            task_id,
+            record.objective,
+            reason=f"cancelled_by:{session_id}",
+        )
+        if not live_thread:
+            with self._task_lock:
+                self._cancelled_tasks.discard(task_id)
+        return f"Tarea cancelada: `{task_id}`"
+
+    def _resume_autonomous_record(
+        self,
+        record: Any,
+        *,
+        reason: str,
+        requested_by_session: str | None = None,
+    ) -> None:
+        mode = record.mode or _infer_session_mode(record.objective)
+        metadata = dict(record.metadata or {})
+        metadata["autonomous"] = True
+        metadata["resume_reason"] = reason
+        metadata["resume_count"] = int(metadata.get("resume_count") or 0) + 1
+        metadata["last_resumed_at"] = time.time()
+        if requested_by_session:
+            metadata["requested_by_session"] = requested_by_session
+        with self._task_lock:
+            self._cancelled_tasks.discard(record.task_id)
+        if self.task_ledger is not None:
+            self.task_ledger.create(
+                task_id=record.task_id,
+                session_id=record.session_id,
+                objective=record.objective,
+                mode=mode,
+                runtime=record.runtime,
+                provider=record.provider,
+                model=record.model,
+                status="running",
+                route=record.route,
+                metadata=metadata,
+                artifacts=record.artifacts,
+            )
+        state = self._get_session_state(record.session_id)
+        active_object = dict(state.get("active_object") or {})
+        active_object["active_task"] = {
+            "task_id": record.task_id,
+            "objective": record.objective,
+            "mode": mode,
+            "status": "running",
+            "resumed_at": metadata["last_resumed_at"],
+            "resume_reason": reason,
+        }
+        self._update_session_state(
+            record.session_id,
+            mode=mode,
+            pending_action=None,
+            verification_status="running",
+            last_checkpoint={
+                "summary": f"Autonomous task resumed: {record.objective[:180]}",
+                "verification_status": "running",
+                "task_id": record.task_id,
+                "reason": reason,
+            },
+            active_object=active_object,
+        )
+        self._emit(
+            "autonomous_task_resumed",
+            {
+                "session_id": record.session_id,
+                "task_id": record.task_id,
+                "objective": record.objective,
+                "reason": reason,
+                "resume_count": metadata["resume_count"],
+            },
+        )
+        thread = threading.Thread(
+            target=self._run_autonomous_task,
+            args=(record.session_id, record.task_id, record.objective, mode),
+            daemon=True,
+            name=f"autonomous-resume-{record.task_id[-8:]}",
+        )
+        with self._task_lock:
+            self._task_threads[record.task_id] = thread
+        thread.start()
+
+    def _mark_cancelled_task_state(self, session_id: str, task_id: str, objective: str, *, reason: str) -> None:
+        state = self._get_session_state(session_id)
+        active_object = dict(state.get("active_object") or {})
+        active_task = dict(active_object.get("active_task") or {})
+        if active_task.get("task_id") == task_id:
+            active_task["status"] = "cancelled"
+            active_task["cancelled_at"] = time.time()
+            active_task["cancel_reason"] = reason
+            active_object["active_task"] = active_task
+        self._update_session_state(
+            session_id,
+            verification_status="cancelled",
+            pending_action=None,
+            last_checkpoint={
+                "summary": f"Autonomous task cancelled: {objective[:180]}",
+                "verification_status": "cancelled",
+                "reason": reason,
+                "task_id": task_id,
+            },
+            active_object=active_object,
+        )
+        if self.task_ledger is not None:
+            self.task_ledger.mark_terminal(
+                task_id,
+                status="cancelled",
+                summary=f"Autonomous task cancelled: {objective[:180]}",
+                error=reason,
+                verification_status="cancelled",
+                artifacts={"cancel_reason": reason},
+            )
+        self._emit(
+            "autonomous_task_cancelled",
+            {
+                "session_id": session_id,
+                "task_id": task_id,
+                "objective": objective,
+                "reason": reason,
+            },
+        )
+
+    def _has_live_task_thread(self, task_id: str) -> bool:
+        with self._task_lock:
+            thread = self._task_threads.get(task_id)
+        return bool(thread and thread.is_alive())
+
+    def _is_cancelled(self, task_id: str) -> bool:
+        with self._task_lock:
+            return task_id in self._cancelled_tasks
+
+    @staticmethod
+    def _is_resumable_record(record: Any, *, automatic: bool) -> bool:
+        metadata = dict(record.metadata or {})
+        if automatic and metadata.get("autonomous") is not True:
+            return False
+        if record.runtime != "coordinator":
+            return False
+        if record.status == "succeeded":
+            return False
+        return record.status in {"queued", "running", "failed", "timed_out", "cancelled", "lost"}
 
     def _emit(self, event_type: str, payload: dict[str, Any]) -> None:
         if self.observe is None:
