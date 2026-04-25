@@ -984,6 +984,9 @@ def build_runtime(
     daemon.scheduler = scheduler
     brain.wiki = wiki
     agent_runtime = AgentRuntime(bot_service=bot, memory=memory, observe=observe)
+    resumed_tasks = bot.resume_interrupted_tasks()
+    if resumed_tasks:
+        observe.emit("autonomous_task_recovery_bootstrap", payload={"resumed_tasks": resumed_tasks})
 
     return ClawRuntime(
         config=config,

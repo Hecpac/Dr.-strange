@@ -240,6 +240,7 @@ class TelegramTransport:
             BotCommand("approvals", "Ver aprobaciones pendientes"),
             BotCommand("models", "Listar modelos y billing"),
             BotCommand("model", "Ver/cambiar modelo — /model status"),
+            BotCommand("jobs", "Ver trabajos autónomos persistidos"),
             BotCommand("pipeline_status", "Ver pipelines activos"),
             BotCommand("agents", "Listar agentes registrados"),
             BotCommand("screen", "Screenshot del escritorio actual"),

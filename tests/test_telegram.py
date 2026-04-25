@@ -66,6 +66,7 @@ class TransportStartTests(unittest.IsolatedAsyncioTestCase):
                 "approvals",
                 "models",
                 "model",
+                "jobs",
                 "pipeline_status",
                 "agents",
                 "screen",

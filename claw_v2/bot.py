@@ -253,6 +253,9 @@ class BotService:
     def coordinator(self, value: object | None) -> None:
         self._task_handler.coordinator = value
 
+    def resume_interrupted_tasks(self) -> int:
+        return self._task_handler.resume_interrupted_autonomous_tasks()
+
     def set_capability_status(self, name: str, *, available: bool, reason: str | None = None) -> None:
         self._capability_status[name] = {"available": available, "reason": reason or ""}
 
@@ -334,6 +337,7 @@ class BotService:
             BotCommand("spending", self._handle_spending_command, exact=("/spending",)),
             BotCommand("task_run", self._handle_task_run_command, exact=("/task_run",), prefixes=("/task_run ",)),
             BotCommand("autonomy", self._handle_autonomy_command, exact=("/autonomy", "/autonomy_policy"), prefixes=("/autonomy ",)),
+            BotCommand("jobs", self._handle_jobs_command, exact=("/jobs",), prefixes=("/jobs ", "/job_status ", "/job_resume ", "/job_cancel ", "/task_resume ", "/task_cancel ")),
             BotCommand("task_state", self._handle_task_state_command, exact=("/tasks", "/task_status", "/task_loop", "/task_queue", "/task_pending", "/session_state"), prefixes=("/task_queue ",)),
             BotCommand("task_transition", self._handle_task_transition_command, exact=("/task_done", "/task_defer"), prefixes=("/task_done ", "/task_defer ")),
             BotCommand("browse", self._handle_browse_command, prefixes=("/browse ",)),
@@ -543,6 +547,38 @@ class BotService:
         if context.stripped == "/task_pending":
             return json.dumps(state.get("pending_approvals") or [], indent=2, sort_keys=True)
         return json.dumps(state, indent=2, sort_keys=True)
+
+    def _handle_jobs_command(self, context: CommandContext) -> str:
+        if self.task_ledger is None:
+            return "task ledger unavailable"
+        parts = context.stripped.split()
+        command = parts[0]
+        if command == "/jobs":
+            include_all = len(parts) > 1 and parts[1].lower() == "all"
+            session_id = None if include_all else context.session_id
+            payload = {
+                "summary": self.task_ledger.summary(session_id=session_id),
+                "jobs": [
+                    task.to_dict()
+                    for task in self.task_ledger.list(session_id=session_id, limit=20)
+                ],
+            }
+            return json.dumps(payload, indent=2, sort_keys=True)
+        if command == "/job_status":
+            if len(parts) != 2:
+                return "usage: /job_status <task_id>"
+            record = self.task_ledger.get(parts[1])
+            payload = record.to_dict() if record else {"error": "task not found"}
+            return json.dumps(payload, indent=2, sort_keys=True)
+        if command in {"/task_resume", "/job_resume"}:
+            if len(parts) != 2:
+                return f"usage: {command} <task_id>"
+            return self._task_handler.resume_task_response(context.session_id, parts[1])
+        if command in {"/task_cancel", "/job_cancel"}:
+            if len(parts) != 2:
+                return f"usage: {command} <task_id>"
+            return self._task_handler.cancel_task_response(context.session_id, parts[1])
+        return "usage: /jobs | /job_status <task_id> | /task_resume <task_id> | /task_cancel <task_id>"
 
     def _handle_task_transition_command(self, context: CommandContext) -> str:
         if context.stripped == "/task_done":
