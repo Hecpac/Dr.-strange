@@ -974,6 +974,12 @@ class BotTests(unittest.TestCase):
                 tasks_payload = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/tasks"))
                 self.assertEqual(tasks_payload["summary"], {"succeeded": 1})
                 self.assertEqual(tasks_payload["tasks"][0]["task_id"], task_id)
+                job_trace = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text=f"/job_trace {task_id}"))
+                self.assertEqual(job_trace["job_id"], task_id)
+                self.assertTrue(
+                    any(event["event_type"] == "task_ledger_terminal" for event in job_trace["events"])
+                )
+                self.assertTrue(all(event["artifact_id"] for event in job_trace["events"] if event["event_type"].startswith("task_ledger_")))
 
     def test_task_resume_command_restarts_lost_autonomous_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

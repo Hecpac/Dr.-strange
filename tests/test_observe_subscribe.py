@@ -45,6 +45,17 @@ class ObserveSubscribeTests(unittest.TestCase):
         self.assertEqual(events[0]["event_type"], "lonely_event")
         self.assertEqual(events[0]["payload"], {"a": 1})
 
+    def test_job_events_filters_and_orders_by_job_id(self) -> None:
+        self.stream.emit("other_started", job_id="job-2", payload={"step": 0})
+        self.stream.emit("job_started", job_id="job-1", artifact_id="plan:1", payload={"step": 1})
+        self.stream.emit("job_completed", job_id="job-1", artifact_id="outcome:1", payload={"step": 2})
+
+        events = self.stream.job_events("job-1")
+
+        self.assertEqual([event["event_type"] for event in events], ["job_started", "job_completed"])
+        self.assertEqual([event["payload"]["step"] for event in events], [1, 2])
+        self.assertEqual(events[0]["artifact_id"], "plan:1")
+
     def test_multiple_subscribers_all_invoked(self) -> None:
         a: list[dict] = []
         b: list[dict] = []
