@@ -54,6 +54,7 @@ from claw_v2.skills import SkillRegistry
 from claw_v2.social import SocialPublisher
 from claw_v2.content import ContentEngine
 from claw_v2.task_board import TaskBoard
+from claw_v2.task_ledger import TaskLedger
 from claw_v2.terminal_bridge import TerminalBridgeService
 from claw_v2.types import LLMResponse
 from claw_v2.workspace import AgentWorkspace
@@ -119,6 +120,7 @@ class ClawRuntime:
     bot: BotService
     agent_runtime: AgentRuntime
     agent_workspace: AgentWorkspace
+    task_ledger: TaskLedger
     skill_registry: SkillRegistry | None = None
     a2a: A2AService | None = None
     startup_health: StartupHealthReport | None = None
@@ -502,6 +504,7 @@ def _setup_operational_services(
     sub_agents: SubAgentService,
     coordinator: CoordinatorService,
     task_board: TaskBoard,
+    task_ledger: TaskLedger,
     buddy: BuddyService,
     learning: LearningLoop,
     kairos: KairosService,
@@ -540,6 +543,7 @@ def _setup_operational_services(
         computer=computer,
         browser_use=browser_use,
         observe=observe,
+        task_ledger=task_ledger,
     )
     for capability, reason in startup_health.degraded_capabilities().items():
         bot.set_capability_status(capability, available=False, reason=reason)
@@ -904,6 +908,7 @@ def build_runtime(
     config.ensure_directories()
 
     memory, observe, metrics, approvals, bus, agent_store = _setup_core_state(config)
+    task_ledger = TaskLedger(config.db_path, observe=observe)
     startup_health = _run_startup_healthchecks(config, observe)
     agent_workspace = AgentWorkspace(config.workspace_root, template_root=Path(__file__).parent)
     workspace_bootstrap = agent_workspace.ensure()
@@ -945,6 +950,7 @@ def build_runtime(
         sub_agents=sub_agents,
         coordinator=coordinator,
         task_board=task_board,
+        task_ledger=task_ledger,
         buddy=buddy,
         learning=learning,
         kairos=kairos,
@@ -995,6 +1001,7 @@ def build_runtime(
         bot=bot,
         agent_runtime=agent_runtime,
         agent_workspace=agent_workspace,
+        task_ledger=task_ledger,
         skill_registry=skill_registry,
         a2a=a2a,
         startup_health=startup_health,

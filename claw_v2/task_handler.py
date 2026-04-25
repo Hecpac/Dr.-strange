@@ -27,6 +27,7 @@ class TaskHandler:
         approvals: Any | None = None,
         coordinator: Any | None = None,
         observe: Any | None = None,
+        task_ledger: Any | None = None,
         get_session_state: Callable[[str], dict[str, Any]],
         update_session_state: Callable[..., Any],
         store_message: Callable[[str, str, str], Any] | None = None,
@@ -34,6 +35,7 @@ class TaskHandler:
         self.approvals = approvals
         self.coordinator = coordinator
         self.observe = observe
+        self.task_ledger = task_ledger
         self._get_session_state = get_session_state
         self._update_session_state = update_session_state
         self._store_message = store_message
@@ -168,6 +170,13 @@ class TaskHandler:
                 "objective": objective,
                 "mode": mode,
             },
+        )
+        self._record_ledger_task_started(
+            task_id=task_id,
+            session_id=session_id,
+            objective=objective,
+            mode=mode,
+            route=active_object.get("last_channel_route") if isinstance(active_object.get("last_channel_route"), dict) else {},
         )
         thread = threading.Thread(
             target=self._run_autonomous_task,
@@ -320,6 +329,17 @@ class TaskHandler:
                 self._update_session_state(session_id, active_object=active_object)
             if self._store_message is not None:
                 self._store_message(session_id, "assistant", response[:4000])
+            completed_state = self._get_session_state(session_id)
+            completed_checkpoint = completed_state.get("last_checkpoint") or {}
+            verification_status = str(completed_state.get("verification_status") or "unknown")
+            if self.task_ledger is not None:
+                self.task_ledger.mark_terminal(
+                    task_id,
+                    status="succeeded",
+                    summary=str(completed_checkpoint.get("summary") or objective),
+                    verification_status=verification_status,
+                    artifacts={"response_preview": response[:1000]},
+                )
             self._emit(
                 "autonomous_task_completed",
                 {
@@ -327,7 +347,7 @@ class TaskHandler:
                     "task_id": task_id,
                     "objective": objective,
                     "response": response,
-                    "verification_status": self._get_session_state(session_id).get("verification_status", "unknown"),
+                    "verification_status": verification_status,
                 },
             )
         except Exception as exc:
@@ -356,6 +376,15 @@ class TaskHandler:
             response = f"Tarea autónoma falló: `{task_id}`\nError: {error}"
             if self._store_message is not None:
                 self._store_message(session_id, "assistant", response[:4000])
+            if self.task_ledger is not None:
+                self.task_ledger.mark_terminal(
+                    task_id,
+                    status="failed",
+                    summary=f"Autonomous task failed: {error}",
+                    error=error,
+                    verification_status="failed",
+                    artifacts={"response_preview": response[:1000]},
+                )
             self._emit(
                 "autonomous_task_failed",
                 {
@@ -382,6 +411,42 @@ class TaskHandler:
         if self.observe is None:
             return
         self.observe.emit(event_type, lane="coordinator", payload=payload)
+
+    def _record_ledger_task_started(
+        self,
+        *,
+        task_id: str,
+        session_id: str,
+        objective: str,
+        mode: str,
+        route: dict[str, Any],
+    ) -> None:
+        if self.task_ledger is None:
+            return
+        provider, model = self._provider_model_for_mode(mode)
+        self.task_ledger.create(
+            task_id=task_id,
+            session_id=session_id,
+            objective=objective,
+            mode=mode,
+            runtime="coordinator",
+            provider=provider,
+            model=model,
+            status="running",
+            route=route,
+            metadata={"autonomous": True},
+        )
+
+    def _provider_model_for_mode(self, mode: str) -> tuple[str | None, str | None]:
+        router = getattr(self.coordinator, "router", None)
+        config = getattr(router, "config", None)
+        if config is None:
+            return None, None
+        lane = "research" if mode == "research" else "worker"
+        try:
+            return str(config.provider_for_lane(lane)), str(config.model_for_lane(lane))
+        except Exception:
+            return None, None
 
     def _updated_pending_task_approvals(self, session_id: str, entry: dict[str, Any]) -> list[dict[str, Any]]:
         state = self._get_session_state(session_id)
