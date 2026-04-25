@@ -11,7 +11,15 @@ if ! command -v claude >/dev/null 2>&1; then
 fi
 
 current_branch="$(git rev-parse --abbrev-ref HEAD)"
-target="${1:-$current_branch}"
+target="$current_branch"
+
+# Git passes remote name/URL as argv and pushed refs on stdin. Use the local ref
+# when available; falling back to the current branch keeps manual runs usable.
+if read -r local_ref _local_sha _remote_ref _remote_sha; then
+  case "$local_ref" in
+    refs/heads/*) target="${local_ref#refs/heads/}" ;;
+  esac
+fi
 
 echo "[pre-push] running claude ultrareview on $target"
 
