@@ -77,6 +77,7 @@ class CodexAdapter(ProviderAdapter):
                 capture_output=True,
                 text=True,
                 timeout=request.timeout,
+                stdin=subprocess.DEVNULL,
             )
         except FileNotFoundError as exc:
             raise AdapterUnavailableError(
