@@ -455,9 +455,7 @@ def _setup_agent_services(
         agent_registry=sub_agents.registry(),
     )
     task_board = TaskBoard(board_root=config.agent_state_root / "_board")
-    registry_path = config.workspace_root / "claw_v2" / "AGENTS.md"
-    if not registry_path.parent.exists():
-        registry_path = config.agent_state_root / "AGENTS.md"
+    registry_path = config.agent_state_root / "AGENTS.md"
     heartbeat = HeartbeatService(
         metrics=metrics,
         approvals=approvals,
