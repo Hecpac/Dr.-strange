@@ -129,8 +129,10 @@ class TelegramTransport:
         token: str | None,
         allowed_user_id: str | None = None,
         voice_api_key: str | None = None,
+        agent_runtime: object | None = None,
     ) -> None:
         self._bot_service = bot_service
+        self._agent_runtime = agent_runtime
         self._token = token
         self._allowed_user_id = allowed_user_id
         self._voice_api_key = voice_api_key
@@ -272,17 +274,16 @@ class TelegramTransport:
         started_at = time.perf_counter()
         await _maybe_send_chat_action(update.message, "typing")
         try:
-            response = await asyncio.to_thread(
-                self._bot_service.handle_text, user_id=user_id, session_id=session_id, text=text,
-            )
+            response = await self._handle_agent_text(user_id=user_id, session_id=session_id, text=text)
         except Exception as exc:
             logger.exception("Error handling message")
             err_str = str(exc)
             if "Could not process image" in err_str:
                 response = "No pude procesar la imagen/screenshot. Intento sin captura visual."
                 try:
-                    response = await asyncio.to_thread(
-                        self._bot_service.handle_text, user_id=user_id, session_id=session_id,
+                    response = await self._handle_agent_text(
+                        user_id=user_id,
+                        session_id=session_id,
                         text=text + " (sin usar screenshots ni imágenes)",
                     )
                 except Exception:
@@ -544,7 +545,7 @@ class TelegramTransport:
                 mime_type=mime_type,
             )
             response = await asyncio.to_thread(
-                self._bot_service.handle_multimodal,
+                self._handle_agent_multimodal_sync,
                 user_id=user_id,
                 session_id=session_id,
                 content_blocks=content_blocks,
@@ -608,7 +609,7 @@ class TelegramTransport:
         ]
         try:
             response = await asyncio.to_thread(
-                self._bot_service.handle_multimodal,
+                self._handle_agent_multimodal_sync,
                 user_id=user_id,
                 session_id=session_id,
                 content_blocks=content_blocks,
@@ -661,9 +662,7 @@ class TelegramTransport:
         session_id = f"tg-{update.effective_chat.id}"
         started_at = time.perf_counter()
         try:
-            response = await asyncio.to_thread(
-                self._bot_service.handle_text, user_id=user_id, session_id=session_id, text=text,
-            )
+            response = await self._handle_agent_text(user_id=user_id, session_id=session_id, text=text)
         except Exception:
             logger.exception("Error handling voice message")
             response = "Error processing your voice message."
@@ -701,6 +700,47 @@ class TelegramTransport:
             response_parts=len(parts),
             response_chars=len(response),
         )
+
+    async def _handle_agent_text(self, *, user_id: str, session_id: str, text: str) -> str:
+        return await asyncio.to_thread(self._handle_agent_text_sync, user_id, session_id, text)
+
+    def _handle_agent_text_sync(self, user_id: str, session_id: str, text: str) -> str:
+        if self._agent_runtime is None:
+            return self._bot_service.handle_text(user_id=user_id, session_id=session_id, text=text)
+        external_session_id = session_id.removeprefix("tg-")
+        response = self._agent_runtime.handle_text(
+            channel="telegram",
+            external_user_id=user_id,
+            external_session_id=external_session_id,
+            session_id=session_id,
+            text=text,
+        )
+        return response.text
+
+    def _handle_agent_multimodal_sync(
+        self,
+        user_id: str,
+        session_id: str,
+        content_blocks: list[dict[str, Any]],
+        memory_text: str,
+    ) -> str:
+        if self._agent_runtime is None:
+            return self._bot_service.handle_multimodal(
+                user_id=user_id,
+                session_id=session_id,
+                content_blocks=content_blocks,
+                memory_text=memory_text,
+            )
+        external_session_id = session_id.removeprefix("tg-")
+        response = self._agent_runtime.handle_multimodal(
+            channel="telegram",
+            external_user_id=user_id,
+            external_session_id=external_session_id,
+            session_id=session_id,
+            content_blocks=content_blocks,
+            memory_text=memory_text,
+        )
+        return response.text
 
     def _is_authorized(self, update: Update) -> bool:
         if self._allowed_user_id is None:

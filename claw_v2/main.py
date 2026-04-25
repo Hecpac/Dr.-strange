@@ -12,6 +12,7 @@ from typing import Any, Callable
 from claw_v2.a2a import A2AService
 from claw_v2.adapters.anthropic import create_claude_sdk_executor
 from claw_v2.adapters.base import LLMRequest
+from claw_v2.agent_runtime import AgentRuntime
 from claw_v2.agents import (
     AgentDefinition,
     AutoResearchAgentService,
@@ -115,6 +116,7 @@ class ClawRuntime:
     scheduler: CronScheduler
     daemon: ClawDaemon
     bot: BotService
+    agent_runtime: AgentRuntime
     skill_registry: SkillRegistry | None = None
     a2a: A2AService | None = None
     startup_health: StartupHealthReport | None = None
@@ -963,6 +965,7 @@ def build_runtime(
     )
     daemon.scheduler = scheduler
     brain.wiki = wiki
+    agent_runtime = AgentRuntime(bot_service=bot, memory=memory, observe=observe)
 
     return ClawRuntime(
         config=config,
@@ -984,6 +987,7 @@ def build_runtime(
         scheduler=scheduler,
         daemon=daemon,
         bot=bot,
+        agent_runtime=agent_runtime,
         skill_registry=skill_registry,
         a2a=a2a,
         startup_health=startup_health,

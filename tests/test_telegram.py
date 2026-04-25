@@ -4,6 +4,7 @@ import asyncio
 import base64
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from claw_v2.telegram import TelegramTransport, _split_message
@@ -121,6 +122,36 @@ class HandleTextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["status"], "ok")
         self.assertEqual(payload["response_parts"], 1)
         self.assertGreaterEqual(payload["total_ms"], 0.0)
+
+    async def test_authorized_text_uses_agent_runtime_when_available(self) -> None:
+        bot_service = MagicMock()
+        bot_service.observe = MagicMock()
+        agent_runtime = MagicMock()
+        agent_runtime.handle_text.return_value = SimpleNamespace(text="runtime response", session_id="tg-1")
+        transport = TelegramTransport(
+            bot_service=bot_service,
+            agent_runtime=agent_runtime,
+            token="t",
+            allowed_user_id="123",
+        )
+        update = MagicMock()
+        update.effective_user.id = 123
+        update.effective_chat.id = 1
+        update.message.text = "hello"
+        update.message.reply_text = AsyncMock()
+        update.message.chat.send_action = AsyncMock()
+
+        await transport._handle_text(update, MagicMock())
+
+        update.message.reply_text.assert_awaited()
+        bot_service.handle_text.assert_not_called()
+        agent_runtime.handle_text.assert_called_once_with(
+            channel="telegram",
+            external_user_id="123",
+            external_session_id="1",
+            session_id="tg-1",
+            text="hello",
+        )
 
     async def test_claude_sdk_failures_return_specific_message(self) -> None:
         transport = TelegramTransport(
