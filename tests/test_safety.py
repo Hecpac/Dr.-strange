@@ -140,6 +140,48 @@ class SafetyTests(unittest.TestCase):
             self.assertIsNone(check_command("python3 --version", policy))
             self.assertIsNone(check_command("npm --version", policy))
 
+    def test_engineer_profile_allows_operational_tools(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            policy = SandboxPolicy(workspace_root=workspace, capability_profile="engineer")
+            self.assertIsNone(check_command("gh pr list --repo Hecpac/Dr.-strange", policy))
+            self.assertIsNone(check_command("launchctl list com.pachano.claw", policy))
+            self.assertIsNone(check_command("ps -p 123", policy))
+            self.assertIsNone(check_command("lsof -nP -iTCP:8765 -sTCP:LISTEN", policy))
+            self.assertIsNone(check_command("chmod +x scripts/install-hooks.sh", policy))
+
+    def test_engineer_profile_allows_explicit_workspace_shell_scripts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            scripts = workspace / "scripts"
+            scripts.mkdir(parents=True)
+            script = scripts / "bootstrap.sh"
+            script.write_text("#!/usr/bin/env bash\necho ok\n", encoding="utf-8")
+            policy = SandboxPolicy(workspace_root=workspace, capability_profile="engineer")
+            self.assertIsNone(check_command("./scripts/bootstrap.sh", policy))
+
+    def test_workspace_shell_script_must_stay_inside_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            outside_script = root / "bootstrap.sh"
+            outside_script.write_text("#!/usr/bin/env bash\necho nope\n", encoding="utf-8")
+            policy = SandboxPolicy(workspace_root=workspace, capability_profile="engineer")
+            decision = sandbox_hook("Bash", {"command": str(outside_script)}, policy=policy)
+            self.assertFalse(decision.allowed)
+            self.assertIn("whitelist", decision.reason)
+
+    def test_sandbox_still_blocks_shell_substitution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            policy = SandboxPolicy(workspace_root=workspace, capability_profile="engineer")
+            violation = check_command("launchctl kickstart -k gui/$(id -u)/com.pachano.claw", policy)
+            self.assertIsNotNone(violation)
+            self.assertIn("shell operators", violation)
+
     def test_engineer_profile_blocks_python_inline_execution(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir) / "workspace"

@@ -157,11 +157,18 @@ class HandleMessageTests(unittest.TestCase):
         self.assertIn("Analyze: identify the likely cause", prompt)
         self.assertIn("Only ask for help after 3 distinct strategies", prompt)
 
+    def test_brain_system_prompt_includes_autonomy_execution_contract(self) -> None:
+        prompt = _brain_system_prompt("You are Claw.")
+        self.assertIn("You are not a tutorial bot", prompt)
+        self.assertIn("build the narrowest workspace bridge script", prompt)
+        self.assertIn("Do not ask Hector to paste output", prompt)
+        self.assertIn("create or update the PR yourself", prompt)
+
     def test_brain_system_prompt_includes_runtime_operations_contract(self) -> None:
         prompt = _brain_system_prompt("You are Claw.")
         self.assertIn("com.pachano.claw", prompt)
         self.assertIn(".venv/bin/python -m claw_v2.main", prompt)
-        self.assertIn("launchctl kickstart -k gui/$(id -u)/com.pachano.claw", prompt)
+        self.assertIn("launchctl kickstart -k gui/<uid>/com.pachano.claw", prompt)
         self.assertIn("Do not suggest com.claw.daemon", prompt)
         self.assertIn("Do not ask Hector to paste process or curl output", prompt)
 

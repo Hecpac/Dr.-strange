@@ -25,30 +25,46 @@ SURGICAL_ALLOWED_BINARIES = frozenset(
     }
 )
 
+DEVELOPMENT_ALLOWED_BINARIES = frozenset(
+    {
+        "node",
+        "npm",
+        "npx",
+        "pip",
+        "pip3",
+        "python",
+        "python3",
+    }
+)
+
+OPERATIONAL_ALLOWED_BINARIES = frozenset(
+    {
+        "chmod",
+        "date",
+        "gh",
+        "head",
+        "id",
+        "launchctl",
+        "lsof",
+        "pgrep",
+        "ps",
+        "readlink",
+        "sqlite3",
+        "stat",
+        "tail",
+        "wc",
+    }
+)
+
 
 CAPABILITY_PROFILES = {
     "surgical": SURGICAL_ALLOWED_BINARIES,
-    "engineer": SURGICAL_ALLOWED_BINARIES
-    | {
-        "pip",
-        "pip3",
-        "python",
-        "python3",
-        "npm",
-        "npx",
-        "node",
-    },
+    "engineer": SURGICAL_ALLOWED_BINARIES | DEVELOPMENT_ALLOWED_BINARIES | OPERATIONAL_ALLOWED_BINARIES,
     "admin": SURGICAL_ALLOWED_BINARIES
+    | DEVELOPMENT_ALLOWED_BINARIES
+    | OPERATIONAL_ALLOWED_BINARIES
     | {
-        "pip",
-        "pip3",
-        "python",
-        "python3",
-        "npm",
-        "npx",
-        "node",
         "brew",
-        "chmod",
         "chown",
         "diskutil",
     },
@@ -70,6 +86,7 @@ PYTHON_SAFE_MODULES = frozenset(
 )
 NODE_INTERPRETERS = frozenset({"node"})
 VERSION_OR_HELP_FLAGS = frozenset({"--version", "-V", "-VV", "--help", "-h"})
+WORKSPACE_SCRIPT_SUFFIXES = (".sh",)
 
 
 @dataclass(slots=True)
@@ -151,6 +168,8 @@ def check_command(command: str, policy: SandboxPolicy) -> str | None:
     if "xargs" in [Path(token).name for token in tokens]:
         return "xargs is not allowed"
     base_cmd = Path(tokens[0]).name
+    if _is_explicit_workspace_script(tokens[0], policy):
+        return None
     if _network_disabled(policy) and base_cmd in {"curl", "wget"}:
         return "network access not allowed for this agent"
     if base_cmd not in policy.active_profile_binaries:
@@ -221,6 +240,15 @@ def _check_node_invocation(tokens: list[str], policy: SandboxPolicy) -> str | No
     if not _script_path_within_policy(script, policy):
         return "node script path outside allowed boundaries"
     return None
+
+
+def _is_explicit_workspace_script(command_token: str, policy: SandboxPolicy) -> bool:
+    path = Path(command_token)
+    if "/" not in command_token and not path.is_absolute():
+        return False
+    if not command_token.endswith(WORKSPACE_SCRIPT_SUFFIXES):
+        return False
+    return _script_path_within_policy(command_token, policy)
 
 
 def _contains_only_version_or_help_flags(args: list[str]) -> bool:
