@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${CLAW_SKIP_ULTRAREVIEW:-0}" == "1" ]]; then
+  exit 0
+fi
+
+if ! command -v claude >/dev/null 2>&1; then
+  echo "[pre-push] claude CLI not found — skipping ultrareview" >&2
+  exit 0
+fi
+
+current_branch="$(git rev-parse --abbrev-ref HEAD)"
+target="${1:-$current_branch}"
+
+echo "[pre-push] running claude ultrareview on $target"
+
+if ! claude ultrareview --json "$target" > /tmp/claw-ultrareview.json; then
+  echo "[pre-push] ultrareview failed — see /tmp/claw-ultrareview.json" >&2
+  echo "[pre-push] override with CLAW_SKIP_ULTRAREVIEW=1 git push" >&2
+  exit 1
+fi
+
+echo "[pre-push] ultrareview passed (findings: /tmp/claw-ultrareview.json)"
+exit 0
