@@ -15,7 +15,7 @@ JOB_ACTIVE_STATUSES = frozenset({"queued", "running", "waiting_approval", "retry
 JOB_VALID_STATUSES = frozenset({*JOB_ACTIVE_STATUSES, *JOB_TERMINAL_STATUSES})
 
 
-JOBS_SCHEMA = """
+JOBS_TABLE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS agent_jobs (
     job_id TEXT PRIMARY KEY,
     kind TEXT NOT NULL,
@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS agent_jobs (
     result_json TEXT NOT NULL DEFAULT '{}',
     metadata_json TEXT NOT NULL DEFAULT '{}',
     error TEXT NOT NULL DEFAULT '',
-    resume_key TEXT UNIQUE,
+    resume_key TEXT,
     attempts INTEGER NOT NULL DEFAULT 0,
     max_attempts INTEGER NOT NULL DEFAULT 3,
     worker_id TEXT,
@@ -35,12 +35,19 @@ CREATE TABLE IF NOT EXISTS agent_jobs (
     completed_at REAL,
     updated_at REAL NOT NULL
 );
+"""
 
+JOBS_INDEX_SCHEMA = """
 CREATE INDEX IF NOT EXISTS idx_agent_jobs_status_next_run
     ON agent_jobs(status, next_run_at, updated_at);
 
 CREATE INDEX IF NOT EXISTS idx_agent_jobs_kind_status
     ON agent_jobs(kind, status, updated_at DESC);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_jobs_active_resume_key
+    ON agent_jobs(resume_key)
+    WHERE resume_key IS NOT NULL
+      AND status IN ('queued', 'running', 'waiting_approval', 'retrying');
 """
 
 
@@ -79,7 +86,9 @@ class JobService:
         self._conn.row_factory = sqlite3.Row
         self._lock = threading.Lock()
         with self._lock:
-            self._conn.executescript(JOBS_SCHEMA)
+            self._conn.executescript(JOBS_TABLE_SCHEMA)
+            self._migrate_resume_key_uniqueness()
+            self._conn.executescript(JOBS_INDEX_SCHEMA)
             self._conn.commit()
 
     def enqueue(
@@ -95,7 +104,7 @@ class JobService:
         if not kind.strip():
             raise ValueError("job kind is required")
         if resume_key:
-            existing = self.get_by_resume_key(resume_key)
+            existing = self.get_active_by_resume_key(resume_key)
             if existing is not None:
                 return existing
         now = time.time()
@@ -112,20 +121,74 @@ class JobService:
             updated_at=now,
         )
         with self._lock:
-            self._conn.execute(
-                """
-                INSERT INTO agent_jobs (
-                    job_id, kind, status, payload_json, checkpoint_json, result_json,
-                    metadata_json, error, resume_key, attempts, max_attempts, worker_id,
-                    next_run_at, created_at, started_at, completed_at, updated_at
+            try:
+                self._conn.execute(
+                    """
+                    INSERT INTO agent_jobs (
+                        job_id, kind, status, payload_json, checkpoint_json, result_json,
+                        metadata_json, error, resume_key, attempts, max_attempts, worker_id,
+                        next_run_at, created_at, started_at, completed_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    self._record_values(record),
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                self._record_values(record),
-            )
-            self._conn.commit()
+                self._conn.commit()
+            except sqlite3.IntegrityError:
+                self._conn.rollback()
+                if resume_key:
+                    existing = self._get_active_by_resume_key_unlocked(resume_key)
+                    if existing is not None:
+                        return existing
+                raise
         self._emit("job_enqueued", record)
         return self.get(record.job_id) or record
+
+    def claim(
+        self,
+        job_id: str,
+        *,
+        worker_id: str,
+        now: float | None = None,
+    ) -> JobRecord | None:
+        now = time.time() if now is None else now
+        with self._lock:
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                row = self._conn.execute(
+                    """
+                    SELECT *
+                    FROM agent_jobs
+                    WHERE job_id = ?
+                      AND status IN ('queued', 'retrying')
+                    """,
+                    (job_id,),
+                ).fetchone()
+                if row is None:
+                    self._conn.commit()
+                    return None
+                attempts = int(row["attempts"] or 0) + 1
+                self._conn.execute(
+                    """
+                    UPDATE agent_jobs
+                    SET status = 'running',
+                        worker_id = ?,
+                        attempts = ?,
+                        started_at = COALESCE(started_at, ?),
+                        updated_at = ?
+                    WHERE job_id = ?
+                      AND status IN ('queued', 'retrying')
+                    """,
+                    (worker_id, attempts, now, now, job_id),
+                )
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+        record = self.get(job_id)
+        if record is not None:
+            self._emit("job_claimed", record)
+        return record
 
     def claim_next(
         self,
@@ -143,33 +206,40 @@ class JobService:
             where += f" AND kind IN ({placeholders})"
             params.extend(kind_list)
         with self._lock:
-            row = self._conn.execute(
-                f"""
-                SELECT *
-                FROM agent_jobs
-                WHERE {where}
-                ORDER BY created_at ASC
-                LIMIT 1
-                """,
-                params,
-            ).fetchone()
-            if row is None:
-                return None
-            job_id = str(row["job_id"])
-            attempts = int(row["attempts"] or 0) + 1
-            self._conn.execute(
-                """
-                UPDATE agent_jobs
-                SET status = 'running',
-                    worker_id = ?,
-                    attempts = ?,
-                    started_at = COALESCE(started_at, ?),
-                    updated_at = ?
-                WHERE job_id = ?
-                """,
-                (worker_id, attempts, now, now, job_id),
-            )
-            self._conn.commit()
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                row = self._conn.execute(
+                    f"""
+                    SELECT *
+                    FROM agent_jobs
+                    WHERE {where}
+                    ORDER BY created_at ASC
+                    LIMIT 1
+                    """,
+                    params,
+                ).fetchone()
+                if row is None:
+                    self._conn.commit()
+                    return None
+                job_id = str(row["job_id"])
+                attempts = int(row["attempts"] or 0) + 1
+                self._conn.execute(
+                    """
+                    UPDATE agent_jobs
+                    SET status = 'running',
+                        worker_id = ?,
+                        attempts = ?,
+                        started_at = COALESCE(started_at, ?),
+                        updated_at = ?
+                    WHERE job_id = ?
+                      AND status IN ('queued', 'retrying')
+                    """,
+                    (worker_id, attempts, now, now, job_id),
+                )
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
         record = self.get(job_id)
         if record is not None:
             self._emit("job_claimed", record)
@@ -219,26 +289,44 @@ class JobService:
         retry_delay_seconds: float = 60.0,
         checkpoint: dict[str, Any] | None = None,
     ) -> JobRecord | None:
+        now = time.time()
+        with self._lock:
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                row = self._conn.execute("SELECT * FROM agent_jobs WHERE job_id = ?", (job_id,)).fetchone()
+                if row is None:
+                    self._conn.commit()
+                    return None
+                should_retry = retry and int(row["attempts"] or 0) < int(row["max_attempts"] or 1)
+                status = "retrying" if should_retry else "failed"
+                completed_at = None if should_retry else now
+                next_run_at = now + max(0.0, retry_delay_seconds) if should_retry else row["next_run_at"]
+                checkpoint_json = (
+                    json.dumps(dict(checkpoint), sort_keys=True)
+                    if checkpoint is not None
+                    else row["checkpoint_json"]
+                )
+                self._conn.execute(
+                    """
+                    UPDATE agent_jobs
+                    SET status = ?,
+                        error = ?,
+                        checkpoint_json = ?,
+                        next_run_at = ?,
+                        completed_at = ?,
+                        updated_at = ?
+                    WHERE job_id = ?
+                    """,
+                    (status, error, checkpoint_json, next_run_at, completed_at, now, job_id),
+                )
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
         record = self.get(job_id)
-        if record is None:
-            return None
-        if retry and record.attempts < record.max_attempts:
-            return self._update(
-                job_id,
-                status="retrying",
-                error=error,
-                checkpoint=checkpoint,
-                next_run_at=time.time() + max(0.0, retry_delay_seconds),
-                event_type="job_retrying",
-            )
-        return self._update(
-            job_id,
-            status="failed",
-            error=error,
-            checkpoint=checkpoint,
-            completed_at=time.time(),
-            event_type="job_failed",
-        )
+        if record is not None:
+            self._emit("job_retrying" if record.status == "retrying" else "job_failed", record)
+        return record
 
     def cancel(self, job_id: str, *, reason: str = "cancelled") -> JobRecord | None:
         record = self.get(job_id)
@@ -261,8 +349,21 @@ class JobService:
 
     def get_by_resume_key(self, resume_key: str) -> JobRecord | None:
         with self._lock:
-            row = self._conn.execute("SELECT * FROM agent_jobs WHERE resume_key = ?", (resume_key,)).fetchone()
+            row = self._conn.execute(
+                """
+                SELECT *
+                FROM agent_jobs
+                WHERE resume_key = ?
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (resume_key,),
+            ).fetchone()
         return self._row_to_record(row) if row is not None else None
+
+    def get_active_by_resume_key(self, resume_key: str) -> JobRecord | None:
+        with self._lock:
+            return self._get_active_by_resume_key_unlocked(resume_key)
 
     def list(
         self,
@@ -348,6 +449,51 @@ class JobService:
         if record is not None:
             self._emit(event_type, record)
         return record
+
+    def _get_active_by_resume_key_unlocked(self, resume_key: str) -> JobRecord | None:
+        row = self._conn.execute(
+            """
+            SELECT *
+            FROM agent_jobs
+            WHERE resume_key = ?
+              AND status IN ('queued', 'running', 'waiting_approval', 'retrying')
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (resume_key,),
+        ).fetchone()
+        return self._row_to_record(row) if row is not None else None
+
+    def _migrate_resume_key_uniqueness(self) -> None:
+        row = self._conn.execute(
+            """
+            SELECT sql
+            FROM sqlite_master
+            WHERE type = 'table'
+              AND name = 'agent_jobs'
+            """
+        ).fetchone()
+        table_sql = str(row["sql"] or "") if row is not None else ""
+        if "resume_key TEXT UNIQUE" not in table_sql:
+            return
+        legacy_table = f"agent_jobs_legacy_{uuid.uuid4().hex[:8]}"
+        self._conn.execute(f"ALTER TABLE agent_jobs RENAME TO {legacy_table}")
+        self._conn.executescript(JOBS_TABLE_SCHEMA)
+        self._conn.execute(
+            f"""
+            INSERT INTO agent_jobs (
+                job_id, kind, status, payload_json, checkpoint_json, result_json,
+                metadata_json, error, resume_key, attempts, max_attempts, worker_id,
+                next_run_at, created_at, started_at, completed_at, updated_at
+            )
+            SELECT
+                job_id, kind, status, payload_json, checkpoint_json, result_json,
+                metadata_json, error, resume_key, attempts, max_attempts, worker_id,
+                next_run_at, created_at, started_at, completed_at, updated_at
+            FROM {legacy_table}
+            """
+        )
+        self._conn.execute(f"DROP TABLE {legacy_table}")
 
     def _record_values(self, record: JobRecord) -> tuple[Any, ...]:
         return (
