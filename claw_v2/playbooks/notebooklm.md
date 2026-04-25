@@ -47,6 +47,25 @@ page.goto("https://notebooklm.google.com/", wait_until="domcontentloaded", timeo
 3. Generación tarda 5-15 minutos según cantidad de fuentes
 4. Monitorear con screenshots periódicos
 
+## Auto-label de Fuentes (rollout 2026-04-24)
+
+NotebookLM categoriza fuentes automáticamente cuando el cuaderno tiene 5+ fuentes.
+
+- **Disparador**: ≥5 fuentes importadas
+- **Espera**: 60s post-import antes de revisar
+- **Set estándar de labels** (cross-notebook):
+  - 📄 Primaria — papers, docs oficiales
+  - 🗞️ Prensa — artículos, blogs
+  - 📊 Data — datasets, benchmarks
+  - 🧠 Análisis — opinión, ensayos
+  - ⚠️ Contrapunto — crítica, red-team
+  - 🎙️ Transcript — entrevistas, podcasts
+  - 🧪 Research — preprints, RFCs
+- **Reglas**: max 7 labels por cuaderno, nombres 1-2 palabras, multi-label sólo si ambas son frecuentes
+- **Override manual cuando**: material confidencial cliente, <5 fuentes, contenido TC Insurance / SGC tenant
+- **Outputs (audio/quiz/mindmap)**: organización manual con prefijo `YYYY-MM-DD-<tipo>` — auto-label aún no cubre outputs (roadmap)
+- **Folders a nivel notebook**: pendientes (roadmap NotebookLM)
+
 ## Gotchas Críticos
 - `DevBrowserService.chrome_navigate()` cierra la conexión al terminar — usar Playwright directo
 - Hay DOS botones "Enviar" — uno para Deep Research, otro para Chat. Seleccionar el correcto por proximidad al textarea
