@@ -152,6 +152,33 @@ class HandleMessageTests(unittest.TestCase):
         self.assertIn("<response>", call_kwargs.kwargs["system_prompt"])
         self.assertIn("Self-healing loop", call_kwargs.kwargs["system_prompt"])
 
+    def test_passes_session_model_override_to_router_without_reusing_other_provider_session(self) -> None:
+        self.memory.link_provider_session("s1", "anthropic", "anthropic-session")
+        self.memory.update_session_state(
+            "s1",
+            active_object={
+                "model_overrides": {
+                    "brain": {
+                        "provider": "codex",
+                        "model": "gpt-5.5",
+                        "billing": "chatgpt_subscription",
+                        "effort": "xhigh",
+                    }
+                }
+            },
+        )
+        self.router.ask.return_value = LLMResponse(
+            content="<response>ok</response>", lane="brain", provider="codex", model="gpt-5.5",
+        )
+
+        self.brain.handle_message("s1", "test")
+
+        call_kwargs = self.router.ask.call_args.kwargs
+        self.assertEqual(call_kwargs["provider"], "codex")
+        self.assertEqual(call_kwargs["model"], "gpt-5.5")
+        self.assertEqual(call_kwargs["effort"], "xhigh")
+        self.assertIsNone(call_kwargs["session_id"])
+
     def test_brain_system_prompt_includes_self_healing_loop(self) -> None:
         prompt = _brain_system_prompt("You are Claw.")
         self.assertIn("Analyze: identify the likely cause", prompt)

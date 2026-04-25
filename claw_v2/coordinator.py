@@ -73,6 +73,7 @@ class CoordinatorService:
         research_tasks: list[WorkerTask],
         implementation_tasks: list[WorkerTask] | None = None,
         verification_tasks: list[WorkerTask] | None = None,
+        lane_overrides: dict[str, dict[str, Any]] | None = None,
     ) -> CoordinatorResult:
         """Execute the full coordinator cycle.
 
@@ -98,26 +99,26 @@ class CoordinatorService:
                 payload={"task_id": task_id, "objective": objective},
             )
             # Phase 1: Research
-            research_results = self._dispatch_parallel(research_tasks, trace)
+            research_results = self._dispatch_parallel(research_tasks, trace, lane_overrides=lane_overrides)
             result.phase_results["research"] = research_results
             self._write_scratch(scratch, "research", research_results)
 
             # Phase 2: Synthesis
-            synthesis = self._synthesize(objective, research_results, trace)
+            synthesis = self._synthesize(objective, research_results, trace, lane_overrides=lane_overrides)
             result.synthesis = synthesis
             self._write_scratch_text(scratch, "synthesis.md", synthesis)
 
             # Phase 3: Implementation (optional)
             if implementation_tasks:
                 impl_tasks = self._inject_context(implementation_tasks, synthesis)
-                impl_results = self._dispatch_parallel(impl_tasks, trace)
+                impl_results = self._dispatch_parallel(impl_tasks, trace, lane_overrides=lane_overrides)
                 result.phase_results["implementation"] = impl_results
                 self._write_scratch(scratch, "implementation", impl_results)
 
             # Phase 4: Verification (optional)
             if verification_tasks:
                 verify_tasks = self._inject_context(verification_tasks, synthesis)
-                verify_results = self._dispatch_parallel(verify_tasks, trace)
+                verify_results = self._dispatch_parallel(verify_tasks, trace, lane_overrides=lane_overrides)
                 result.phase_results["verification"] = verify_results
                 self._write_scratch(scratch, "verification", verify_results)
 
@@ -145,7 +146,13 @@ class CoordinatorService:
             result.duration_seconds = time.time() - start
             return result
 
-    def _dispatch_parallel(self, tasks: list[WorkerTask], trace_context: dict[str, Any] | None = None) -> list[WorkerResult]:
+    def _dispatch_parallel(
+        self,
+        tasks: list[WorkerTask],
+        trace_context: dict[str, Any] | None = None,
+        *,
+        lane_overrides: dict[str, dict[str, Any]] | None = None,
+    ) -> list[WorkerResult]:
         """Run multiple worker tasks in parallel using a thread pool."""
         if not tasks:
             return []
@@ -153,7 +160,7 @@ class CoordinatorService:
         results: list[WorkerResult] = []
         with ThreadPoolExecutor(max_workers=min(self.max_workers, len(tasks))) as pool:
             futures = {
-                pool.submit(self._execute_worker, task, trace_context): task
+                pool.submit(self._execute_worker, task, trace_context, lane_overrides=lane_overrides): task
                 for task in tasks
             }
             for future in as_completed(futures):
@@ -169,7 +176,13 @@ class CoordinatorService:
                     ))
         return results
 
-    def _execute_worker(self, task: WorkerTask, trace_context: dict[str, Any] | None = None) -> WorkerResult:
+    def _execute_worker(
+        self,
+        task: WorkerTask,
+        trace_context: dict[str, Any] | None = None,
+        *,
+        lane_overrides: dict[str, dict[str, Any]] | None = None,
+    ) -> WorkerResult:
         """Execute a single worker task via the LLM router."""
         start = time.time()
         try:
@@ -183,6 +196,12 @@ class CoordinatorService:
                 kwargs["provider"] = agent["provider"]
                 kwargs["model"] = agent["model"]
                 kwargs["system_prompt"] = agent.get("soul_text", "")
+            elif lane_overrides and task.lane in lane_overrides:
+                override = lane_overrides[task.lane]
+                kwargs["provider"] = override.get("provider")
+                kwargs["model"] = override.get("model")
+                if override.get("effort"):
+                    kwargs["effort"] = override.get("effort")
             response = self.router.ask(task.instruction, **kwargs)
             return WorkerResult(
                 task_name=task.name,
@@ -197,7 +216,14 @@ class CoordinatorService:
                 error=str(exc),
             )
 
-    def _synthesize(self, objective: str, research_results: list[WorkerResult], trace_context: dict[str, Any] | None = None) -> str:
+    def _synthesize(
+        self,
+        objective: str,
+        research_results: list[WorkerResult],
+        trace_context: dict[str, Any] | None = None,
+        *,
+        lane_overrides: dict[str, dict[str, Any]] | None = None,
+    ) -> str:
         """Merge research findings into a coherent plan."""
         findings = "\n\n".join(
             f"### {r.task_name}\n{r.content}" if not r.error
@@ -228,6 +254,9 @@ class CoordinatorService:
             response = self.router.ask(
                 prompt,
                 lane="research",
+                provider=(lane_overrides or {}).get("research", {}).get("provider"),
+                model=(lane_overrides or {}).get("research", {}).get("model"),
+                effort=(lane_overrides or {}).get("research", {}).get("effort"),
                 evidence_pack=attach_trace(
                     {"coordinator_phase": "synthesis", "objective": objective},
                     synthesis_trace,

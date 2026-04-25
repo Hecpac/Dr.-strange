@@ -48,6 +48,7 @@ from claw_v2.linear import LinearService, build_linear_api_caller
 from claw_v2.llm import LLMRouter
 from claw_v2.memory import MemoryStore
 from claw_v2.metrics import MetricsTracker
+from claw_v2.model_registry import ModelRegistry
 from claw_v2.observe import ObserveStream
 from claw_v2.pipeline import PipelineService
 from claw_v2.skills import SkillRegistry
@@ -121,6 +122,7 @@ class ClawRuntime:
     agent_runtime: AgentRuntime
     agent_workspace: AgentWorkspace
     task_ledger: TaskLedger
+    model_registry: ModelRegistry
     skill_registry: SkillRegistry | None = None
     a2a: A2AService | None = None
     startup_health: StartupHealthReport | None = None
@@ -505,6 +507,7 @@ def _setup_operational_services(
     coordinator: CoordinatorService,
     task_board: TaskBoard,
     task_ledger: TaskLedger,
+    model_registry: ModelRegistry,
     buddy: BuddyService,
     learning: LearningLoop,
     kairos: KairosService,
@@ -544,6 +547,7 @@ def _setup_operational_services(
         browser_use=browser_use,
         observe=observe,
         task_ledger=task_ledger,
+        model_registry=model_registry,
     )
     for capability, reason in startup_health.degraded_capabilities().items():
         bot.set_capability_status(capability, available=False, reason=reason)
@@ -909,6 +913,7 @@ def build_runtime(
 
     memory, observe, metrics, approvals, bus, agent_store = _setup_core_state(config)
     task_ledger = TaskLedger(config.db_path, observe=observe)
+    model_registry = ModelRegistry.default()
     startup_health = _run_startup_healthchecks(config, observe)
     agent_workspace = AgentWorkspace(config.workspace_root, template_root=Path(__file__).parent)
     workspace_bootstrap = agent_workspace.ensure()
@@ -951,6 +956,7 @@ def build_runtime(
         coordinator=coordinator,
         task_board=task_board,
         task_ledger=task_ledger,
+        model_registry=model_registry,
         buddy=buddy,
         learning=learning,
         kairos=kairos,
@@ -1002,6 +1008,7 @@ def build_runtime(
         agent_runtime=agent_runtime,
         agent_workspace=agent_workspace,
         task_ledger=task_ledger,
+        model_registry=model_registry,
         skill_registry=skill_registry,
         a2a=a2a,
         startup_health=startup_health,

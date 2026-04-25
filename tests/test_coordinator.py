@@ -203,6 +203,27 @@ class AgentAwareTests(unittest.TestCase):
         self.assertNotIn("provider", call_kwargs.kwargs)
         self.assertNotIn("model", call_kwargs.kwargs)
 
+    def test_execute_worker_uses_lane_override_when_no_agent_assigned(self) -> None:
+        svc, router, _, _ = _make_service()
+        router.ask.return_value = MagicMock(content="ok")
+        task = WorkerTask(name="impl", instruction="write code", lane="worker")
+
+        svc._execute_worker(
+            task,
+            lane_overrides={
+                "worker": {
+                    "provider": "codex",
+                    "model": "gpt-5.5",
+                    "effort": "xhigh",
+                }
+            },
+        )
+
+        call_kwargs = router.ask.call_args.kwargs
+        self.assertEqual(call_kwargs["provider"], "codex")
+        self.assertEqual(call_kwargs["model"], "gpt-5.5")
+        self.assertEqual(call_kwargs["effort"], "xhigh")
+
     def test_synthesize_includes_agent_context(self) -> None:
         registry = {
             "hex": {"provider": "openai", "model": "gpt-5.3-codex", "domains": ["code"], "skills": ["bug-triage"]},

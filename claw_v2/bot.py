@@ -28,6 +28,13 @@ from claw_v2.coordinator import CoordinatorService
 from claw_v2.content import ContentEngine
 from claw_v2.github import GitHubPullRequestService
 from claw_v2.heartbeat import HeartbeatService
+from claw_v2.model_registry import (
+    ModelRegistry,
+    ModelOverride,
+    model_overrides_from_state,
+    normalize_model_lane,
+    serialize_model_overrides,
+)
 from claw_v2.pipeline import PipelineService
 from claw_v2.social import SocialPublisher
 from claw_v2.bot_helpers import *  # noqa: F403
@@ -84,6 +91,7 @@ class BotService:
         computer_system_prompt: str | None = None,
         observe: object | None = None,
         task_ledger: object | None = None,
+        model_registry: ModelRegistry | None = None,
     ) -> None:
         self.brain = brain
         self.auto_research = auto_research
@@ -97,6 +105,7 @@ class BotService:
         self._terminal_handler = TerminalHandler(terminal_bridge=terminal_bridge)
         self.observe = observe
         self.task_ledger = task_ledger
+        self.model_registry = model_registry or ModelRegistry.default()
         self.learning: Any | None = None
         self._wiki_handler = WikiHandler(memory=brain.memory)
         self._nlm_handler = NlmHandler(update_session_state=brain.memory.update_session_state)
@@ -320,6 +329,7 @@ class BotService:
             BotCommand("help", self._handle_help_command, exact=("/help",), prefixes=("/help ",)),
             BotCommand("status", self._handle_status_command, exact=("/status",)),
             BotCommand("config", self._handle_config_command, exact=("/config",)),
+            BotCommand("model", self._handle_model_command, exact=("/models", "/model", "/model status"), prefixes=("/model ",)),
             BotCommand("tokens", self._handle_tokens_command, exact=("/tokens",)),
             BotCommand("spending", self._handle_spending_command, exact=("/spending",)),
             BotCommand("task_run", self._handle_task_run_command, exact=("/task_run",), prefixes=("/task_run ",)),
@@ -371,19 +381,118 @@ class BotService:
         if self.config is None:
             return "config not available"
         c = self.config
+        overrides = model_overrides_from_state(self.brain.memory.get_session_state(context.session_id))
         lanes = {}
         for lane in ("brain", "worker", "verifier", "research", "judge"):
+            override = overrides.get(lane)
+            provider = override.provider if override else c.provider_for_lane(lane)
+            model = override.model if override else c.model_for_lane(lane)
+            ref = override or self.model_registry.resolve(f"{provider}:{model}")
             lanes[lane] = {
-                "provider": c.provider_for_lane(lane),
-                "model": c.model_for_lane(lane),
-                "effort": c.effort_for_lane(lane),
+                "provider": provider,
+                "model": model,
+                "effort": override.effort if override and override.effort else c.effort_for_lane(lane),
+                "billing": ref.billing,
+                "override": override is not None,
                 "context_window": c.context_window_for_lane(lane),
                 "max_output": c.max_output_for_lane(lane),
             }
         return json.dumps({"lanes": lanes, "max_budget_usd": c.max_budget_usd, "daily_token_budget": c.daily_token_budget}, indent=2)
 
+    def _handle_model_command(self, context: CommandContext) -> str:
+        if self.config is None:
+            return "config not available"
+        if context.stripped == "/models":
+            payload = [model.to_dict() for model in self.model_registry.list_models()]
+            return json.dumps(payload, indent=2, sort_keys=True)
+        if context.stripped in {"/model", "/model status"}:
+            return json.dumps(self._model_status_payload(context.session_id), indent=2, sort_keys=True)
+        parts = context.stripped.split()
+        if len(parts) < 2:
+            return "Uso: /model status | /models | /model set <lane> <provider:model> [effort=low|medium|high|xhigh|max] | /model clear <lane>"
+        action = parts[1].lower()
+        if action == "status":
+            return json.dumps(self._model_status_payload(context.session_id), indent=2, sort_keys=True)
+        if action == "clear":
+            if len(parts) < 3:
+                return "Uso: /model clear <lane>"
+            try:
+                lane = normalize_model_lane(parts[2])
+            except ValueError as exc:
+                return str(exc)
+            overrides = model_overrides_from_state(self.brain.memory.get_session_state(context.session_id))
+            overrides.pop(lane, None)
+            self._store_model_overrides(context.session_id, overrides)
+            return json.dumps(self._model_status_payload(context.session_id), indent=2, sort_keys=True)
+        if action != "set":
+            return f"Acción inválida: {action}"
+        if len(parts) < 4:
+            return "Uso: /model set <lane> <provider:model> [effort=low|medium|high|xhigh|max]"
+        try:
+            lane = normalize_model_lane(parts[2])
+        except ValueError as exc:
+            return str(exc)
+        selector = parts[3]
+        effort = None
+        for item in parts[4:]:
+            if item.startswith("effort="):
+                effort = item.split("=", maxsplit=1)[1].strip().lower()
+        try:
+            override = self.model_registry.override_from_selector(selector, effort=effort)
+        except ValueError as exc:
+            return str(exc)
+        overrides = model_overrides_from_state(self.brain.memory.get_session_state(context.session_id))
+        overrides[lane] = override
+        self._store_model_overrides(context.session_id, overrides)
+        warning = ""
+        if override.billing == "api":
+            warning = "\nAviso: `openai:*` usa API billing. Para suscripción ChatGPT/Codex usa `codex:<modelo>`."
+        return (
+            f"Modelo para {lane}: `{override.key}`\n"
+            f"Billing: {override.billing}\n"
+            f"Effort: {override.effort or self.config.effort_for_lane(lane)}"
+            f"{warning}"
+        )
+
     def _handle_tokens_command(self, context: CommandContext) -> str:
         return self._tokens_info_response(context.session_id)
+
+    def _model_status_payload(self, session_id: str) -> dict[str, Any]:
+        if self.config is None:
+            return {"error": "config not available"}
+        overrides = model_overrides_from_state(self.brain.memory.get_session_state(session_id))
+        lanes: dict[str, Any] = {}
+        for lane in ("brain", "worker", "research", "verifier", "judge"):
+            override = overrides.get(lane)
+            if override is not None:
+                lanes[lane] = {
+                    **override.to_dict(),
+                    "effective": True,
+                    "override": True,
+                }
+                continue
+            provider = self.config.provider_for_lane(lane)
+            model = self.config.model_for_lane(lane)
+            ref = self.model_registry.resolve(f"{provider}:{model}")
+            lanes[lane] = {
+                **ref.to_dict(),
+                "effort": self.config.effort_for_lane(lane),
+                "effective": True,
+                "override": False,
+            }
+        return {
+            "lanes": lanes,
+            "rules": {
+                "openai": "API billing",
+                "codex": "ChatGPT subscription via Codex CLI",
+            },
+        }
+
+    def _store_model_overrides(self, session_id: str, overrides: dict[str, ModelOverride]) -> None:
+        state = self.brain.memory.get_session_state(session_id)
+        active_object = dict(state.get("active_object") or {})
+        active_object["model_overrides"] = serialize_model_overrides(overrides)
+        self.brain.memory.update_session_state(session_id, active_object=active_object)
 
     def _handle_spending_command(self, context: CommandContext) -> str:
         return self._spending_response()
