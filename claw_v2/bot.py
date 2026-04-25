@@ -142,7 +142,7 @@ class BotService:
             config=config,
             observe=observe,
             capability_check=self._capability_unavailable_message,
-            brain_handle_message=brain.handle_message,
+            brain_handle_message=lambda *args, **kwargs: self.brain.handle_message(*args, **kwargs),
         )
         self._agent_handler = AgentHandler(
             auto_research=auto_research,
@@ -158,6 +158,38 @@ class BotService:
     @terminal_bridge.setter
     def terminal_bridge(self, value: object | None) -> None:
         self._terminal_handler.terminal_bridge = value
+
+    @property
+    def computer(self) -> object | None:
+        return self._computer_handler.computer
+
+    @computer.setter
+    def computer(self, value: object | None) -> None:
+        self._computer_handler.computer = value
+
+    @property
+    def browser_use(self) -> object | None:
+        return self._computer_handler.browser_use
+
+    @browser_use.setter
+    def browser_use(self, value: object | None) -> None:
+        self._computer_handler.browser_use = value
+
+    @property
+    def computer_gate(self) -> object | None:
+        return self._computer_handler.computer_gate
+
+    @computer_gate.setter
+    def computer_gate(self, value: object | None) -> None:
+        self._computer_handler.computer_gate = value
+
+    @property
+    def computer_client_factory(self) -> Callable[[], Any] | None:
+        return self._computer_handler.computer_client_factory
+
+    @computer_client_factory.setter
+    def computer_client_factory(self, value: Callable[[], Any] | None) -> None:
+        self._computer_handler.computer_client_factory = value
 
     @property
     def wiki(self) -> object | None:
@@ -233,6 +265,8 @@ class BotService:
         if command_response is not None:
             return command_response
         self._remember_user_turn_state(session_id, stripped)
+        if _looks_like_autonomy_grant(stripped):
+            return self._handle_autonomy_grant_response(session_id, stripped)
         stateful_followup = self._maybe_resolve_stateful_followup(stripped, session_id=session_id)
         if isinstance(stateful_followup, _BrainShortcut):
             return self._brain_text_response(
@@ -947,6 +981,34 @@ class BotService:
         )
         return json.dumps(state, indent=2, sort_keys=True)
 
+    def _handle_autonomy_grant_response(self, session_id: str, text: str) -> str:
+        current = self.brain.memory.get_session_state(session_id)
+        active_object = dict(current.get("active_object") or {})
+        active_object["autonomy_grant"] = {
+            "mode": "autonomous",
+            "source": text[:500],
+            "scope": "development_tasks",
+            "allowed_without_phase_approval": ["inspect", "edit", "test", "commit", "push"],
+            "still_blocked": ["deploy", "publish", "destructive"],
+        }
+        state = self.brain.memory.update_session_state(
+            session_id,
+            autonomy_mode="autonomous",
+            step_budget=_default_step_budget("autonomous"),
+            active_object=active_object,
+        )
+        reply = (
+            "Autonomía activada para esta sesión. "
+            "Ejecutaré fases de desarrollo sin pedir autorización intermedia: inspección, edición, tests, commit y git push. "
+            "Solo pausaré por deploy/publicación, acciones destructivas, credenciales faltantes o bloqueo real de sandbox."
+        )
+        self.brain.memory.store_message(session_id, "user", text)
+        self.brain.memory.store_message(session_id, "assistant", reply)
+        self._remember_assistant_turn_state(session_id, text, reply)
+        if state.get("pending_action"):
+            return f"{reply}\nPending action: {state['pending_action']}"
+        return reply
+
     def _remember_user_turn_state(self, session_id: str, text: str) -> None:
         self._state_handler.remember_user_turn_state(session_id, text)
 
@@ -1011,4 +1073,3 @@ class BotService:
                 return self._chrome_handler.browse_response("https://ads.google.com", session_id=session_id)
 
         return None
-

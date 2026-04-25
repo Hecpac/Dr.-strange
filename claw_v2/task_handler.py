@@ -94,7 +94,12 @@ class TaskHandler:
         if _extract_option_reference(text) is not None or _looks_like_proceed_request(text):
             return None
         mode = _infer_session_mode(text)
-        policy = _evaluate_autonomy_policy(text, mode=mode, forced=False)
+        policy = _evaluate_autonomy_policy(
+            text,
+            mode=mode,
+            forced=False,
+            autonomy_mode=str(state.get("autonomy_mode") or "assisted"),
+        )
         if not policy["allowed"] and policy["reason"] == "sensitive_action":
             self._update_session_state(
                 session_id,
@@ -122,10 +127,12 @@ class TaskHandler:
         if self.coordinator is None:
             return "coordinator unavailable"
         mode = _infer_session_mode(objective)
+        state = self._get_session_state(session_id)
         policy = _evaluate_autonomy_policy(
             objective,
             mode=mode,
             forced=forced,
+            autonomy_mode=str(state.get("autonomy_mode") or "assisted"),
             approved_actions=approved_actions,
         )
         if not policy["allowed"]:

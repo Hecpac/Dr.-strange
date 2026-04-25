@@ -237,7 +237,7 @@ class ClaudeSDKExecutor:
 
         sdk_agents = self._build_agents(sdk, request)
         sdk_env: dict[str, str] = {}
-        extra_args: dict[str, str | None] = {}
+        extra_args: dict[str, str | None] = {"disable-slash-commands": None}
         if self._should_use_api_key_auth():
             if api_key := _resolve_anthropic_api_key():
                 sdk_env["ANTHROPIC_API_KEY"] = api_key
@@ -254,10 +254,9 @@ class ClaudeSDKExecutor:
             model=request.model,
             cli_path=self.config.claude_cli_path,
             cwd=Path(request.cwd) if request.cwd else self.config.workspace_root,
-            # Isolate the bot from user-level Claude Code hooks/plugins.
-            # The user's personal ~/.claude/settings.json can run heavy SessionStart
-            # hooks or custom callbacks that break SDK initialization.
-            setting_sources=["project", "local"],
+            # Isolate the bot from Claude Code user/project/local settings and
+            # skills. Telegram policy/sandbox is the source of truth here.
+            setting_sources=[],
             stderr=stderr_callback,
             extra_args=extra_args,
             env=sdk_env,

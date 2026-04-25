@@ -79,6 +79,7 @@ __all__ = [
     "_is_usable_browse_content",
     "_jina_read",
     "_looks_like_api_key",
+    "_looks_like_autonomy_grant",
     "_looks_like_computer_read_request",
     "_looks_like_proceed_request",
     "_looks_like_raw_markup",
@@ -241,7 +242,6 @@ _OPTION_ORDINALS = {
     "fifth": 5,
 }
 _AUTONOMY_ACTION_PATTERNS: dict[str, tuple[str, ...]] = {
-    "push": (r"\bgit\s+push\b",),
     "deploy": (r"\bdeploy\b", r"\bdespliega\b", r"\bproduction\b", r"\bprod\b"),
     "publish": (r"\bpublica\b", r"\bpublish\b", r"\btweet\b", r"\bpost\b"),
     "destructive": (r"\bdelete\b", r"\bborra\b", r"\belimina\b", r"\brm\s+-", r"\bdrop\s+table\b", r"\btruncate\b"),
@@ -251,6 +251,7 @@ _AUTONOMY_TASK_ACTION_PATTERNS: dict[str, tuple[str, ...]] = {
     "edit": (r"\bcorrige\b", r"\barregla\b", r"\bfix\b", r"\bimplementa\b", r"\bedit\b", r"\bpatch\b"),
     "test": (r"\btest\b", r"\bpytest\b", r"\bverifica\b", r"\bverify\b"),
     "commit": (r"\bcommit\b", r"\bcommitea\b"),
+    "push": (r"\bgit\s+push\b", r"\bpush\b", r"\bpushea\b", r"\bempuja\b"),
     "research": (r"\binvestiga\b", r"\bresearch\b", r"\bfind\b", r"\bgather\b"),
     "summarize": (r"\bresume\b", r"\bsummariza\b", r"\bsummary\b", r"\bsintetiza\b"),
 
@@ -258,8 +259,8 @@ _AUTONOMY_TASK_ACTION_PATTERNS: dict[str, tuple[str, ...]] = {
 _AUTONOMY_POLICY_MATRIX: dict[str, dict[str, Any]] = {
     "manual": {
         "automatic_coordinator_modes": [],
-        "blocked_actions": ("push", "deploy", "publish", "destructive"),
-        "approval_required_actions": ("commit",),
+        "blocked_actions": ("deploy", "publish", "destructive"),
+        "approval_required_actions": ("commit", "push"),
         "allowed_task_actions": (),
         "notes": [
             "No coordinated execution runs automatically in manual mode.",
@@ -268,23 +269,23 @@ _AUTONOMY_POLICY_MATRIX: dict[str, dict[str, Any]] = {
     },
     "assisted": {
         "automatic_coordinator_modes": [],
-        "blocked_actions": ("push", "deploy", "publish", "destructive"),
-        "approval_required_actions": ("commit",),
+        "blocked_actions": ("deploy", "publish", "destructive"),
+        "approval_required_actions": ("commit", "push"),
         "allowed_task_actions": ("inspect", "edit", "test", "research", "summarize"),
         "notes": [
             "Coordinated runs require explicit `/task_run` in assisted mode.",
-            "Commit requires confirmation. Publish, deploy, push, and destructive actions remain blocked.",
+            "Commit and git push require confirmation. Publish, deploy, and destructive actions remain blocked.",
         ],
     },
     "autonomous": {
         "automatic_coordinator_modes": ["coding", "research"],
-        "blocked_actions": ("push", "deploy", "publish", "destructive"),
-        "approval_required_actions": ("commit",),
-        "allowed_task_actions": ("inspect", "edit", "test", "research", "summarize"),
+        "blocked_actions": ("deploy", "publish", "destructive"),
+        "approval_required_actions": (),
+        "allowed_task_actions": ("inspect", "edit", "test", "commit", "push", "research", "summarize"),
         "notes": [
             "Autonomous coordinator runs are limited to coding and research.",
             "Operational/browser/authenticated flows stay outside the autonomous coordinator path.",
-            "Commit requires confirmation. Publish, deploy, push, and destructive actions remain blocked.",
+            "Commit and git push are allowed for development tasks after local verification. Publish, deploy, and destructive actions remain blocked.",
         ],
     },
 }
@@ -364,6 +365,27 @@ def _looks_like_proceed_request(text: str) -> bool:
     if normalized in _PROCEED_TOKENS:
         return True
     return any(normalized.startswith(f"{token} ") for token in _PROCEED_TOKENS)
+
+
+def _looks_like_autonomy_grant(text: str) -> bool:
+    normalized = _normalize_command_text(text)
+    if "autonom" not in normalized and "permiso" not in normalized and "autoriz" not in normalized:
+        return False
+    grant_markers = (
+        "tienes toda la autonomia",
+        "tienes autonomia",
+        "autonomia completa",
+        "modo autonomo",
+        "full autonomy",
+        "complete autonomy",
+        "no tienes que pedirme autorizacion",
+        "no me pidas autorizacion",
+        "no me pidas permiso",
+        "no tienes que pedirme permiso",
+        "sin pedir autorizacion",
+        "sin pedir permiso",
+    )
+    return any(marker in normalized for marker in grant_markers)
 
 
 def _extract_numbered_options(text: str) -> list[str]:
@@ -610,11 +632,12 @@ def _evaluate_autonomy_policy(
     *,
     mode: str,
     forced: bool,
+    autonomy_mode: str | None = None,
     approved_actions: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     normalized = _normalize_command_text(text)
-    autonomy_mode = "autonomous" if not forced else "assisted"
-    policy = _policy_for_mode(autonomy_mode)
+    effective_autonomy_mode = autonomy_mode or ("autonomous" if not forced else "assisted")
+    policy = _policy_for_mode(effective_autonomy_mode)
     matched_actions = _matched_policy_actions(normalized, blocked_actions=policy["blocked_actions"])
     if matched_actions:
         labels = ", ".join(matched_actions)
@@ -647,7 +670,7 @@ def _evaluate_autonomy_policy(
         return {
             "allowed": False,
             "reason": "mode_not_auto_enabled",
-            "summary": f"El modo {mode} no está habilitado para ejecución automática en {autonomy_mode}.",
+            "summary": f"El modo {mode} no está habilitado para ejecución automática en {effective_autonomy_mode}.",
         }
     requested_actions = _classify_task_actions(normalized, mode=mode)
     effective_allowed_actions = set(policy["allowed_task_actions"]) | set(approved_actions)
@@ -657,7 +680,7 @@ def _evaluate_autonomy_policy(
         return {
             "allowed": False,
             "reason": "action_not_allowed",
-            "summary": f"La tarea pide acciones fuera del scope permitido para {autonomy_mode}: {labels}.",
+            "summary": f"La tarea pide acciones fuera del scope permitido para {effective_autonomy_mode}: {labels}.",
         }
     return {
         "allowed": True,
@@ -674,7 +697,7 @@ def _format_autonomy_policy_block(policy: dict[str, str | bool]) -> str:
         f"Reason: {reason}\n"
         f"Summary: {summary}\n"
         "Allowed automatic scopes: coding, research.\n"
-        "Blocked automatic scopes: publish, deploy, push, destructive actions."
+        "Blocked automatic scopes: publish, deploy, destructive actions."
     )
 
 
@@ -741,7 +764,7 @@ def _infer_session_mode(user_text: str, reply_text: str | None = None) -> str:
         return "browse"
     if any(token in normalized for token in ("terminal", "chrome", "screen", "computer", "click", "scroll", "sesion")):
         return "ops"
-    if any(token in normalized for token in ("commit", "test", "pytest", "fix", "corrige", "arregla", "bug", "repo", "codigo", "code", "patch")):
+    if any(token in normalized for token in ("commit", "push", "git push", "test", "pytest", "fix", "corrige", "arregla", "bug", "repo", "codigo", "code", "patch")):
         return "coding"
     if any(token in normalized for token in ("tweet", "post", "publica", "publish", "x.com", "social")):
         return "publish"

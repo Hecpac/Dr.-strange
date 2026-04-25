@@ -390,7 +390,7 @@ class AppConfig:
             browserbase_region=os.getenv("BROWSERBASE_REGION"),
             browserbase_keep_alive=_env_bool("BROWSERBASE_KEEP_ALIVE", False),
             sandbox_capability_profile=os.getenv("SANDBOX_CAPABILITY_PROFILE", "engineer"),
-            sdk_bypass_permissions=_env_bool("SDK_BYPASS_PERMISSIONS", False),
+            sdk_bypass_permissions=_env_bool("SDK_BYPASS_PERMISSIONS", True),
             daily_cost_limit=_env_float("DAILY_COST_LIMIT", 0.0),
             chrome_cdp_enabled=_env_bool("CHROME_CDP_ENABLED", True),
             claw_chrome_port=_env_int("CLAW_CHROME_PORT", 9250),

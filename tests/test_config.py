@@ -77,6 +77,21 @@ class AppConfigDefaultsTests(unittest.TestCase):
             finally:
                 os.chdir(previous_cwd)
 
+    def test_sdk_bypass_permissions_defaults_to_enabled_and_accepts_override(self) -> None:
+        previous_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.chdir(tmpdir)
+            try:
+                with patch.dict(os.environ, {}, clear=True):
+                    config = AppConfig.from_env()
+                self.assertTrue(config.sdk_bypass_permissions)
+
+                with patch.dict(os.environ, {"SDK_BYPASS_PERMISSIONS": "false"}, clear=True):
+                    configured = AppConfig.from_env()
+                self.assertFalse(configured.sdk_bypass_permissions)
+            finally:
+                os.chdir(previous_cwd)
+
     def test_runtime_config_path_loads_monitored_sites_and_sub_agent_jobs(self) -> None:
         previous_cwd = Path.cwd()
         with tempfile.TemporaryDirectory() as tmpdir:
