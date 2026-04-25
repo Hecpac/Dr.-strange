@@ -12,6 +12,7 @@ from claw_v2.approval import ApprovalManager
 from claw_v2.learning import LearningLoop
 from claw_v2.llm import LLMRouter
 from claw_v2.memory import MemoryStore
+from claw_v2.model_registry import model_overrides_from_state
 from claw_v2.observe import ObserveStream
 from claw_v2.playbook_loader import PlaybookLoader
 from claw_v2.tracing import attach_trace, new_trace_context, child_trace_context
@@ -125,8 +126,10 @@ class BrainService:
     ) -> LLMResponse:
         stored_user_message = memory_text or _summarize_user_prompt(message)
         trace = new_trace_context(artifact_id=session_id)
-        provider_session_id = self.memory.get_provider_session(session_id, "anthropic")
-        provider_cursor = self.memory.get_provider_session_cursor(session_id, "anthropic")
+        model_override = model_overrides_from_state(self.memory.get_session_state(session_id)).get("brain")
+        session_provider = model_override.provider if model_override else "anthropic"
+        provider_session_id = self.memory.get_provider_session(session_id, session_provider)
+        provider_cursor = self.memory.get_provider_session_cursor(session_id, session_provider)
         # When resuming a provider session, skip message history — the SDK already has it.
         # Including both causes Claude to re-summarize the entire conversation each time.
         resuming = provider_session_id is not None
@@ -153,6 +156,9 @@ class BrainService:
                 prompt,
                 system_prompt=_brain_system_prompt(self.system_prompt),
                 lane="brain",
+                provider=model_override.provider if model_override else None,
+                model=model_override.model if model_override else None,
+                effort=model_override.effort if model_override else None,
                 session_id=provider_session_id,
                 evidence_pack=attach_trace({"app_session_id": session_id}, trace),
                 max_budget=2.0,
@@ -175,7 +181,7 @@ class BrainService:
                     artifact_id=trace["artifact_id"],
                     payload={"app_session_id": session_id, "stale_session": provider_session_id},
                 )
-            self.memory.clear_provider_session(session_id, "anthropic")
+            self.memory.clear_provider_session(session_id, session_provider)
             prompt = self._build_prompt(
                 session_id=session_id,
                 message=message,
@@ -188,6 +194,9 @@ class BrainService:
                 prompt,
                 system_prompt=_brain_system_prompt(self.system_prompt),
                 lane="brain",
+                provider=model_override.provider if model_override else None,
+                model=model_override.model if model_override else None,
+                effort=model_override.effort if model_override else None,
                 session_id=None,
                 evidence_pack=attach_trace({"app_session_id": session_id}, trace),
                 max_budget=2.0,

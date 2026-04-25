@@ -18,6 +18,7 @@ from claw_v2.bot_helpers import (
     _stable_task_id,
     _task_approval_summary,
 )
+from claw_v2.model_registry import model_overrides_from_state
 
 
 class TaskHandler:
@@ -286,6 +287,7 @@ class TaskHandler:
             research_tasks,
             implementation_tasks=implementation_tasks,
             verification_tasks=verification_tasks,
+            lane_overrides=self._lane_model_overrides(session_id),
         )
         checkpoint = _coordinator_checkpoint(result, objective=objective)
         current_queue = self._get_session_state(session_id).get("task_queue") or []
@@ -423,7 +425,7 @@ class TaskHandler:
     ) -> None:
         if self.task_ledger is None:
             return
-        provider, model = self._provider_model_for_mode(mode)
+        provider, model = self._provider_model_for_mode(session_id, mode)
         self.task_ledger.create(
             task_id=task_id,
             session_id=session_id,
@@ -437,16 +439,24 @@ class TaskHandler:
             metadata={"autonomous": True},
         )
 
-    def _provider_model_for_mode(self, mode: str) -> tuple[str | None, str | None]:
+    def _provider_model_for_mode(self, session_id: str, mode: str) -> tuple[str | None, str | None]:
+        lane = "research" if mode == "research" else "worker"
+        overrides = model_overrides_from_state(self._get_session_state(session_id))
+        if lane in overrides:
+            override = overrides[lane]
+            return override.provider, override.model
         router = getattr(self.coordinator, "router", None)
         config = getattr(router, "config", None)
         if config is None:
             return None, None
-        lane = "research" if mode == "research" else "worker"
         try:
             return str(config.provider_for_lane(lane)), str(config.model_for_lane(lane))
         except Exception:
             return None, None
+
+    def _lane_model_overrides(self, session_id: str) -> dict[str, dict[str, Any]]:
+        overrides = model_overrides_from_state(self._get_session_state(session_id))
+        return {lane: override.to_dict() for lane, override in overrides.items()}
 
     def _updated_pending_task_approvals(self, session_id: str, entry: dict[str, Any]) -> list[dict[str, Any]]:
         state = self._get_session_state(session_id)

@@ -2877,6 +2877,100 @@ class BotTests(unittest.TestCase):
                 self.assertEqual(runtime.bot.config.worker_effort, "max")
                 self.assertEqual(runtime.bot.config.judge_effort, "max")
 
+    def test_models_command_lists_subscription_and_api_models(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+
+                payload = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/models"))
+
+                by_key = {item["key"]: item for item in payload}
+                self.assertEqual(by_key["codex:gpt-5.5"]["billing"], "chatgpt_subscription")
+                self.assertEqual(by_key["openai:gpt-5.5"]["billing"], "api")
+
+    def test_model_set_persists_session_override_and_warns_for_api_billing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+
+                reply = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="/model set coding codex:gpt-5.5 effort=xhigh",
+                )
+                api_reply = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="/model set research openai:gpt-5.5",
+                )
+                status = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/model status"))
+                config = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/config"))
+
+                self.assertIn("Modelo para worker", reply)
+                self.assertIn("chatgpt_subscription", reply)
+                self.assertIn("API billing", api_reply)
+                self.assertEqual(status["lanes"]["worker"]["provider"], "codex")
+                self.assertEqual(status["lanes"]["worker"]["model"], "gpt-5.5")
+                self.assertEqual(status["lanes"]["worker"]["effort"], "xhigh")
+                self.assertEqual(status["lanes"]["research"]["billing"], "api")
+                self.assertEqual(config["lanes"]["worker"]["billing"], "chatgpt_subscription")
+                self.assertEqual(config["lanes"]["brain"]["billing"], "claude_subscription_or_api")
+
+    def test_autonomous_task_uses_session_model_override_for_coordinator_and_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.coordinator = MagicMock()
+                runtime.bot.coordinator.run.return_value = CoordinatorResult(
+                    task_id="s1:override",
+                    phase_results={
+                        "research": [WorkerResult(task_name="scope_and_risks", content="ok", duration_seconds=0.1)],
+                        "verification": [WorkerResult(task_name="verify_change", content="Verification Status: passed", duration_seconds=0.1)],
+                    },
+                    synthesis="done",
+                )
+
+                runtime.bot.handle_text(user_id="123", session_id="s1", text="/autonomy autonomous")
+                runtime.bot.handle_text(user_id="123", session_id="s1", text="/model set coding codex:gpt-5.5 effort=xhigh")
+                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="corrige el bug del login")
+                task_id = re.search(r"`([^`]+)`", reply).group(1)
+                self.assertTrue(runtime.bot._task_handler.wait_for_task(task_id, timeout=2))
+
+                lane_overrides = runtime.bot.coordinator.run.call_args.kwargs["lane_overrides"]
+                self.assertEqual(lane_overrides["worker"]["provider"], "codex")
+                self.assertEqual(lane_overrides["worker"]["model"], "gpt-5.5")
+                self.assertEqual(lane_overrides["worker"]["effort"], "xhigh")
+                record = runtime.task_ledger.get(task_id)
+                self.assertEqual(record.provider, "codex")
+                self.assertEqual(record.model, "gpt-5.5")
+
     def test_verify_command_calls_brain(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
