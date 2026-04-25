@@ -133,8 +133,9 @@ class AnthropicExecutorTests(unittest.IsolatedAsyncioTestCase):
                         response = await executor._run(request)
 
             self.assertEqual(response.content, "ok")
-            self.assertEqual(recorded["options"].kwargs["setting_sources"], ["project", "local"])
-            self.assertEqual(recorded["options"].kwargs["extra_args"], {})
+            self.assertEqual(recorded["options"].kwargs["setting_sources"], [])
+            self.assertEqual(recorded["options"].kwargs["extra_args"], {"disable-slash-commands": None})
+            self.assertEqual(recorded["options"].kwargs["permission_mode"], "bypassPermissions")
             self.assertTrue(callable(recorded["options"].kwargs["stderr"]))
             self.assertEqual(recorded["options"].kwargs["env"], {"ANTHROPIC_API_KEY": ""})
             self.assertEqual(recorded["prompt_type"], "stream")
@@ -183,7 +184,7 @@ class AnthropicExecutorTests(unittest.IsolatedAsyncioTestCase):
             with patch.dict(environ, {"ANTHROPIC_API_KEY": "sk-test"}, clear=False):
                 options = executor._build_options(fake_sdk, request)
 
-            self.assertEqual(options.kwargs["extra_args"], {"bare": None})
+            self.assertEqual(options.kwargs["extra_args"], {"disable-slash-commands": None, "bare": None})
             self.assertEqual(options.kwargs["env"]["ANTHROPIC_API_KEY"], "sk-test")
 
     async def test_brain_lane_appends_silence_directive_to_claude_code_preset(self) -> None:
@@ -229,6 +230,8 @@ class AnthropicExecutorTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("You are Claw.", system_prompt["append"])
             self.assertIn("headless engine", system_prompt["append"])
             self.assertIn(SILENCE_DIRECTIVE.strip(), system_prompt["append"])
+            self.assertEqual(options.kwargs["setting_sources"], [])
+            self.assertEqual(options.kwargs["extra_args"], {"disable-slash-commands": None})
 
     async def test_executor_emits_llm_error_event_when_sdk_result_is_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

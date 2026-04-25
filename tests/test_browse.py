@@ -41,7 +41,7 @@ class BrowseJinaTests(unittest.TestCase):
         self.assertEqual(_select_navigation_strategy("https://github.com/org/repo"), "js_rendered")
         self.assertEqual(_select_navigation_strategy("https://x.com/post/123"), "authenticated")
 
-    @patch("claw_v2.bot._jina_read")
+    @patch("claw_v2.browse_handler._jina_read")
     def test_browse_jina_success(self, mock_jina) -> None:
         mock_jina.return_value = "# Article Title\n\nThis is a long article about AI trends in 2026. " + "x" * 200
         bot = _make_bot()
@@ -49,7 +49,7 @@ class BrowseJinaTests(unittest.TestCase):
         self.assertIn("Article Title", result)
         mock_jina.assert_called_once()
 
-    @patch("claw_v2.bot._jina_read")
+    @patch("claw_v2.browse_handler._jina_read")
     def test_browse_auth_domain_goes_to_cdp(self, mock_jina) -> None:
         browser = MagicMock()
         browser.chrome_navigate.return_value = BrowseResult(
@@ -64,7 +64,7 @@ class BrowseJinaTests(unittest.TestCase):
         browser.chrome_navigate.assert_called_once()
         self.assertIn("Tweet", result)
 
-    @patch("claw_v2.bot._jina_read")
+    @patch("claw_v2.browse_handler._jina_read")
     def test_browse_auth_domain_cdp_fails_returns_error(self, mock_jina) -> None:
         browser = MagicMock()
         browser.chrome_navigate.side_effect = Exception("CDP down")
@@ -77,8 +77,8 @@ class BrowseJinaTests(unittest.TestCase):
         mock_jina.assert_not_called()
         self.assertIn("error", result.lower())
 
-    @patch("claw_v2.bot._tweet_fxtwitter_read")
-    @patch("claw_v2.bot._jina_read")
+    @patch("claw_v2.browse_handler._tweet_fxtwitter_read")
+    @patch("claw_v2.browse_handler._jina_read")
     def test_browse_tweet_login_wall_falls_back_to_tweet_reader(self, mock_jina, mock_tweet_read) -> None:
         tweet_url = "https://x.com/tendenciatuits/status/2039116558836936982?s=46"
         mock_tweet_read.return_value = f"**Autor on X** ({tweet_url})\n\nTexto limpio del tweet."
@@ -99,14 +99,14 @@ class BrowseJinaTests(unittest.TestCase):
         browser.chrome_navigate.assert_called_once()
         self.assertIn("Texto limpio del tweet", result)
 
-    @patch("claw_v2.bot._jina_read")
+    @patch("claw_v2.browse_handler._jina_read")
     def test_browse_jina_short_valid_content_is_accepted(self, mock_jina) -> None:
         mock_jina.return_value = "# OK\n\nDocumento corto pero valido."
         bot = _make_bot()
         result = bot.handle_text(user_id="123", session_id="s1", text="/browse https://example.com/short")
         self.assertIn("Documento corto pero valido", result)
 
-    @patch("claw_v2.bot._jina_read")
+    @patch("claw_v2.browse_handler._jina_read")
     def test_browse_jina_empty_falls_to_cdp(self, mock_jina) -> None:
         mock_jina.return_value = ""  # empty = validation fail
         browser = MagicMock()
@@ -122,7 +122,7 @@ class BrowseJinaTests(unittest.TestCase):
         self.assertIn("Example", result)
         browser.chrome_navigate.assert_called_once()
 
-    @patch("claw_v2.bot._jina_read")
+    @patch("claw_v2.browse_handler._jina_read")
     def test_browse_playwright_local_backend_uses_browser_browse_before_cdp(self, mock_jina) -> None:
         mock_jina.return_value = ""
         browser = MagicMock()
@@ -141,7 +141,7 @@ class BrowseJinaTests(unittest.TestCase):
         browser.browse.assert_called_once_with("https://example.com/docs")
         browser.chrome_navigate.assert_not_called()
 
-    @patch("claw_v2.bot._jina_read")
+    @patch("claw_v2.browse_handler._jina_read")
     def test_browse_browserbase_backend_uses_remote_session(self, mock_jina) -> None:
         mock_jina.return_value = ""
         browser = MagicMock()
@@ -168,7 +168,7 @@ class BrowseJinaTests(unittest.TestCase):
             keep_alive=False,
         )
 
-    @patch("claw_v2.bot._jina_read")
+    @patch("claw_v2.browse_handler._jina_read")
     def test_js_rendered_domain_uses_playwright_before_jina(self, mock_jina) -> None:
         mock_jina.return_value = "# Jina\n\nfallback"
         browser = MagicMock()
@@ -186,7 +186,7 @@ class BrowseJinaTests(unittest.TestCase):
         browser.browse.assert_called_once_with("https://github.com/acme/repo")
         mock_jina.assert_not_called()
 
-    @patch("claw_v2.bot._jina_read")
+    @patch("claw_v2.browse_handler._jina_read")
     def test_browse_no_chrome_jina_only(self, mock_jina) -> None:
         """When managed_chrome is None, all URLs go through Jina best-effort."""
         mock_jina.return_value = "# Some Content\n\n" + "x" * 200
@@ -196,7 +196,7 @@ class BrowseJinaTests(unittest.TestCase):
         mock_jina.assert_called_once()
         self.assertIn("Some Content", result)
 
-    @patch("claw_v2.bot._jina_read")
+    @patch("claw_v2.browse_handler._jina_read")
     def test_natural_language_bare_host_with_query_uses_browse(self, mock_jina) -> None:
         mock_jina.return_value = "# Search\n\nResultados utiles." + "x" * 40
         bot = _make_bot()
@@ -204,7 +204,7 @@ class BrowseJinaTests(unittest.TestCase):
         self.assertIn("Search", result)
         mock_jina.assert_called_once_with("https://example.com?q=ai")
 
-    @patch("claw_v2.bot._jina_read")
+    @patch("claw_v2.browse_handler._jina_read")
     def test_standalone_localhost_url_is_detected(self, mock_jina) -> None:
         mock_jina.return_value = "# Local App\n\nDashboard local." + "x" * 40
         bot = _make_bot()

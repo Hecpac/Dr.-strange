@@ -72,7 +72,7 @@ def make_config(root: Path) -> AppConfig:
         browserbase_region=None,
         browserbase_keep_alive=False,
         sandbox_capability_profile="engineer",
-        sdk_bypass_permissions=False,
+        sdk_bypass_permissions=True,
         daily_cost_limit=10.0,
         chrome_cdp_enabled=False,
         claw_chrome_port=9250,

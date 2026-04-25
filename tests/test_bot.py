@@ -27,6 +27,17 @@ def fake_anthropic(request: LLMRequest) -> LLMResponse:
 
 
 class BotTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._pipeline_state_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._pipeline_state_tmp.cleanup)
+        patcher = patch.dict(
+            os.environ,
+            {"PIPELINE_STATE_ROOT": str(Path(self._pipeline_state_tmp.name) / "pipeline")},
+            clear=False,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_help_command_surfaces_main_and_topic_specific_commands(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -274,13 +285,41 @@ class BotTests(unittest.TestCase):
                 self.assertEqual(policy["autonomy_mode"], "autonomous")
                 self.assertIn("coding", policy["automatic_coordinator_modes"])
                 self.assertIn("edit", policy["allowed_task_actions"])
-                self.assertIn("commit", policy["approval_required_actions"])
+                self.assertIn("commit", policy["allowed_task_actions"])
+                self.assertIn("push", policy["allowed_task_actions"])
+                self.assertNotIn("commit", policy["approval_required_actions"])
                 self.assertIn("deploy", policy["blocked_actions"])
                 self.assertIn("deploy", policy["action_patterns"])
                 self.assertIn("commit", policy["task_action_patterns"])
+                self.assertIn("push", policy["task_action_patterns"])
 
                 invalid = runtime.bot.handle_text(user_id="123", session_id="s1", text="/autonomy unsafe")
                 self.assertEqual(invalid, "autonomy mode must be one of: manual, assisted, autonomous")
+
+    def test_natural_language_autonomy_grant_sets_autonomous_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+
+                reply = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="Tienes toda la autonomia para terminar el plan no tienes que pedirme autorizacion en cada fase",
+                )
+
+                self.assertIn("Autonomía activada", reply)
+                state = runtime.memory.get_session_state("s1")
+                self.assertEqual(state["autonomy_mode"], "autonomous")
+                self.assertIn("push", state["active_object"]["autonomy_grant"]["allowed_without_phase_approval"])
 
     def test_option_followups_and_proceed_use_session_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -921,6 +960,42 @@ class BotTests(unittest.TestCase):
                 state = runtime.memory.get_session_state("s1")
                 self.assertEqual(state["verification_status"], "blocked")
 
+    def test_autonomous_policy_allows_requested_git_push_without_phase_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.coordinator = MagicMock()
+                runtime.bot.coordinator.run.return_value = CoordinatorResult(
+                    task_id="s1:push",
+                    phase_results={
+                        "research": [WorkerResult(task_name="scope_and_risks", content="scope ok", duration_seconds=0.1)],
+                        "implementation": [WorkerResult(task_name="implement_change", content="pushed branch", duration_seconds=0.1)],
+                        "verification": [WorkerResult(task_name="verify_change", content="Verification Status: passed", duration_seconds=0.1)],
+                    },
+                    synthesis="git push completed",
+                )
+
+                runtime.bot.handle_text(user_id="123", session_id="s1", text="/autonomy autonomous")
+                reply = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="verifica y haz git push de la rama",
+                )
+
+                self.assertIn("Coordinator task: s1:push", reply)
+                self.assertIn("Dispatch: autonomous", reply)
+                runtime.bot.coordinator.run.assert_called_once()
+                self.assertEqual(runtime.approvals.list_pending(), [])
+
     def test_task_run_blocks_sensitive_scope_even_when_explicit(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -977,6 +1052,41 @@ class BotTests(unittest.TestCase):
                 self.assertEqual(pending[0]["metadata"]["approved_actions"], ["commit"])
                 state = runtime.memory.get_session_state("s1")
                 self.assertEqual(state["verification_status"], "awaiting_approval")
+
+    def test_task_run_allows_commit_when_session_is_autonomous(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.coordinator = MagicMock()
+                runtime.bot.coordinator.run.return_value = CoordinatorResult(
+                    task_id="s1:commit",
+                    phase_results={
+                        "research": [WorkerResult(task_name="scope_and_risks", content="scope ok", duration_seconds=0.1)],
+                        "implementation": [WorkerResult(task_name="implement_change", content="created commit", duration_seconds=0.1)],
+                        "verification": [WorkerResult(task_name="verify_change", content="Verification Status: passed", duration_seconds=0.1)],
+                    },
+                    synthesis="commit completed",
+                )
+
+                runtime.bot.handle_text(user_id="123", session_id="s1", text="/autonomy autonomous")
+                reply = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="/task_run commit los cambios del bug del login",
+                )
+
+                self.assertIn("Coordinator task: s1:commit", reply)
+                runtime.bot.coordinator.run.assert_called_once()
+                self.assertEqual(runtime.approvals.list_pending(), [])
 
     def test_task_approve_runs_coordinator_after_commit_approval(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1962,7 +2072,7 @@ class BotTests(unittest.TestCase):
                 self.assertEqual(second, "handled")
                 self.assertEqual(runtime.bot.browser.chrome_navigate.call_count, 1)
 
-    @patch("claw_v2.browse_handler._tweet_fxtwitter_read")
+    @patch("claw_v2.bot_helpers._tweet_fxtwitter_read")
     def test_natural_language_review_tweet_url_uses_brain_analysis(self, mock_tweet_read) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -2476,6 +2586,7 @@ class BotTests(unittest.TestCase):
                 "AGENT_STATE_ROOT": str(root / "agents"),
                 "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
                 "APPROVALS_ROOT": str(root / "approvals"),
+                "PIPELINE_STATE_ROOT": str(root / "pipeline"),
                 "TELEGRAM_ALLOWED_USER_ID": "123",
                 "OPENAI_API_KEY": "sk-proj-test-key",
             }
@@ -2496,6 +2607,7 @@ class BotTests(unittest.TestCase):
                 "AGENT_STATE_ROOT": str(root / "agents"),
                 "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
                 "APPROVALS_ROOT": str(root / "approvals"),
+                "PIPELINE_STATE_ROOT": str(root / "pipeline"),
                 "TELEGRAM_ALLOWED_USER_ID": "123",
             }
             with patch.dict(os.environ, env, clear=True):

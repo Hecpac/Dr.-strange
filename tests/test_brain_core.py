@@ -190,7 +190,7 @@ class HandleMessageTests(unittest.TestCase):
         session = self.memory.get_provider_session("s1", "anthropic")
         self.assertEqual(session, "sdk-abc-123")
 
-    def test_discards_unwrapped_sdk_output(self) -> None:
+    def test_preserves_unwrapped_sdk_output_as_visible_reply(self) -> None:
         self.router.ask.return_value = LLMResponse(
             content="I checked the files and fixed it.",
             lane="brain",
@@ -200,10 +200,24 @@ class HandleMessageTests(unittest.TestCase):
 
         result = self.brain.handle_message("s1", "hazlo")
 
-        self.assertEqual(result.content, "")
+        self.assertEqual(result.content, "I checked the files and fixed it.")
+        self.assertEqual(result.artifacts["contract_violation"], "missing_response_tags")
         self.assertIn("Unwrapped SDK output", result.artifacts["reasoning_trace"])
         msgs = self.memory.get_recent_messages("s1")
-        self.assertEqual(msgs[-1]["content"], "")
+        self.assertEqual(msgs[-1]["content"], "I checked the files and fixed it.")
+
+    def test_discards_runtime_preamble_from_claude_code(self) -> None:
+        self.router.ask.return_value = LLMResponse(
+            content="# Auto-loaded skills\nThe following skills have been auto-loaded into context for use:",
+            lane="brain",
+            provider="anthropic",
+            model="test",
+        )
+
+        result = self.brain.handle_message("s1", "hazlo")
+
+        self.assertEqual(result.content, "")
+        self.assertIn("Auto-loaded skills", result.artifacts["reasoning_trace"])
 
     def test_extracts_reasoning_trace_and_stores_visible_response(self) -> None:
         observe = ObserveStream(self.db_path)

@@ -547,9 +547,9 @@ class BrainService:
             [
                 "Follow a short task loop internally: inspect context, choose the next safe step, execute or reason through it, then verify what changed.",
                 "Do not stop after a plan if the next safe step is obvious.",
-                "For coding or technical tasks, prefer end-to-end progress: inspect, edit, verify, summarize.",
+                "For coding or technical tasks, prefer end-to-end progress: inspect, edit, verify, commit/push when explicitly requested or already in the goal, then summarize.",
                 "Truly stuck rule: retry a failing tool at most 3 times, then switch tools; after failures across 3 distinct tools, stop and ask Hector with evidence.",
-                "Stop and ask only when blocked, when an action is destructive, or when external publication/authenticated actions need confirmation.",
+                "Stop and ask only when blocked, when an action is destructive, or when deploy/publication/payment/security-sensitive actions need confirmation.",
                 "End with a concise operational checkpoint: what was done, what was verified, and what is pending.",
             ]
         )
@@ -990,8 +990,13 @@ def _extract_visible_brain_response(response: LLMResponse) -> LLMResponse:
         response.artifacts["raw_response"] = content
         response.content = visible
     elif content.strip():
-        response.artifacts["reasoning_trace"] = f"Unwrapped SDK output: {content}"
-        response.content = ""
+        stripped = content.strip()
+        response.artifacts["reasoning_trace"] = f"Unwrapped SDK output: {stripped}"
+        if _looks_like_runtime_preamble(stripped):
+            response.content = ""
+        else:
+            response.artifacts["contract_violation"] = "missing_response_tags"
+            response.content = stripped
     return response
 
 
@@ -1002,6 +1007,15 @@ def _split_trace_response(content: str) -> tuple[str, str | None]:
     if response_match:
         return trace, response_match.group(1).strip()
     return trace, None
+
+
+def _looks_like_runtime_preamble(content: str) -> bool:
+    lowered = content.lower()
+    return (
+        lowered.startswith("# auto-loaded skills")
+        or "the following skills have been auto-loaded" in lowered
+        or lowered.startswith("auto-loaded skills")
+    )
 
 
 def _aggregate_verifier_votes(votes: list[dict]) -> dict:
