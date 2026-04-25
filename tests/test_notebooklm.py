@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import tempfile
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from claw_v2.jobs import JobService
 from claw_v2.notebooklm import NotebookLMService
 
 
@@ -453,6 +456,54 @@ class CdpResearchTests(unittest.TestCase):
         # Notify fires once on completion with the URL.
         self.assertTrue(any("Deep Research completado" in str(c.args) for c in notify.call_args_list))
 
+    def test_start_research_records_job_lifecycle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            notify = MagicMock()
+            job_service = JobService(Path(tmpdir) / "claw.db")
+            svc = NotebookLMService(notify=notify, job_service=job_service)
+            svc._cdp_research_fn = lambda notebook_id, query: 7
+
+            message = svc.start_research("nb-cdp-full-id", "buenas prácticas blender")
+            self.assertIn("Deep Research iniciado", message)
+
+            deadline = time.time() + 2.0
+            while time.time() < deadline and svc._running:
+                time.sleep(0.01)
+
+            jobs = job_service.list()
+            self.assertEqual(len(jobs), 1)
+            job = jobs[0]
+            self.assertEqual(job.kind, "notebooklm.research")
+            self.assertEqual(job.status, "completed")
+            self.assertEqual(job.payload["notebook_id"], "nb-cdp-full-id")
+            self.assertEqual(job.payload["query"], "buenas prácticas blender")
+            self.assertEqual(job.checkpoint["operation"], "research")
+            self.assertEqual(job.result["sources_count"], 7)
+            self.assertEqual(job.attempts, 1)
+            self.assertEqual(job.worker_id, "notebooklm")
+
+    def test_start_research_records_job_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            notify = MagicMock()
+            job_service = JobService(Path(tmpdir) / "claw.db")
+            svc = NotebookLMService(notify=notify, job_service=job_service)
+
+            def fake_cdp(notebook_id: str, query: str) -> int:
+                raise RuntimeError("CDP down")
+
+            svc._cdp_research_fn = fake_cdp
+            svc.start_research("nb-cdp-full-id", "query")
+
+            deadline = time.time() + 2.0
+            while time.time() < deadline and svc._running:
+                time.sleep(0.01)
+
+            jobs = job_service.list()
+            self.assertEqual(len(jobs), 1)
+            self.assertEqual(jobs[0].status, "failed")
+            self.assertIn("CDP down", jobs[0].error)
+            self.assertTrue(any("Error en research" in str(c.args) for c in notify.call_args_list))
+
     def test_cdp_research_does_not_invoke_id_resolution(self) -> None:
         # Critical: in CDP mode start_research must NOT call list_notebooks
         # (which would fail without SDK). We simulate by setting _client_factory
@@ -494,6 +545,29 @@ class CdpArtifactTests(unittest.TestCase):
 
         self.assertEqual(captured, {"notebook_id": "nb-cdp-id", "kind": "podcast"})
         self.assertTrue(any("podcast generado" in str(c.args).lower() for c in notify.call_args_list))
+
+    def test_start_artifact_records_job_lifecycle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            notify = MagicMock()
+            job_service = JobService(Path(tmpdir) / "claw.db")
+            svc = NotebookLMService(notify=notify, job_service=job_service)
+            svc._cdp_artifact_fn = lambda notebook_id, kind: None
+
+            message = svc.start_artifact("nb-cdp-id", "infographic")
+            self.assertIn("infografia", message.lower())
+
+            deadline = time.time() + 2.0
+            while time.time() < deadline and svc._running:
+                time.sleep(0.01)
+
+            jobs = job_service.list()
+            self.assertEqual(len(jobs), 1)
+            job = jobs[0]
+            self.assertEqual(job.kind, "notebooklm.infographic")
+            self.assertEqual(job.status, "completed")
+            self.assertEqual(job.payload["artifact_kind"], "infographic")
+            self.assertEqual(job.checkpoint["operation"], "infographic")
+            self.assertEqual(job.result["artifact_kind"], "infographic")
 
     def test_start_artifact_unsupported_kind_still_raises(self) -> None:
         # CDP path should still validate the kind label up-front (same as SDK).

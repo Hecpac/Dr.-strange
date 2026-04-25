@@ -4,7 +4,7 @@ import json
 import logging
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +38,9 @@ from claw_v2.model_registry import (
 from claw_v2.pipeline import PipelineService
 from claw_v2.social import SocialPublisher
 from claw_v2.bot_helpers import *  # noqa: F403
+
+if TYPE_CHECKING:
+    from claw_v2.jobs import JobService
 
 
 _DEFAULT_COMPUTER_MODEL = "gpt-5.4"
@@ -91,7 +94,7 @@ class BotService:
         computer_system_prompt: str | None = None,
         observe: object | None = None,
         task_ledger: object | None = None,
-        job_service: object | None = None,
+        job_service: JobService | None = None,
         model_registry: ModelRegistry | None = None,
     ) -> None:
         self.brain = brain
@@ -106,7 +109,7 @@ class BotService:
         self._terminal_handler = TerminalHandler(terminal_bridge=terminal_bridge)
         self.observe = observe
         self.task_ledger = task_ledger
-        self.job_service = job_service
+        self.job_service: JobService | None = job_service
         self.model_registry = model_registry or ModelRegistry.default()
         self.learning: Any | None = None
         self._wiki_handler = WikiHandler(memory=brain.memory)

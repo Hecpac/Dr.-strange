@@ -4,9 +4,12 @@ import asyncio
 import contextlib
 import logging
 import threading
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from claw_v2 import notebooklm_cdp
+
+if TYPE_CHECKING:
+    from claw_v2.jobs import JobService
 
 logger = logging.getLogger(__name__)
 
@@ -31,9 +34,11 @@ class NotebookLMService:
         self,
         notify: Callable[[str], None] | None = None,
         observe: Any | None = None,
+        job_service: JobService | None = None,
     ) -> None:
         self._notify = notify or (lambda msg: None)
         self._observe = observe
+        self._job_service = job_service
         self._running: dict[str, threading.Thread] = {}
         self._client_factory: Callable[[], Any] | None = None
         # Optional override for CDP-backed methods (used by tests). Defaults to
@@ -214,15 +219,55 @@ class NotebookLMService:
             title = self._get_notebook_title(full_id)
         if full_id in self._running and self._running[full_id].is_alive():
             return f"Ya hay una operación en curso para este notebook ({full_id[:8]}...)."
-        self._emit("nlm_research_started", notebook_id=full_id, query=query, mode=mode)
+        job_id: str | None = None
+        if self._job_service is not None:
+            job = self._job_service.enqueue(
+                kind="notebooklm.research",
+                payload={
+                    "notebook_id": full_id,
+                    "query": query,
+                    "mode": mode,
+                    "cdp_mode": cdp_mode,
+                },
+                metadata={"notebook_title": title},
+            )
+            job_id = job.job_id
+        self._emit("nlm_research_started", notebook_id=full_id, query=query, mode=mode, job_id=job_id)
 
         def _worker():
             try:
+                if self._job_service is not None and job_id is not None:
+                    claimed = self._job_service.claim(job_id, worker_id="notebooklm")
+                    if claimed is None:
+                        self._emit(
+                            "nlm_job_skipped",
+                            notebook_id=full_id,
+                            operation="research",
+                            job_id=job_id,
+                        )
+                        return
+                    self._job_service.checkpoint(
+                        job_id,
+                        {
+                            "operation": "research",
+                            "notebook_id": full_id,
+                            "query": query,
+                            "mode": mode,
+                        },
+                    )
                 if cdp_mode:
                     cdp_fn = self._cdp_research_fn or notebooklm_cdp.deep_research
                     result = cdp_fn(full_id, query)
                 else:
                     result = self._run_async(self._async_research(full_id, query, mode))
+                if self._job_service is not None and job_id is not None:
+                    try:
+                        self._job_service.complete(
+                            job_id,
+                            result={"notebook_id": full_id, "sources_count": result},
+                        )
+                    except Exception:
+                        logger.exception("Job completion persistence failed for %s", job_id)
                 self._emit("nlm_research_completed", notebook_id=full_id, sources_count=result)
                 self._notify(
                     f"Deep Research completado en notebook {title}\n"
@@ -231,6 +276,16 @@ class NotebookLMService:
                 )
             except Exception as exc:
                 logger.exception("Background research failed for %s", full_id)
+                if self._job_service is not None and job_id is not None:
+                    try:
+                        self._job_service.fail(
+                            job_id,
+                            error=str(exc),
+                            retry=False,
+                            checkpoint={"operation": "research", "notebook_id": full_id},
+                        )
+                    except Exception:
+                        logger.exception("Job failure persistence failed for %s", job_id)
                 self._emit("nlm_error", notebook_id=full_id, operation="research", error=str(exc))
                 self._notify(f"Error en research: {exc}")
             finally:
@@ -286,15 +341,53 @@ class NotebookLMService:
             title = self._get_notebook_title(full_id)
         if full_id in self._running and self._running[full_id].is_alive():
             return f"Ya hay una operación en curso para este notebook ({full_id[:8]}...)."
-        self._emit(f"nlm_{normalized_kind}_started", notebook_id=full_id)
+        job_id: str | None = None
+        if self._job_service is not None:
+            job = self._job_service.enqueue(
+                kind=f"notebooklm.{normalized_kind}",
+                payload={
+                    "notebook_id": full_id,
+                    "artifact_kind": normalized_kind,
+                    "cdp_mode": cdp_mode,
+                },
+                metadata={"notebook_title": title},
+            )
+            job_id = job.job_id
+        self._emit(f"nlm_{normalized_kind}_started", notebook_id=full_id, job_id=job_id)
 
         def _worker():
             try:
+                if self._job_service is not None and job_id is not None:
+                    claimed = self._job_service.claim(job_id, worker_id="notebooklm")
+                    if claimed is None:
+                        self._emit(
+                            "nlm_job_skipped",
+                            notebook_id=full_id,
+                            operation=normalized_kind,
+                            job_id=job_id,
+                        )
+                        return
+                    self._job_service.checkpoint(
+                        job_id,
+                        {
+                            "operation": normalized_kind,
+                            "notebook_id": full_id,
+                            "artifact_kind": normalized_kind,
+                        },
+                    )
                 if cdp_mode:
                     cdp_fn = self._cdp_artifact_fn or notebooklm_cdp.generate_artifact
                     cdp_fn(full_id, normalized_kind)
                 else:
                     self._run_async(self._async_generate_artifact(full_id, normalized_kind))
+                if self._job_service is not None and job_id is not None:
+                    try:
+                        self._job_service.complete(
+                            job_id,
+                            result={"notebook_id": full_id, "artifact_kind": normalized_kind},
+                        )
+                    except Exception:
+                        logger.exception("Job completion persistence failed for %s", job_id)
                 self._emit(f"nlm_{normalized_kind}_completed", notebook_id=full_id)
                 self._notify(
                     f"{self._artifact_name(normalized_kind)} generado para notebook {title}\n"
@@ -302,6 +395,16 @@ class NotebookLMService:
                 )
             except Exception as exc:
                 logger.exception("Background %s failed for %s", normalized_kind, full_id)
+                if self._job_service is not None and job_id is not None:
+                    try:
+                        self._job_service.fail(
+                            job_id,
+                            error=str(exc),
+                            retry=False,
+                            checkpoint={"operation": normalized_kind, "notebook_id": full_id},
+                        )
+                    except Exception:
+                        logger.exception("Job failure persistence failed for %s", job_id)
                 self._emit("nlm_error", notebook_id=full_id, operation=normalized_kind, error=str(exc))
                 self._notify(f"Error en {self._artifact_name(normalized_kind)}: {exc}")
             finally:
