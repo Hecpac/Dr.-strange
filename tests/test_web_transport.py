@@ -4,6 +4,8 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 from urllib.request import Request, urlopen
 
 from claw_v2.bot import BotService
@@ -19,6 +21,30 @@ class _StubBotService:
 
 
 class WebTransportTests(unittest.IsolatedAsyncioTestCase):
+    async def test_chat_api_uses_agent_runtime_when_available(self) -> None:
+        agent_runtime = MagicMock()
+        agent_runtime.handle_text.return_value = SimpleNamespace(
+            text="runtime reply",
+            session_id="mac-main",
+        )
+        api = LocalChatAPI(bot_service=_StubBotService(), agent_runtime=agent_runtime)
+
+        response = api.dispatch(
+            method="POST",
+            path="/api/chat",
+            body=json.dumps({"session_id": "mac-main", "text": "hola"}).encode("utf-8"),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.payload["reply"], "runtime reply")
+        agent_runtime.handle_text.assert_called_once_with(
+            channel="web",
+            external_user_id="123",
+            external_session_id="mac-main",
+            session_id="mac-main",
+            text="hola",
+        )
+
     async def test_serves_chat_ui_and_api(self) -> None:
         transport = WebTransport(
             chat_api=LocalChatAPI(bot_service=_StubBotService()),

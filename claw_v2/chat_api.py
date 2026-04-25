@@ -34,11 +34,13 @@ class LocalChatAPI:
         self,
         *,
         bot_service: BotService,
+        agent_runtime: object | None = None,
         default_user_id: str | None = None,
         observe: ObserveStream | None = None,
         auth_token: str | None = None,
     ) -> None:
         self._bot_service = bot_service
+        self._agent_runtime = agent_runtime
         self._default_user_id = default_user_id or bot_service.allowed_user_id or "local-user"
         self._observe = observe or getattr(bot_service, "observe", None)
         self._auth_token = auth_token.strip() if isinstance(auth_token, str) and auth_token.strip() else None
@@ -87,16 +89,30 @@ class LocalChatAPI:
         if not isinstance(text, str) or not text.strip():
             return ChatAPIResponse(status_code=400, payload={"error": "text must be a non-empty string"})
 
-        reply = self._bot_service.handle_text(
-            user_id=self._default_user_id,
-            session_id=session_id.strip(),
-            text=text,
-        )
+        session_id = session_id.strip()
+        if self._agent_runtime is not None:
+            agent_response = self._agent_runtime.handle_text(
+                channel="web",
+                external_user_id=self._default_user_id,
+                external_session_id=session_id,
+                session_id=session_id,
+                text=text,
+            )
+            reply = agent_response.text
+            agent_session_id = agent_response.session_id
+        else:
+            reply = self._bot_service.handle_text(
+                user_id=self._default_user_id,
+                session_id=session_id,
+                text=text,
+            )
+            agent_session_id = session_id
         return ChatAPIResponse(
             status_code=200,
             payload={
                 "reply": reply,
-                "session_id": session_id.strip(),
+                "session_id": session_id,
+                "agent_session_id": agent_session_id,
                 "trace_id": None,
             },
         )

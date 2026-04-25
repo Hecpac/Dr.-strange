@@ -76,6 +76,7 @@ async def run() -> int:
 
         transport = TelegramTransport(
             bot_service=runtime.bot,
+            agent_runtime=runtime.agent_runtime,
             token=runtime.config.telegram_bot_token,
             allowed_user_id=runtime.config.telegram_allowed_user_id,
             voice_api_key=runtime.config.openai_api_key,
@@ -83,6 +84,7 @@ async def run() -> int:
         web_transport = WebTransport(
             chat_api=LocalChatAPI(
                 bot_service=runtime.bot,
+                agent_runtime=runtime.agent_runtime,
                 default_user_id=runtime.config.telegram_allowed_user_id,
                 auth_token=runtime.config.web_chat_token,
             ),
