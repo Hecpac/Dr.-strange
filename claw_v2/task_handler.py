@@ -39,6 +39,7 @@ class TaskHandler:
         coordinator: Any | None = None,
         observe: Any | None = None,
         task_ledger: Any | None = None,
+        job_service: Any | None = None,
         get_session_state: Callable[[str], dict[str, Any]],
         update_session_state: Callable[..., Any],
         store_message: Callable[[str, str, str], Any] | None = None,
@@ -47,6 +48,7 @@ class TaskHandler:
         self.coordinator = coordinator
         self.observe = observe
         self.task_ledger = task_ledger
+        self.job_service = job_service
         self._get_session_state = get_session_state
         self._update_session_state = update_session_state
         self._store_message = store_message
@@ -190,9 +192,17 @@ class TaskHandler:
             mode=mode,
             route=active_object.get("last_channel_route") if isinstance(active_object.get("last_channel_route"), dict) else {},
         )
+        job_id = self._enqueue_autonomous_job(
+            task_id=task_id,
+            session_id=session_id,
+            objective=objective,
+            mode=mode,
+            route=active_object.get("last_channel_route") if isinstance(active_object.get("last_channel_route"), dict) else {},
+            reason="task_started",
+        )
         thread = threading.Thread(
             target=self._run_autonomous_task,
-            args=(session_id, task_id, objective, mode),
+            args=(session_id, task_id, objective, mode, job_id),
             daemon=True,
             name=f"autonomous-task-{task_id[-8:]}",
         )
@@ -323,10 +333,26 @@ class TaskHandler:
         )
         return _format_coordinator_response(result, checkpoint=checkpoint, forced=forced)
 
-    def _run_autonomous_task(self, session_id: str, task_id: str, objective: str, mode: str) -> None:
+    def _run_autonomous_task(
+        self,
+        session_id: str,
+        task_id: str,
+        objective: str,
+        mode: str,
+        job_id: str | None = None,
+    ) -> None:
         try:
             if self._is_cancelled(task_id):
                 self._mark_cancelled_task_state(session_id, task_id, objective, reason="cancelled_before_start")
+                self._cancel_autonomous_job(task_id, reason="cancelled_before_start", job_id=job_id)
+                return
+            if not self._claim_autonomous_job(
+                task_id=task_id,
+                session_id=session_id,
+                objective=objective,
+                mode=mode,
+                job_id=job_id,
+            ):
                 return
             response = self._run_coordinated_task(
                 session_id,
@@ -337,6 +363,7 @@ class TaskHandler:
             )
             if self._is_cancelled(task_id):
                 self._mark_cancelled_task_state(session_id, task_id, objective, reason="cancelled_during_run")
+                self._cancel_autonomous_job(task_id, reason="cancelled_during_run", job_id=job_id)
                 return
             state = self._get_session_state(session_id)
             active_object = dict(state.get("active_object") or {})
@@ -351,6 +378,15 @@ class TaskHandler:
             completed_state = self._get_session_state(session_id)
             completed_checkpoint = completed_state.get("last_checkpoint") or {}
             verification_status = str(completed_state.get("verification_status") or "unknown")
+            self._complete_autonomous_job(
+                task_id=task_id,
+                job_id=job_id,
+                result={
+                    "session_id": session_id,
+                    "verification_status": verification_status,
+                    "summary": str(completed_checkpoint.get("summary") or objective),
+                },
+            )
             if self.task_ledger is not None:
                 artifacts = self._completion_artifacts(
                     task_id=task_id,
@@ -378,6 +414,12 @@ class TaskHandler:
             )
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
+            self._fail_autonomous_job(
+                task_id=task_id,
+                job_id=job_id,
+                error=error,
+                checkpoint={"operation": "coordinator", "mode": mode, "session_id": session_id},
+            )
             checkpoint = {
                 "summary": f"Autonomous task failed: {error}",
                 "verification_status": "failed",
@@ -583,7 +625,21 @@ class TaskHandler:
         )
         thread = threading.Thread(
             target=self._run_autonomous_task,
-            args=(record.session_id, record.task_id, record.objective, mode),
+            args=(
+                record.session_id,
+                record.task_id,
+                record.objective,
+                mode,
+                self._enqueue_autonomous_job(
+                    task_id=record.task_id,
+                    session_id=record.session_id,
+                    objective=record.objective,
+                    mode=mode,
+                    route=record.route,
+                    reason=reason,
+                    reclaim_running=True,
+                ),
+            ),
             daemon=True,
             name=f"autonomous-resume-{record.task_id[-8:]}",
         )
@@ -632,6 +688,7 @@ class TaskHandler:
                 verification_status="cancelled",
                 artifacts=artifacts,
             )
+        self._cancel_autonomous_job(task_id, reason=reason)
         self._emit(
             "autonomous_task_cancelled",
             {
@@ -862,6 +919,152 @@ class TaskHandler:
                 provider=provider,
                 model=model,
             ),
+        )
+
+    @staticmethod
+    def _resume_key_for_task(task_id: str) -> str:
+        return f"coordinator:{task_id}"
+
+    def _enqueue_autonomous_job(
+        self,
+        *,
+        task_id: str,
+        session_id: str,
+        objective: str,
+        mode: str,
+        route: dict[str, Any],
+        reason: str,
+        reclaim_running: bool = False,
+    ) -> str | None:
+        if self.job_service is None:
+            return None
+        provider, model = self._provider_model_for_mode(session_id, mode)
+        job = self.job_service.enqueue(
+            kind="coordinator.autonomous_task",
+            payload={
+                "task_id": task_id,
+                "session_id": session_id,
+                "objective": objective,
+                "mode": mode,
+            },
+            resume_key=self._resume_key_for_task(task_id),
+            metadata={
+                "runtime": "coordinator",
+                "provider": provider,
+                "model": model,
+                "route": dict(route or {}),
+                "reason": reason,
+            },
+        )
+        if reclaim_running and job.status == "running":
+            retried = self.job_service.fail(
+                job.job_id,
+                error=f"reclaiming interrupted autonomous task: {reason}",
+                retry=True,
+                retry_delay_seconds=0,
+                checkpoint={"task_id": task_id, "session_id": session_id, "reason": reason},
+            )
+            if retried is not None:
+                job = retried
+        self._update_task_job_metadata(task_id, job.job_id)
+        return job.job_id
+
+    def _claim_autonomous_job(
+        self,
+        *,
+        task_id: str,
+        session_id: str,
+        objective: str,
+        mode: str,
+        job_id: str | None,
+    ) -> bool:
+        if self.job_service is None or job_id is None:
+            return True
+        claimed = self.job_service.claim(job_id, worker_id="coordinator")
+        if claimed is not None:
+            self.job_service.checkpoint(
+                job_id,
+                {
+                    "operation": "coordinator",
+                    "task_id": task_id,
+                    "session_id": session_id,
+                    "objective": objective,
+                    "mode": mode,
+                },
+            )
+            return True
+        record = self.job_service.get(job_id)
+        if record is not None and record.status == "cancelled":
+            self._mark_cancelled_task_state(session_id, task_id, objective, reason=record.error or "job_cancelled")
+            return False
+        if record is not None and record.status in {"completed", "failed"}:
+            self._emit(
+                "autonomous_task_job_skipped",
+                {
+                    "session_id": session_id,
+                    "task_id": task_id,
+                    "job_id": job_id,
+                    "job_status": record.status,
+                },
+            )
+            return False
+        return True
+
+    def _complete_autonomous_job(self, *, task_id: str, job_id: str | None, result: dict[str, Any]) -> None:
+        if self.job_service is None:
+            return
+        record_id = job_id or self._active_job_id_for_task(task_id)
+        if record_id is not None:
+            self.job_service.complete(record_id, result=result)
+
+    def _fail_autonomous_job(
+        self,
+        *,
+        task_id: str,
+        job_id: str | None,
+        error: str,
+        checkpoint: dict[str, Any] | None = None,
+    ) -> None:
+        if self.job_service is None:
+            return
+        record_id = job_id or self._active_job_id_for_task(task_id)
+        if record_id is not None:
+            self.job_service.fail(record_id, error=error, retry=False, checkpoint=checkpoint)
+
+    def _cancel_autonomous_job(self, task_id: str, *, reason: str, job_id: str | None = None) -> None:
+        if self.job_service is None:
+            return
+        record_id = job_id or self._active_job_id_for_task(task_id)
+        if record_id is not None:
+            self.job_service.cancel(record_id, reason=reason)
+
+    def _active_job_id_for_task(self, task_id: str) -> str | None:
+        if self.job_service is None:
+            return None
+        record = self.job_service.get_active_by_resume_key(self._resume_key_for_task(task_id))
+        return record.job_id if record is not None else None
+
+    def _update_task_job_metadata(self, task_id: str, job_id: str) -> None:
+        if self.task_ledger is None:
+            return
+        record = self.task_ledger.get(task_id)
+        if record is None:
+            return
+        metadata = dict(record.metadata or {})
+        metadata["generic_job_id"] = job_id
+        self.task_ledger.create(
+            task_id=record.task_id,
+            session_id=record.session_id,
+            objective=record.objective,
+            mode=record.mode,
+            runtime=record.runtime,
+            provider=record.provider,
+            model=record.model,
+            status=record.status,
+            notify_policy=record.notify_policy,
+            route=record.route,
+            metadata=metadata,
+            artifacts=record.artifacts,
         )
 
     def _provider_model_for_mode(self, session_id: str, mode: str) -> tuple[str | None, str | None]:
