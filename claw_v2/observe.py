@@ -235,20 +235,7 @@ class ObserveStream:
                 (limit,),
             ).fetchall()
         return [
-            {
-                "event_type": row[0],
-                "lane": row[1],
-                "provider": row[2],
-                "model": row[3],
-                "trace_id": row[4],
-                "root_trace_id": row[5],
-                "span_id": row[6],
-                "parent_span_id": row[7],
-                "job_id": row[8],
-                "artifact_id": row[9],
-                "payload": json.loads(row[10]),
-                "timestamp": row[11],
-            }
+            _event_row_to_dict(row)
             for row in rows
         ]
 
@@ -268,19 +255,40 @@ class ObserveStream:
         with self._lock:
             rows = self._conn.execute(query, params).fetchall()
         return [
-            {
-                "event_type": row[0],
-                "lane": row[1],
-                "provider": row[2],
-                "model": row[3],
-                "trace_id": row[4],
-                "root_trace_id": row[5],
-                "span_id": row[6],
-                "parent_span_id": row[7],
-                "job_id": row[8],
-                "artifact_id": row[9],
-                "payload": json.loads(row[10]),
-                "timestamp": row[11],
-            }
+            _event_row_to_dict(row)
             for row in rows
         ]
+
+    def job_events(self, job_id: str, *, limit: int | None = None) -> list[dict]:
+        query = """
+            SELECT event_type, lane, provider, model,
+                   trace_id, root_trace_id, span_id, parent_span_id, job_id, artifact_id,
+                   payload, timestamp
+            FROM observe_stream
+            WHERE job_id = ?
+            ORDER BY id ASC
+        """
+        params: tuple[object, ...] = (job_id,)
+        if limit is not None:
+            query += " LIMIT ?"
+            params = (job_id, limit)
+        with self._lock:
+            rows = self._conn.execute(query, params).fetchall()
+        return [_event_row_to_dict(row) for row in rows]
+
+
+def _event_row_to_dict(row: sqlite3.Row | tuple) -> dict:
+    return {
+        "event_type": row[0],
+        "lane": row[1],
+        "provider": row[2],
+        "model": row[3],
+        "trace_id": row[4],
+        "root_trace_id": row[5],
+        "span_id": row[6],
+        "parent_span_id": row[7],
+        "job_id": row[8],
+        "artifact_id": row[9],
+        "payload": json.loads(row[10]),
+        "timestamp": row[11],
+    }

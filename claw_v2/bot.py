@@ -337,7 +337,7 @@ class BotService:
             BotCommand("spending", self._handle_spending_command, exact=("/spending",)),
             BotCommand("task_run", self._handle_task_run_command, exact=("/task_run",), prefixes=("/task_run ",)),
             BotCommand("autonomy", self._handle_autonomy_command, exact=("/autonomy", "/autonomy_policy"), prefixes=("/autonomy ",)),
-            BotCommand("jobs", self._handle_jobs_command, exact=("/jobs",), prefixes=("/jobs ", "/job_status ", "/job_resume ", "/job_cancel ", "/task_resume ", "/task_cancel ")),
+            BotCommand("jobs", self._handle_jobs_command, exact=("/jobs",), prefixes=("/jobs ", "/job_status ", "/job_trace ", "/job_resume ", "/job_cancel ", "/task_resume ", "/task_cancel ")),
             BotCommand("task_state", self._handle_task_state_command, exact=("/tasks", "/task_status", "/task_loop", "/task_queue", "/task_pending", "/session_state"), prefixes=("/task_queue ",)),
             BotCommand("task_transition", self._handle_task_transition_command, exact=("/task_done", "/task_defer"), prefixes=("/task_done ", "/task_defer ")),
             BotCommand("browse", self._handle_browse_command, prefixes=("/browse ",)),
@@ -570,6 +570,16 @@ class BotService:
             record = self.task_ledger.get(parts[1])
             payload = record.to_dict() if record else {"error": "task not found"}
             return json.dumps(payload, indent=2, sort_keys=True)
+        if command == "/job_trace":
+            if len(parts) not in {2, 3}:
+                return "usage: /job_trace <task_id> [limit]"
+            limit = 100
+            if len(parts) == 3:
+                try:
+                    limit = _parse_positive_int(parts[2], field_name="limit")
+                except ValueError as exc:
+                    return str(exc)
+            return self._job_trace_response(parts[1], limit=limit)
         if command in {"/task_resume", "/job_resume"}:
             if len(parts) != 2:
                 return f"usage: {command} <task_id>"
@@ -1108,6 +1118,31 @@ class BotService:
         if html_path:
             result["html"] = html_path
         return json.dumps(result, indent=2, sort_keys=True)
+
+    def _job_trace_response(self, job_id: str, *, limit: int) -> str:
+        if self.observe is None:
+            return "observe stream unavailable"
+        if not hasattr(self.observe, "job_events"):
+            return "observe stream does not support job replay"
+        events = self.observe.job_events(job_id, limit=limit)
+        if not events:
+            return f"job trace not found: {job_id}"
+        replay = [
+            {
+                "timestamp": event["timestamp"],
+                "event_type": event["event_type"],
+                "lane": event["lane"],
+                "provider": event["provider"],
+                "model": event["model"],
+                "trace_id": event["trace_id"],
+                "span_id": event["span_id"],
+                "parent_span_id": event["parent_span_id"],
+                "artifact_id": event["artifact_id"],
+                "payload": event["payload"],
+            }
+            for event in events
+        ]
+        return json.dumps({"job_id": job_id, "event_count": len(replay), "events": replay}, indent=2, sort_keys=True)
 
 
 

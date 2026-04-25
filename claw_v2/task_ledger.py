@@ -358,7 +358,14 @@ class TaskLedger:
     def _emit(self, event_type: str, payload: dict[str, Any]) -> None:
         if self.observe is None:
             return
-        self.observe.emit(event_type, lane="task_ledger", payload=payload)
+        task_id = _as_optional_str(payload.get("task_id"))
+        self.observe.emit(
+            event_type,
+            lane="task_ledger",
+            job_id=task_id,
+            artifact_id=_lifecycle_job_artifact_id(payload),
+            payload=payload,
+        )
 
 
 def _loads_json(value: Any) -> dict[str, Any]:
@@ -382,3 +389,19 @@ def _as_optional_float(value: Any) -> float | None:
     if value is None:
         return None
     return float(value)
+
+
+def _lifecycle_job_artifact_id(payload: dict[str, Any]) -> str | None:
+    artifacts = payload.get("artifacts")
+    if not isinstance(artifacts, dict):
+        return None
+    lifecycle = artifacts.get("lifecycle")
+    if not isinstance(lifecycle, dict):
+        return None
+    job = lifecycle.get("job")
+    if isinstance(job, dict):
+        return _as_optional_str(job.get("artifact_id"))
+    artifact_ids = lifecycle.get("artifact_ids")
+    if isinstance(artifact_ids, list) and artifact_ids:
+        return _as_optional_str(artifact_ids[-1])
+    return None

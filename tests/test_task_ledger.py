@@ -5,6 +5,7 @@ import time
 import unittest
 from pathlib import Path
 
+from claw_v2.observe import ObserveStream
 from claw_v2.task_ledger import TaskLedger
 
 
@@ -47,6 +48,37 @@ class TaskLedgerTests(unittest.TestCase):
             self.assertEqual(terminal.artifacts["commit"], "abc123")
             self.assertEqual(ledger.summary(session_id="tg-123"), {"succeeded": 1})
             self.assertEqual(ledger.list(session_id="tg-123")[0].task_id, "task-1")
+
+    def test_emits_task_events_with_job_and_artifact_lineage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "observe.db")
+            ledger = TaskLedger(Path(tmpdir) / "claw.db", observe=observe)
+
+            ledger.create(
+                task_id="task-1",
+                session_id="s1",
+                objective="fix login",
+                runtime="coordinator",
+                status="running",
+                artifacts={
+                    "lifecycle": {
+                        "job": {
+                            "kind": "job",
+                            "artifact_id": "job:abc",
+                            "task_id": "task-1",
+                            "session_id": "s1",
+                            "lifecycle_status": "running",
+                            "artifact_ids": ["plan:abc"],
+                        }
+                    }
+                },
+            )
+
+            events = observe.job_events("task-1")
+
+            self.assertEqual(events[0]["event_type"], "task_ledger_created")
+            self.assertEqual(events[0]["job_id"], "task-1")
+            self.assertEqual(events[0]["artifact_id"], "job:abc")
 
     def test_marks_stale_running_tasks_lost(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
