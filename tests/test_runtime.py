@@ -104,6 +104,28 @@ class RuntimeTests(unittest.TestCase):
                 self.assertEqual((hex_def.provider, hex_def.model), ("openai", "gpt-5.5"))
                 self.assertEqual((eval_def.provider, eval_def.model), ("anthropic", "claude-opus-4-7"))
 
+    def test_build_runtime_bootstraps_agent_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "PIPELINE_STATE_ROOT": str(root / "pipeline"),
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+
+                self.assertEqual(runtime.agent_workspace.root, root / "workspace")
+                for name in runtime.agent_workspace.REQUIRED_FILES:
+                    self.assertTrue((root / "workspace" / name).exists(), name)
+                self.assertTrue((root / "workspace" / "memory").is_dir())
+                self.assertIn("# Agent Workspace Context", runtime.brain.system_prompt)
+                events = runtime.observe.recent_events(limit=5)
+                self.assertTrue(any(event["event_type"] == "agent_workspace_bootstrap" for event in events))
+
     def test_runtime_registry_writes_to_agent_state_not_tracked_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
