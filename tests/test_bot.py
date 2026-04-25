@@ -965,6 +965,12 @@ class BotTests(unittest.TestCase):
                 self.assertEqual(record.objective, "corrige el bug del login")
                 self.assertEqual(record.status, "succeeded")
                 self.assertEqual(record.verification_status, "pending")
+                lifecycle = record.artifacts["lifecycle"]
+                self.assertEqual(lifecycle["plan"]["objective"], "corrige el bug del login")
+                self.assertEqual(lifecycle["plan"]["planned_phases"], ["research", "synthesis", "implementation", "verification"])
+                self.assertEqual(lifecycle["verification"]["status"], "pending")
+                self.assertEqual(lifecycle["outcome"]["status"], "succeeded")
+                self.assertEqual(lifecycle["job"]["lifecycle_status"], "completed")
                 tasks_payload = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/tasks"))
                 self.assertEqual(tasks_payload["summary"], {"succeeded": 1})
                 self.assertEqual(tasks_payload["tasks"][0]["task_id"], task_id)
@@ -1010,6 +1016,10 @@ class BotTests(unittest.TestCase):
                 self.assertEqual(record.status, "succeeded")
                 self.assertEqual(record.metadata["resume_reason"], "manual_resume")
                 self.assertEqual(record.metadata["resume_count"], 1)
+                lifecycle = record.artifacts["lifecycle"]
+                self.assertEqual(lifecycle["plan"]["objective"], "corrige el bug del login")
+                self.assertEqual(lifecycle["execution"]["status"], "resumed")
+                self.assertEqual(lifecycle["outcome"]["status"], "succeeded")
 
     def test_task_cancel_command_marks_running_task_cancelled(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1040,6 +1050,8 @@ class BotTests(unittest.TestCase):
                 record = runtime.task_ledger.get("s1:running-task")
                 self.assertEqual(record.status, "cancelled")
                 self.assertEqual(record.verification_status, "cancelled")
+                self.assertEqual(record.artifacts["lifecycle"]["plan"]["objective"], "corrige el bug del login")
+                self.assertEqual(record.artifacts["lifecycle"]["outcome"]["status"], "cancelled")
                 status = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/job_status s1:running-task"))
                 self.assertEqual(status["status"], "cancelled")
                 jobs = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/jobs"))

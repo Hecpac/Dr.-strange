@@ -5,6 +5,16 @@ import threading
 import time
 from typing import Any, Callable
 
+from claw_v2.artifacts import (
+    ExecutionArtifact,
+    JobArtifact,
+    OutcomeArtifact,
+    PlanArtifact,
+    VerificationArtifact,
+    append_lifecycle_artifacts,
+    new_artifact_id,
+    planned_phases_for_mode,
+)
 from claw_v2.bot_helpers import (
     _build_coordinator_tasks,
     _coordinator_checkpoint,
@@ -342,12 +352,19 @@ class TaskHandler:
             completed_checkpoint = completed_state.get("last_checkpoint") or {}
             verification_status = str(completed_state.get("verification_status") or "unknown")
             if self.task_ledger is not None:
+                artifacts = self._completion_artifacts(
+                    task_id=task_id,
+                    session_id=session_id,
+                    checkpoint=completed_checkpoint,
+                    verification_status=verification_status,
+                    response_preview=response[:1000],
+                )
                 self.task_ledger.mark_terminal(
                     task_id,
                     status="succeeded",
                     summary=str(completed_checkpoint.get("summary") or objective),
                     verification_status=verification_status,
-                    artifacts={"response_preview": response[:1000]},
+                    artifacts=artifacts,
                 )
             self._emit(
                 "autonomous_task_completed",
@@ -386,13 +403,24 @@ class TaskHandler:
             if self._store_message is not None:
                 self._store_message(session_id, "assistant", response[:4000])
             if self.task_ledger is not None:
+                artifacts = self._outcome_artifacts(
+                    task_id=task_id,
+                    session_id=session_id,
+                    status="failed",
+                    summary=f"Autonomous task failed: {error}",
+                    objective=objective,
+                    mode=mode,
+                    error=error,
+                    verification_status="failed",
+                    extra={"response_preview": response[:1000]},
+                )
                 self.task_ledger.mark_terminal(
                     task_id,
                     status="failed",
                     summary=f"Autonomous task failed: {error}",
                     error=error,
                     verification_status="failed",
-                    artifacts={"response_preview": response[:1000]},
+                    artifacts=artifacts,
                 )
             self._emit(
                 "autonomous_task_failed",
@@ -487,6 +515,26 @@ class TaskHandler:
         with self._task_lock:
             self._cancelled_tasks.discard(record.task_id)
         if self.task_ledger is not None:
+            base_artifacts = self._ensure_plan_artifact(
+                record.artifacts,
+                task_id=record.task_id,
+                session_id=record.session_id,
+                objective=record.objective,
+                mode=mode,
+            )
+            artifacts = append_lifecycle_artifacts(
+                base_artifacts,
+                ExecutionArtifact(
+                    artifact_id=new_artifact_id("execution"),
+                    task_id=record.task_id,
+                    session_id=record.session_id,
+                    status="resumed",
+                    runtime=record.runtime,
+                    provider=record.provider,
+                    model=record.model,
+                    reason=reason,
+                ),
+            )
             self.task_ledger.create(
                 task_id=record.task_id,
                 session_id=record.session_id,
@@ -498,7 +546,7 @@ class TaskHandler:
                 status="running",
                 route=record.route,
                 metadata=metadata,
-                artifacts=record.artifacts,
+                artifacts=artifacts,
             )
         state = self._get_session_state(record.session_id)
         active_object = dict(state.get("active_object") or {})
@@ -565,13 +613,24 @@ class TaskHandler:
             active_object=active_object,
         )
         if self.task_ledger is not None:
+            artifacts = self._outcome_artifacts(
+                task_id=task_id,
+                session_id=session_id,
+                status="cancelled",
+                summary=f"Autonomous task cancelled: {objective[:180]}",
+                objective=objective,
+                mode=_infer_session_mode(objective),
+                error=reason,
+                verification_status="cancelled",
+                extra={"cancel_reason": reason},
+            )
             self.task_ledger.mark_terminal(
                 task_id,
                 status="cancelled",
                 summary=f"Autonomous task cancelled: {objective[:180]}",
                 error=reason,
                 verification_status="cancelled",
-                artifacts={"cancel_reason": reason},
+                artifacts=artifacts,
             )
         self._emit(
             "autonomous_task_cancelled",
@@ -603,10 +662,172 @@ class TaskHandler:
             return False
         return record.status in {"queued", "running", "failed", "timed_out", "cancelled", "lost"}
 
+    @staticmethod
+    def _ensure_plan_artifact(
+        artifacts: dict[str, Any] | None,
+        *,
+        task_id: str,
+        session_id: str,
+        objective: str,
+        mode: str,
+    ) -> dict[str, Any]:
+        payload = dict(artifacts or {})
+        lifecycle = payload.get("lifecycle") if isinstance(payload.get("lifecycle"), dict) else {}
+        if isinstance(lifecycle, dict) and isinstance(lifecycle.get("plan"), dict):
+            return payload
+        return append_lifecycle_artifacts(
+            payload,
+            PlanArtifact(
+                artifact_id=new_artifact_id("plan"),
+                task_id=task_id,
+                session_id=session_id,
+                objective=objective,
+                mode=mode,
+                planned_phases=planned_phases_for_mode(mode),
+            ),
+        )
+
+    def _current_task_artifacts(self, task_id: str) -> dict[str, Any]:
+        if self.task_ledger is None:
+            return {}
+        record = self.task_ledger.get(task_id)
+        return dict(record.artifacts or {}) if record is not None else {}
+
+    def _completion_artifacts(
+        self,
+        *,
+        task_id: str,
+        session_id: str,
+        checkpoint: dict[str, Any],
+        verification_status: str,
+        response_preview: str,
+    ) -> dict[str, Any]:
+        summary = str(checkpoint.get("summary") or "")
+        artifacts = append_lifecycle_artifacts(
+            self._current_task_artifacts(task_id),
+            VerificationArtifact(
+                artifact_id=new_artifact_id("verification"),
+                task_id=task_id,
+                session_id=session_id,
+                status=verification_status,
+                summary=summary,
+                pending_action=str(checkpoint.get("pending_action") or ""),
+            ),
+            OutcomeArtifact(
+                artifact_id=new_artifact_id("outcome"),
+                task_id=task_id,
+                session_id=session_id,
+                status="succeeded",
+                summary=summary,
+                verification_status=verification_status,
+            ),
+        )
+        artifacts["response_preview"] = response_preview
+        return self._with_job_artifact(task_id, session_id, "completed", artifacts)
+
+    def _outcome_artifacts(
+        self,
+        *,
+        task_id: str,
+        session_id: str,
+        status: str,
+        summary: str,
+        verification_status: str,
+        error: str = "",
+        objective: str | None = None,
+        mode: str | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        base_artifacts = self._current_task_artifacts(task_id)
+        if objective is not None:
+            base_artifacts = self._ensure_plan_artifact(
+                base_artifacts,
+                task_id=task_id,
+                session_id=session_id,
+                objective=objective,
+                mode=mode or _infer_session_mode(objective),
+            )
+        artifacts = append_lifecycle_artifacts(
+            base_artifacts,
+            OutcomeArtifact(
+                artifact_id=new_artifact_id("outcome"),
+                task_id=task_id,
+                session_id=session_id,
+                status=status,
+                summary=summary,
+                error=error,
+                verification_status=verification_status,
+            ),
+        )
+        artifacts.update(dict(extra or {}))
+        return self._with_job_artifact(task_id, session_id, status, artifacts)
+
+    def _initial_task_artifacts(
+        self,
+        *,
+        task_id: str,
+        session_id: str,
+        objective: str,
+        mode: str,
+        runtime: str,
+        provider: str | None,
+        model: str | None,
+    ) -> dict[str, Any]:
+        artifacts = append_lifecycle_artifacts(
+            {},
+            PlanArtifact(
+                artifact_id=new_artifact_id("plan"),
+                task_id=task_id,
+                session_id=session_id,
+                objective=objective,
+                mode=mode,
+                planned_phases=planned_phases_for_mode(mode),
+            ),
+            ExecutionArtifact(
+                artifact_id=new_artifact_id("execution"),
+                task_id=task_id,
+                session_id=session_id,
+                status="running",
+                runtime=runtime,
+                provider=provider,
+                model=model,
+                reason="task_started",
+            ),
+        )
+        return self._with_job_artifact(task_id, session_id, "running", artifacts)
+
+    @staticmethod
+    def _with_job_artifact(
+        task_id: str,
+        session_id: str,
+        lifecycle_status: str,
+        artifacts: dict[str, Any],
+    ) -> dict[str, Any]:
+        lifecycle = dict(artifacts.get("lifecycle") or {})
+        artifact_ids = list(lifecycle.get("artifact_ids") or [])
+        return append_lifecycle_artifacts(
+            artifacts,
+            JobArtifact(
+                artifact_id=new_artifact_id("job"),
+                task_id=task_id,
+                session_id=session_id,
+                lifecycle_status=lifecycle_status,
+                artifact_ids=artifact_ids,
+            ),
+        )
+
     def _emit(self, event_type: str, payload: dict[str, Any]) -> None:
         if self.observe is None:
             return
-        self.observe.emit(event_type, lane="coordinator", payload=payload)
+        task_id = payload.get("task_id")
+        artifact_id = payload.get("artifact_id")
+        self.observe.emit(
+            event_type,
+            lane="coordinator",
+            job_id=str(task_id) if task_id else None,
+            artifact_id=str(artifact_id) if artifact_id else None,
+            payload=payload,
+        )
 
     def _record_ledger_task_started(
         self,
@@ -620,17 +841,27 @@ class TaskHandler:
         if self.task_ledger is None:
             return
         provider, model = self._provider_model_for_mode(session_id, mode)
+        runtime = "coordinator"
         self.task_ledger.create(
             task_id=task_id,
             session_id=session_id,
             objective=objective,
             mode=mode,
-            runtime="coordinator",
+            runtime=runtime,
             provider=provider,
             model=model,
             status="running",
             route=route,
             metadata={"autonomous": True},
+            artifacts=self._initial_task_artifacts(
+                task_id=task_id,
+                session_id=session_id,
+                objective=objective,
+                mode=mode,
+                runtime=runtime,
+                provider=provider,
+                model=model,
+            ),
         )
 
     def _provider_model_for_mode(self, session_id: str, mode: str) -> tuple[str | None, str | None]:

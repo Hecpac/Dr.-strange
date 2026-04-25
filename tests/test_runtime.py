@@ -201,6 +201,9 @@ class RuntimeTests(unittest.TestCase):
                 self.assertEqual(record.status, "succeeded")
                 self.assertEqual(record.metadata["resume_reason"], "startup_recovery")
                 self.assertEqual(record.metadata["resume_count"], 1)
+                self.assertEqual(record.artifacts["lifecycle"]["plan"]["objective"], "corrige el bug del login")
+                self.assertEqual(record.artifacts["lifecycle"]["execution"]["status"], "resumed")
+                self.assertEqual(record.artifacts["lifecycle"]["job"]["lifecycle_status"], "completed")
                 state = runtime.memory.get_session_state("tg-123")
                 self.assertEqual(state["active_object"]["active_task"]["status"], "completed")
 
