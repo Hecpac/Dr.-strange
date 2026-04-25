@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from typing import Any, Callable
 
@@ -25,13 +26,19 @@ class TaskHandler:
         *,
         approvals: Any | None = None,
         coordinator: Any | None = None,
+        observe: Any | None = None,
         get_session_state: Callable[[str], dict[str, Any]],
         update_session_state: Callable[..., Any],
+        store_message: Callable[[str, str, str], Any] | None = None,
     ) -> None:
         self.approvals = approvals
         self.coordinator = coordinator
+        self.observe = observe
         self._get_session_state = get_session_state
         self._update_session_state = update_session_state
+        self._store_message = store_message
+        self._task_threads: dict[str, threading.Thread] = {}
+        self._task_lock = threading.Lock()
 
     def task_approve_response(self, approval_id: str, token: str) -> str:
         if self.approvals is None:
@@ -114,7 +121,69 @@ class TaskHandler:
             return _format_autonomy_policy_block(policy)
         if mode not in {"coding", "research"}:
             return None
-        return self.coordinated_task_response(session_id, text, forced=False)
+        return self.start_autonomous_task(session_id, text, mode=mode)
+
+    def start_autonomous_task(self, session_id: str, objective: str, *, mode: str | None = None) -> str:
+        if self.coordinator is None:
+            return "coordinator unavailable"
+        mode = mode or _infer_session_mode(objective)
+        task_id = f"{session_id}:{time.time_ns()}"
+        checkpoint = {
+            "summary": f"Autonomous task started: {objective[:180]}",
+            "verification_status": "running",
+            "task_id": task_id,
+        }
+        state = self._get_session_state(session_id)
+        queue = self.upsert_task_queue_entry(
+            state.get("task_queue") or [],
+            summary=objective,
+            mode=mode,
+            status="in_progress",
+            source="coordinator",
+            priority=0,
+            depends_on=self.derive_task_dependencies(state.get("task_queue") or [], summary=objective),
+        )
+        active_object = dict(state.get("active_object") or {})
+        active_object["active_task"] = {
+            "task_id": task_id,
+            "objective": objective,
+            "mode": mode,
+            "status": "running",
+            "started_at": time.time(),
+        }
+        self._update_session_state(
+            session_id,
+            mode=mode,
+            pending_action=None,
+            task_queue=queue,
+            verification_status="running",
+            last_checkpoint=checkpoint,
+            active_object=active_object,
+        )
+        self._emit(
+            "autonomous_task_started",
+            {
+                "session_id": session_id,
+                "task_id": task_id,
+                "objective": objective,
+                "mode": mode,
+            },
+        )
+        thread = threading.Thread(
+            target=self._run_autonomous_task,
+            args=(session_id, task_id, objective, mode),
+            daemon=True,
+            name=f"autonomous-task-{task_id[-8:]}",
+        )
+        with self._task_lock:
+            self._task_threads[task_id] = thread
+        thread.start()
+        return (
+            f"Tarea autónoma iniciada: `{task_id}`\n"
+            f"Modo: {mode}\n"
+            "Estado: running\n"
+            "Voy a ejecutar, verificar y cerrar con reporte final. Usa `/task_loop` para ver el estado."
+        )
 
     def coordinated_task_response(
         self,
@@ -184,6 +253,23 @@ class TaskHandler:
             )
             return _format_autonomy_policy_block(policy)
         task_id = f"{session_id}:{time.time_ns()}"
+        return self._run_coordinated_task(
+            session_id,
+            objective,
+            mode=mode,
+            forced=forced,
+            task_id=task_id,
+        )
+
+    def _run_coordinated_task(
+        self,
+        session_id: str,
+        objective: str,
+        *,
+        mode: str,
+        forced: bool,
+        task_id: str,
+    ) -> str:
         research_tasks, implementation_tasks, verification_tasks = _build_coordinator_tasks(mode, objective)
         result = self.coordinator.run(
             task_id,
@@ -214,6 +300,88 @@ class TaskHandler:
             last_checkpoint=checkpoint,
         )
         return _format_coordinator_response(result, checkpoint=checkpoint, forced=forced)
+
+    def _run_autonomous_task(self, session_id: str, task_id: str, objective: str, mode: str) -> None:
+        try:
+            response = self._run_coordinated_task(
+                session_id,
+                objective,
+                mode=mode,
+                forced=False,
+                task_id=task_id,
+            )
+            state = self._get_session_state(session_id)
+            active_object = dict(state.get("active_object") or {})
+            active_task = dict(active_object.get("active_task") or {})
+            if active_task.get("task_id") == task_id:
+                active_task["status"] = "completed"
+                active_task["completed_at"] = time.time()
+                active_object["active_task"] = active_task
+                self._update_session_state(session_id, active_object=active_object)
+            if self._store_message is not None:
+                self._store_message(session_id, "assistant", response[:4000])
+            self._emit(
+                "autonomous_task_completed",
+                {
+                    "session_id": session_id,
+                    "task_id": task_id,
+                    "objective": objective,
+                    "response": response,
+                    "verification_status": self._get_session_state(session_id).get("verification_status", "unknown"),
+                },
+            )
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            checkpoint = {
+                "summary": f"Autonomous task failed: {error}",
+                "verification_status": "failed",
+                "reason": "autonomous_task_exception",
+                "task_id": task_id,
+            }
+            state = self._get_session_state(session_id)
+            active_object = dict(state.get("active_object") or {})
+            active_task = dict(active_object.get("active_task") or {})
+            if active_task.get("task_id") == task_id:
+                active_task["status"] = "failed"
+                active_task["error"] = error
+                active_task["completed_at"] = time.time()
+                active_object["active_task"] = active_task
+            self._update_session_state(
+                session_id,
+                verification_status="failed",
+                pending_action=None,
+                last_checkpoint=checkpoint,
+                active_object=active_object,
+            )
+            response = f"Tarea autónoma falló: `{task_id}`\nError: {error}"
+            if self._store_message is not None:
+                self._store_message(session_id, "assistant", response[:4000])
+            self._emit(
+                "autonomous_task_failed",
+                {
+                    "session_id": session_id,
+                    "task_id": task_id,
+                    "objective": objective,
+                    "error": error,
+                    "response": response,
+                },
+            )
+        finally:
+            with self._task_lock:
+                self._task_threads.pop(task_id, None)
+
+    def wait_for_task(self, task_id: str, timeout: float = 5.0) -> bool:
+        with self._task_lock:
+            thread = self._task_threads.get(task_id)
+        if thread is None:
+            return True
+        thread.join(timeout=timeout)
+        return not thread.is_alive()
+
+    def _emit(self, event_type: str, payload: dict[str, Any]) -> None:
+        if self.observe is None:
+            return
+        self.observe.emit(event_type, lane="coordinator", payload=payload)
 
     def _updated_pending_task_approvals(self, session_id: str, entry: dict[str, Any]) -> list[dict[str, Any]]:
         state = self._get_session_state(session_id)

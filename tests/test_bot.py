@@ -321,6 +321,31 @@ class BotTests(unittest.TestCase):
                 self.assertEqual(state["autonomy_mode"], "autonomous")
                 self.assertIn("push", state["active_object"]["autonomy_grant"]["allowed_without_phase_approval"])
 
+    def test_telegram_sessions_default_to_autonomous_until_explicit_override(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+
+                runtime.bot.handle_text(user_id="123", session_id="tg-123", text="hola")
+                state = runtime.memory.get_session_state("tg-123")
+                self.assertEqual(state["autonomy_mode"], "autonomous")
+                self.assertEqual(state["active_object"]["autonomy_configured"]["source"], "telegram_default")
+
+                runtime.bot.handle_text(user_id="123", session_id="tg-123", text="/autonomy assisted")
+                runtime.bot.handle_text(user_id="123", session_id="tg-123", text="hola de nuevo")
+                state = runtime.memory.get_session_state("tg-123")
+                self.assertEqual(state["autonomy_mode"], "assisted")
+                self.assertEqual(state["active_object"]["autonomy_configured"]["source"], "command")
+
     def test_option_followups_and_proceed_use_session_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -926,7 +951,9 @@ class BotTests(unittest.TestCase):
                     text="corrige el bug del login",
                 )
 
-                self.assertIn("Dispatch: autonomous", reply)
+                self.assertIn("Tarea autónoma iniciada", reply)
+                task_id = re.search(r"`([^`]+)`", reply).group(1)
+                self.assertTrue(runtime.bot._task_handler.wait_for_task(task_id, timeout=2))
                 runtime.bot.coordinator.run.assert_called_once()
                 state = runtime.memory.get_session_state("s1")
                 self.assertEqual(state["pending_action"], "correr pytest -q")
@@ -991,8 +1018,9 @@ class BotTests(unittest.TestCase):
                     text="verifica y haz git push de la rama",
                 )
 
-                self.assertIn("Coordinator task: s1:push", reply)
-                self.assertIn("Dispatch: autonomous", reply)
+                self.assertIn("Tarea autónoma iniciada", reply)
+                task_id = re.search(r"`([^`]+)`", reply).group(1)
+                self.assertTrue(runtime.bot._task_handler.wait_for_task(task_id, timeout=2))
                 runtime.bot.coordinator.run.assert_called_once()
                 self.assertEqual(runtime.approvals.list_pending(), [])
 

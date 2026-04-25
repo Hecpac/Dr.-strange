@@ -56,8 +56,12 @@ class NotebookLMService:
 
     @property
     def _use_sdk(self) -> bool:
-        """True when SDK should be used (either injected factory or auto-detected)."""
-        return self._client_factory is not None or self._sdk_available
+        """True when an SDK client is explicitly injected.
+
+        The production default is the CDP path because NotebookLM SDK auth
+        state can exist on the host without being the intended runtime path.
+        """
+        return self._client_factory is not None
 
     _ARTIFACT_LABELS = {
         "podcast": "podcast",

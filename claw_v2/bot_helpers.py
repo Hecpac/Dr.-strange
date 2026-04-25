@@ -760,11 +760,41 @@ def _classify_task_actions(normalized_text: str, *, mode: str) -> list[str]:
 
 def _infer_session_mode(user_text: str, reply_text: str | None = None) -> str:
     normalized = _normalize_command_text(f"{user_text}\n{reply_text or ''}")
-    if any(token in normalized for token in ("browse", "revisa", "review", "http://", "https://", "www.")):
+    if any(token in normalized for token in ("browse", "http://", "https://", "www.")):
         return "browse"
     if any(token in normalized for token in ("terminal", "chrome", "screen", "computer", "click", "scroll", "sesion")):
         return "ops"
-    if any(token in normalized for token in ("commit", "push", "git push", "test", "pytest", "fix", "corrige", "arregla", "bug", "repo", "codigo", "code", "patch")):
+    if any(token in normalized for token in (
+        "commit",
+        "push",
+        "git push",
+        "test",
+        "pytest",
+        "fix",
+        "corrige",
+        "arregla",
+        "bug",
+        "repo",
+        "codigo",
+        "code",
+        "patch",
+        "completa",
+        "termina",
+        "implementa",
+        "coloca",
+        "colócala",
+        "colocalo",
+        "colócalo",
+        "sube",
+        "ponlo vivo",
+        "ponla vivo",
+        "produccion",
+        "producción",
+        "branding",
+        "pagina",
+        "página",
+        "ga4",
+    )):
         return "coding"
     if any(token in normalized for token in ("tweet", "post", "publica", "publish", "x.com", "social")):
         return "publish"

@@ -113,8 +113,10 @@ class BotService:
         self._task_handler = TaskHandler(
             approvals=approvals,
             coordinator=coordinator,
+            observe=observe,
             get_session_state=brain.memory.get_session_state,
             update_session_state=brain.memory.update_session_state,
+            store_message=brain.memory.store_message,
         )
         self._state_handler = StateHandler(
             brain_memory=brain.memory,
@@ -255,6 +257,7 @@ class BotService:
             raise PermissionError("TELEGRAM_ALLOWED_USER_ID must be configured")
         if user_id != self.allowed_user_id:
             raise PermissionError("user is not allowed to access this bot")
+        self._ensure_default_autonomy(session_id)
         stripped = text.strip()
         context = CommandContext(user_id=user_id, session_id=session_id, text=text, stripped=stripped)
         command_response = dispatch_commands(self._pre_state_commands, context)
@@ -296,7 +299,8 @@ class BotService:
         if coordinated_response is not None:
             self.brain.memory.store_message(session_id, "user", stripped)
             self.brain.memory.store_message(session_id, "assistant", coordinated_response[:4000])
-            self._remember_assistant_turn_state(session_id, stripped, coordinated_response)
+            if not coordinated_response.startswith("Tarea autónoma iniciada:"):
+                self._remember_assistant_turn_state(session_id, stripped, coordinated_response)
             return coordinated_response
         command_response = dispatch_commands(self._post_shortcut_commands, context)
         if command_response is not None:
@@ -317,7 +321,7 @@ class BotService:
             BotCommand("spending", self._handle_spending_command, exact=("/spending",)),
             BotCommand("task_run", self._handle_task_run_command, exact=("/task_run",), prefixes=("/task_run ",)),
             BotCommand("autonomy", self._handle_autonomy_command, exact=("/autonomy", "/autonomy_policy"), prefixes=("/autonomy ",)),
-            BotCommand("task_state", self._handle_task_state_command, exact=("/task_loop", "/task_queue", "/task_pending", "/session_state"), prefixes=("/task_queue ",)),
+            BotCommand("task_state", self._handle_task_state_command, exact=("/tasks", "/task_status", "/task_loop", "/task_queue", "/task_pending", "/session_state"), prefixes=("/task_queue ",)),
             BotCommand("task_transition", self._handle_task_transition_command, exact=("/task_done", "/task_defer"), prefixes=("/task_done ", "/task_defer ")),
             BotCommand("browse", self._handle_browse_command, prefixes=("/browse ",)),
             *self._terminal_handler.commands(),
@@ -404,7 +408,7 @@ class BotService:
 
     def _handle_task_state_command(self, context: CommandContext) -> str:
         state = self.brain.memory.get_session_state(context.session_id)
-        if context.stripped == "/task_loop":
+        if context.stripped in {"/tasks", "/task_status", "/task_loop"}:
             return json.dumps(state, indent=2, sort_keys=True)
         if context.stripped == "/task_queue":
             return json.dumps(state.get("task_queue") or [], indent=2, sort_keys=True)
@@ -974,10 +978,17 @@ class BotService:
 
     def _set_autonomy_mode_response(self, session_id: str, value: str) -> str:
         mode = _parse_autonomy_mode(value)
+        current = self.brain.memory.get_session_state(session_id)
+        active_object = dict(current.get("active_object") or {})
+        active_object["autonomy_configured"] = {
+            "mode": mode,
+            "source": "command",
+        }
         state = self.brain.memory.update_session_state(
             session_id,
             autonomy_mode=mode,
             step_budget=_default_step_budget(mode),
+            active_object=active_object,
         )
         return json.dumps(state, indent=2, sort_keys=True)
 
@@ -990,6 +1001,10 @@ class BotService:
             "scope": "development_tasks",
             "allowed_without_phase_approval": ["inspect", "edit", "test", "commit", "push"],
             "still_blocked": ["deploy", "publish", "destructive"],
+        }
+        active_object["autonomy_configured"] = {
+            "mode": "autonomous",
+            "source": "natural_language_grant",
         }
         state = self.brain.memory.update_session_state(
             session_id,
@@ -1008,6 +1023,26 @@ class BotService:
         if state.get("pending_action"):
             return f"{reply}\nPending action: {state['pending_action']}"
         return reply
+
+    def _ensure_default_autonomy(self, session_id: str) -> None:
+        if not session_id.startswith("tg-"):
+            return
+        current = self.brain.memory.get_session_state(session_id)
+        active_object = dict(current.get("active_object") or {})
+        if active_object.get("autonomy_configured"):
+            return
+        if current.get("autonomy_mode") == "autonomous":
+            return
+        active_object["autonomy_configured"] = {
+            "mode": "autonomous",
+            "source": "telegram_default",
+        }
+        self.brain.memory.update_session_state(
+            session_id,
+            autonomy_mode="autonomous",
+            step_budget=_default_step_budget("autonomous"),
+            active_object=active_object,
+        )
 
     def _remember_user_turn_state(self, session_id: str, text: str) -> None:
         self._state_handler.remember_user_turn_state(session_id, text)
