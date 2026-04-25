@@ -965,6 +965,12 @@ class BotTests(unittest.TestCase):
                 self.assertEqual(record.objective, "corrige el bug del login")
                 self.assertEqual(record.status, "succeeded")
                 self.assertEqual(record.verification_status, "pending")
+                generic_job_id = record.metadata["generic_job_id"]
+                generic_job = runtime.job_service.get(generic_job_id)
+                self.assertIsNotNone(generic_job)
+                self.assertEqual(generic_job.kind, "coordinator.autonomous_task")
+                self.assertEqual(generic_job.status, "completed")
+                self.assertEqual(generic_job.result["verification_status"], "pending")
                 lifecycle = record.artifacts["lifecycle"]
                 self.assertEqual(lifecycle["plan"]["objective"], "corrige el bug del login")
                 self.assertEqual(lifecycle["plan"]["planned_phases"], ["research", "synthesis", "implementation", "verification"])
@@ -974,6 +980,9 @@ class BotTests(unittest.TestCase):
                 tasks_payload = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/tasks"))
                 self.assertEqual(tasks_payload["summary"], {"succeeded": 1})
                 self.assertEqual(tasks_payload["tasks"][0]["task_id"], task_id)
+                jobs_payload = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/jobs"))
+                self.assertEqual(jobs_payload["system_summary"], {"completed": 1})
+                self.assertEqual(jobs_payload["system_jobs"][0]["job_id"], generic_job_id)
                 job_trace = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text=f"/job_trace {task_id}"))
                 self.assertEqual(job_trace["job_id"], task_id)
                 self.assertTrue(
@@ -1022,6 +1031,9 @@ class BotTests(unittest.TestCase):
                 self.assertEqual(record.status, "succeeded")
                 self.assertEqual(record.metadata["resume_reason"], "manual_resume")
                 self.assertEqual(record.metadata["resume_count"], 1)
+                generic_job = runtime.job_service.get(record.metadata["generic_job_id"])
+                self.assertEqual(generic_job.status, "completed")
+                self.assertEqual(generic_job.metadata["reason"], "manual_resume")
                 lifecycle = record.artifacts["lifecycle"]
                 self.assertEqual(lifecycle["plan"]["objective"], "corrige el bug del login")
                 self.assertEqual(lifecycle["execution"]["status"], "resumed")
@@ -1063,6 +1075,45 @@ class BotTests(unittest.TestCase):
                 jobs = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/jobs"))
                 self.assertEqual(jobs["summary"], {"cancelled": 1})
                 self.assertEqual(jobs["jobs"][0]["task_id"], "s1:running-task")
+
+    def test_job_cancel_on_generic_coordinator_job_cancels_linked_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.task_ledger.create(
+                    task_id="s1:running-task",
+                    session_id="s1",
+                    objective="corrige el bug del login",
+                    mode="coding",
+                    runtime="coordinator",
+                    status="running",
+                    metadata={"autonomous": True},
+                )
+                job = runtime.job_service.enqueue(
+                    kind="coordinator.autonomous_task",
+                    payload={
+                        "task_id": "s1:running-task",
+                        "session_id": "s1",
+                        "objective": "corrige el bug del login",
+                        "mode": "coding",
+                    },
+                    resume_key="coordinator:s1:running-task",
+                )
+
+                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text=f"/job_cancel {job.job_id}")
+
+                self.assertIn("Tarea cancelada", reply)
+                self.assertEqual(runtime.task_ledger.get("s1:running-task").status, "cancelled")
+                self.assertEqual(runtime.job_service.get(job.job_id).status, "cancelled")
 
     def test_jobs_command_includes_generic_job_service_records(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

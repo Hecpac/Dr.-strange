@@ -131,6 +131,7 @@ class BotService:
             coordinator=coordinator,
             observe=observe,
             task_ledger=task_ledger,
+            job_service=job_service,
             get_session_state=brain.memory.get_session_state,
             update_session_state=brain.memory.update_session_state,
             store_message=brain.memory.store_message,
@@ -606,9 +607,13 @@ class BotService:
             if command == "/job_cancel" and self.task_ledger.get(parts[1]) is None:
                 if self.job_service is None:
                     return "job service unavailable"
-                record = self.job_service.cancel(parts[1], reason=f"cancelled_by:{context.session_id}")
-                if record is None:
+                job = self.job_service.get(parts[1])
+                if job is None:
                     return f"job {parts[1]} not found"
+                linked_task_id = job.payload.get("task_id") if isinstance(job.payload, dict) else None
+                if isinstance(linked_task_id, str) and self.task_ledger.get(linked_task_id) is not None:
+                    return self._task_handler.cancel_task_response(context.session_id, linked_task_id)
+                self.job_service.cancel(parts[1], reason=f"cancelled_by:{context.session_id}")
                 return f"Job cancelado: `{parts[1]}`"
             return self._task_handler.cancel_task_response(context.session_id, parts[1])
         return "usage: /jobs | /job_status <task_id> | /task_resume <task_id> | /task_cancel <task_id>"

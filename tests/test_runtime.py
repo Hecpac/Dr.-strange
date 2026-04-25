@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from claw_v2.adapters.base import LLMRequest
+from claw_v2.jobs import JobService
 from claw_v2.main import build_runtime
 from claw_v2.task_ledger import TaskLedger
 from claw_v2.types import LLMResponse
@@ -204,6 +205,20 @@ class RuntimeTests(unittest.TestCase):
                 metadata={"autonomous": True},
             )
             seed_ledger._conn.close()
+            seed_jobs = JobService(db_path)
+            job = seed_jobs.enqueue(
+                kind="coordinator.autonomous_task",
+                payload={
+                    "task_id": "tg-123:interrupted",
+                    "session_id": "tg-123",
+                    "objective": "corrige el bug del login",
+                    "mode": "coding",
+                },
+                resume_key="coordinator:tg-123:interrupted",
+                metadata={"runtime": "coordinator"},
+            )
+            seed_jobs.claim(job.job_id, worker_id="previous-runtime")
+            seed_jobs._conn.close()
             env = {
                 "DB_PATH": str(db_path),
                 "WORKSPACE_ROOT": str(root / "workspace"),
@@ -221,6 +236,11 @@ class RuntimeTests(unittest.TestCase):
                 self.assertEqual(record.status, "succeeded")
                 self.assertEqual(record.metadata["resume_reason"], "startup_recovery")
                 self.assertEqual(record.metadata["resume_count"], 1)
+                self.assertEqual(record.metadata["generic_job_id"], job.job_id)
+                recovered_job = runtime.job_service.get(job.job_id)
+                self.assertEqual(recovered_job.status, "completed")
+                self.assertEqual(recovered_job.worker_id, "coordinator")
+                self.assertEqual(recovered_job.attempts, 2)
                 self.assertEqual(record.artifacts["lifecycle"]["plan"]["objective"], "corrige el bug del login")
                 self.assertEqual(record.artifacts["lifecycle"]["execution"]["status"], "resumed")
                 self.assertEqual(record.artifacts["lifecycle"]["job"]["lifecycle_status"], "completed")
