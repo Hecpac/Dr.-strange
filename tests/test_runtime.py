@@ -166,6 +166,26 @@ class RuntimeTests(unittest.TestCase):
                 self.assertIn("morning_brief", tick.executed_jobs)
                 self.assertIn("daily_metrics", tick.executed_jobs)
 
+    def test_build_runtime_wires_generic_job_service(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "PIPELINE_STATE_ROOT": str(root / "pipeline"),
+                "WORKER_PROVIDER": "anthropic",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+
+                job = runtime.job_service.enqueue(kind="pipeline.issue", payload={"issue_id": "HEC-1"})
+
+                self.assertEqual(runtime.job_service.get(job.job_id).kind, "pipeline.issue")
+                self.assertEqual(runtime.bot.job_service.get(job.job_id).status, "queued")
+
     def test_build_runtime_resumes_interrupted_autonomous_tasks(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
