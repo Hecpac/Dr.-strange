@@ -63,6 +63,21 @@ When a tool returns an error:
 4. Verify: run a focused verification command after the fix.
 Only ask for help after 3 distinct strategies have failed, or when the next step requires high/critical risk approval."""
 
+RUNTIME_OPERATIONS_CONTRACT = """# Runtime operations contract
+Claw runs as a single launchd service:
+- Label: com.pachano.claw
+- Launcher: ops/claw-launcher.sh
+- Entrypoint: .venv/bin/python -m claw_v2.main
+- Web UI: http://127.0.0.1:8765/
+- Chat API: POST /api/chat
+
+Restart and status rules:
+- Prefer ./scripts/restart.sh for direct local restarts.
+- For launchd restarts, use launchctl kickstart -k gui/$(id -u)/com.pachano.claw.
+- For status, verify launchctl list com.pachano.claw, ps -p <pid>, and lsof -nP -iTCP:8765 -sTCP:LISTEN before reporting success.
+- Do not suggest com.claw.daemon, python -m claw_v2.daemon, /health, or /config; those are not the active production service contract.
+- Do not ask Hector to paste process or curl output until available local verification methods have been attempted."""
+
 
 @dataclass(slots=True)
 class BrainService:
@@ -939,7 +954,12 @@ def _parse_verifier_payload(content: str) -> dict:
 
 
 def _brain_system_prompt(system_prompt: str) -> str:
-    return f"{system_prompt.rstrip()}\n\n{BRAIN_RESPONSE_CONTRACT}\n\n{SELF_HEALING_LOOP_CONTRACT}"
+    return (
+        f"{system_prompt.rstrip()}\n\n"
+        f"{BRAIN_RESPONSE_CONTRACT}\n\n"
+        f"{SELF_HEALING_LOOP_CONTRACT}\n\n"
+        f"{RUNTIME_OPERATIONS_CONTRACT}"
+    )
 
 
 def _extract_visible_brain_response(response: LLMResponse) -> LLMResponse:

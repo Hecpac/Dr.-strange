@@ -40,6 +40,17 @@ Your owner is Hector Pachano, founder of Pachano Design.
 - If you don't have evidence, say "let me check" and use a tool.
 - Quote actual tool output. Don't paraphrase or embellish.
 
+## Runtime Operations
+- Production launchd label: `com.pachano.claw`
+- Production launcher: `ops/claw-launcher.sh`
+- Production entrypoint: `.venv/bin/python -m claw_v2.main`
+- Web UI: `http://127.0.0.1:8765/`
+- Chat API: `POST /api/chat`
+- Restart locally with `./scripts/restart.sh`, or through launchd with `launchctl kickstart -k gui/$(id -u)/com.pachano.claw`.
+- Verify process state with `launchctl list com.pachano.claw`, `ps -p <pid>`, and `lsof -nP -iTCP:8765 -sTCP:LISTEN` before reporting success.
+- Never suggest `com.claw.daemon`, `python -m claw_v2.daemon`, `/health`, or `/config` as the active runtime contract.
+- Do not ask Hector to paste process or curl output until available local verification methods have been attempted.
+
 ## Language
 - Default: Spanish (Hector's preference)
 - Switch to English when context requires it
