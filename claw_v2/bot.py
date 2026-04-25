@@ -83,6 +83,7 @@ class BotService:
         computer_model: str = _DEFAULT_COMPUTER_MODEL,
         computer_system_prompt: str | None = None,
         observe: object | None = None,
+        task_ledger: object | None = None,
     ) -> None:
         self.brain = brain
         self.auto_research = auto_research
@@ -95,6 +96,7 @@ class BotService:
         self.config = config
         self._terminal_handler = TerminalHandler(terminal_bridge=terminal_bridge)
         self.observe = observe
+        self.task_ledger = task_ledger
         self.learning: Any | None = None
         self._wiki_handler = WikiHandler(memory=brain.memory)
         self._nlm_handler = NlmHandler(update_session_state=brain.memory.update_session_state)
@@ -114,6 +116,7 @@ class BotService:
             approvals=approvals,
             coordinator=coordinator,
             observe=observe,
+            task_ledger=task_ledger,
             get_session_state=brain.memory.get_session_state,
             update_session_state=brain.memory.update_session_state,
             store_message=brain.memory.store_message,
@@ -408,6 +411,17 @@ class BotService:
 
     def _handle_task_state_command(self, context: CommandContext) -> str:
         state = self.brain.memory.get_session_state(context.session_id)
+        if context.stripped == "/tasks" and self.task_ledger is not None:
+            payload = {
+                "summary": self.task_ledger.summary(session_id=context.session_id),
+                "tasks": [
+                    task.to_dict()
+                    for task in self.task_ledger.list(session_id=context.session_id, limit=20)
+                ],
+            }
+            return json.dumps(payload, indent=2, sort_keys=True)
+        if context.stripped == "/task_status" and self.task_ledger is not None:
+            return json.dumps(self.task_ledger.summary(session_id=context.session_id), indent=2, sort_keys=True)
         if context.stripped in {"/tasks", "/task_status", "/task_loop"}:
             return json.dumps(state, indent=2, sort_keys=True)
         if context.stripped == "/task_queue":

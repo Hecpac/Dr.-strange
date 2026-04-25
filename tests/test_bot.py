@@ -959,6 +959,15 @@ class BotTests(unittest.TestCase):
                 self.assertEqual(state["pending_action"], "correr pytest -q")
                 self.assertEqual(state["verification_status"], "pending")
                 self.assertEqual(state["task_queue"][0]["priority"], 0)
+                record = runtime.task_ledger.get(task_id)
+                self.assertIsNotNone(record)
+                self.assertEqual(record.session_id, "s1")
+                self.assertEqual(record.objective, "corrige el bug del login")
+                self.assertEqual(record.status, "succeeded")
+                self.assertEqual(record.verification_status, "pending")
+                tasks_payload = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/tasks"))
+                self.assertEqual(tasks_payload["summary"], {"succeeded": 1})
+                self.assertEqual(tasks_payload["tasks"][0]["task_id"], task_id)
 
     def test_autonomous_policy_blocks_sensitive_automatic_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
