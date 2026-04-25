@@ -97,6 +97,39 @@ async def run() -> int:
         # Wire NotebookLM with Telegram notify callback
         _loop = asyncio.get_running_loop()
 
+        def _send_session_telegram_message(session_id: str, message: str) -> None:
+            if not session_id.startswith("tg-") or not transport._app:
+                return
+            chat_id_raw = session_id.removeprefix("tg-")
+            try:
+                chat_id = int(chat_id_raw)
+            except ValueError:
+                logger.warning("Cannot notify non-numeric Telegram session id: %s", session_id)
+                return
+            for start in range(0, len(message), 3500):
+                chunk = message[start:start + 3500]
+                asyncio.run_coroutine_threadsafe(
+                    transport._app.bot.send_message(chat_id=chat_id, text=chunk),
+                    _loop,
+                )
+
+        def _autonomous_task_complete_consumer(payload: dict) -> None:
+            session_id = str(payload.get("session_id") or "")
+            task_id = str(payload.get("task_id") or "")
+            status = str(payload.get("verification_status") or "unknown")
+            response = str(payload.get("response") or "").strip()
+            header = f"Tarea autónoma cerrada: `{task_id}`\nVerification Status: {status}\n\n"
+            _send_session_telegram_message(session_id, header + response)
+
+        def _autonomous_task_failed_consumer(payload: dict) -> None:
+            session_id = str(payload.get("session_id") or "")
+            task_id = str(payload.get("task_id") or "")
+            response = str(payload.get("response") or payload.get("error") or "unknown error")
+            _send_session_telegram_message(session_id, f"Tarea autónoma falló: `{task_id}`\n{response}")
+
+        runtime.observe.subscribe("autonomous_task_completed", _autonomous_task_complete_consumer)
+        runtime.observe.subscribe("autonomous_task_failed", _autonomous_task_failed_consumer)
+
         def _nlm_notify(message: str) -> None:
             if runtime.config.telegram_allowed_user_id and transport._app:
                 asyncio.run_coroutine_threadsafe(

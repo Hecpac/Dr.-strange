@@ -1001,11 +1001,16 @@ def _extract_visible_brain_response(response: LLMResponse) -> LLMResponse:
 
 
 def _split_trace_response(content: str) -> tuple[str, str | None]:
-    trace_match = re.search(r"<(?:trace|thinking)>\s*(.*?)\s*</(?:trace|thinking)>", content, flags=re.IGNORECASE | re.DOTALL)
-    response_match = re.search(r"<response>\s*(.*?)\s*</response>", content, flags=re.IGNORECASE | re.DOTALL)
-    trace = trace_match.group(1).strip() if trace_match else ""
-    if response_match:
-        return trace, response_match.group(1).strip()
+    trace_matches = re.findall(r"<(?:trace|thinking)>\s*(.*?)\s*</(?:trace|thinking)>", content, flags=re.IGNORECASE | re.DOTALL)
+    response_matches = re.findall(r"<response>\s*(.*?)\s*</response>", content, flags=re.IGNORECASE | re.DOTALL)
+    trace = "\n\n".join(item.strip() for item in trace_matches if item.strip())
+    if response_matches:
+        visible_blocks = [item.strip() for item in response_matches if item.strip()]
+        if not visible_blocks:
+            return trace, ""
+        # The SDK may emit progress and final answer as separate response blocks.
+        # Telegram should receive the final substantive block, not only "ejecutando...".
+        return trace, visible_blocks[-1]
     return trace, None
 
 

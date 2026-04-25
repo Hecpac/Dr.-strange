@@ -219,6 +219,24 @@ class HandleMessageTests(unittest.TestCase):
         self.assertEqual(result.content, "")
         self.assertIn("Auto-loaded skills", result.artifacts["reasoning_trace"])
 
+    def test_extracts_last_response_block_when_sdk_returns_progress_and_final(self) -> None:
+        self.router.ask.return_value = LLMResponse(
+            content=(
+                "<trace>inspected files</trace>\n"
+                "<response>Ejecutando: reviso contexto.</response>\n"
+                "<response>## Resultado\n\nTrabajo terminado.\nVerification Status: passed</response>"
+            ),
+            lane="brain",
+            provider="anthropic",
+            model="test",
+        )
+
+        result = self.brain.handle_message("s1", "hazlo")
+
+        self.assertIn("Trabajo terminado", result.content)
+        self.assertNotIn("Ejecutando: reviso contexto", result.content)
+        self.assertIn("inspected files", result.artifacts["reasoning_trace"])
+
     def test_extracts_reasoning_trace_and_stores_visible_response(self) -> None:
         observe = ObserveStream(self.db_path)
         brain = BrainService(

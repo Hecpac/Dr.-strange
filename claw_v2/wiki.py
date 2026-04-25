@@ -1111,6 +1111,9 @@ class WikiService:
         for idx, record in enumerate(page_records):
             raw_keyword = keyword_scores[idx] if idx < len(keyword_scores) else 0.0
             keyword_score = raw_keyword / max_keyword if max_keyword > 0 else 0.0
+            if keyword_score <= 0 and query_tokens and idx < len(corpus_tokens):
+                token_set = set(corpus_tokens[idx])
+                keyword_score = len(set(query_tokens).intersection(token_set)) / max(len(set(query_tokens)), 1)
             similarity = float(record["similarity"])
             score = (similarity * 0.65) + (keyword_score * 0.35)
             record["keyword_score"] = keyword_score
