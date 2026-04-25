@@ -50,7 +50,7 @@ class OpenAIAdapter(ProviderAdapter):
         try:
             kwargs: dict[str, Any] = dict(
                 model=request.model,
-                input=build_effective_input(request),
+                input=_normalize_responses_input(build_effective_input(request)),
                 instructions=build_effective_system_prompt(request),
                 previous_response_id=request.session_id,
             )
@@ -156,3 +156,42 @@ _REASONING_MODELS = {"o3", "o3-mini", "o4-mini", "gpt-5.4", "gpt-5.4-mini"}
 
 def _supports_reasoning(model: str) -> bool:
     return any(model.startswith(prefix) for prefix in _REASONING_MODELS)
+
+
+def _normalize_responses_input(prompt: Any) -> Any:
+    """Wrap content-block lists in a Responses-API message envelope.
+
+    The Responses API rejects top-level items with type='text' or type='image';
+    multimodal content must live inside a {"type": "message", "role": "user", "content": [...]}
+    envelope, with blocks translated to input_text / input_image.
+    """
+    if isinstance(prompt, str):
+        return prompt
+    if not isinstance(prompt, list):
+        return prompt
+    if all(isinstance(item, dict) and item.get("type") == "message" for item in prompt):
+        return prompt
+    content: list[dict[str, Any]] = []
+    for block in prompt:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype in {"text", "input_text"}:
+            content.append({"type": "input_text", "text": block.get("text", "")})
+        elif btype == "image":
+            source = block.get("source") or {}
+            if source.get("type") == "base64":
+                url = f"data:{source.get('media_type', 'image/png')};base64,{source.get('data', '')}"
+            else:
+                url = source.get("url", "")
+            content.append({"type": "input_image", "image_url": url})
+        elif btype == "input_image":
+            content.append(block)
+        elif btype == "image_url":
+            url = block.get("image_url")
+            if isinstance(url, dict):
+                url = url.get("url", "")
+            content.append({"type": "input_image", "image_url": url or ""})
+        else:
+            content.append(block)
+    return [{"type": "message", "role": "user", "content": content}]
