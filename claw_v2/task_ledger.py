@@ -209,6 +209,44 @@ class TaskLedger:
             self._emit("task_ledger_terminal", record.to_dict())
         return record
 
+    def mark_running_checkpoint(
+        self,
+        task_id: str,
+        *,
+        summary: str = "",
+        error: str = "",
+        verification_status: str = "pending",
+        artifacts: dict[str, Any] | None = None,
+    ) -> TaskRecord | None:
+        now = time.time()
+        with self._lock:
+            self._conn.execute(
+                """
+                UPDATE agent_tasks
+                SET status = 'running',
+                    completed_at = NULL,
+                    summary = ?,
+                    error = ?,
+                    verification_status = ?,
+                    artifacts_json = ?,
+                    updated_at = ?
+                WHERE task_id = ?
+                """,
+                (
+                    summary,
+                    error,
+                    verification_status,
+                    json.dumps(dict(artifacts or {}), sort_keys=True),
+                    now,
+                    task_id,
+                ),
+            )
+            self._conn.commit()
+        record = self.get(task_id)
+        if record is not None:
+            self._emit("task_ledger_checkpoint", record.to_dict())
+        return record
+
     def mark_stale_running_lost(self, *, older_than_seconds: float = 300.0) -> int:
         cutoff = time.time() - older_than_seconds
         now = time.time()

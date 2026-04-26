@@ -961,32 +961,50 @@ class BotTests(unittest.TestCase):
                 self.assertIsNotNone(record)
                 self.assertEqual(record.session_id, "s1")
                 self.assertEqual(record.objective, "corrige el bug del login")
-                self.assertEqual(record.status, "succeeded")
+                self.assertEqual(record.status, "running")
                 self.assertEqual(record.verification_status, "pending")
                 generic_job_id = record.metadata["generic_job_id"]
                 generic_job = runtime.job_service.get(generic_job_id)
                 self.assertIsNotNone(generic_job)
                 self.assertEqual(generic_job.kind, "coordinator.autonomous_task")
-                self.assertEqual(generic_job.status, "completed")
-                self.assertEqual(generic_job.result["verification_status"], "pending")
+                self.assertEqual(generic_job.status, "retrying")
+                self.assertEqual(generic_job.checkpoint["verification_status"], "pending")
                 lifecycle = record.artifacts["lifecycle"]
                 self.assertEqual(lifecycle["plan"]["objective"], "corrige el bug del login")
                 self.assertEqual(lifecycle["plan"]["planned_phases"], ["research", "synthesis", "implementation", "verification"])
                 self.assertEqual(lifecycle["verification"]["status"], "pending")
-                self.assertEqual(lifecycle["outcome"]["status"], "succeeded")
-                self.assertEqual(lifecycle["job"]["lifecycle_status"], "completed")
+                self.assertNotIn("outcome", lifecycle)
+                self.assertEqual(lifecycle["job"]["lifecycle_status"], "pending")
                 tasks_payload = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/tasks"))
-                self.assertEqual(tasks_payload["summary"], {"succeeded": 1})
+                self.assertEqual(tasks_payload["summary"], {"running": 1})
                 self.assertEqual(tasks_payload["tasks"][0]["task_id"], task_id)
                 jobs_payload = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/jobs"))
-                self.assertEqual(jobs_payload["system_summary"], {"completed": 1})
+                self.assertEqual(jobs_payload["system_summary"], {"retrying": 1})
                 self.assertEqual(jobs_payload["system_jobs"][0]["job_id"], generic_job_id)
                 job_trace = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text=f"/job_trace {task_id}"))
                 self.assertEqual(job_trace["job_id"], task_id)
                 self.assertTrue(
-                    any(event["event_type"] == "task_ledger_terminal" for event in job_trace["events"])
+                    any(event["event_type"] == "task_ledger_checkpoint" for event in job_trace["events"])
                 )
                 self.assertTrue(all(event["artifact_id"] for event in job_trace["events"] if event["event_type"].startswith("task_ledger_")))
+
+                runtime.bot.coordinator.run.reset_mock()
+                runtime.bot.coordinator.run.return_value = CoordinatorResult(
+                    task_id=task_id,
+                    phase_results={
+                        "research": [WorkerResult(task_name="scope_and_risks", content="scope ok", duration_seconds=0.1)],
+                        "verification": [WorkerResult(task_name="verify_change", content="Verification Status: passed", duration_seconds=0.1)],
+                    },
+                    synthesis="verified after resume",
+                )
+                self.assertEqual(runtime.bot.resume_interrupted_tasks(), 1)
+                self.assertTrue(runtime.bot._task_handler.wait_for_task(task_id, timeout=2))
+                resumed_record = runtime.task_ledger.get(task_id)
+                self.assertEqual(resumed_record.status, "succeeded")
+                self.assertEqual(resumed_record.verification_status, "passed")
+                resumed_job = runtime.job_service.get(generic_job_id)
+                self.assertEqual(resumed_job.status, "completed")
+                self.assertEqual(resumed_job.attempts, 2)
 
     def test_coding_task_autostashes_dirty_worktree(self) -> None:
         import subprocess as _sub
