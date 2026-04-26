@@ -3,7 +3,9 @@ from __future__ import annotations
 from datetime import datetime
 import logging
 import unicodedata
-from typing import Any, Callable
+import uuid
+from contextlib import contextmanager
+from typing import Any, Callable, Iterator
 
 from claw_v2.bot_commands import BotCommand, CommandContext
 from claw_v2.bot_helpers import _extract_nlm_artifact_kind, _extract_nlm_create_topic
@@ -15,10 +17,13 @@ class NlmHandler:
     def __init__(
         self,
         update_session_state: Callable[..., None] | None = None,
+        *,
+        task_ledger: Any | None = None,
     ) -> None:
         self.notebooklm: Any | None = None
         self._active_notebooks: dict[str, dict[str, str]] = {}
         self._update_session_state = update_session_state or (lambda *a, **kw: None)
+        self._task_ledger = task_ledger
 
     def commands(self) -> list[BotCommand]:
         return [
@@ -35,23 +40,87 @@ class NlmHandler:
     def natural_language_response(self, session_id: str, text: str) -> str | None:
         if self.notebooklm is None or not text or text.startswith("/"):
             return None
-        try:
-            if _looks_like_recent_notebook_review(text):
-                return self._review_latest_response(session_id)
-            if topic := _extract_nlm_create_topic(text):
-                return self._create_response(session_id, topic)
-            if kind := _extract_nlm_artifact_kind(text):
-                target = self._active_notebook_id(session_id)
-                if target is None:
-                    return "No hay cuaderno activo. Primero dime `creame un cuaderno sobre ...`."
-                self._set_active_notebook(session_id, target)
-                return self.notebooklm.start_artifact(target, kind)
+        intent = self._classify_intent(text)
+        if intent is None:
             return None
-        except ValueError as exc:
-            return f"Error: {exc}"
-        except Exception as exc:
-            logger.exception("NLM natural language error")
-            return f"Error en NotebookLM: {exc}"
+        with self._record_task(session_id=session_id, objective=text, intent=intent) as recorder:
+            try:
+                response = self._dispatch_intent(session_id, text, intent)
+            except ValueError as exc:
+                response = f"Error: {exc}"
+                recorder.fail(response)
+                return response
+            except Exception as exc:
+                logger.exception("NLM natural language error")
+                response = f"Error en NotebookLM: {exc}"
+                recorder.fail(response)
+                return response
+            if response is None:
+                recorder.skip()
+                return None
+            if response.startswith("Error"):
+                recorder.fail(response)
+            else:
+                recorder.succeed(response)
+            return response
+
+    def _classify_intent(self, text: str) -> str | None:
+        if _looks_like_recent_notebook_review(text):
+            return "review_latest"
+        if _extract_nlm_create_topic(text):
+            return "create_notebook"
+        if _extract_nlm_artifact_kind(text):
+            return "start_artifact"
+        return None
+
+    def _dispatch_intent(self, session_id: str, text: str, intent: str) -> str | None:
+        if intent == "review_latest":
+            return self._review_latest_response(session_id)
+        if intent == "create_notebook":
+            topic = _extract_nlm_create_topic(text)
+            if topic is None:
+                return None
+            return self._create_response(session_id, topic)
+        if intent == "start_artifact":
+            kind = _extract_nlm_artifact_kind(text)
+            if kind is None:
+                return None
+            target = self._active_notebook_id(session_id)
+            if target is None:
+                return "No hay cuaderno activo. Primero dime `creame un cuaderno sobre ...`."
+            self._set_active_notebook(session_id, target)
+            return self.notebooklm.start_artifact(target, kind)
+        return None
+
+    @contextmanager
+    def _record_task(
+        self,
+        *,
+        session_id: str,
+        objective: str,
+        intent: str,
+    ) -> Iterator["_NlmTaskRecorder"]:
+        recorder = _NlmTaskRecorder(self._task_ledger)
+        if self._task_ledger is None:
+            yield recorder
+            return
+        task_id = f"nlm-{uuid.uuid4().hex[:12]}"
+        try:
+            self._task_ledger.create(
+                task_id=task_id,
+                session_id=session_id,
+                objective=objective[:500],
+                runtime="nlm_natural_language",
+                status="running",
+                metadata={"intent": intent},
+            )
+            recorder.bind(task_id)
+        except Exception:
+            logger.debug("nlm task ledger create failed", exc_info=True)
+        try:
+            yield recorder
+        finally:
+            recorder.finalize_if_pending()
 
     def dispatch(self, session_id: str, command: str) -> str:
         if self.notebooklm is None:
@@ -213,6 +282,46 @@ class NlmHandler:
         if notebook is None:
             return None
         return notebook["id"]
+
+
+class _NlmTaskRecorder:
+    def __init__(self, task_ledger: Any | None) -> None:
+        self._task_ledger = task_ledger
+        self._task_id: str | None = None
+        self._finalized = False
+
+    def bind(self, task_id: str) -> None:
+        self._task_id = task_id
+
+    def succeed(self, summary: str) -> None:
+        self._mark("succeeded", verification_status="passed", summary=summary[:1000])
+
+    def fail(self, error: str) -> None:
+        self._mark("failed", verification_status="failed", error=error[:1000])
+
+    def skip(self) -> None:
+        self._mark("cancelled", verification_status="skipped", summary="no_op")
+
+    def finalize_if_pending(self) -> None:
+        if self._finalized:
+            return
+        self._mark("failed", verification_status="failed", error="task_finalized_without_outcome")
+
+    def _mark(self, status: str, *, verification_status: str, summary: str = "", error: str = "") -> None:
+        if self._finalized or self._task_ledger is None or self._task_id is None:
+            self._finalized = True
+            return
+        try:
+            self._task_ledger.mark_terminal(
+                self._task_id,
+                status=status,
+                summary=summary,
+                error=error,
+                verification_status=verification_status,
+            )
+        except Exception:
+            logger.debug("nlm task ledger mark_terminal failed", exc_info=True)
+        self._finalized = True
 
 
 def _looks_like_recent_notebook_review(text: str) -> bool:
