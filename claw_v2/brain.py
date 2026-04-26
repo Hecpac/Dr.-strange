@@ -164,7 +164,7 @@ class BrainService:
                 max_budget=2.0,
                 timeout=300.0,
             )
-        except AdapterError:
+        except AdapterError as exc:
             if not resuming:
                 raise
             # Session may be corrupted/too large — retry with a fresh session.
@@ -179,7 +179,11 @@ class BrainService:
                     span_id=trace["span_id"],
                     parent_span_id=trace["parent_span_id"],
                     artifact_id=trace["artifact_id"],
-                    payload={"app_session_id": session_id, "stale_session": provider_session_id},
+                    payload={
+                        "app_session_id": session_id,
+                        "stale_session": provider_session_id,
+                        "error": str(exc)[:500],
+                    },
                 )
             self.memory.clear_provider_session(session_id, session_provider)
             prompt = self._build_prompt(

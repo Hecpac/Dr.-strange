@@ -912,9 +912,7 @@ class BotTests(unittest.TestCase):
                     text="/task_run corrige el bug del login",
                 )
 
-                self.assertIn("Coordinator task: s1:123", reply)
-                self.assertIn("Dispatch: manual", reply)
-                self.assertIn("Verification Status: passed", reply)
+                self.assertIn("Tarea s1:123: Listo", reply)
                 runtime.bot.coordinator.run.assert_called_once()
                 state = runtime.memory.get_session_state("s1")
                 self.assertEqual(state["verification_status"], "passed")
@@ -989,6 +987,63 @@ class BotTests(unittest.TestCase):
                     any(event["event_type"] == "task_ledger_terminal" for event in job_trace["events"])
                 )
                 self.assertTrue(all(event["artifact_id"] for event in job_trace["events"] if event["event_type"].startswith("task_ledger_")))
+
+    def test_implementation_worker_error_marks_task_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.coordinator = MagicMock()
+                runtime.bot.coordinator.run.return_value = CoordinatorResult(
+                    task_id="s1:autonomous",
+                    phase_results={
+                        "research": [WorkerResult(task_name="scope_and_risks", content="scope ok", duration_seconds=0.1)],
+                        "implementation": [WorkerResult(
+                            task_name="implement_change",
+                            content="",
+                            duration_seconds=0.1,
+                            error="Codex CLI timed out after 120.0s",
+                        )],
+                        "verification": [WorkerResult(
+                            task_name="verify_change",
+                            content="No hay evidencia de implementación.",
+                            duration_seconds=0.1,
+                        )],
+                    },
+                    synthesis="1. Inspect the login path",
+                )
+
+                runtime.bot.handle_text(user_id="123", session_id="s1", text="/autonomy autonomous")
+                reply = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="corrige el bug del login",
+                )
+
+                self.assertIn("Tarea autónoma iniciada", reply)
+                task_id = re.search(r"`([^`]+)`", reply).group(1)
+                self.assertTrue(runtime.bot._task_handler.wait_for_task(task_id, timeout=2))
+
+                state = runtime.memory.get_session_state("s1")
+                self.assertEqual(state["verification_status"], "failed")
+
+                record = runtime.task_ledger.get(task_id)
+                self.assertIsNotNone(record)
+                self.assertEqual(record.status, "failed")
+                self.assertEqual(record.verification_status, "failed")
+                self.assertIn("Codex CLI timed out", record.error)
+
+                lifecycle = record.artifacts["lifecycle"]
+                self.assertEqual(lifecycle["outcome"]["status"], "failed")
+                self.assertEqual(lifecycle["job"]["lifecycle_status"], "failed")
 
     def test_task_resume_command_restarts_lost_autonomous_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1298,7 +1353,7 @@ class BotTests(unittest.TestCase):
                     text="/task_run commit los cambios del bug del login",
                 )
 
-                self.assertIn("Coordinator task: s1:commit", reply)
+                self.assertIn("Tarea s1:commit", reply)
                 runtime.bot.coordinator.run.assert_called_once()
                 self.assertEqual(runtime.approvals.list_pending(), [])
 
@@ -1341,7 +1396,7 @@ class BotTests(unittest.TestCase):
                     text=f"/task_approve {approval_id} {token}",
                 )
 
-                self.assertIn("Coordinator task: s1:approved", second)
+                self.assertIn("Tarea s1:approved", second)
                 runtime.bot.coordinator.run.assert_called_once()
                 state = runtime.memory.get_session_state("s1")
                 self.assertEqual(state["verification_status"], "passed")

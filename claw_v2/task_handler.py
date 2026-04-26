@@ -378,6 +378,8 @@ class TaskHandler:
             completed_state = self._get_session_state(session_id)
             completed_checkpoint = completed_state.get("last_checkpoint") or {}
             verification_status = str(completed_state.get("verification_status") or "unknown")
+            terminal_status = "failed" if verification_status == "failed" else "succeeded"
+            checkpoint_error = str(completed_checkpoint.get("error") or "")
             self._complete_autonomous_job(
                 task_id=task_id,
                 job_id=job_id,
@@ -385,6 +387,7 @@ class TaskHandler:
                     "session_id": session_id,
                     "verification_status": verification_status,
                     "summary": str(completed_checkpoint.get("summary") or objective),
+                    "terminal_status": terminal_status,
                 },
             )
             if self.task_ledger is not None:
@@ -394,22 +397,26 @@ class TaskHandler:
                     checkpoint=completed_checkpoint,
                     verification_status=verification_status,
                     response_preview=response[:1000],
+                    terminal_status=terminal_status,
                 )
                 self.task_ledger.mark_terminal(
                     task_id,
-                    status="succeeded",
+                    status=terminal_status,
                     summary=str(completed_checkpoint.get("summary") or objective),
                     verification_status=verification_status,
+                    error=checkpoint_error if terminal_status == "failed" else "",
                     artifacts=artifacts,
                 )
             self._emit(
-                "autonomous_task_completed",
+                "autonomous_task_completed" if terminal_status == "succeeded" else "autonomous_task_failed",
                 {
                     "session_id": session_id,
                     "task_id": task_id,
                     "objective": objective,
                     "response": response,
                     "verification_status": verification_status,
+                    "terminal_status": terminal_status,
+                    **({"error": checkpoint_error} if terminal_status == "failed" and checkpoint_error else {}),
                 },
             )
         except Exception as exc:
@@ -758,6 +765,7 @@ class TaskHandler:
         checkpoint: dict[str, Any],
         verification_status: str,
         response_preview: str,
+        terminal_status: str = "succeeded",
     ) -> dict[str, Any]:
         summary = str(checkpoint.get("summary") or "")
         artifacts = append_lifecycle_artifacts(
@@ -774,13 +782,15 @@ class TaskHandler:
                 artifact_id=new_artifact_id("outcome"),
                 task_id=task_id,
                 session_id=session_id,
-                status="succeeded",
+                status=terminal_status,
                 summary=summary,
+                error=str(checkpoint.get("error") or "") if terminal_status == "failed" else "",
                 verification_status=verification_status,
             ),
         )
         artifacts["response_preview"] = response_preview
-        return self._with_job_artifact(task_id, session_id, "completed", artifacts)
+        job_state = "completed" if terminal_status == "succeeded" else "failed"
+        return self._with_job_artifact(task_id, session_id, job_state, artifacts)
 
     def _outcome_artifacts(
         self,

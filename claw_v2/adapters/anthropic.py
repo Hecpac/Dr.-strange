@@ -364,6 +364,16 @@ class ClaudeSDKExecutor:
             input_data: dict[str, Any], tool_use_id: str | None, context: Any
         ) -> dict[str, Any]:
             if self.observe is not None:
+                tool_response = input_data.get("tool_response") or {}
+                error_message = (
+                    input_data.get("error")
+                    or input_data.get("error_message")
+                    or input_data.get("stderr")
+                    or tool_response.get("error")
+                    or tool_response.get("error_message")
+                    or tool_response.get("stderr")
+                    or ""
+                )
                 self.observe.emit(
                     "sdk_post_tool_use_failure",
                     lane=request.lane,
@@ -374,6 +384,8 @@ class ClaudeSDKExecutor:
                         "tool_name": input_data.get("tool_name"),
                         "tool_use_id": tool_use_id,
                         "session_id": input_data.get("session_id"),
+                        "error": str(error_message)[:1000],
+                        "is_error": bool(tool_response.get("is_error")) if isinstance(tool_response, dict) else False,
                     },
                 )
             return {}
