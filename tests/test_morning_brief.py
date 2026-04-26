@@ -124,12 +124,29 @@ class MorningBriefTests(unittest.TestCase):
                 notify=lambda _: None,
                 clock=lambda: datetime(2026, 4, 27, 8, 0),
                 weather_fetcher=lambda location, timeout: "auto: 70F",
+                calendar_fetcher=lambda timeout: (_ for _ in ()).throw(RuntimeError("calendar denied")),
+                email_fetcher=lambda timeout: (_ for _ in ()).throw(RuntimeError("mail denied")),
             )
 
             message = service.build_message(datetime(2026, 4, 27, 8, 0))
 
-            self.assertIn("Agenda: sin conector configurado", message)
-            self.assertIn("Correo: sin conector configurado", message)
+            self.assertIn("Agenda: no disponible (RuntimeError)", message)
+            self.assertIn("Correo: no disponible (RuntimeError)", message)
+
+    def test_calendar_and_email_collectors_are_automatic_when_no_command_is_configured(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = MorningBriefService(
+                settings=MorningBriefSettings(stamp_path=Path(tmpdir) / "morning.txt"),
+                notify=lambda _: None,
+                weather_fetcher=lambda location, timeout: "auto: 70F",
+                calendar_fetcher=lambda timeout: "9:00 AM - Revision diaria",
+                email_fetcher=lambda timeout: "4 sin leer\n- Cliente: propuesta",
+            )
+
+            message = service.build_message(datetime(2026, 4, 27, 8, 0))
+
+            self.assertIn("Agenda: 9:00 AM - Revision diaria", message)
+            self.assertIn("Correo: 4 sin leer", message)
 
 
 if __name__ == "__main__":
