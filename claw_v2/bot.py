@@ -91,6 +91,23 @@ def _looks_like_task_completion_question(text: str) -> bool:
     )
 
 
+def _looks_like_operational_alert(text: str) -> bool:
+    normalized = _normalize_command_text(text).strip()
+    return normalized.startswith("alerta operacional:") or normalized.startswith("operational alert:")
+
+
+def _parse_operational_alert_fields(text: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for line in text.splitlines()[1:]:
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        normalized_key = _normalize_command_text(key).strip().replace(" ", "_")
+        if normalized_key:
+            fields[normalized_key] = value.strip()
+    return fields
+
+
 class BotService:
     def __init__(
         self,
@@ -338,6 +355,11 @@ class BotService:
             )
         if command_response is not None:
             return command_response
+        operational_alert_response = self._maybe_handle_operational_alert(stripped, session_id=session_id)
+        if operational_alert_response is not None:
+            self._store_memory_turn(session_id, stripped, operational_alert_response, assistant_limit=2000)
+            self._remember_assistant_turn_state(session_id, stripped, operational_alert_response)
+            return operational_alert_response
         task_status_response = self._maybe_handle_task_status_question(stripped, session_id=session_id)
         if task_status_response is not None:
             self._store_memory_turn(session_id, stripped, task_status_response, assistant_limit=2000)
@@ -1387,6 +1409,44 @@ class BotService:
         if not _looks_like_task_completion_question(text):
             return None
         return self._task_status_question_response(session_id)
+
+    def _maybe_handle_operational_alert(self, text: str, *, session_id: str) -> str | None:
+        if not _looks_like_operational_alert(text):
+            return None
+        fields = _parse_operational_alert_fields(text)
+        title = text.splitlines()[0].split(":", 1)[1].strip() if ":" in text.splitlines()[0] else "unknown"
+        severity = fields.get("severidad") or fields.get("severity") or "unknown"
+        agent = fields.get("agent") or fields.get("agente") or "unknown"
+        reason = fields.get("reason") or fields.get("razon") or "unknown"
+        error = fields.get("error") or ""
+        if self.observe is not None:
+            self.observe.emit(
+                "operational_alert_input_handled",
+                payload={
+                    "session_id": session_id,
+                    "title": title,
+                    "severity": severity,
+                    "agent": agent,
+                    "reason": reason,
+                    "error": error[:500],
+                },
+            )
+        lines = [
+            "Alerta operacional registrada; no la voy a convertir en tarea autónoma.",
+            f"Tipo: {title}",
+            f"Severidad: {severity}",
+        ]
+        if agent != "unknown":
+            lines.append(f"Agente: {agent}")
+        if reason != "unknown":
+            lines.append(f"Razón: {reason}")
+        if error:
+            lines.append(f"Error: {error[:300]}")
+        if agent == "perf-optimizer" and reason == "codex_timeout":
+            lines.append("Acción: mantener `perf-optimizer` pausado y revisar/reanudar manualmente cuando quieras validar el proveedor.")
+        else:
+            lines.append("Acción: revisar `/jobs`, `/tasks` o `scripts/diagnose.sh` antes de reintentar.")
+        return "\n".join(lines)
 
     def _task_status_question_response(self, session_id: str) -> str:
         latest = None
