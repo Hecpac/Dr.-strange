@@ -43,10 +43,35 @@ class TransportStartTests(unittest.IsolatedAsyncioTestCase):
 
         transport = TelegramTransport(bot_service=MagicMock(), token="test-token")
         await transport.start()
+        mock_builder.connection_pool_size.assert_called_once_with(32)
+        mock_builder.get_updates_connection_pool_size.assert_called_once_with(8)
+        mock_builder.pool_timeout.assert_called_once_with(30.0)
+        mock_builder.get_updates_pool_timeout.assert_called_once_with(30.0)
         mock_app.initialize.assert_awaited_once()
         mock_app.start.assert_awaited_once()
         mock_app.updater.start_polling.assert_awaited_once()
         await transport.stop()
+
+    async def test_stop_swallows_pool_cleanup_errors_and_emits_observe_event(self) -> None:
+        bot_service = MagicMock()
+        bot_service.observe = MagicMock()
+        transport = TelegramTransport(bot_service=bot_service, token="test-token")
+        app = MagicMock()
+        app.updater.stop = AsyncMock(side_effect=RuntimeError("Pool timeout"))
+        app.stop = AsyncMock()
+        app.shutdown = AsyncMock()
+        transport._app = app
+
+        await transport.stop()
+
+        app.updater.stop.assert_awaited_once()
+        app.stop.assert_awaited_once()
+        app.shutdown.assert_awaited_once()
+        bot_service.observe.emit.assert_called_once()
+        self.assertEqual(bot_service.observe.emit.call_args.args[0], "telegram_transport_stop_error")
+        payload = bot_service.observe.emit.call_args.kwargs["payload"]
+        self.assertEqual(payload["error_count"], 1)
+        self.assertIn("Pool timeout", payload["errors"][0])
 
     async def test_set_commands_uses_curated_short_menu(self) -> None:
         transport = TelegramTransport(bot_service=MagicMock(), token="test-token")

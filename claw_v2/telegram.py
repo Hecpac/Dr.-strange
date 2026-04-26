@@ -5,6 +5,7 @@ import base64
 import inspect
 import logging
 import mimetypes
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,11 @@ logger = logging.getLogger(__name__)
 MAX_TELEGRAM_LEN = 4096
 MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024  # 20 MB
 DEFAULT_IMAGE_PROMPT = "El usuario envio esta imagen por Telegram. Analizala y responde de forma util."
+DEFAULT_CONNECTION_POOL_SIZE = 32
+DEFAULT_POOL_TIMEOUT = 30.0
+DEFAULT_REQUEST_TIMEOUT = 30.0
+DEFAULT_MEDIA_WRITE_TIMEOUT = 60.0
+DEFAULT_GET_UPDATES_POOL_SIZE = 8
 
 
 def _split_message(text: str, max_len: int = MAX_TELEGRAM_LEN) -> list[str]:
@@ -32,6 +38,28 @@ def _split_message(text: str, max_len: int = MAX_TELEGRAM_LEN) -> list[str]:
         parts.append(text[:max_len])
         text = text[max_len:]
     return parts
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        parsed = int(raw)
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        parsed = float(raw)
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else default
 
 
 def _build_image_content_blocks(
@@ -140,6 +168,20 @@ class TelegramTransport:
         self._rate_limits: dict[str, list[float]] = {}
         self._rate_max = 10  # max requests per window
         self._rate_window = 60.0  # seconds
+        self._connection_pool_size = _env_int("TELEGRAM_CONNECTION_POOL_SIZE", DEFAULT_CONNECTION_POOL_SIZE)
+        self._pool_timeout = _env_float("TELEGRAM_POOL_TIMEOUT", DEFAULT_POOL_TIMEOUT)
+        self._request_timeout = _env_float("TELEGRAM_REQUEST_TIMEOUT", DEFAULT_REQUEST_TIMEOUT)
+        self._media_write_timeout = _env_float("TELEGRAM_MEDIA_WRITE_TIMEOUT", DEFAULT_MEDIA_WRITE_TIMEOUT)
+        self._get_updates_pool_size = _env_int("TELEGRAM_GET_UPDATES_POOL_SIZE", DEFAULT_GET_UPDATES_POOL_SIZE)
+
+    def _emit_transport_event(self, event_type: str, payload: dict[str, Any]) -> None:
+        observe = getattr(self._bot_service, "observe", None)
+        if observe is None:
+            return
+        try:
+            observe.emit(event_type, payload=payload)
+        except Exception:
+            logger.debug("Could not emit Telegram transport event", exc_info=True)
 
     def _emit_latency(
         self,
@@ -180,20 +222,45 @@ class TelegramTransport:
     async def start(self) -> None:
         if self._token is None:
             return
-        # Single-instance guard: kill stale polling process if PID file exists
+        # Single-instance guard: stop stale polling process if PID file exists.
         if self._PID_FILE.exists():
             try:
                 old_pid = int(self._PID_FILE.read_text().strip())
-                import os, signal
-                os.kill(old_pid, signal.SIGKILL)
-                logger.warning("Killed stale Telegram poller (pid %d)", old_pid)
-                await asyncio.sleep(1)
+                import os, signal, subprocess
+                if old_pid != os.getpid():
+                    proc = subprocess.run(
+                        ["ps", "-p", str(old_pid), "-o", "command="],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    if "claw_v2.main" in proc.stdout:
+                        os.kill(old_pid, signal.SIGTERM)
+                        logger.warning("Requested stale Telegram poller stop (pid %d)", old_pid)
+                        for _ in range(10):
+                            await asyncio.sleep(0.2)
+                            try:
+                                os.kill(old_pid, 0)
+                            except ProcessLookupError:
+                                break
             except (ValueError, ProcessLookupError, PermissionError):
                 pass
         self._PID_FILE.parent.mkdir(parents=True, exist_ok=True)
         import os
         self._PID_FILE.write_text(str(os.getpid()))
-        self._app = ApplicationBuilder().token(self._token).build()
+        builder = ApplicationBuilder().token(self._token)
+        builder.connection_pool_size(self._connection_pool_size)
+        builder.pool_timeout(self._pool_timeout)
+        builder.connect_timeout(self._request_timeout)
+        builder.read_timeout(self._request_timeout)
+        builder.write_timeout(self._request_timeout)
+        builder.media_write_timeout(self._media_write_timeout)
+        builder.get_updates_connection_pool_size(self._get_updates_pool_size)
+        builder.get_updates_pool_timeout(self._pool_timeout)
+        builder.get_updates_connect_timeout(self._request_timeout)
+        builder.get_updates_read_timeout(self._request_timeout)
+        builder.get_updates_write_timeout(self._request_timeout)
+        self._app = builder.build()
         self._app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_text))
         self._app.add_handler(MessageHandler(filters.COMMAND, self._handle_text))
         self._app.add_handler(MessageHandler(filters.PHOTO, self._handle_photo))
@@ -228,9 +295,34 @@ class TelegramTransport:
     async def stop(self) -> None:
         if self._app is None:
             return
-        await self._app.updater.stop()
-        await self._app.stop()
-        await self._app.shutdown()
+        app = self._app
+        self._app = None
+        errors: list[str] = []
+        steps = (
+            ("updater_stop", app.updater.stop),
+            ("application_stop", app.stop),
+            ("application_shutdown", app.shutdown),
+        )
+        for step, call in steps:
+            try:
+                result = call()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as exc:
+                detail = f"{type(exc).__name__}: {str(exc)[:300]}"
+                errors.append(f"{step}: {detail}")
+                logger.warning("Telegram transport %s failed: %s", step, detail, exc_info=True)
+        if errors:
+            self._emit_transport_event(
+                "telegram_transport_stop_error",
+                payload={"errors": errors, "error_count": len(errors)},
+            )
+        try:
+            import os
+            if self._PID_FILE.exists() and self._PID_FILE.read_text().strip() == str(os.getpid()):
+                self._PID_FILE.unlink(missing_ok=True)
+        except Exception:
+            logger.debug("Could not clear Telegram PID file", exc_info=True)
 
     async def _set_commands(self) -> None:
         from telegram import BotCommand

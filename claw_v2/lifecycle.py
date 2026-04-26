@@ -12,6 +12,7 @@ from claw_v2.chrome import ManagedChrome
 from claw_v2.chat_api import LocalChatAPI
 from claw_v2.main import build_runtime
 from claw_v2.notebooklm import NotebookLMService
+from claw_v2.operational_alerts import install_operational_alerts
 from claw_v2.telegram import TelegramTransport
 from claw_v2.web_transport import WebTransport
 
@@ -142,10 +143,28 @@ async def run() -> int:
                     _loop,
                 )
 
+        install_operational_alerts(observe=runtime.observe, notify=_nlm_notify)
+
+        def _nlm_research_fallback(query: str) -> str | None:
+            wiki = runtime.bot.wiki
+            if wiki is None:
+                return None
+            hits = wiki.search(query, limit=3)
+            if not hits:
+                return None
+            lines = ["Fallback wiki local:"]
+            for hit in hits:
+                title = str(hit.get("title") or hit.get("slug") or "resultado")
+                snippet = str(hit.get("snippet") or "")[:300]
+                score = float(hit.get("score") or 0.0)
+                lines.append(f"- {title} ({score:.2f}): {snippet}")
+            return "\n".join(lines)
+
         nlm_service = NotebookLMService(
             notify=_nlm_notify,
             observe=runtime.observe,
             job_service=runtime.job_service,
+            research_fallback=_nlm_research_fallback,
         )
         runtime.bot.notebooklm = nlm_service
 

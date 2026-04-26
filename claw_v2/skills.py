@@ -432,7 +432,21 @@ class SkillRegistry:
         """)
 
         try:
-            resp = self.router.ask(prompt, lane="judge", max_budget=0.10, timeout=60.0)
+            resp = self.router.ask(
+                prompt,
+                lane="judge",
+                evidence_pack={
+                    "operation": "skill_gap_discovery",
+                    "active_skill_count": sum(1 for skill in self._registry.values() if skill.status == "active"),
+                    "active_skills": [
+                        {"name": skill.name, "description": skill.description}
+                        for skill in self._registry.values()
+                        if skill.status == "active"
+                    ][:50],
+                },
+                max_budget=0.10,
+                timeout=60.0,
+            )
             content = resp.content.strip()
             start = content.find("[")
             end = content.rfind("]") + 1

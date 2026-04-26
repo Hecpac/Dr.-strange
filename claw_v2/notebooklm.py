@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 import threading
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -12,6 +13,67 @@ if TYPE_CHECKING:
     from claw_v2.jobs import JobService
 
 logger = logging.getLogger(__name__)
+
+ResearchFallback = Callable[[str], str | dict[str, Any] | None]
+
+_NOTEBOOKLM_TIMEOUT_PATTERNS = ("timeout", "timed out", "did not complete", "deadline")
+_NOTEBOOKLM_AUTH_PATTERNS = ("auth", "unauthorized", "forbidden", "permission", "401", "403", "login")
+_NOTEBOOKLM_RATE_LIMIT_PATTERNS = ("rate limit", "too many requests", "quota", "429")
+_NOTEBOOKLM_UNAVAILABLE_PATTERNS = (
+    "api down",
+    "service unavailable",
+    "temporarily unavailable",
+    "connection refused",
+    "connection reset",
+    "cdp down",
+)
+
+
+def classify_notebooklm_failure(value: BaseException | str | None) -> str:
+    text = _error_text(value)
+    if any(pattern in text for pattern in _NOTEBOOKLM_TIMEOUT_PATTERNS):
+        return "timeout"
+    if any(pattern in text for pattern in _NOTEBOOKLM_RATE_LIMIT_PATTERNS):
+        return "rate_limited"
+    if any(pattern in text for pattern in _NOTEBOOKLM_AUTH_PATTERNS):
+        return "auth"
+    if any(pattern in text for pattern in _NOTEBOOKLM_UNAVAILABLE_PATTERNS):
+        return "unavailable"
+    if "no sources" in text or "0 sources" in text or "empty result" in text:
+        return "no_results"
+    return "unknown"
+
+
+def _error_text(value: BaseException | str | None) -> str:
+    if value is None:
+        return ""
+    return str(value).lower()
+
+
+def _format_fallback_output(value: str | dict[str, Any] | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, dict):
+        if "summary" in value:
+            return _clean_fallback_text(value.get("summary"))
+        if "answer" in value:
+            return _clean_fallback_text(value.get("answer"))
+        if "results" in value and isinstance(value["results"], list):
+            lines = []
+            for item in value["results"][:3]:
+                if not isinstance(item, dict):
+                    continue
+                title = str(item.get("title") or item.get("slug") or "resultado")
+                snippet = str(item.get("snippet") or item.get("content") or "")
+                lines.append(f"- {title}: {_clean_fallback_text(snippet)[:240]}")
+            return "\n".join(lines)
+        return _clean_fallback_text(value)
+    return _clean_fallback_text(value)
+
+
+def _clean_fallback_text(value: object) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    return text[:2000]
 
 
 class _NoOpContext:
@@ -35,10 +97,12 @@ class NotebookLMService:
         notify: Callable[[str], None] | None = None,
         observe: Any | None = None,
         job_service: JobService | None = None,
+        research_fallback: ResearchFallback | None = None,
     ) -> None:
         self._notify = notify or (lambda msg: None)
         self._observe = observe
         self._job_service = job_service
+        self._research_fallback = research_fallback
         self._running: dict[str, threading.Thread] = {}
         self._client_factory: Callable[[], Any] | None = None
         # Optional override for CDP-backed methods (used by tests). Defaults to
@@ -260,14 +324,48 @@ class NotebookLMService:
                     result = cdp_fn(full_id, query)
                 else:
                     result = self._run_async(self._async_research(full_id, query, mode))
-                if self._job_service is not None and job_id is not None:
-                    try:
-                        self._job_service.complete(
-                            job_id,
-                            result={"notebook_id": full_id, "sources_count": result},
+                if result <= 0:
+                    fallback = self._try_research_fallback(
+                        notebook_id=full_id,
+                        query=query,
+                        reason="no_results",
+                        job_id=job_id,
+                    )
+                    self._complete_research_job(
+                        job_id=job_id,
+                        notebook_id=full_id,
+                        sources_count=0,
+                        degraded=True,
+                        failure_kind="no_results",
+                        fallback=fallback,
+                    )
+                    self._emit(
+                        "nlm_research_completed",
+                        notebook_id=full_id,
+                        sources_count=0,
+                        degraded=True,
+                        failure_kind="no_results",
+                        fallback_used=fallback["used"],
+                        job_id=job_id,
+                    )
+                    if fallback["used"]:
+                        self._notify(
+                            "NotebookLM no importo fuentes; use fallback local.\n"
+                            f"Notebook: {title}\n"
+                            f"{fallback['summary']}"
                         )
-                    except Exception:
-                        logger.exception("Job completion persistence failed for %s", job_id)
+                    else:
+                        self._notify(
+                            f"Deep Research termino sin fuentes importadas en notebook {title}.\n"
+                            "No habia fallback local disponible para cubrir la consulta."
+                        )
+                    return
+                if self._job_service is not None and job_id is not None:
+                    self._complete_research_job(
+                        job_id=job_id,
+                        notebook_id=full_id,
+                        sources_count=result,
+                    )
                 self._emit("nlm_research_completed", notebook_id=full_id, sources_count=result)
                 self._notify(
                     f"Deep Research completado en notebook {title}\n"
@@ -276,18 +374,70 @@ class NotebookLMService:
                 )
             except Exception as exc:
                 logger.exception("Background research failed for %s", full_id)
-                if self._job_service is not None and job_id is not None:
-                    try:
-                        self._job_service.fail(
-                            job_id,
-                            error=str(exc),
-                            retry=False,
-                            checkpoint={"operation": "research", "notebook_id": full_id},
-                        )
-                    except Exception:
-                        logger.exception("Job failure persistence failed for %s", job_id)
-                self._emit("nlm_error", notebook_id=full_id, operation="research", error=str(exc))
-                self._notify(f"Error en research: {exc}")
+                failure_kind = classify_notebooklm_failure(exc)
+                fallback = self._try_research_fallback(
+                    notebook_id=full_id,
+                    query=query,
+                    reason=failure_kind,
+                    job_id=job_id,
+                    error=str(exc),
+                )
+                if fallback["used"]:
+                    self._complete_research_job(
+                        job_id=job_id,
+                        notebook_id=full_id,
+                        sources_count=0,
+                        degraded=True,
+                        failure_kind=failure_kind,
+                        fallback=fallback,
+                    )
+                    self._emit(
+                        "nlm_error",
+                        notebook_id=full_id,
+                        operation="research",
+                        error=str(exc),
+                        failure_kind=failure_kind,
+                        graceful_fallback=True,
+                        job_id=job_id,
+                        user_notified=True,
+                    )
+                    self._notify(
+                        "NotebookLM fallo; use fallback local.\n"
+                        f"Tipo: {failure_kind}\n"
+                        f"Notebook: {title}\n"
+                        f"{fallback['summary']}"
+                    )
+                else:
+                    if self._job_service is not None and job_id is not None:
+                        try:
+                            self._job_service.fail(
+                                job_id,
+                                error=str(exc),
+                                retry=False,
+                                checkpoint={"operation": "research", "notebook_id": full_id},
+                            )
+                        except Exception:
+                            logger.exception("Job failure persistence failed for %s", job_id)
+                    self._emit(
+                        "nlm_error",
+                        notebook_id=full_id,
+                        operation="research",
+                        error=str(exc),
+                        failure_kind=failure_kind,
+                        graceful_fallback=False,
+                        job_id=job_id,
+                        user_notified=True,
+                    )
+                    self._emit(
+                        "nlm_research_failed",
+                        notebook_id=full_id,
+                        operation="research",
+                        error=str(exc),
+                        failure_kind=failure_kind,
+                        job_id=job_id,
+                        user_notified=True,
+                    )
+                    self._notify(f"Error en research ({failure_kind}): {exc}")
             finally:
                 self._running.pop(full_id, None)
 
@@ -295,6 +445,100 @@ class NotebookLMService:
         self._running[full_id] = thread
         thread.start()
         return f"Deep Research iniciado para '{query}' en notebook {title}..."
+
+    def _complete_research_job(
+        self,
+        *,
+        job_id: str | None,
+        notebook_id: str,
+        sources_count: int,
+        degraded: bool = False,
+        failure_kind: str | None = None,
+        fallback: dict[str, Any] | None = None,
+    ) -> None:
+        if self._job_service is None or job_id is None:
+            return
+        result: dict[str, Any] = {
+            "notebook_id": notebook_id,
+            "sources_count": sources_count,
+        }
+        if degraded:
+            result.update(
+                {
+                    "degraded": True,
+                    "failure_kind": failure_kind or "unknown",
+                    "fallback_used": bool((fallback or {}).get("used")),
+                    "fallback_summary": str((fallback or {}).get("summary") or "")[:1000],
+                }
+            )
+        try:
+            self._job_service.complete(job_id, result=result)
+        except Exception:
+            logger.exception("Job completion persistence failed for %s", job_id)
+
+    def _try_research_fallback(
+        self,
+        *,
+        notebook_id: str,
+        query: str,
+        reason: str,
+        job_id: str | None,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        if self._research_fallback is None:
+            self._emit(
+                "nlm_research_degraded",
+                notebook_id=notebook_id,
+                query=query,
+                reason=reason,
+                error=error,
+                fallback_used=False,
+                job_id=job_id,
+                user_notified=True,
+            )
+            return {"used": False, "summary": "", "error": ""}
+        try:
+            fallback_output = self._research_fallback(query)
+            summary = _format_fallback_output(fallback_output)
+            if not summary:
+                self._emit(
+                    "nlm_research_degraded",
+                    notebook_id=notebook_id,
+                    query=query,
+                    reason=reason,
+                    error=error,
+                    fallback_used=False,
+                    fallback_error="empty_fallback",
+                    job_id=job_id,
+                    user_notified=True,
+                )
+                return {"used": False, "summary": "", "error": "empty_fallback"}
+            self._emit(
+                "nlm_research_degraded",
+                notebook_id=notebook_id,
+                query=query,
+                reason=reason,
+                error=error,
+                fallback_used=True,
+                fallback_summary=summary[:1000],
+                job_id=job_id,
+                user_notified=True,
+            )
+            return {"used": True, "summary": summary, "error": ""}
+        except Exception as fallback_exc:
+            logger.exception("NotebookLM fallback failed for %s", notebook_id)
+            self._emit(
+                "nlm_research_degraded",
+                notebook_id=notebook_id,
+                query=query,
+                reason=reason,
+                error=error,
+                fallback_used=False,
+                fallback_error=str(fallback_exc),
+                job_id=job_id,
+                user_notified=True,
+            )
+            return {"used": False, "summary": "", "error": str(fallback_exc)}
 
     async def _async_research(self, notebook_id: str, query: str, mode: str) -> int:
         async with self._client_ctx(timeout=300) as client:

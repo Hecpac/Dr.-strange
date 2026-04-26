@@ -195,7 +195,7 @@ class AgentHandler:
 
     def _run_response(self, agent_name: str, *, max_experiments: int) -> str:
         try:
-            result = self.auto_research.run_loop(agent_name, max_experiments=max_experiments)
+            result = self.auto_research.run_loop(agent_name, max_experiments=max_experiments, force=True)
             state = self.auto_research.inspect(agent_name)
         except FileNotFoundError:
             return f"agent not found: {agent_name}"
@@ -207,6 +207,7 @@ class AgentHandler:
                 agent_name,
                 target_metric=target_metric,
                 max_experiments=max_experiments,
+                force=True,
             )
             state = self.auto_research.inspect(agent_name)
         except FileNotFoundError:
@@ -235,7 +236,7 @@ class AgentHandler:
         if update_payload:
             self.auto_research.update_controls(agent_name, **update_payload)
 
-        result = self.auto_research.run_loop(agent_name, max_experiments=max_experiments)
+        result = self.auto_research.run_loop(agent_name, max_experiments=max_experiments, force=True)
         state = self.auto_research.inspect(agent_name)
         latest = self.auto_research.latest_result(agent_name)
         payload = _run_summary(agent_name, state, result)

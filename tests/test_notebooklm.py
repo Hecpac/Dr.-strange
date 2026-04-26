@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import tempfile
 import time
 import unittest
@@ -8,7 +9,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from claw_v2.jobs import JobService
-from claw_v2.notebooklm import NotebookLMService
+from claw_v2.notebooklm import NotebookLMService, classify_notebooklm_failure
 
 
 def _mock_notebook(notebook_id: str = "abc123-def456", title: str = "Test NB"):
@@ -18,6 +19,14 @@ def _mock_notebook(notebook_id: str = "abc123-def456", title: str = "Test NB"):
     nb.created_at = None
     nb.sources_count = 0
     return nb
+
+
+class FailureClassificationTests(unittest.TestCase):
+    def test_classifies_timeout_rate_limit_auth_and_unavailable(self) -> None:
+        self.assertEqual(classify_notebooklm_failure(TimeoutError("timed out")), "timeout")
+        self.assertEqual(classify_notebooklm_failure("429 too many requests"), "rate_limited")
+        self.assertEqual(classify_notebooklm_failure("401 unauthorized"), "auth")
+        self.assertEqual(classify_notebooklm_failure("CDP down"), "unavailable")
 
 
 class SyncMethodTests(unittest.TestCase):
@@ -219,18 +228,96 @@ class BackgroundTests(unittest.TestCase):
         call_msg = svc._notify.call_args[0][0]
         self.assertIn("error", call_msg.lower())
 
+    def test_research_zero_sources_uses_fallback_and_emits_degraded(self) -> None:
+        client = AsyncMock()
+        client.notebooks.list.return_value = [_mock_notebook("abc-full", "Research NB")]
+        client.research.start.return_value = {"task_id": "t1", "report_id": "r1"}
+        client.research.poll.return_value = {"status": "completed", "sources": [], "task_id": "t1"}
+        observe = MagicMock()
+        notify = MagicMock()
+        svc = NotebookLMService(
+            notify=notify,
+            observe=observe,
+            research_fallback=lambda query: f"fallback wiki para {query}",
+        )
+        svc._client_factory = lambda: client
+
+        result = svc.start_research("abc", "AI trends")
+        self.assertIn("Deep Research iniciado", result)
+        for _ in range(50):
+            if "abc-full" not in svc._running:
+                break
+            time.sleep(0.1)
+
+        notify.assert_called_once()
+        self.assertIn("fallback local", notify.call_args.args[0])
+        observe.emit.assert_any_call(
+            "nlm_research_degraded",
+            payload={
+                "notebook_id": "abc-full",
+                "query": "AI trends",
+                "reason": "no_results",
+                "error": None,
+                "fallback_used": True,
+                "fallback_summary": "fallback wiki para AI trends",
+                "job_id": None,
+                "user_notified": True,
+            },
+        )
+
+    def test_research_failure_with_fallback_completes_job_degraded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            notify = MagicMock()
+            job_service = JobService(Path(tmpdir) / "claw.db")
+            svc = NotebookLMService(
+                notify=notify,
+                job_service=job_service,
+                research_fallback=lambda query: {"summary": f"wiki fallback: {query}"},
+            )
+
+            def fake_cdp(notebook_id: str, query: str) -> int:
+                raise TimeoutError("Research did not complete within 10 minutes")
+
+            svc._cdp_research_fn = fake_cdp
+            svc.start_research("nb-cdp-full-id", "query")
+
+            deadline = time.time() + 2.0
+            while time.time() < deadline and svc._running:
+                time.sleep(0.01)
+
+            jobs = job_service.list()
+            self.assertEqual(len(jobs), 1)
+            self.assertEqual(jobs[0].status, "completed")
+            self.assertTrue(jobs[0].result["degraded"])
+            self.assertEqual(jobs[0].result["failure_kind"], "timeout")
+            self.assertTrue(jobs[0].result["fallback_used"])
+            self.assertTrue(any("fallback local" in str(c.args).lower() for c in notify.call_args_list))
+
     def test_one_operation_per_notebook(self) -> None:
         client = AsyncMock()
         client.notebooks.list.return_value = [_mock_notebook("abc-full", "NB")]
-        # Make research hang
+        client.research.poll.return_value = {"status": "completed", "sources": [], "task_id": "t1"}
+        started = threading.Event()
+        release = threading.Event()
+
         async def slow_start(*a, **kw):
-            await asyncio.sleep(10)
+            started.set()
+            while not release.is_set():
+                await asyncio.sleep(0.01)
             return {"task_id": "t1"}
+
         client.research.start = slow_start
         svc = self._make_service(client)
         svc.start_research("abc", "query 1")
+        self.assertTrue(started.wait(timeout=1.0))
         result = svc.start_research("abc", "query 2")
         self.assertIn("ya hay una operación", result.lower())
+        release.set()
+        for _ in range(100):
+            if "abc-full" not in svc._running:
+                break
+            time.sleep(0.01)
+        self.assertNotIn("abc-full", svc._running)
 
 
 import tempfile
