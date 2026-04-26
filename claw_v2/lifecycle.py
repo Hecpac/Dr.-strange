@@ -11,6 +11,7 @@ from pathlib import Path
 from claw_v2.chrome import ManagedChrome
 from claw_v2.chat_api import LocalChatAPI
 from claw_v2.main import build_runtime
+from claw_v2.morning_brief import MorningBriefService, MorningBriefSettings
 from claw_v2.notebooklm import NotebookLMService
 from claw_v2.operational_alerts import install_operational_alerts
 from claw_v2.telegram import TelegramTransport
@@ -100,6 +101,19 @@ async def run() -> int:
         # Wire NotebookLM with Telegram notify callback
         _loop = asyncio.get_running_loop()
 
+        def _send_owner_telegram_message(message: str, *, parse_mode: str | None = None) -> None:
+            if not runtime.config.telegram_allowed_user_id or not transport._app:
+                raise RuntimeError("Telegram owner chat is not available")
+            future = asyncio.run_coroutine_threadsafe(
+                transport.send_text(
+                    chat_id=int(runtime.config.telegram_allowed_user_id),
+                    text=message,
+                    parse_mode=parse_mode,
+                ),
+                _loop,
+            )
+            future.result(timeout=20)
+
         def _send_session_telegram_message(session_id: str, message: str) -> None:
             if not session_id.startswith("tg-") or not transport._app:
                 return
@@ -134,14 +148,36 @@ async def run() -> int:
         runtime.observe.subscribe("autonomous_task_failed", _autonomous_task_failed_consumer)
 
         def _nlm_notify(message: str) -> None:
-            if runtime.config.telegram_allowed_user_id and transport._app:
-                asyncio.run_coroutine_threadsafe(
-                    transport._app.bot.send_message(
-                        chat_id=int(runtime.config.telegram_allowed_user_id),
-                        text=message,
-                    ),
-                    _loop,
-                )
+            try:
+                _send_owner_telegram_message(message)
+            except Exception:
+                logger.debug("Owner Telegram notify skipped", exc_info=True)
+
+        morning_brief = MorningBriefService(
+            settings=MorningBriefSettings(
+                enabled=runtime.config.morning_brief_enabled,
+                hour=runtime.config.morning_brief_hour,
+                timezone=runtime.config.morning_brief_timezone,
+                weather_location=runtime.config.morning_brief_weather_location,
+                email_command=runtime.config.morning_brief_email_command,
+                calendar_command=runtime.config.morning_brief_calendar_command,
+            ),
+            notify=_send_owner_telegram_message,
+            observe=runtime.observe,
+            metrics=runtime.metrics,
+            auto_research=runtime.auto_research,
+            task_ledger=runtime.task_ledger,
+            job_service=runtime.job_service,
+            task_board=runtime.task_board,
+            pipeline=runtime.bot.pipeline,
+        )
+
+        from claw_v2.cron import ScheduledJob as _SJ
+        runtime.scheduler.register(_SJ(
+            name="morning_brief",
+            interval_seconds=300,
+            handler=morning_brief.run_if_due,
+        ))
 
         install_operational_alerts(observe=runtime.observe, notify=_nlm_notify)
 
@@ -238,17 +274,11 @@ async def run() -> int:
                 f"🥩 Proteína: mínimo 150g hoy\n\n"
                 f"🔥 _{quote}_"
             )
-            if runtime.config.telegram_allowed_user_id and transport._app:
-                asyncio.run_coroutine_threadsafe(
-                    transport._app.bot.send_message(
-                        chat_id=int(runtime.config.telegram_allowed_user_id),
-                        text=msg,
-                        parse_mode="Markdown",
-                    ),
-                    _loop,
-                )
+            try:
+                _send_owner_telegram_message(msg, parse_mode="Markdown")
+            except Exception:
+                logger.debug("Fitness reminder Telegram send skipped", exc_info=True)
 
-        from claw_v2.cron import ScheduledJob as _SJ
         runtime.scheduler.register(_SJ(
             name="fitness_reminder",
             interval_seconds=300,

@@ -6,6 +6,7 @@ import secrets
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .types import Lane
 
@@ -306,6 +307,12 @@ class AppConfig:
     codex_cli_path: str
     codex_model: str
     computer_use_backend: str
+    morning_brief_enabled: bool
+    morning_brief_hour: int
+    morning_brief_timezone: str
+    morning_brief_weather_location: str
+    morning_brief_email_command: str | None
+    morning_brief_calendar_command: str | None
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -402,6 +409,12 @@ class AppConfig:
             codex_cli_path=os.getenv("CODEX_CLI_PATH") or shutil.which("codex") or "codex",
             codex_model=os.getenv("CODEX_MODEL", "codex-mini-latest"),
             computer_use_backend=os.getenv("COMPUTER_USE_BACKEND", "openai"),
+            morning_brief_enabled=_env_bool("MORNING_BRIEF_ENABLED", True),
+            morning_brief_hour=_env_int("MORNING_BRIEF_HOUR", 8),
+            morning_brief_timezone=os.getenv("MORNING_BRIEF_TIMEZONE", os.getenv("TZ", "America/Chicago")),
+            morning_brief_weather_location=os.getenv("MORNING_BRIEF_LOCATION", os.getenv("WEATHER_LOCATION", "")),
+            morning_brief_email_command=os.getenv("MORNING_BRIEF_EMAIL_COMMAND") or None,
+            morning_brief_calendar_command=os.getenv("MORNING_BRIEF_CALENDAR_COMMAND") or None,
         )
 
     def ensure_directories(self) -> None:
@@ -435,6 +448,12 @@ class AppConfig:
             raise ValueError("sandbox_capability_profile must be one of: surgical, engineer, admin.")
         if self.computer_use_backend not in {"openai", "codex"}:
             raise ValueError("computer_use_backend must be 'openai' or 'codex'.")
+        if not 0 <= self.morning_brief_hour <= 23:
+            raise ValueError("morning_brief_hour must be between 0 and 23.")
+        try:
+            ZoneInfo(self.morning_brief_timezone)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError(f"morning_brief_timezone is invalid: {self.morning_brief_timezone}") from exc
         if self.web_chat_port <= 0:
             raise ValueError("web_chat_port must be positive.")
         for site in self.monitored_sites:

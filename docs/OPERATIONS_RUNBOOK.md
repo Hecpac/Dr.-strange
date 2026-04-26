@@ -218,6 +218,35 @@ Telegram transport:
   `TELEGRAM_POOL_TIMEOUT`, `TELEGRAM_REQUEST_TIMEOUT`, `TELEGRAM_MEDIA_WRITE_TIMEOUT`.
 - Restart cleanup errors are logged and observed, but shutdown continues through app stop and shutdown.
 
+## Morning Brief
+
+Claw sends one proactive Telegram briefing each morning during the configured hour.
+
+Default:
+
+```bash
+MORNING_BRIEF_ENABLED=true
+MORNING_BRIEF_HOUR=8
+MORNING_BRIEF_TIMEZONE=America/Chicago
+```
+
+Optional enrichments:
+
+```bash
+MORNING_BRIEF_LOCATION="City, ST"
+MORNING_BRIEF_EMAIL_COMMAND="/path/to/email-digest"
+MORNING_BRIEF_CALENDAR_COMMAND="/path/to/calendar-digest"
+```
+
+The email/calendar commands must print a short summary to stdout and finish quickly. When unset, the briefing explicitly reports those connectors as unconfigured instead of pretending it checked them.
+
+Events:
+
+- `morning_brief_sent`
+- `morning_brief_failed`
+
+Duplicate protection lives in `~/.claw/morning_brief_last_sent.txt`.
+
 ## Escalation
 
 Escalate only after local diagnostics confirm the blocker:
