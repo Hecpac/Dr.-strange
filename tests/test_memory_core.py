@@ -47,6 +47,27 @@ class MessageTests(unittest.TestCase):
         self.store.store_message("s1", "user", "hi")
         self.assertGreater(self.store.last_message_id("s1"), 0)
 
+    def test_compaction_summarizes_oldest_messages_and_preserves_recent(self) -> None:
+        for i in range(8):
+            self.store.store_message(
+                "s1",
+                "user",
+                f"msg-{i}",
+                compact=True,
+                max_messages=6,
+                preserve_recent=4,
+            )
+
+        self.assertLessEqual(self.store.count_messages("s1"), 6)
+        messages = self.store.get_recent_messages("s1", limit=10)
+        contents = [message["content"] for message in messages]
+        self.assertNotIn("msg-0", contents)
+        self.assertEqual(contents[-1], "msg-7")
+
+        summary = self.store.get_session_state("s1")["rolling_summary"]
+        self.assertIn("Compacted 3 older messages", summary)
+        self.assertIn("msg-0", summary)
+
 
 class DeleteFactTests(unittest.TestCase):
     def setUp(self) -> None:

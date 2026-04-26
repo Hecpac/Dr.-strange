@@ -134,7 +134,7 @@ class BotService:
             job_service=job_service,
             get_session_state=brain.memory.get_session_state,
             update_session_state=brain.memory.update_session_state,
-            store_message=brain.memory.store_message,
+            store_message=self._store_message_from_handler,
             workspace_root=getattr(config, "workspace_root", None),
         )
         self._state_handler = StateHandler(
@@ -274,6 +274,33 @@ class BotService:
         reason = str(status.get("reason", "")).strip()
         return f"{base} {reason}".strip()
 
+    def _memory_compaction_enabled(self) -> bool:
+        return bool(getattr(self.config, "use_compaction", False))
+
+    def _store_memory_turn(
+        self,
+        session_id: str,
+        user_text: str,
+        assistant_text: str,
+        *,
+        assistant_limit: int,
+    ) -> None:
+        self.brain.memory.store_message(session_id, "user", user_text)
+        self.brain.memory.store_message(
+            session_id,
+            "assistant",
+            assistant_text[:assistant_limit],
+            compact=self._memory_compaction_enabled(),
+        )
+
+    def _store_message_from_handler(self, session_id: str, role: str, content: str) -> None:
+        self.brain.memory.store_message(
+            session_id,
+            role,
+            content,
+            compact=role == "assistant" and self._memory_compaction_enabled(),
+        )
+
     def handle_text(self, *, user_id: str, session_id: str, text: str) -> str:
         if self.allowed_user_id is None:
             raise PermissionError("TELEGRAM_ALLOWED_USER_ID must be configured")
@@ -300,8 +327,7 @@ class BotService:
                 memory_text=stateful_followup.memory_text,
             )
         if stateful_followup is not None:
-            self.brain.memory.store_message(session_id, "user", stripped)
-            self.brain.memory.store_message(session_id, "assistant", stateful_followup[:2000])
+            self._store_memory_turn(session_id, stripped, stateful_followup, assistant_limit=2000)
             self._remember_assistant_turn_state(session_id, stripped, stateful_followup)
             return stateful_followup
         shortcut_response = self._maybe_handle_shortcut(stripped, session_id=session_id)
@@ -313,14 +339,12 @@ class BotService:
             )
         if shortcut_response is not None:
             # Store the exchange so the brain has context on subsequent messages.
-            self.brain.memory.store_message(session_id, "user", stripped)
-            self.brain.memory.store_message(session_id, "assistant", shortcut_response[:2000])
+            self._store_memory_turn(session_id, stripped, shortcut_response, assistant_limit=2000)
             self._remember_assistant_turn_state(session_id, stripped, shortcut_response)
             return shortcut_response
         coordinated_response = self._task_handler.maybe_run_coordinated_task(session_id, stripped)
         if coordinated_response is not None:
-            self.brain.memory.store_message(session_id, "user", stripped)
-            self.brain.memory.store_message(session_id, "assistant", coordinated_response[:4000])
+            self._store_memory_turn(session_id, stripped, coordinated_response, assistant_limit=4000)
             if not coordinated_response.startswith("Tarea autónoma iniciada:"):
                 self._remember_assistant_turn_state(session_id, stripped, coordinated_response)
             return coordinated_response
@@ -1240,8 +1264,7 @@ class BotService:
             "Ejecutaré fases de desarrollo sin pedir autorización intermedia: inspección, edición, tests, commit y git push. "
             "Solo pausaré por deploy/publicación, acciones destructivas, credenciales faltantes o bloqueo real de sandbox."
         )
-        self.brain.memory.store_message(session_id, "user", text)
-        self.brain.memory.store_message(session_id, "assistant", reply)
+        self._store_memory_turn(session_id, text, reply, assistant_limit=len(reply))
         self._remember_assistant_turn_state(session_id, text, reply)
         if state.get("pending_action"):
             return f"{reply}\nPending action: {state['pending_action']}"

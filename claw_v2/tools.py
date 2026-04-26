@@ -6,6 +6,7 @@ import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from claw_v2.memory import MemoryStore
@@ -21,6 +22,70 @@ if TYPE_CHECKING:
 
 ToolHandler = Callable[[dict], dict]
 _FIRECRAWL_CONTENT_LIMIT = 12_000
+_FIRECRAWL_CREDIT_PATTERNS = (
+    "insufficient credits",
+    "not enough credits",
+    "credit balance",
+    "payment required",
+)
+_FIRECRAWL_RATE_LIMIT_PATTERNS = (
+    "rate limit",
+    "too many requests",
+    "429",
+)
+
+
+class FirecrawlUnavailableError(RuntimeError):
+    """Raised when Firecrawl cannot serve a request for operational reasons."""
+
+    def __init__(self, reason: str, detail: str) -> None:
+        super().__init__(f"Firecrawl unavailable: {reason}: {detail[:300]}")
+        self.reason = reason
+        self.detail = detail
+
+
+def classify_firecrawl_error(text: str, *, status_code: int | None = None) -> str | None:
+    normalized = (text or "").lower()
+    if any(pattern in normalized for pattern in _FIRECRAWL_CREDIT_PATTERNS) or status_code == 402:
+        return "insufficient_credits"
+    if any(pattern in normalized for pattern in _FIRECRAWL_RATE_LIMIT_PATTERNS) or status_code == 429:
+        return "rate_limited"
+    return None
+
+
+def _firecrawl_post_json(endpoint: str, *, api_key: str, payload: dict, timeout: float) -> dict:
+    request = Request(
+        f"https://api.firecrawl.dev/v1/{endpoint}",
+        data=json.dumps(payload).encode(),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            body = json.loads(response.read())
+    except HTTPError as exc:
+        detail = _read_http_error(exc)
+        reason = classify_firecrawl_error(detail, status_code=exc.code)
+        if reason is not None:
+            raise FirecrawlUnavailableError(reason, detail) from exc
+        raise
+    reason = classify_firecrawl_error(json.dumps(body, default=str))
+    if reason is not None:
+        raise FirecrawlUnavailableError(reason, json.dumps(body, default=str))
+    return body
+
+
+def _read_http_error(exc: HTTPError) -> str:
+    try:
+        raw = exc.read()
+    except Exception:
+        raw = b""
+    if isinstance(raw, bytes):
+        return raw.decode("utf-8", errors="replace")
+    return str(raw)
 
 # Autonomy tiers (per SOUL.md). Enforced in code, not prompt.
 #   1 = read-only / local-safe / observation  -> auto-execute, no approval
@@ -826,18 +891,12 @@ class ToolRegistry:
                 raise ValueError("url is required")
             formats = args.get("formats", ["markdown"])
             api_key = _firecrawl_api_key()
-            payload = json.dumps({"url": url, "formats": formats}).encode()
-            req = Request(
-                "https://api.firecrawl.dev/v1/scrape",
-                data=payload,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                method="POST",
+            body = _firecrawl_post_json(
+                "scrape",
+                api_key=api_key,
+                payload={"url": url, "formats": formats},
+                timeout=60,
             )
-            with urlopen(req, timeout=60) as resp:
-                body = json.loads(resp.read())
             data = body.get("data", {})
             return {
                 "markdown": data.get("markdown", "")[:_FIRECRAWL_CONTENT_LIMIT],
@@ -851,22 +910,16 @@ class ToolRegistry:
                 raise ValueError("query is required")
             limit = int(args.get("limit", 5))
             api_key = _firecrawl_api_key()
-            payload = json.dumps({
-                "query": query,
-                "limit": limit,
-                "scrapeOptions": {"formats": ["markdown"]},
-            }).encode()
-            req = Request(
-                "https://api.firecrawl.dev/v1/search",
-                data=payload,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
+            body = _firecrawl_post_json(
+                "search",
+                api_key=api_key,
+                payload={
+                    "query": query,
+                    "limit": limit,
+                    "scrapeOptions": {"formats": ["markdown"]},
                 },
-                method="POST",
+                timeout=60,
             )
-            with urlopen(req, timeout=60) as resp:
-                body = json.loads(resp.read())
             results = []
             for item in body.get("data", [])[:limit]:
                 results.append({
@@ -888,18 +941,12 @@ class ToolRegistry:
             body: dict = {"urls": [url], "schema": schema}
             if prompt:
                 body["prompt"] = prompt
-            payload = json.dumps(body).encode()
-            req = Request(
-                "https://api.firecrawl.dev/v1/extract",
-                data=payload,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                method="POST",
+            result = _firecrawl_post_json(
+                "extract",
+                api_key=api_key,
+                payload=body,
+                timeout=90,
             )
-            with urlopen(req, timeout=90) as resp:
-                result = json.loads(resp.read())
             data = result.get("data", [])
             return {"extracted": data[0] if len(data) == 1 else data, "success": result.get("success", False)}
 

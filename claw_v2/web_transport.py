@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
+import logging
 import threading
 from pathlib import Path
 from typing import Any, Callable
 from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 
 from claw_v2.chat_api import LocalChatAPI
+
+logger = logging.getLogger(__name__)
 
 
 def _static_dir() -> Path:
@@ -25,6 +29,10 @@ def _content_type_for(path: str) -> str:
 class _QuietHandler(WSGIRequestHandler):
     def log_message(self, format: str, *args: object) -> None:  # pragma: no cover - suppress stdlib noise
         return
+
+
+class _ReusableWSGIServer(WSGIServer):
+    allow_reuse_address = True
 
 
 class WebTransport:
@@ -85,7 +93,24 @@ class WebTransport:
             )
             return [body]
 
-        self._server = make_server(self._host, self._port, _app, handler_class=_QuietHandler)
+        last_error: OSError | None = None
+        for attempt in range(5):
+            try:
+                self._server = make_server(
+                    self._host,
+                    self._port,
+                    _app,
+                    server_class=_ReusableWSGIServer,
+                    handler_class=_QuietHandler,
+                )
+                break
+            except OSError as exc:
+                last_error = exc
+                if exc.errno != errno.EADDRINUSE or self._port == 0:
+                    raise
+                await asyncio.sleep(0.25 * (attempt + 1))
+        if self._server is None:
+            raise OSError(f"Port {self._host}:{self._port} is still in use after retries") from last_error
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
         await asyncio.sleep(0)
@@ -97,5 +122,7 @@ class WebTransport:
         self._server.server_close()
         if self._thread is not None:
             self._thread.join(timeout=5)
+            if self._thread.is_alive():
+                logger.warning("Web transport thread did not stop within timeout")
         self._server = None
         self._thread = None

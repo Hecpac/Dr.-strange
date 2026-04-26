@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from claw_v2.adapters.base import AdapterUnavailableError, LLMRequest, build_effective_input
+from claw_v2.adapters.base import AdapterError, AdapterUnavailableError, LLMRequest, build_effective_input
 from claw_v2.adapters.google import GoogleAdapter
 from claw_v2.adapters.openai import OpenAIAdapter
 
@@ -19,7 +19,7 @@ def make_request() -> LLMRequest:
         provider="openai",
         model="gpt-5.4-mini",
         effort="low",
-        session_id="prev-123",
+        session_id="resp_prev_123",
         max_budget=0.5,
         evidence_pack={"diff": "print('x')", "tests": "ok"},
         allowed_tools=None,
@@ -59,9 +59,124 @@ class SecondaryProviderAdapterTests(unittest.TestCase):
             response = adapter.complete(make_request())
         self.assertEqual(response.content, "proceed with caution")
         self.assertEqual(response.artifacts["response_id"], "resp_123")
+        self.assertEqual(response.artifacts["session_id"], "resp_123")
         self.assertEqual(recorded["client_kwargs"], {"api_key": "sk-test"})
-        self.assertEqual(recorded["request_kwargs"]["previous_response_id"], "prev-123")
+        self.assertEqual(recorded["request_kwargs"]["previous_response_id"], "resp_prev_123")
         self.assertIn("# Evidence Pack", recorded["request_kwargs"]["input"])
+
+    def test_openai_adapter_omits_non_openai_previous_response_id(self) -> None:
+        recorded: dict[str, object] = {}
+        fake_response = SimpleNamespace(id="resp_123", output_text="ok", usage=None)
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                self.responses = SimpleNamespace(create=self.create)
+
+            def create(self, **kwargs):
+                recorded["request_kwargs"] = kwargs
+                return fake_response
+
+        request = make_request()
+        request.session_id = "bb1e321e-claude-session"
+        adapter = OpenAIAdapter(api_key="sk-test")
+        with patch("claw_v2.adapters.openai.import_module", return_value=SimpleNamespace(OpenAI=FakeClient)):
+            adapter.complete(request)
+        self.assertNotIn("previous_response_id", recorded["request_kwargs"])
+
+    def test_openai_adapter_retries_rate_limit(self) -> None:
+        class FakeRateLimitError(Exception):
+            status_code = 429
+
+        recorded: dict[str, object] = {"calls": 0}
+        fake_response = SimpleNamespace(id="resp_123", output_text="ok after retry", usage=None)
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                self.responses = SimpleNamespace(create=self.create)
+
+            def create(self, **kwargs):
+                recorded["calls"] = int(recorded["calls"]) + 1
+                if recorded["calls"] == 1:
+                    raise FakeRateLimitError("rate limit exceeded")
+                recorded["request_kwargs"] = kwargs
+                return fake_response
+
+        adapter = OpenAIAdapter(api_key="sk-test")
+        with (
+            patch("claw_v2.adapters.openai.import_module", return_value=SimpleNamespace(OpenAI=FakeClient)),
+            patch("claw_v2.adapters.openai.time.sleep") as sleep,
+        ):
+            response = adapter.complete(make_request())
+
+        self.assertEqual(response.content, "ok after retry")
+        self.assertEqual(recorded["calls"], 2)
+        sleep.assert_called_once()
+
+    def test_openai_adapter_fails_after_retry_budget(self) -> None:
+        class FakeRateLimitError(Exception):
+            status_code = 429
+
+        recorded: dict[str, int] = {"calls": 0}
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                self.responses = SimpleNamespace(create=self.create)
+
+            def create(self, **kwargs):
+                recorded["calls"] += 1
+                raise FakeRateLimitError("rate limit exceeded")
+
+        adapter = OpenAIAdapter(api_key="sk-test")
+        with (
+            patch("claw_v2.adapters.openai.import_module", return_value=SimpleNamespace(OpenAI=FakeClient)),
+            patch("claw_v2.adapters.openai.time.sleep"),
+            self.assertRaisesRegex(AdapterError, "rate_limited after 3 attempts"),
+        ):
+            adapter.complete(make_request())
+        self.assertEqual(recorded["calls"], 3)
+
+    def test_openai_adapter_normalizes_multimodal_message_content(self) -> None:
+        recorded: dict[str, object] = {}
+        fake_response = SimpleNamespace(id="resp_123", output_text="ok", usage=None)
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                self.responses = SimpleNamespace(create=self.create)
+
+            def create(self, **kwargs):
+                recorded["request_kwargs"] = kwargs
+                return fake_response
+
+        request = make_request()
+        request.lane = "brain"
+        request.evidence_pack = None
+        request.session_id = None
+        request.prompt = [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "que ves?"},
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": "abc123",
+                        },
+                    },
+                ],
+            }
+        ]
+        adapter = OpenAIAdapter(api_key="sk-test")
+        with patch("claw_v2.adapters.openai.import_module", return_value=SimpleNamespace(OpenAI=FakeClient)):
+            adapter.complete(request)
+        request_input = recorded["request_kwargs"]["input"]
+        self.assertEqual(request_input[0]["type"], "message")
+        content = request_input[0]["content"]
+        self.assertEqual(content[0], {"type": "input_text", "text": "que ves?"})
+        self.assertEqual(content[1]["type"], "input_image")
+        self.assertTrue(content[1]["image_url"].startswith("data:image/png;base64,"))
 
     def test_google_adapter_uses_generate_content(self) -> None:
         recorded: dict[str, object] = {}

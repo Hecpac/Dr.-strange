@@ -7,6 +7,7 @@ from pathlib import Path
 from claw_v2.adapters.base import AdapterError, AdapterUnavailableError, LLMRequest
 from claw_v2.eval_mocks import StaticAdapter, echo_response
 from claw_v2.llm import LLMRouter
+from claw_v2.retry_policy import ProviderCircuitBreaker
 from claw_v2.types import LLMResponse
 
 from tests.helpers import make_config
@@ -41,6 +42,42 @@ class LLMRouterTests(unittest.TestCase):
             self.assertEqual(response.provider, "anthropic")
             self.assertTrue(response.degraded_mode)
             self.assertIn("fallback_reason", response.artifacts)
+
+    def test_cross_provider_fallback_does_not_reuse_incompatible_session_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            recorded: dict[str, object] = {}
+
+            def failing(_: LLMRequest) -> LLMResponse:
+                raise AdapterError("Claude SDK execution failed")
+
+            def fallback(request: LLMRequest) -> LLMResponse:
+                recorded["session_id"] = request.session_id
+                return LLMResponse(
+                    content="fallback ok",
+                    lane=request.lane,
+                    provider="openai",
+                    model=request.model,
+                    confidence=0.7,
+                    cost_estimate=0.0,
+                )
+
+            router = LLMRouter(
+                config=config,
+                adapters={
+                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=failing),
+                    "openai": StaticAdapter("openai", tool_capable=False, responder=fallback),
+                },
+            )
+            response = router.ask(
+                "verify",
+                lane="verifier",
+                provider="anthropic",
+                session_id="bb1e321e-claude-session",
+                evidence_pack={"diff": "x"},
+            )
+            self.assertEqual(response.provider, "openai")
+            self.assertIsNone(recorded["session_id"])
 
     def test_ollama_lane_routes_to_adapter(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -95,6 +132,69 @@ class LLMRouterTests(unittest.TestCase):
             self.assertEqual(response.model, config.worker_model)
             self.assertTrue(response.degraded_mode)
 
+    def test_provider_circuit_opens_after_repeated_adapter_errors_and_uses_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            audit_events: list[dict] = []
+
+            def failing(_: LLMRequest) -> LLMResponse:
+                raise AdapterError("persistent provider timeout")
+
+            router = LLMRouter(
+                config=config,
+                adapters={
+                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=failing),
+                    "openai": StaticAdapter("openai", tool_capable=False, responder=echo_response("openai")),
+                },
+                audit_sink=audit_events.append,
+                circuit_breaker=ProviderCircuitBreaker(failure_threshold=2, cooldown_seconds=60),
+            )
+
+            first = router.ask("verify", lane="verifier", provider="anthropic", evidence_pack={"diff": "x"})
+            second = router.ask("verify", lane="verifier", provider="anthropic", evidence_pack={"diff": "x"})
+            third = router.ask("verify", lane="verifier", provider="anthropic", evidence_pack={"diff": "x"})
+
+            self.assertEqual(first.provider, "openai")
+            self.assertEqual(second.provider, "openai")
+            self.assertEqual(third.provider, "openai")
+            self.assertTrue(any(event["action"] == "llm_circuit_open" for event in audit_events))
+            self.assertTrue(any(event["action"] == "llm_circuit_blocked" for event in audit_events))
+
+    def test_provider_circuit_recovers_after_cooldown_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            now = [100.0]
+            audit_events: list[dict] = []
+            calls = {"anthropic": 0}
+
+            def flaky(request: LLMRequest) -> LLMResponse:
+                calls["anthropic"] += 1
+                if calls["anthropic"] == 1:
+                    raise AdapterError("temporary outage")
+                return echo_response("anthropic")(request)
+
+            router = LLMRouter(
+                config=config,
+                adapters={
+                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=flaky),
+                    "openai": StaticAdapter("openai", tool_capable=False, responder=echo_response("openai")),
+                },
+                audit_sink=audit_events.append,
+                circuit_breaker=ProviderCircuitBreaker(
+                    failure_threshold=1,
+                    cooldown_seconds=10,
+                    clock=lambda: now[0],
+                ),
+            )
+
+            fallback = router.ask("verify", lane="verifier", provider="anthropic", evidence_pack={"diff": "x"})
+            now[0] = 111.0
+            recovered = router.ask("verify", lane="verifier", provider="anthropic", evidence_pack={"diff": "x"})
+
+            self.assertEqual(fallback.provider, "openai")
+            self.assertEqual(recovered.provider, "anthropic")
+            self.assertTrue(any(event["action"] == "llm_circuit_recovered" for event in audit_events))
+
     def test_fallback_to_anthropic_uses_safe_anthropic_model_when_worker_is_codex(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = make_config(Path(tmpdir))
@@ -133,6 +233,24 @@ class LLMRouterTests(unittest.TestCase):
             )
             with self.assertRaises(ValueError):
                 router.ask("do work", lane="worker", provider="openai")
+
+    def test_invalid_request_fails_before_adapter_call(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            calls = 0
+
+            def responder(_: LLMRequest) -> LLMResponse:
+                nonlocal calls
+                calls += 1
+                return echo_response("anthropic")(_)
+
+            router = LLMRouter(
+                config=config,
+                adapters={"anthropic": StaticAdapter("anthropic", tool_capable=True, responder=responder)},
+            )
+            with self.assertRaisesRegex(ValueError, "timeout"):
+                router.ask("do work", lane="brain", timeout=0)
+            self.assertEqual(calls, 0)
 
     def test_codex_worker_lane_routes_to_codex_adapter(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

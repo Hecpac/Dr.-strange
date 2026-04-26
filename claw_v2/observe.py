@@ -30,6 +30,17 @@ CREATE TABLE IF NOT EXISTS observe_stream (
 );
 """
 
+OBSERVE_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_observe_stream_event_time
+    ON observe_stream(event_type, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_observe_stream_trace_id_id
+    ON observe_stream(trace_id, id);
+CREATE INDEX IF NOT EXISTS idx_observe_stream_job_id_id
+    ON observe_stream(job_id, id);
+CREATE INDEX IF NOT EXISTS idx_observe_stream_root_trace_id_id
+    ON observe_stream(root_trace_id, id);
+"""
+
 
 class ObserveStream:
     def __init__(self, db_path: Path | str) -> None:
@@ -114,6 +125,7 @@ class ObserveStream:
         ):
             if column not in existing:
                 self._conn.execute(f"ALTER TABLE observe_stream ADD COLUMN {column} TEXT")
+        self._conn.executescript(OBSERVE_INDEXES)
         self._conn.commit()
 
     def cache_summary(self, hours: int = 24) -> dict:
