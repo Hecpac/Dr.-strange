@@ -557,8 +557,13 @@ def _coordinator_checkpoint(result: CoordinatorResult, *, objective: str) -> dic
     verification_text = "\n".join(item.content for item in verification_results if item.content)
     implementation_text = "\n".join(item.content for item in implementation_results if item.content)
     pending_action = _extract_pending_action_from_reply(verification_text) or _extract_pending_action_from_reply(implementation_text)
+    implementation_error = next(
+        (item.error for item in implementation_results if item.error),
+        "",
+    )
     verification_status = (
-        _extract_verification_status(verification_text)
+        ("failed" if implementation_error else None)
+        or _extract_verification_status(verification_text)
         or ("failed" if result.error else None)
         or ("pending" if verification_results else "unknown")
     )
@@ -569,8 +574,12 @@ def _coordinator_checkpoint(result: CoordinatorResult, *, objective: str) -> dic
     }
     if pending_action:
         checkpoint["pending_action"] = pending_action
+    elif implementation_error:
+        checkpoint["pending_action"] = f"reintentar implementación: {implementation_error}"
     if result.error:
         checkpoint["error"] = result.error
+    elif implementation_error:
+        checkpoint["error"] = implementation_error
     return checkpoint
 
 
@@ -585,28 +594,23 @@ def _format_worker_results(results: list[Any]) -> str:
 
 
 def _format_coordinator_response(result: CoordinatorResult, *, checkpoint: dict[str, str], forced: bool) -> str:
-    lines = [
-        f"Coordinator task: {result.task_id}",
-        f"Dispatch: {'manual' if forced else 'autonomous'}",
-    ]
-    if result.error:
-        lines.append(f"Error: {result.error}")
-    if result.synthesis:
-        lines.extend(["", "Plan:", result.synthesis])
-    if "implementation" in result.phase_results:
-        lines.extend(["", "Implementation:", _format_worker_results(result.phase_results["implementation"])])
-    if "verification" in result.phase_results:
-        lines.extend(["", "Verification:", _format_worker_results(result.phase_results["verification"])])
-    lines.extend(
-        [
-            "",
-            f"Verification Status: {checkpoint.get('verification_status', 'unknown')}",
-        ]
-    )
+    status = checkpoint.get("verification_status", "unknown")
+    status_label = {
+        "passed": "Listo",
+        "failed": "Falló",
+        "pending": "Pendiente",
+        "blocked": "Bloqueada",
+        "awaiting_approval": "Esperando aprobación",
+    }.get(status, status)
+    lines = [f"Tarea {result.task_id}: {status_label}"]
+    summary = checkpoint.get("summary") or result.synthesis
+    if summary:
+        lines.append(_compact_summary(summary, limit=240) or summary[:240])
+    error = result.error or checkpoint.get("error")
+    if error:
+        lines.append(f"Error: {error}")
     if checkpoint.get("pending_action"):
-        lines.append(f"Siguiente paso: {checkpoint['pending_action']}")
-    if checkpoint.get("summary"):
-        lines.append(f"Checkpoint: {checkpoint['summary']}")
+        lines.append(f"Sugerencia: {checkpoint['pending_action']}")
     return "\n".join(lines)
 
 

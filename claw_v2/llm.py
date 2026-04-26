@@ -49,7 +49,7 @@ class LLMRouter:
         agents: dict | None = None,
         hooks: dict | None = None,
         cwd: str | None = None,
-        timeout: float = 120.0,
+        timeout: float = 300.0,
     ) -> LLMResponse:
         self._validate_lane_input(lane, evidence_pack, allowed_tools, agents, hooks)
         selected_provider = provider or self.config.provider_for_lane(lane)
