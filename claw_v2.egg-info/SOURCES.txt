@@ -50,6 +50,7 @@ claw_v2/main.py
 claw_v2/memory.py
 claw_v2/metrics.py
 claw_v2/model_registry.py
+claw_v2/morning_brief.py
 claw_v2/network_proxy.py
 claw_v2/nlm_handler.py
 claw_v2/notebooklm.py
@@ -135,6 +136,7 @@ tests/test_llm.py
 tests/test_memory_core.py
 tests/test_memory_scoped.py
 tests/test_model_registry.py
+tests/test_morning_brief.py
 tests/test_notebooklm.py
 tests/test_observe_subscribe.py
 tests/test_operational_alerts.py

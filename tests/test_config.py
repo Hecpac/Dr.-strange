@@ -92,6 +92,42 @@ class AppConfigDefaultsTests(unittest.TestCase):
             finally:
                 os.chdir(previous_cwd)
 
+    def test_morning_brief_configuration_loads_from_env(self) -> None:
+        previous_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.chdir(tmpdir)
+            try:
+                with patch.dict(
+                    os.environ,
+                    {
+                        "MORNING_BRIEF_ENABLED": "true",
+                        "MORNING_BRIEF_HOUR": "7",
+                        "MORNING_BRIEF_TIMEZONE": "America/Chicago",
+                        "MORNING_BRIEF_LOCATION": "Dallas, TX",
+                        "MORNING_BRIEF_EMAIL_COMMAND": "email-digest",
+                        "MORNING_BRIEF_CALENDAR_COMMAND": "calendar-digest",
+                    },
+                    clear=True,
+                ):
+                    config = AppConfig.from_env()
+            finally:
+                os.chdir(previous_cwd)
+
+        self.assertTrue(config.morning_brief_enabled)
+        self.assertEqual(config.morning_brief_hour, 7)
+        self.assertEqual(config.morning_brief_timezone, "America/Chicago")
+        self.assertEqual(config.morning_brief_weather_location, "Dallas, TX")
+        self.assertEqual(config.morning_brief_email_command, "email-digest")
+        self.assertEqual(config.morning_brief_calendar_command, "calendar-digest")
+
+    def test_invalid_morning_brief_timezone_fails_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from tests.helpers import make_config
+            config = make_config(Path(tmpdir))
+            config.morning_brief_timezone = "Mars/Olympus"
+            with self.assertRaisesRegex(ValueError, "morning_brief_timezone"):
+                config.validate()
+
     def test_runtime_config_path_loads_monitored_sites_and_sub_agent_jobs(self) -> None:
         previous_cwd = Path.cwd()
         with tempfile.TemporaryDirectory() as tmpdir:

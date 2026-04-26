@@ -84,6 +84,12 @@ def make_config(root: Path) -> AppConfig:
         codex_cli_path="codex",
         codex_model="codex-mini-latest",
         computer_use_backend="openai",
+        morning_brief_enabled=True,
+        morning_brief_hour=8,
+        morning_brief_timezone="America/Chicago",
+        morning_brief_weather_location="",
+        morning_brief_email_command=None,
+        morning_brief_calendar_command=None,
     )
     config.validate()
     config.ensure_directories()

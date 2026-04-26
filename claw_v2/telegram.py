@@ -752,6 +752,18 @@ class TelegramTransport:
             return
         await self._app.bot.send_video(chat_id=chat_id, video=video_url, caption=caption)
 
+    async def send_text(self, *, chat_id: int, text: str, parse_mode: str | None = None) -> None:
+        """Send a proactive text message, split to Telegram's message limit."""
+        if self._app is None:
+            return
+        for part in _split_message(text):
+            await self._app.bot.send_message(
+                chat_id=chat_id,
+                text=part,
+                parse_mode=parse_mode,
+                link_preview_options=_NO_PREVIEW,
+            )
+
     async def _handle_text_content(self, update: Update, text: str) -> None:
         user_id = str(update.effective_user.id)
         session_id = f"tg-{update.effective_chat.id}"
