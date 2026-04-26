@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from claw_v2.adapters.base import AdapterUnavailableError, LLMRequest
+from claw_v2.adapters.base import AdapterError, AdapterUnavailableError, LLMRequest
 from claw_v2.eval_mocks import StaticAdapter, echo_response
 from claw_v2.llm import LLMRouter
 from claw_v2.types import LLMResponse
@@ -150,14 +150,13 @@ class LLMRouterTests(unittest.TestCase):
             response = router.ask("write a function", lane="worker")
             self.assertEqual(response.provider, "codex")
 
-    def test_codex_worker_lane_falls_back_to_anthropic_on_adapter_error(self) -> None:
+    def test_codex_worker_lane_does_not_fallback_to_anthropic_on_adapter_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = make_config(Path(tmpdir))
             config.worker_provider = "codex"
             config.worker_model = "codex-mini-latest"
 
             def failing(_: LLMRequest) -> LLMResponse:
-                from claw_v2.adapters.base import AdapterError
                 raise AdapterError("Codex CLI timed out after 120s")
 
             router = LLMRouter(
@@ -167,10 +166,27 @@ class LLMRouterTests(unittest.TestCase):
                     "codex": StaticAdapter("codex", tool_capable=True, responder=failing),
                 },
             )
-            response = router.ask("implement change", lane="worker")
-            self.assertEqual(response.provider, "anthropic")
-            self.assertTrue(response.degraded_mode)
-            self.assertIn("Codex CLI timed out", response.artifacts.get("fallback_reason", ""))
+            with self.assertRaises(AdapterError):
+                router.ask("implement change", lane="worker")
+
+    def test_codex_secondary_lane_does_not_fallback_to_anthropic(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            config.research_provider = "codex"
+            config.research_model = "gpt-5.5"
+
+            def failing(_: LLMRequest) -> LLMResponse:
+                raise AdapterError("Codex CLI timed out after 300s")
+
+            router = LLMRouter(
+                config=config,
+                adapters={
+                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=echo_response("anthropic")),
+                    "codex": StaticAdapter("codex", tool_capable=True, responder=failing),
+                },
+            )
+            with self.assertRaises(AdapterError):
+                router.ask("research", lane="research", evidence_pack={"task": "x"})
 
     def test_default_router_includes_codex_adapter(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
