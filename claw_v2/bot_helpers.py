@@ -501,7 +501,15 @@ def _build_coordinator_tasks(
                 lane="worker",
                 instruction=(
                     "Implement the requested change in the workspace. Keep edits minimal and explicit. "
-                    "Summarize files touched and what changed. "
+                    "Work in three explicit phases and emit each phase as its own labeled section in the response:\n"
+                    "1) `## Edits` — for every file touched, list `path: <one-line summary of change>`. "
+                    "If you ran search/inspect tools, list them under `inspections:`.\n"
+                    "2) `## Build/Verify` — for every command executed (lint, typecheck, build, export, tests), "
+                    "list `cmd: <command>` and `result: ok|fail (<short reason>)`. If nothing was built/verified, "
+                    "say `none` and explain why.\n"
+                    "3) `## Evidence` — list any artifact paths the next phase can inspect (diff hunks, screenshots, "
+                    "build logs, output dirs). If none, say `none`.\n"
+                    "Do NOT skip any of the three sections. If a phase fails, still emit the section and state the failure.\n"
                     f"Objective: {objective}"
                 ),
             )
