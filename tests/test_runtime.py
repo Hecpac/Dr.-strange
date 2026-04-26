@@ -233,19 +233,20 @@ class RuntimeTests(unittest.TestCase):
                 self.assertTrue(runtime.bot._task_handler.wait_for_task("tg-123:interrupted", timeout=2))
 
                 record = runtime.task_ledger.get("tg-123:interrupted")
-                self.assertEqual(record.status, "succeeded")
+                self.assertEqual(record.status, "running")
+                self.assertEqual(record.verification_status, "pending")
                 self.assertEqual(record.metadata["resume_reason"], "startup_recovery")
                 self.assertEqual(record.metadata["resume_count"], 1)
                 self.assertEqual(record.metadata["generic_job_id"], job.job_id)
                 recovered_job = runtime.job_service.get(job.job_id)
-                self.assertEqual(recovered_job.status, "completed")
+                self.assertEqual(recovered_job.status, "retrying")
                 self.assertEqual(recovered_job.worker_id, "coordinator")
                 self.assertEqual(recovered_job.attempts, 2)
                 self.assertEqual(record.artifacts["lifecycle"]["plan"]["objective"], "corrige el bug del login")
                 self.assertEqual(record.artifacts["lifecycle"]["execution"]["status"], "resumed")
-                self.assertEqual(record.artifacts["lifecycle"]["job"]["lifecycle_status"], "completed")
+                self.assertEqual(record.artifacts["lifecycle"]["job"]["lifecycle_status"], "pending")
                 state = runtime.memory.get_session_state("tg-123")
-                self.assertEqual(state["active_object"]["active_task"]["status"], "completed")
+                self.assertEqual(state["active_object"]["active_task"]["status"], "pending")
 
     def test_build_runtime_registers_sites_and_sub_agent_jobs_from_runtime_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

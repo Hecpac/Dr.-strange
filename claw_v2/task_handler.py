@@ -373,28 +373,91 @@ class TaskHandler:
             state = self._get_session_state(session_id)
             active_object = dict(state.get("active_object") or {})
             active_task = dict(active_object.get("active_task") or {})
-            if active_task.get("task_id") == task_id:
-                active_task["status"] = "completed"
-                active_task["completed_at"] = time.time()
-                active_object["active_task"] = active_task
-                self._update_session_state(session_id, active_object=active_object)
             if self._store_message is not None:
                 self._store_message(session_id, "assistant", response[:4000])
             completed_state = self._get_session_state(session_id)
             completed_checkpoint = completed_state.get("last_checkpoint") or {}
             verification_status = str(completed_state.get("verification_status") or "unknown")
-            terminal_status = "failed" if verification_status == "failed" else "succeeded"
-            checkpoint_error = str(completed_checkpoint.get("error") or "")
-            self._complete_autonomous_job(
-                task_id=task_id,
-                job_id=job_id,
-                result={
-                    "session_id": session_id,
-                    "verification_status": verification_status,
-                    "summary": str(completed_checkpoint.get("summary") or objective),
-                    "terminal_status": terminal_status,
-                },
+            terminal_status = (
+                "succeeded" if verification_status == "passed"
+                else "failed" if verification_status == "failed"
+                else ""
             )
+            checkpoint_error = str(completed_checkpoint.get("error") or "")
+            if not terminal_status:
+                if active_task.get("task_id") == task_id:
+                    active_task["status"] = "pending"
+                    active_task["pending_action"] = str(completed_checkpoint.get("pending_action") or "")
+                    active_task["updated_at"] = time.time()
+                    active_object["active_task"] = active_task
+                    self._update_session_state(session_id, active_object=active_object)
+                self._defer_autonomous_job(
+                    task_id=task_id,
+                    job_id=job_id,
+                    checkpoint={
+                        "operation": "coordinator",
+                        "mode": mode,
+                        "session_id": session_id,
+                        "verification_status": verification_status,
+                        "pending_action": str(completed_checkpoint.get("pending_action") or ""),
+                    },
+                )
+                if self.task_ledger is not None:
+                    artifacts = self._pending_artifacts(
+                        task_id=task_id,
+                        session_id=session_id,
+                        checkpoint=completed_checkpoint,
+                        verification_status=verification_status,
+                        response_preview=response[:1000],
+                    )
+                    self.task_ledger.mark_running_checkpoint(
+                        task_id,
+                        summary=str(completed_checkpoint.get("summary") or objective),
+                        verification_status=verification_status,
+                        artifacts=artifacts,
+                    )
+                self._emit(
+                    "autonomous_task_pending",
+                    {
+                        "session_id": session_id,
+                        "task_id": task_id,
+                        "objective": objective,
+                        "response": response,
+                        "verification_status": verification_status,
+                        "pending_action": str(completed_checkpoint.get("pending_action") or ""),
+                    },
+                )
+                return
+            if active_task.get("task_id") == task_id:
+                active_task["status"] = "completed" if terminal_status == "succeeded" else "failed"
+                active_task["completed_at"] = time.time()
+                if checkpoint_error and terminal_status == "failed":
+                    active_task["error"] = checkpoint_error
+                active_object["active_task"] = active_task
+                self._update_session_state(session_id, active_object=active_object)
+            if terminal_status == "succeeded":
+                self._complete_autonomous_job(
+                    task_id=task_id,
+                    job_id=job_id,
+                    result={
+                        "session_id": session_id,
+                        "verification_status": verification_status,
+                        "summary": str(completed_checkpoint.get("summary") or objective),
+                        "terminal_status": terminal_status,
+                    },
+                )
+            else:
+                self._fail_autonomous_job(
+                    task_id=task_id,
+                    job_id=job_id,
+                    error=checkpoint_error or "verification failed",
+                    checkpoint={
+                        "operation": "coordinator",
+                        "mode": mode,
+                        "session_id": session_id,
+                        "verification_status": verification_status,
+                    },
+                )
             if self.task_ledger is not None:
                 artifacts = self._completion_artifacts(
                     task_id=task_id,
@@ -838,6 +901,31 @@ class TaskHandler:
         job_state = "completed" if terminal_status == "succeeded" else "failed"
         return self._with_job_artifact(task_id, session_id, job_state, artifacts)
 
+    def _pending_artifacts(
+        self,
+        *,
+        task_id: str,
+        session_id: str,
+        checkpoint: dict[str, Any],
+        verification_status: str,
+        response_preview: str,
+    ) -> dict[str, Any]:
+        summary = str(checkpoint.get("summary") or "")
+        artifacts = append_lifecycle_artifacts(
+            self._current_task_artifacts(task_id),
+            VerificationArtifact(
+                artifact_id=new_artifact_id("verification"),
+                task_id=task_id,
+                session_id=session_id,
+                status=verification_status,
+                summary=summary,
+                pending_action=str(checkpoint.get("pending_action") or ""),
+            ),
+        )
+        artifacts["response_preview"] = response_preview
+        return self._with_job_artifact(task_id, session_id, "pending", artifacts)
+
+
     def _outcome_artifacts(
         self,
         *,
@@ -1086,6 +1174,25 @@ class TaskHandler:
         record_id = job_id or self._active_job_id_for_task(task_id)
         if record_id is not None:
             self.job_service.fail(record_id, error=error, retry=False, checkpoint=checkpoint)
+
+    def _defer_autonomous_job(
+        self,
+        *,
+        task_id: str,
+        job_id: str | None,
+        checkpoint: dict[str, Any] | None = None,
+    ) -> None:
+        if self.job_service is None:
+            return
+        record_id = job_id or self._active_job_id_for_task(task_id)
+        if record_id is not None:
+            self.job_service.fail(
+                record_id,
+                error="verification pending",
+                retry=True,
+                retry_delay_seconds=0,
+                checkpoint=checkpoint,
+            )
 
     def _cancel_autonomous_job(self, task_id: str, *, reason: str, job_id: str | None = None) -> None:
         if self.job_service is None:
