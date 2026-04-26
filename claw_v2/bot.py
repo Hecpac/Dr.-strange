@@ -135,6 +135,7 @@ class BotService:
             get_session_state=brain.memory.get_session_state,
             update_session_state=brain.memory.update_session_state,
             store_message=brain.memory.store_message,
+            workspace_root=getattr(config, "workspace_root", None),
         )
         self._state_handler = StateHandler(
             brain_memory=brain.memory,

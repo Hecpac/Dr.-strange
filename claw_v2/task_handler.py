@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import threading
 import time
+from pathlib import Path
 from typing import Any, Callable
 
 from claw_v2.artifacts import (
@@ -43,6 +45,7 @@ class TaskHandler:
         get_session_state: Callable[[str], dict[str, Any]],
         update_session_state: Callable[..., Any],
         store_message: Callable[[str, str, str], Any] | None = None,
+        workspace_root: Path | None = None,
     ) -> None:
         self.approvals = approvals
         self.coordinator = coordinator
@@ -52,6 +55,7 @@ class TaskHandler:
         self._get_session_state = get_session_state
         self._update_session_state = update_session_state
         self._store_message = store_message
+        self._workspace_root = Path(workspace_root) if workspace_root is not None else None
         self._task_threads: dict[str, threading.Thread] = {}
         self._cancelled_tasks: set[str] = set()
         self._task_lock = threading.Lock()
@@ -354,6 +358,7 @@ class TaskHandler:
                 job_id=job_id,
             ):
                 return
+            self._precheck_worktree(task_id=task_id, mode=mode)
             response = self._run_coordinated_task(
                 session_id,
                 objective,
@@ -485,6 +490,47 @@ class TaskHandler:
             with self._task_lock:
                 self._task_threads.pop(task_id, None)
                 self._cancelled_tasks.discard(task_id)
+
+    def _precheck_worktree(self, *, task_id: str, mode: str) -> None:
+        if mode != "coding" or self._workspace_root is None:
+            return
+        workspace = self._workspace_root
+        if not (workspace / ".git").exists():
+            return
+        try:
+            status = subprocess.run(
+                ["git", "-C", str(workspace), "status", "--porcelain", "--untracked-files=normal"],
+                capture_output=True, text=True, timeout=10,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+            self._emit("worktree_precheck_skipped", {"task_id": task_id, "reason": str(exc)[:200]})
+            return
+        if status.returncode != 0:
+            self._emit("worktree_precheck_skipped", {"task_id": task_id, "reason": status.stderr.strip()[:200]})
+            return
+        dirty_lines = [line for line in status.stdout.splitlines() if line.strip()]
+        if not dirty_lines:
+            return
+        try:
+            stash = subprocess.run(
+                ["git", "-C", str(workspace), "stash", "push", "-u", "-m", f"claw:autostash:{task_id}"],
+                capture_output=True, text=True, timeout=15,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+            self._emit("worktree_autostash_failed", {"task_id": task_id, "reason": str(exc)[:200]})
+            return
+        if stash.returncode != 0:
+            self._emit("worktree_autostash_failed", {"task_id": task_id, "reason": stash.stderr.strip()[:200]})
+            return
+        self._emit(
+            "worktree_autostash",
+            {
+                "task_id": task_id,
+                "stash_label": f"claw:autostash:{task_id}",
+                "files": dirty_lines[:50],
+                "files_total": len(dirty_lines),
+            },
+        )
 
     def wait_for_task(self, task_id: str, timeout: float = 5.0) -> bool:
         with self._task_lock:

@@ -99,7 +99,21 @@ class CodexAdapter(ProviderAdapter):
             lane=request.lane,
             provider="codex",
             model=model,
-            confidence=0.7 if content else 0.3,
+            confidence=_codex_confidence(content),
             cost_estimate=0.0,
             artifacts={"stderr": result.stderr.strip()[:200]},
         )
+
+
+def _codex_confidence(content: str) -> float:
+    if not content:
+        return 0.3
+    structured = sum(
+        1 for marker in ("```", "\n## ", "\n# ", "\n- ", "\n* ", "/", "diff --git", "## Edits", "## Build/Verify", "## Evidence")
+        if marker in content
+    )
+    if structured >= 3 and len(content) >= 200:
+        return 0.85
+    if structured >= 1:
+        return 0.7
+    return 0.55

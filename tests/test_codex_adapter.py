@@ -61,7 +61,34 @@ class CodexAdapterTests(unittest.TestCase):
         self.assertEqual(result.content, "def hello():\n    print('hello')")
         self.assertEqual(result.provider, "codex")
         self.assertEqual(result.cost_estimate, 0.0)
-        self.assertEqual(result.confidence, 0.7)
+        self.assertGreater(result.confidence, 0.4)
+        self.assertLessEqual(result.confidence, 0.85)
+
+    def test_confidence_is_low_when_response_empty(self) -> None:
+        adapter = CodexAdapter(cli_path="codex")
+        fake_result = MagicMock(returncode=0, stdout="", stderr="")
+        with patch("claw_v2.adapters.codex.subprocess.run", return_value=fake_result):
+            with patch("claw_v2.adapters.codex.shutil.which", return_value="/usr/local/bin/codex"):
+                result = adapter.complete(_make_request())
+        self.assertEqual(result.confidence, 0.3)
+
+    def test_confidence_is_high_when_response_is_structured(self) -> None:
+        adapter = CodexAdapter(cli_path="codex")
+        structured = (
+            "## Edits\n"
+            "- claw_v2/foo.py: bumped timeout 120 -> 300\n"
+            "- claw_v2/bar.py: added retry helper\n"
+            "## Build/Verify\n"
+            "- cmd: pytest -q\n"
+            "  result: ok\n"
+            "## Evidence\n"
+            "- diff hunks attached above; no screenshots needed for backend change\n"
+        )
+        fake_result = MagicMock(returncode=0, stdout=structured, stderr="")
+        with patch("claw_v2.adapters.codex.subprocess.run", return_value=fake_result):
+            with patch("claw_v2.adapters.codex.shutil.which", return_value="/usr/local/bin/codex"):
+                result = adapter.complete(_make_request())
+        self.assertGreaterEqual(result.confidence, 0.85)
 
     def test_passes_cwd_to_subprocess(self) -> None:
         adapter = CodexAdapter(cli_path="codex")
