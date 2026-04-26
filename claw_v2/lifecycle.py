@@ -135,14 +135,14 @@ async def run() -> int:
             task_id = str(payload.get("task_id") or "")
             status = str(payload.get("verification_status") or "unknown")
             response = str(payload.get("response") or "").strip()
-            header = f"Tarea autónoma cerrada: `{task_id}`\nVerification Status: {status}\n\n"
+            header = f"Cerré la tarea `{task_id}`.\nVerificación: {status}\n\n"
             _send_session_telegram_message(session_id, header + response)
 
         def _autonomous_task_failed_consumer(payload: dict) -> None:
             session_id = str(payload.get("session_id") or "")
             task_id = str(payload.get("task_id") or "")
             response = str(payload.get("response") or payload.get("error") or "unknown error")
-            _send_session_telegram_message(session_id, f"Tarea autónoma falló: `{task_id}`\n{response}")
+            _send_session_telegram_message(session_id, f"No pude cerrar la tarea `{task_id}`.\n{response}")
 
         runtime.observe.subscribe("autonomous_task_completed", _autonomous_task_complete_consumer)
         runtime.observe.subscribe("autonomous_task_failed", _autonomous_task_failed_consumer)
