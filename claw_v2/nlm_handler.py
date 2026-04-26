@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime
 import logging
+import unicodedata
 from typing import Any, Callable
 
 from claw_v2.bot_commands import BotCommand, CommandContext
@@ -33,15 +35,23 @@ class NlmHandler:
     def natural_language_response(self, session_id: str, text: str) -> str | None:
         if self.notebooklm is None or not text or text.startswith("/"):
             return None
-        if topic := _extract_nlm_create_topic(text):
-            return self._create_response(session_id, topic)
-        if kind := _extract_nlm_artifact_kind(text):
-            target = self._active_notebook_id(session_id)
-            if target is None:
-                return "No hay cuaderno activo. Primero dime `creame un cuaderno sobre ...`."
-            self._set_active_notebook(session_id, target)
-            return self.notebooklm.start_artifact(target, kind)
-        return None
+        try:
+            if _looks_like_recent_notebook_review(text):
+                return self._review_latest_response(session_id)
+            if topic := _extract_nlm_create_topic(text):
+                return self._create_response(session_id, topic)
+            if kind := _extract_nlm_artifact_kind(text):
+                target = self._active_notebook_id(session_id)
+                if target is None:
+                    return "No hay cuaderno activo. Primero dime `creame un cuaderno sobre ...`."
+                self._set_active_notebook(session_id, target)
+                return self.notebooklm.start_artifact(target, kind)
+            return None
+        except ValueError as exc:
+            return f"Error: {exc}"
+        except Exception as exc:
+            logger.exception("NLM natural language error")
+            return f"Error en NotebookLM: {exc}"
 
     def dispatch(self, session_id: str, command: str) -> str:
         if self.notebooklm is None:
@@ -130,6 +140,23 @@ class NlmHandler:
             "Queda como cuaderno activo para esta conversación."
         )
 
+    def _review_latest_response(self, session_id: str) -> str:
+        notebooks = self.notebooklm.list_notebooks()
+        if not notebooks:
+            return "No hay notebooks para revisar."
+        latest = _latest_notebook(notebooks)
+        nb_id = str(latest["id"])
+        title = str(latest.get("title") or nb_id[:8])
+        self._set_active_notebook(session_id, nb_id, title)
+        question = (
+            "Revisa este cuaderno y responde en espanol con: "
+            "1) resumen ejecutivo, 2) hallazgos clave, "
+            "3) fuentes o evidencias importantes, 4) riesgos o huecos, "
+            "5) proximos pasos accionables."
+        )
+        answer = self.notebooklm.chat(nb_id, question)
+        return f"Revision del ultimo cuaderno: {title} ({nb_id[:8]})\n\n{answer}"
+
     def _delete_response(self, notebook_id: str) -> str:
         self.notebooklm.delete_notebook(notebook_id)
         return "Notebook eliminado."
@@ -186,3 +213,35 @@ class NlmHandler:
         if notebook is None:
             return None
         return notebook["id"]
+
+
+def _looks_like_recent_notebook_review(text: str) -> bool:
+    normalized = _normalize(text)
+    if not any(token in normalized for token in ("notebooklm", "notebook", "cuaderno")):
+        return False
+    if not any(token in normalized for token in ("revisa", "review", "analiza", "audita", "check")):
+        return False
+    return any(token in normalized for token in ("ultimo", "reciente", "creado", "latest", "last"))
+
+
+def _latest_notebook(notebooks: list[dict[str, Any]]) -> dict[str, Any]:
+    indexed = list(enumerate(notebooks))
+    return max(indexed, key=lambda item: (_created_at_timestamp(item[1]), -item[0]))[1]
+
+
+def _created_at_timestamp(notebook: dict[str, Any]) -> float:
+    raw = notebook.get("created_at")
+    if not raw:
+        return 0.0
+    text = str(raw).strip()
+    if not text:
+        return 0.0
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
+
+
+def _normalize(text: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", text.lower())
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch))

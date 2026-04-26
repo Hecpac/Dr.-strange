@@ -1006,6 +1006,93 @@ class BotTests(unittest.TestCase):
                 self.assertEqual(resumed_job.status, "completed")
                 self.assertEqual(resumed_job.attempts, 2)
 
+    def test_autonomous_task_waiting_for_user_input_closes_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.coordinator = MagicMock()
+                runtime.bot.coordinator.run.return_value = CoordinatorResult(
+                    task_id="task-1",
+                    phase_results={
+                        "research": [WorkerResult(task_name="gather_findings", content="no evidence", duration_seconds=0.1)],
+                        "verification": [
+                            WorkerResult(
+                                task_name="verify_findings",
+                                content=(
+                                    "Verification Status: pending\n"
+                                    "Siguiente paso: solicitar al usuario el enlace o contenido verificable"
+                                ),
+                                duration_seconds=0.1,
+                            )
+                        ],
+                    },
+                    synthesis="No hay enlace ni contenido para revisar.",
+                )
+
+                runtime.bot.handle_text(user_id="123", session_id="s1", text="/autonomy autonomous")
+                reply = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="analiza el ultimo cuaderno",
+                )
+
+                self.assertIn("Tarea autónoma iniciada", reply)
+                task_id = re.search(r"`([^`]+)`", reply).group(1)
+                self.assertTrue(runtime.bot._task_handler.wait_for_task(task_id, timeout=2))
+                record = runtime.task_ledger.get(task_id)
+                self.assertEqual(record.status, "failed")
+                self.assertEqual(record.verification_status, "blocked")
+                self.assertIn("waiting_for_user_input", record.error)
+                generic_job = runtime.job_service.get(record.metadata["generic_job_id"])
+                self.assertEqual(generic_job.status, "failed")
+                self.assertIn("waiting_for_user_input", generic_job.error)
+                tasks_payload = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/tasks"))
+                self.assertEqual(tasks_payload["summary"], {"failed": 1})
+
+    def test_task_completion_question_reports_status_without_starting_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.task_ledger.create(
+                    task_id="s1:running-task",
+                    session_id="s1",
+                    objective="revisar notebook",
+                    mode="research",
+                    runtime="coordinator",
+                    status="running",
+                    metadata={"autonomous": True},
+                )
+                runtime.bot.coordinator = MagicMock()
+                runtime.memory.update_session_state("s1", autonomy_mode="autonomous")
+
+                reply = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="Completaste la tarea ?",
+                )
+
+                self.assertIn("sigue activa", reply)
+                runtime.bot.coordinator.run.assert_not_called()
+                self.assertEqual(runtime.task_ledger.summary(session_id="s1"), {"running": 1})
+
     def test_coding_task_autostashes_dirty_worktree(self) -> None:
         import subprocess as _sub
         with tempfile.TemporaryDirectory() as tmpdir:
