@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from claw_v2.adapters.base import AdapterError
 from claw_v2.tracing import attach_trace, child_trace_context, new_trace_context
 
 logger = logging.getLogger(__name__)
@@ -109,6 +110,7 @@ class CoordinatorService:
             self._write_scratch_text(scratch, "synthesis.md", synthesis)
 
             # Phase 3: Implementation (optional)
+            impl_results: list[WorkerResult] = []
             if implementation_tasks:
                 impl_tasks = self._inject_context(implementation_tasks, synthesis)
                 impl_results = self._dispatch_parallel(impl_tasks, trace, lane_overrides=lane_overrides)
@@ -117,7 +119,15 @@ class CoordinatorService:
 
             # Phase 4: Verification (optional)
             if verification_tasks:
-                verify_tasks = self._inject_context(verification_tasks, synthesis)
+                verify_context = synthesis
+                if impl_results:
+                    impl_evidence = "\n\n".join(
+                        f"### {r.task_name}\n[ERROR: {r.error}]" if r.error
+                        else f"### {r.task_name}\n{r.content}"
+                        for r in impl_results
+                    )
+                    verify_context = f"{synthesis}\n\n## Implementation Results\n{impl_evidence}"
+                verify_tasks = self._inject_context(verification_tasks, verify_context)
                 verify_results = self._dispatch_parallel(verify_tasks, trace, lane_overrides=lane_overrides)
                 result.phase_results["verification"] = verify_results
                 self._write_scratch(scratch, "verification", verify_results)
@@ -176,6 +186,8 @@ class CoordinatorService:
                     ))
         return results
 
+    _RETRY_LANES: frozenset[str] = frozenset({"worker"})
+
     def _execute_worker(
         self,
         task: WorkerTask,
@@ -185,36 +197,55 @@ class CoordinatorService:
     ) -> WorkerResult:
         """Execute a single worker task via the LLM router."""
         start = time.time()
-        try:
-            task_trace = child_trace_context(trace_context, artifact_id=task.name)
-            kwargs: dict[str, Any] = {
-                "lane": task.lane,
-                "evidence_pack": attach_trace({"coordinator_task": task.name}, task_trace),
-            }
-            if task.assigned_agent and task.assigned_agent in self.agent_registry:
-                agent = self.agent_registry[task.assigned_agent]
-                kwargs["provider"] = agent["provider"]
-                kwargs["model"] = agent["model"]
-                kwargs["system_prompt"] = agent.get("soul_text", "")
-            elif lane_overrides and task.lane in lane_overrides:
-                override = lane_overrides[task.lane]
-                kwargs["provider"] = override.get("provider")
-                kwargs["model"] = override.get("model")
-                if override.get("effort"):
-                    kwargs["effort"] = override.get("effort")
-            response = self.router.ask(task.instruction, **kwargs)
-            return WorkerResult(
-                task_name=task.name,
-                content=response.content,
-                duration_seconds=time.time() - start,
-            )
-        except Exception as exc:
-            return WorkerResult(
-                task_name=task.name,
-                content="",
-                duration_seconds=time.time() - start,
-                error=str(exc),
-            )
+        task_trace = child_trace_context(trace_context, artifact_id=task.name)
+        kwargs: dict[str, Any] = {
+            "lane": task.lane,
+            "evidence_pack": attach_trace({"coordinator_task": task.name}, task_trace),
+        }
+        if task.assigned_agent and task.assigned_agent in self.agent_registry:
+            agent = self.agent_registry[task.assigned_agent]
+            kwargs["provider"] = agent["provider"]
+            kwargs["model"] = agent["model"]
+            kwargs["system_prompt"] = agent.get("soul_text", "")
+        elif lane_overrides and task.lane in lane_overrides:
+            override = lane_overrides[task.lane]
+            kwargs["provider"] = override.get("provider")
+            kwargs["model"] = override.get("model")
+            if override.get("effort"):
+                kwargs["effort"] = override.get("effort")
+        attempts = 2 if task.lane in self._RETRY_LANES else 1
+        last_exc: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                response = self.router.ask(task.instruction, **kwargs)
+                return WorkerResult(
+                    task_name=task.name,
+                    content=response.content,
+                    duration_seconds=time.time() - start,
+                )
+            except AdapterError as exc:
+                last_exc = exc
+                if attempt < attempts:
+                    self.observe.emit(
+                        "coordinator_worker_retry",
+                        trace_id=task_trace["trace_id"],
+                        root_trace_id=task_trace["root_trace_id"],
+                        span_id=task_trace["span_id"],
+                        parent_span_id=task_trace["parent_span_id"],
+                        artifact_id=task.name,
+                        payload={"task_name": task.name, "lane": task.lane, "error": str(exc)[:300], "attempt": attempt},
+                    )
+                    continue
+                break
+            except Exception as exc:
+                last_exc = exc
+                break
+        return WorkerResult(
+            task_name=task.name,
+            content="",
+            duration_seconds=time.time() - start,
+            error=str(last_exc) if last_exc else "unknown_error",
+        )
 
     def _synthesize(
         self,
