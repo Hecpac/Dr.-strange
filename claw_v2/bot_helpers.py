@@ -603,14 +603,14 @@ def _format_worker_results(results: list[Any]) -> str:
 
 def _format_coordinator_response(result: CoordinatorResult, *, checkpoint: dict[str, str], forced: bool) -> str:
     status = checkpoint.get("verification_status", "unknown")
-    status_label = {
-        "passed": "Listo",
-        "failed": "Falló",
-        "pending": "Pendiente",
-        "blocked": "Bloqueada",
-        "awaiting_approval": "Esperando aprobación",
-    }.get(status, status)
-    lines = [f"Tarea {result.task_id}: {status_label}"]
+    opening = {
+        "passed": f"Listo. Cerré la tarea `{result.task_id}`.",
+        "failed": f"No pude cerrar bien la tarea `{result.task_id}`.",
+        "pending": f"La tarea `{result.task_id}` todavía necesita un paso más.",
+        "blocked": f"La tarea `{result.task_id}` quedó bloqueada.",
+        "awaiting_approval": f"La tarea `{result.task_id}` necesita aprobación antes de seguir.",
+    }.get(status, f"La tarea `{result.task_id}` quedó en estado {status}.")
+    lines = [opening]
     summary = checkpoint.get("summary") or result.synthesis
     if summary:
         lines.append(_compact_summary(summary, limit=240) or summary[:240])
@@ -618,7 +618,7 @@ def _format_coordinator_response(result: CoordinatorResult, *, checkpoint: dict[
     if error:
         lines.append(f"Error: {error}")
     if checkpoint.get("pending_action"):
-        lines.append(f"Sugerencia: {checkpoint['pending_action']}")
+        lines.append(f"Siguiente paso: {checkpoint['pending_action']}")
     return "\n".join(lines)
 
 

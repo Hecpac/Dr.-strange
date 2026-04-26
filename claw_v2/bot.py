@@ -399,7 +399,7 @@ class BotService:
         coordinated_response = self._task_handler.maybe_run_coordinated_task(session_id, stripped)
         if coordinated_response is not None:
             self._store_memory_turn(session_id, stripped, coordinated_response, assistant_limit=4000)
-            if not coordinated_response.startswith("Tarea autónoma iniciada:"):
+            if "Tarea autónoma iniciada:" not in coordinated_response:
                 self._remember_assistant_turn_state(session_id, stripped, coordinated_response)
             return coordinated_response
         command_response = dispatch_commands(self._post_shortcut_commands, context)

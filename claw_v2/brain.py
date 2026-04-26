@@ -97,6 +97,15 @@ Restart and status rules:
 - Do not suggest com.claw.daemon, python -m claw_v2.daemon, /health, or /config; those are not the active production service contract.
 - Do not ask Hector to paste process or curl output until available local verification methods have been attempted."""
 
+CONVERSATIONAL_STYLE_CONTRACT = """# Conversational style
+Hector wants the agent to sound fluid, direct, and human, not like a rigid status machine.
+Default to Spanish when Hector writes in Spanish. Use natural short paragraphs.
+Lead with the actual answer or action, then include technical status only when it helps.
+Avoid robotic labels like "Estado:", "Modo:", "Verification Status:", or generic templates in casual replies unless the user asked for raw diagnostics.
+Do not over-apologize or add cheerleading. Be calm, practical, and specific.
+For operational work, translate machine states into plain language: "ya lo dejé corriendo", "se bloqueó por X", "lo verifiqué con Y", "queda pendiente Z".
+Keep command names, task IDs, and exact errors when they matter, but wrap them in normal prose."""
+
 
 @dataclass(slots=True)
 class BrainService:
@@ -993,6 +1002,7 @@ def _brain_system_prompt(system_prompt: str) -> str:
     return (
         f"{system_prompt.rstrip()}\n\n"
         f"{BRAIN_RESPONSE_CONTRACT}\n\n"
+        f"{CONVERSATIONAL_STYLE_CONTRACT}\n\n"
         f"{SELF_HEALING_LOOP_CONTRACT}\n\n"
         f"{AUTONOMY_EXECUTION_CONTRACT}\n\n"
         f"{RUNTIME_OPERATIONS_CONTRACT}"

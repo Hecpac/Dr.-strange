@@ -199,6 +199,12 @@ class HandleMessageTests(unittest.TestCase):
         self.assertIn("Do not suggest com.claw.daemon", prompt)
         self.assertIn("Do not ask Hector to paste process or curl output", prompt)
 
+    def test_brain_system_prompt_includes_conversational_style_contract(self) -> None:
+        prompt = _brain_system_prompt("You are Claw.")
+        self.assertIn("sound fluid, direct, and human", prompt)
+        self.assertIn("Default to Spanish when Hector writes in Spanish", prompt)
+        self.assertIn("Avoid robotic labels", prompt)
+
     def test_returns_llm_response(self) -> None:
         expected = LLMResponse(
             content="<response>response</response>", lane="brain", provider="anthropic", model="test",

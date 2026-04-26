@@ -215,10 +215,10 @@ class TaskHandler:
             self._task_threads[task_id] = thread
         thread.start()
         return (
+            "Voy con eso. La dejo corriendo y te aviso cuando cierre con evidencia.\n\n"
             f"Tarea autónoma iniciada: `{task_id}`\n"
             f"Modo: {mode}\n"
-            "Estado: running\n"
-            "Voy a ejecutar, verificar y cerrar con reporte final. Usa `/task_loop` para ver el estado."
+            "Para mirar el estado en vivo: `/task_loop`."
         )
 
     def coordinated_task_response(
@@ -544,7 +544,7 @@ class TaskHandler:
                 last_checkpoint=checkpoint,
                 active_object=active_object,
             )
-            response = f"Tarea autónoma falló: `{task_id}`\nError: {error}"
+            response = f"No pude cerrar la tarea `{task_id}`.\nError: {error}"
             if self._store_message is not None:
                 self._store_message(session_id, "assistant", response[:4000])
             if self.task_ledger is not None:
@@ -658,7 +658,7 @@ class TaskHandler:
         if not self._is_resumable_record(record, automatic=False):
             return f"task {task_id} is not resumable"
         self._resume_autonomous_record(record, reason="manual_resume", requested_by_session=session_id)
-        return f"Tarea reanudada: `{task_id}`\nEstado: running"
+        return f"La retomé y queda corriendo de nuevo.\nTarea reanudada: `{task_id}`"
 
     def cancel_task_response(self, session_id: str, task_id: str) -> str:
         if self.task_ledger is None:
@@ -682,7 +682,7 @@ class TaskHandler:
         if not live_thread:
             with self._task_lock:
                 self._cancelled_tasks.discard(task_id)
-        return f"Tarea cancelada: `{task_id}`"
+        return f"Listo, cancelé esa tarea.\nTarea cancelada: `{task_id}`"
 
     def _resume_autonomous_record(
         self,

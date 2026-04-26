@@ -912,7 +912,7 @@ class BotTests(unittest.TestCase):
                     text="/task_run corrige el bug del login",
                 )
 
-                self.assertIn("Tarea s1:123: Listo", reply)
+                self.assertIn("Cerré la tarea `s1:123`", reply)
                 runtime.bot.coordinator.run.assert_called_once()
                 state = runtime.memory.get_session_state("s1")
                 self.assertEqual(state["verification_status"], "passed")
@@ -1704,7 +1704,7 @@ class BotTests(unittest.TestCase):
                     text="/task_run commit los cambios del bug del login",
                 )
 
-                self.assertIn("Tarea s1:commit", reply)
+                self.assertIn("Cerré la tarea `s1:commit`", reply)
                 runtime.bot.coordinator.run.assert_called_once()
                 self.assertEqual(runtime.approvals.list_pending(), [])
 
@@ -1747,7 +1747,7 @@ class BotTests(unittest.TestCase):
                     text=f"/task_approve {approval_id} {token}",
                 )
 
-                self.assertIn("Tarea s1:approved", second)
+                self.assertIn("Cerré la tarea `s1:approved`", second)
                 runtime.bot.coordinator.run.assert_called_once()
                 state = runtime.memory.get_session_state("s1")
                 self.assertEqual(state["verification_status"], "passed")
