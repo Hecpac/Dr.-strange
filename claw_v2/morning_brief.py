@@ -70,6 +70,8 @@ class MorningBriefService:
         clock: Callable[[], datetime] | None = None,
         weather_fetcher: Callable[[str, float], str] | None = None,
         command_runner: Callable[[str, float], str] | None = None,
+        email_fetcher: Callable[[float], str] | None = None,
+        calendar_fetcher: Callable[[float], str] | None = None,
     ) -> None:
         self.settings = settings
         self.notify = notify
@@ -83,6 +85,8 @@ class MorningBriefService:
         self.clock = clock or self._local_now
         self.weather_fetcher = weather_fetcher or fetch_weather_summary
         self.command_runner = command_runner or run_external_summary_command
+        self.email_fetcher = email_fetcher or fetch_mail_summary
+        self.calendar_fetcher = calendar_fetcher or fetch_calendar_summary
 
     def run_if_due(self) -> str | None:
         now = self.clock()
@@ -126,8 +130,8 @@ class MorningBriefService:
         sections = [
             f"Buenos dias, Hector.\nHoy es {date_line}.",
             f"Clima: {self._weather_line()}",
-            f"Agenda: {self._external_line(self.settings.calendar_command, default='sin conector configurado')}",
-            f"Correo: {self._external_line(self.settings.email_command, default='sin conector configurado')}",
+            f"Agenda: {self._calendar_line()}",
+            f"Correo: {self._email_line()}",
             self._pending_work_section(),
             self._agent_section(),
             self._system_section(),
@@ -153,6 +157,24 @@ class MorningBriefService:
             logger.warning("morning brief command failed: %s", exc)
             return f"error consultando conector ({type(exc).__name__})"
         return result or "sin novedades"
+
+    def _calendar_line(self) -> str:
+        if self.settings.calendar_command:
+            return self._external_line(self.settings.calendar_command, default="sin novedades")
+        try:
+            return self.calendar_fetcher(self.settings.command_timeout_seconds) or "sin eventos hoy"
+        except Exception as exc:
+            logger.warning("morning brief calendar unavailable: %s", exc)
+            return f"no disponible ({type(exc).__name__})"
+
+    def _email_line(self) -> str:
+        if self.settings.email_command:
+            return self._external_line(self.settings.email_command, default="sin novedades")
+        try:
+            return self.email_fetcher(self.settings.command_timeout_seconds) or "sin correos prioritarios"
+        except Exception as exc:
+            logger.warning("morning brief email unavailable: %s", exc)
+            return f"no disponible ({type(exc).__name__})"
 
     def _pending_work_section(self) -> str:
         lines: list[str] = ["Pendientes:"]
@@ -297,6 +319,71 @@ def run_external_summary_command(command: str, timeout_seconds: float = 10.0) ->
     if completed.returncode != 0:
         return _trim(f"error exit {completed.returncode}: {output}", 300)
     return _trim(output, 1000)
+
+
+def fetch_calendar_summary(timeout_seconds: float = 10.0) -> str:
+    script = """
+set todayStart to current date
+set time of todayStart to 0
+set todayEnd to todayStart + 1 * days
+set eventLines to {}
+tell application "Calendar"
+    repeat with cal in calendars
+        try
+            set todaysEvents to every event of cal whose start date is greater than or equal to todayStart and start date is less than todayEnd
+            repeat with ev in todaysEvents
+                set eventTitle to summary of ev
+                set eventStart to time string of (start date of ev)
+                set end of eventLines to eventStart & " - " & eventTitle
+            end repeat
+        end try
+    end repeat
+end tell
+if (count of eventLines) is 0 then return "sin eventos hoy"
+set AppleScript's text item delimiters to linefeed
+if (count of eventLines) > 5 then
+    set shownLines to items 1 thru 5 of eventLines
+    return (shownLines as text) & linefeed & "... " & ((count of eventLines) - 5) & " eventos mas"
+end if
+return eventLines as text
+"""
+    return _run_osascript(script, timeout_seconds=timeout_seconds, limit=1000)
+
+
+def fetch_mail_summary(timeout_seconds: float = 10.0) -> str:
+    script = """
+set messageLines to {}
+tell application "Mail"
+    set unreadMessages to unread messages of inbox
+    set unreadCount to count of unreadMessages
+    set maxItems to unreadCount
+    if maxItems > 5 then set maxItems to 5
+    repeat with i from 1 to maxItems
+        set msg to item i of unreadMessages
+        set messageSubject to subject of msg
+        set messageSender to sender of msg
+        set end of messageLines to "- " & messageSender & ": " & messageSubject
+    end repeat
+end tell
+if unreadCount is 0 then return "0 sin leer"
+set AppleScript's text item delimiters to linefeed
+return unreadCount & " sin leer" & linefeed & (messageLines as text)
+"""
+    return _run_osascript(script, timeout_seconds=timeout_seconds, limit=1000)
+
+
+def _run_osascript(script: str, *, timeout_seconds: float, limit: int) -> str:
+    completed = subprocess.run(
+        ["osascript", "-e", script],
+        capture_output=True,
+        text=True,
+        timeout=timeout_seconds,
+        check=False,
+    )
+    output = (completed.stdout or completed.stderr or "").strip()
+    if completed.returncode != 0:
+        raise RuntimeError(_trim(output or f"osascript exit {completed.returncode}", 300))
+    return _trim(output, limit)
 
 
 def _metrics_total_cost(snapshot: dict[str, Any]) -> float:

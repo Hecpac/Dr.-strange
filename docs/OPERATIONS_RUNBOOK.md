@@ -238,7 +238,7 @@ MORNING_BRIEF_EMAIL_COMMAND="/path/to/email-digest"
 MORNING_BRIEF_CALENDAR_COMMAND="/path/to/calendar-digest"
 ```
 
-The email/calendar commands must print a short summary to stdout and finish quickly. When unset, the briefing explicitly reports those connectors as unconfigured instead of pretending it checked them.
+When command overrides are unset, Claw automatically tries macOS Mail and Calendar through `osascript`. If macOS privacy permissions or account setup block access, the brief reports that source as unavailable. Override commands must print a short summary to stdout and finish quickly.
 
 Events:
 

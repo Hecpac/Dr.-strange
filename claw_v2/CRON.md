@@ -10,8 +10,9 @@
 - `MORNING_BRIEF_HOUR=8`
 - `MORNING_BRIEF_TIMEZONE=America/Chicago`
 - `MORNING_BRIEF_LOCATION="City, ST"` (optional; wttr.in auto-detects by IP when empty)
-- `MORNING_BRIEF_EMAIL_COMMAND="..."` (optional local command returning a concise inbox summary)
-- `MORNING_BRIEF_CALENDAR_COMMAND="..."` (optional local command returning a concise agenda summary)
+- Email and Calendar are collected automatically from macOS Mail/Calendar via `osascript` when available.
+- `MORNING_BRIEF_EMAIL_COMMAND="..."` (optional override command returning a concise inbox summary)
+- `MORNING_BRIEF_CALENDAR_COMMAND="..."` (optional override command returning a concise agenda summary)
 
 ## Weekly
 - Monday 09:00 — weekly_report: Full SEO audit + metrics + trust level review
