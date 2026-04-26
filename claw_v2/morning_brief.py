@@ -45,13 +45,15 @@ ACTIVE_JOB_STATUSES = ("queued", "running", "waiting_approval", "retrying")
 @dataclass(slots=True)
 class MorningBriefSettings:
     enabled: bool = True
-    hour: int = 8
+    hour: int = 5
     timezone: str = "America/Chicago"
     weather_location: str = ""
     email_command: str | None = None
     calendar_command: str | None = None
     stamp_path: Path = Path.home() / ".claw" / "morning_brief_last_sent.txt"
     command_timeout_seconds: float = 10.0
+    report_name: str = "morning_brief"
+    greeting: str = "Buenos dias, Hector."
 
 
 class MorningBriefService:
@@ -103,7 +105,7 @@ class MorningBriefService:
         except Exception as exc:
             logger.exception("morning brief notification failed")
             self._emit(
-                "morning_brief_failed",
+                f"{self.settings.report_name}_failed",
                 {
                     "reason": "notify_failed",
                     "error": str(exc)[:500],
@@ -113,7 +115,7 @@ class MorningBriefService:
             return None
         self._mark_sent(now)
         self._emit(
-            "morning_brief_sent",
+            f"{self.settings.report_name}_sent",
             {
                 "date": now.strftime("%Y-%m-%d"),
                 "hour": now.hour,
@@ -128,7 +130,7 @@ class MorningBriefService:
     def build_message(self, now: datetime) -> str:
         date_line = format_spanish_date(now)
         sections = [
-            f"Buenos dias, Hector.\nHoy es {date_line}.",
+            f"{self.settings.greeting}\nHoy es {date_line}.",
             f"Clima: {self._weather_line()}",
             f"Agenda: {self._calendar_line()}",
             f"Correo: {self._email_line()}",

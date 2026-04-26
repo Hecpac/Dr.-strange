@@ -39,14 +39,14 @@ class MorningBriefTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             stamp = Path(tmpdir) / "sent.txt"
             self.assertFalse(
-                should_send_morning_brief(datetime(2026, 4, 27, 7, 59), stamp, hour=8)
+                should_send_morning_brief(datetime(2026, 4, 27, 4, 59), stamp, hour=5)
             )
             self.assertTrue(
-                should_send_morning_brief(datetime(2026, 4, 27, 8, 0), stamp, hour=8)
+                should_send_morning_brief(datetime(2026, 4, 27, 5, 0), stamp, hour=5)
             )
             stamp.write_text("2026-04-27", encoding="utf-8")
             self.assertFalse(
-                should_send_morning_brief(datetime(2026, 4, 27, 8, 30), stamp, hour=8)
+                should_send_morning_brief(datetime(2026, 4, 27, 5, 30), stamp, hour=5)
             )
 
     def test_formats_spanish_date_without_locale_dependency(self) -> None:
@@ -147,6 +147,35 @@ class MorningBriefTests(unittest.TestCase):
 
             self.assertIn("Agenda: 9:00 AM - Revision diaria", message)
             self.assertIn("Correo: 4 sin leer", message)
+
+    def test_evening_report_uses_independent_stamp_and_event_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            sent: list[str] = []
+            observe = ObserveStream(root / "claw.db")
+            service = MorningBriefService(
+                settings=MorningBriefSettings(
+                    hour=21,
+                    stamp_path=root / "evening.txt",
+                    report_name="evening_brief",
+                    greeting="Cierre del dia, Hector.",
+                ),
+                notify=sent.append,
+                observe=observe,
+                clock=lambda: datetime(2026, 4, 27, 21, 0),
+                weather_fetcher=lambda location, timeout: "auto: 68F",
+                calendar_fetcher=lambda timeout: "sin eventos restantes",
+                email_fetcher=lambda timeout: "2 sin leer",
+            )
+
+            message = service.run_if_due()
+            duplicate = service.run_if_due()
+
+            self.assertIsNotNone(message)
+            self.assertIsNone(duplicate)
+            self.assertIn("Cierre del dia, Hector.", sent[0])
+            self.assertEqual((root / "evening.txt").read_text(encoding="utf-8"), "2026-04-27")
+            self.assertEqual(observe.recent_events(limit=1)[0]["event_type"], "evening_brief_sent")
 
 
 if __name__ == "__main__":

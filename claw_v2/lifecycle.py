@@ -171,12 +171,38 @@ async def run() -> int:
             task_board=runtime.task_board,
             pipeline=runtime.bot.pipeline,
         )
+        evening_brief = MorningBriefService(
+            settings=MorningBriefSettings(
+                enabled=runtime.config.evening_brief_enabled,
+                hour=runtime.config.evening_brief_hour,
+                timezone=runtime.config.morning_brief_timezone,
+                weather_location=runtime.config.morning_brief_weather_location,
+                email_command=runtime.config.morning_brief_email_command,
+                calendar_command=runtime.config.morning_brief_calendar_command,
+                stamp_path=Path.home() / ".claw" / "evening_brief_last_sent.txt",
+                report_name="evening_brief",
+                greeting="Cierre del dia, Hector.",
+            ),
+            notify=_send_owner_telegram_message,
+            observe=runtime.observe,
+            metrics=runtime.metrics,
+            auto_research=runtime.auto_research,
+            task_ledger=runtime.task_ledger,
+            job_service=runtime.job_service,
+            task_board=runtime.task_board,
+            pipeline=runtime.bot.pipeline,
+        )
 
         from claw_v2.cron import ScheduledJob as _SJ
         runtime.scheduler.register(_SJ(
             name="morning_brief",
             interval_seconds=300,
             handler=morning_brief.run_if_due,
+        ))
+        runtime.scheduler.register(_SJ(
+            name="evening_brief",
+            interval_seconds=300,
+            handler=evening_brief.run_if_due,
         ))
 
         install_operational_alerts(observe=runtime.observe, notify=_nlm_notify)
