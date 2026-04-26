@@ -15,7 +15,7 @@ from claw_v2.types import Lane, LLMResponse
 
 
 class LLMRouter:
-    """Multi-lane router with explicit fallback to Anthropic for secondary lanes."""
+    """Multi-lane router with explicit fallback for API/local providers."""
 
     NON_TOOL_LANES: tuple[Lane, ...] = ("verifier", "research", "judge")
 
@@ -139,15 +139,16 @@ class LLMRouter:
         )
         return response
 
-    # Fallback order: anthropic ↔ openai; codex falls back to anthropic for tool-capable lanes;
-    # advisory-only providers fall back to Anthropic.
+    # Fallback order: anthropic ↔ openai; advisory-only providers fall back to Anthropic.
+    # Codex is a ChatGPT subscription runtime and must not silently degrade to Claude.
     _FALLBACK_MAP: dict[str, str] = {
         "anthropic": "openai",
         "openai": "anthropic",
-        "codex": "anthropic",
     }
 
     def _pick_fallback(self, failed_provider: str, lane: Lane) -> str | None:
+        if failed_provider == "codex":
+            return None
         candidate = self._FALLBACK_MAP.get(failed_provider)
         if candidate and candidate in self.adapters:
             return candidate
