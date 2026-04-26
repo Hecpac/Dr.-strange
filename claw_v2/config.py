@@ -313,6 +313,8 @@ class AppConfig:
     morning_brief_weather_location: str
     morning_brief_email_command: str | None
     morning_brief_calendar_command: str | None
+    evening_brief_enabled: bool
+    evening_brief_hour: int
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -410,11 +412,13 @@ class AppConfig:
             codex_model=os.getenv("CODEX_MODEL", "codex-mini-latest"),
             computer_use_backend=os.getenv("COMPUTER_USE_BACKEND", "openai"),
             morning_brief_enabled=_env_bool("MORNING_BRIEF_ENABLED", True),
-            morning_brief_hour=_env_int("MORNING_BRIEF_HOUR", 8),
+            morning_brief_hour=_env_int("MORNING_BRIEF_HOUR", 5),
             morning_brief_timezone=os.getenv("MORNING_BRIEF_TIMEZONE", os.getenv("TZ", "America/Chicago")),
             morning_brief_weather_location=os.getenv("MORNING_BRIEF_LOCATION", os.getenv("WEATHER_LOCATION", "")),
             morning_brief_email_command=os.getenv("MORNING_BRIEF_EMAIL_COMMAND") or None,
             morning_brief_calendar_command=os.getenv("MORNING_BRIEF_CALENDAR_COMMAND") or None,
+            evening_brief_enabled=_env_bool("EVENING_BRIEF_ENABLED", True),
+            evening_brief_hour=_env_int("EVENING_BRIEF_HOUR", 21),
         )
 
     def ensure_directories(self) -> None:
@@ -450,6 +454,8 @@ class AppConfig:
             raise ValueError("computer_use_backend must be 'openai' or 'codex'.")
         if not 0 <= self.morning_brief_hour <= 23:
             raise ValueError("morning_brief_hour must be between 0 and 23.")
+        if not 0 <= self.evening_brief_hour <= 23:
+            raise ValueError("evening_brief_hour must be between 0 and 23.")
         try:
             ZoneInfo(self.morning_brief_timezone)
         except ZoneInfoNotFoundError as exc:

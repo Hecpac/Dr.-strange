@@ -220,13 +220,15 @@ Telegram transport:
 
 ## Morning Brief
 
-Claw sends one proactive Telegram briefing each morning during the configured hour.
+Claw sends one proactive Telegram briefing at the start of the day and one final report at night.
 
 Default:
 
 ```bash
 MORNING_BRIEF_ENABLED=true
-MORNING_BRIEF_HOUR=8
+MORNING_BRIEF_HOUR=5
+EVENING_BRIEF_ENABLED=true
+EVENING_BRIEF_HOUR=21
 MORNING_BRIEF_TIMEZONE=America/Chicago
 ```
 
@@ -244,8 +246,10 @@ Events:
 
 - `morning_brief_sent`
 - `morning_brief_failed`
+- `evening_brief_sent`
+- `evening_brief_failed`
 
-Duplicate protection lives in `~/.claw/morning_brief_last_sent.txt`.
+Duplicate protection lives in `~/.claw/morning_brief_last_sent.txt` and `~/.claw/evening_brief_last_sent.txt`.
 
 ## Escalation
 

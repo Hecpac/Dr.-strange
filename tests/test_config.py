@@ -106,6 +106,8 @@ class AppConfigDefaultsTests(unittest.TestCase):
                         "MORNING_BRIEF_LOCATION": "Dallas, TX",
                         "MORNING_BRIEF_EMAIL_COMMAND": "email-digest",
                         "MORNING_BRIEF_CALENDAR_COMMAND": "calendar-digest",
+                        "EVENING_BRIEF_ENABLED": "true",
+                        "EVENING_BRIEF_HOUR": "21",
                     },
                     clear=True,
                 ):
@@ -119,6 +121,21 @@ class AppConfigDefaultsTests(unittest.TestCase):
         self.assertEqual(config.morning_brief_weather_location, "Dallas, TX")
         self.assertEqual(config.morning_brief_email_command, "email-digest")
         self.assertEqual(config.morning_brief_calendar_command, "calendar-digest")
+        self.assertTrue(config.evening_brief_enabled)
+        self.assertEqual(config.evening_brief_hour, 21)
+
+    def test_morning_and_evening_brief_default_hours(self) -> None:
+        previous_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.chdir(tmpdir)
+            try:
+                with patch.dict(os.environ, {}, clear=True):
+                    config = AppConfig.from_env()
+            finally:
+                os.chdir(previous_cwd)
+
+        self.assertEqual(config.morning_brief_hour, 5)
+        self.assertEqual(config.evening_brief_hour, 21)
 
     def test_invalid_morning_brief_timezone_fails_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -126,6 +143,14 @@ class AppConfigDefaultsTests(unittest.TestCase):
             config = make_config(Path(tmpdir))
             config.morning_brief_timezone = "Mars/Olympus"
             with self.assertRaisesRegex(ValueError, "morning_brief_timezone"):
+                config.validate()
+
+    def test_invalid_evening_brief_hour_fails_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from tests.helpers import make_config
+            config = make_config(Path(tmpdir))
+            config.evening_brief_hour = 24
+            with self.assertRaisesRegex(ValueError, "evening_brief_hour"):
                 config.validate()
 
     def test_runtime_config_path_loads_monitored_sites_and_sub_agent_jobs(self) -> None:
