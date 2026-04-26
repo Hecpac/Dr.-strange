@@ -343,8 +343,19 @@ class LearningLoop:
             + "\n".join(summary_lines)
             + "\n\nRules:"
         )
+        evidence_pack = {
+            "operation": "learning_consolidate",
+            "outcome_count": len(outcomes),
+            "outcomes": summary_lines,
+        }
         try:
-            resp = self.router.ask(prompt, lane="judge", max_budget=0.10, timeout=60.0)
+            resp = self.router.ask(
+                prompt,
+                lane="judge",
+                evidence_pack=evidence_pack,
+                max_budget=0.10,
+                timeout=60.0,
+            )
             rules = resp.content.strip()
             self.memory.store_fact(
                 key="learning_loop_consolidated",
@@ -441,7 +452,19 @@ class LearningLoop:
             f"{json.dumps(signals[:40], ensure_ascii=True, sort_keys=True)}"
         )
         try:
-            response = self.router.ask(prompt, lane="judge", max_budget=0.15, timeout=60.0)
+            response = self.router.ask(
+                prompt,
+                lane="judge",
+                evidence_pack={
+                    "operation": "soul_update_proposal",
+                    "signal_count": len(signals),
+                    "signals": signals[:40],
+                    "outcome_count": len(outcomes),
+                    "event_count": len(events),
+                },
+                max_budget=0.15,
+                timeout=60.0,
+            )
             parsed = _parse_json_object(response.content)
             if parsed is None:
                 return _heuristic_soul_update_proposal(signals, outcomes, events)

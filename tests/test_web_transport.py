@@ -102,6 +102,29 @@ class WebTransportTests(unittest.IsolatedAsyncioTestCase):
         await transport.stop()
         await transport.stop()
 
+    async def test_can_restart_on_same_port_after_stop(self) -> None:
+        first = WebTransport(
+            chat_api=LocalChatAPI(bot_service=_StubBotService()),
+            host="127.0.0.1",
+            port=0,
+        )
+        await first.start()
+        port = first.port
+        await first.stop()
+
+        second = WebTransport(
+            chat_api=LocalChatAPI(bot_service=_StubBotService()),
+            host="127.0.0.1",
+            port=port,
+        )
+        await second.start()
+        try:
+            with urlopen(f"{second.base_url}/") as response:
+                html = response.read().decode("utf-8")
+            self.assertIn("Dr. Strange", html)
+        finally:
+            await second.stop()
+
     async def test_api_requires_token_when_chat_api_is_protected(self) -> None:
         transport = WebTransport(
             chat_api=LocalChatAPI(bot_service=_StubBotService(), auth_token="secret-token"),

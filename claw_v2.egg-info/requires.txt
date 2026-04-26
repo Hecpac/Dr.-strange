@@ -1,4 +1,10 @@
 claude-agent-sdk
 openai
 google-genai
+ollama
 python-telegram-bot
+anthropic
+pyautogui
+rank-bm25
+pypdf
+playwright

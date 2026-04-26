@@ -13,6 +13,9 @@ from typing import Any, Callable, Iterable
 
 logger = logging.getLogger(__name__)
 
+_COMPACTED_MESSAGE_SNIPPET_CHARS = 260
+_ROLLING_SUMMARY_MAX_CHARS = 12_000
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
@@ -237,6 +240,39 @@ def _format_untrusted_learning_fact(row: dict | sqlite3.Row) -> str:
     )
 
 
+def _summarize_compacted_messages(rows: list[sqlite3.Row]) -> str:
+    if not rows:
+        return ""
+    start = rows[0]["created_at"]
+    end = rows[-1]["created_at"]
+    lines = [f"Compacted {len(rows)} older messages from {start} to {end}."]
+    remaining = 2600
+    for index, row in enumerate(rows):
+        line = f"- {row['role']}: {_compact_message_snippet(row['content'])}"
+        if remaining - len(line) < 0:
+            omitted = len(rows) - index
+            lines.append(f"- ... {omitted} additional compacted messages omitted.")
+            break
+        lines.append(line)
+        remaining -= len(line)
+    return "\n".join(lines)
+
+
+def _compact_message_snippet(content: object) -> str:
+    text = re.sub(r"\s+", " ", str(content)).strip()
+    if len(text) <= _COMPACTED_MESSAGE_SNIPPET_CHARS:
+        return text
+    return text[: _COMPACTED_MESSAGE_SNIPPET_CHARS - 3].rstrip() + "..."
+
+
+def _append_rolling_summary(existing: str, entry: str) -> str:
+    combined = f"{existing}\n\n{entry}" if existing else entry
+    if len(combined) <= _ROLLING_SUMMARY_MAX_CHARS:
+        return combined
+    trimmed = combined[-(_ROLLING_SUMMARY_MAX_CHARS - 28):].lstrip()
+    return "[older summary trimmed]\n" + trimmed
+
+
 _MIGRATION_ADD_AGENT_NAME = """
 ALTER TABLE facts ADD COLUMN agent_name TEXT NOT NULL DEFAULT 'system';
 """
@@ -435,13 +471,76 @@ class MemoryStore:
         except Exception:
             logger.debug("Outcome entity edges backfill skipped", exc_info=True)
 
-    def store_message(self, session_id: str, role: str, content: str) -> None:
+    def store_message(
+        self,
+        session_id: str,
+        role: str,
+        content: str,
+        *,
+        compact: bool = False,
+        max_messages: int = 80,
+        preserve_recent: int = 40,
+    ) -> None:
         with self._lock:
             self._conn.execute(
                 "INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)",
                 (session_id, role, content),
             )
             self._conn.commit()
+        if compact:
+            self.compact_session_messages(
+                session_id,
+                max_messages=max_messages,
+                preserve_recent=preserve_recent,
+            )
+
+    def compact_session_messages(
+        self,
+        session_id: str,
+        *,
+        max_messages: int = 80,
+        preserve_recent: int = 40,
+    ) -> int:
+        max_messages = max(1, int(max_messages))
+        preserve_recent = min(max(1, int(preserve_recent)), max_messages)
+        with self._lock:
+            total_row = self._conn.execute(
+                "SELECT COUNT(*) AS count FROM messages WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            total = int(total_row["count"] or 0) if total_row else 0
+            if total <= max_messages:
+                return 0
+            rows = self._conn.execute(
+                """
+                SELECT id, role, content, created_at
+                FROM messages
+                WHERE session_id = ?
+                  AND id NOT IN (
+                      SELECT id
+                      FROM messages
+                      WHERE session_id = ?
+                      ORDER BY id DESC
+                      LIMIT ?
+                  )
+                ORDER BY id ASC
+                """,
+                (session_id, session_id, preserve_recent),
+            ).fetchall()
+            if not rows:
+                return 0
+
+            summary_entry = _summarize_compacted_messages(rows)
+            current = self.get_session_state(session_id)
+            existing_summary = str(current.get("rolling_summary") or "").strip()
+            rolling_summary = _append_rolling_summary(existing_summary, summary_entry)
+            self._update_session_state_locked(session_id, current, rolling_summary=rolling_summary)
+
+            ids = [row["id"] for row in rows]
+            placeholders = ",".join("?" for _ in ids)
+            self._conn.execute(f"DELETE FROM messages WHERE id IN ({placeholders})", ids)
+            self._conn.commit()
+            return len(ids)
 
     def get_recent_messages(self, session_id: str, limit: int = 20) -> list[dict]:
         rows = self._conn.execute(

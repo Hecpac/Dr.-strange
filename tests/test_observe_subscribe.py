@@ -45,6 +45,14 @@ class ObserveSubscribeTests(unittest.TestCase):
         self.assertEqual(events[0]["event_type"], "lonely_event")
         self.assertEqual(events[0]["payload"], {"a": 1})
 
+    def test_observe_indexes_are_created(self) -> None:
+        rows = self.stream._conn.execute("PRAGMA index_list(observe_stream)").fetchall()
+        names = {row[1] for row in rows}
+        self.assertIn("idx_observe_stream_event_time", names)
+        self.assertIn("idx_observe_stream_trace_id_id", names)
+        self.assertIn("idx_observe_stream_job_id_id", names)
+        self.assertIn("idx_observe_stream_root_trace_id_id", names)
+
     def test_job_events_filters_and_orders_by_job_id(self) -> None:
         self.stream.emit("other_started", job_id="job-2", payload={"step": 0})
         self.stream.emit("job_started", job_id="job-1", artifact_id="plan:1", payload={"step": 1})

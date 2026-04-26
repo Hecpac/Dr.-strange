@@ -9,6 +9,7 @@ from typing import Callable, Protocol
 logger = logging.getLogger(__name__)
 
 JobHandler = Callable[[], object]
+CronErrorSink = Callable[["ScheduledJob", BaseException], None]
 
 
 class CronPersistence(Protocol):
@@ -27,9 +28,14 @@ class ScheduledJob:
 
 
 class CronScheduler:
-    def __init__(self, persistence: CronPersistence | None = None) -> None:
+    def __init__(
+        self,
+        persistence: CronPersistence | None = None,
+        error_sink: CronErrorSink | None = None,
+    ) -> None:
         self._jobs: dict[str, ScheduledJob] = {}
         self._persistence = persistence
+        self._error_sink = error_sink
 
     def register(self, job: ScheduledJob) -> None:
         self._jobs[job.name] = job
@@ -54,8 +60,13 @@ class CronScheduler:
                 continue
             try:
                 job.handler()
-            except Exception:
+            except Exception as exc:
                 logger.exception("cron job %s failed", job.name)
+                if self._error_sink is not None:
+                    try:
+                        self._error_sink(job, exc)
+                    except Exception:
+                        logger.exception("cron error sink failed for %s", job.name)
             job.last_run_at = current
             job.runs += 1
             executed.append(job.name)

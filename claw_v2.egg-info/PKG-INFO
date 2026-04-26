@@ -2,12 +2,18 @@ Metadata-Version: 2.4
 Name: claw-v2
 Version: 0.1.0
 Summary: Claw v2 multi-LLM agent scaffold
-Requires-Python: >=3.12
+Requires-Python: <3.14,>=3.13
 Description-Content-Type: text/markdown
 Requires-Dist: claude-agent-sdk
 Requires-Dist: openai
 Requires-Dist: google-genai
+Requires-Dist: ollama
 Requires-Dist: python-telegram-bot
+Requires-Dist: anthropic
+Requires-Dist: pyautogui
+Requires-Dist: rank-bm25
+Requires-Dist: pypdf
+Requires-Dist: playwright
 
 # Claw v2.1 — Product Requirements Document
 
@@ -269,6 +275,7 @@ Pydantic Settings loading from `.env`:
 | JUDGE_MODEL | optional | **[Multi-LLM]** Cheap judge/classifier model |
 | WORKER_EFFORT | `medium` | **[SDK]** Default effort level for worker agents |
 | BRAIN_EFFORT | `high` | **[SDK]** Default effort level for brain orchestration |
+| JUDGE_EFFORT | `medium` | **[SDK]** Default effort level for judge, verifier, and research lanes |
 | MAX_BUDGET_USD | 0.50 | Per-call budget cap |
 | DB_PATH | data/claw.db | SQLite path |
 | HEARTBEAT_INTERVAL | 1800 | Seconds between heartbeats |

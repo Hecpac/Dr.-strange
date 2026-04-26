@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import tempfile
 import unittest
 from pathlib import Path
+from urllib.error import HTTPError
+from unittest.mock import patch
 
 from claw_v2.memory import MemoryStore
 from claw_v2.network_proxy import DomainAllowlistEnforcer
@@ -12,6 +15,7 @@ from claw_v2.tools import (
     TIER_LOCAL_MUTATION,
     TIER_READ_ONLY,
     TIER_REQUIRES_APPROVAL,
+    FirecrawlUnavailableError,
     ToolDefinition,
     ToolRegistry,
     sanitize_tool_output,
@@ -98,6 +102,42 @@ class ToolRegistryTests(unittest.TestCase):
             registry = ToolRegistry.default(workspace_root=workspace)
             with self.assertRaises(ValueError):
                 registry.execute("FirecrawlExtract", {"url": "https://example.com", "schema": {}}, agent_class="researcher")
+
+    def test_firecrawl_scrape_classifies_insufficient_credits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            registry = ToolRegistry.default(workspace_root=workspace)
+            error = HTTPError(
+                "https://api.firecrawl.dev/v1/scrape",
+                402,
+                "Payment Required",
+                {},
+                io.BytesIO(b'{"error":"insufficient credits"}'),
+            )
+            with patch.dict("os.environ", {"FIRECRAWL_API_KEY": "fc-test"}):
+                with patch("claw_v2.tools.urlopen", side_effect=error):
+                    with self.assertRaises(FirecrawlUnavailableError) as ctx:
+                        registry.execute("FirecrawlScrape", {"url": "https://example.com"}, agent_class="researcher")
+            self.assertEqual(ctx.exception.reason, "insufficient_credits")
+
+    def test_firecrawl_search_classifies_rate_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            registry = ToolRegistry.default(workspace_root=workspace)
+            error = HTTPError(
+                "https://api.firecrawl.dev/v1/search",
+                429,
+                "Too Many Requests",
+                {},
+                io.BytesIO(b'{"error":"rate limit exceeded"}'),
+            )
+            with patch.dict("os.environ", {"FIRECRAWL_API_KEY": "fc-test"}):
+                with patch("claw_v2.tools.urlopen", side_effect=error):
+                    with self.assertRaises(FirecrawlUnavailableError) as ctx:
+                        registry.execute("FirecrawlSearch", {"query": "ai"}, agent_class="researcher")
+            self.assertEqual(ctx.exception.reason, "rate_limited")
 
 
 class SanitizerPostHookTests(unittest.TestCase):

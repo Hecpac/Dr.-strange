@@ -210,7 +210,12 @@ class BrainService:
         self._last_confidence = response.confidence
         provider_session_artifact = response.artifacts.get("session_id")
         self.memory.store_message(session_id, "user", stored_user_message)
-        self.memory.store_message(session_id, "assistant", response.content)
+        self.memory.store_message(
+            session_id,
+            "assistant",
+            response.content,
+            compact=_memory_compaction_enabled(self.router),
+        )
         if isinstance(provider_session_artifact, str) and provider_session_artifact:
             self.memory.link_provider_session(
                 session_id,
@@ -1298,6 +1303,10 @@ def _summarize_user_prompt(message: UserPrompt) -> str:
         summary_parts.append(f"[{image_count} imagenes adjuntas]")
     summary_parts.extend(text_parts)
     return "\n".join(summary_parts) if summary_parts else "[Mensaje multimodal]"
+
+
+def _memory_compaction_enabled(router: LLMRouter) -> bool:
+    return bool(getattr(router.config, "use_compaction", False))
 
 
 def _count_recent_consecutive_failures(

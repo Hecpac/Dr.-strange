@@ -4,12 +4,13 @@ from dataclasses import asdict
 from typing import Callable
 
 from claw_v2.adapters.anthropic import AnthropicAgentAdapter
-from claw_v2.adapters.base import AdapterError, LLMRequest, PostLLMHook, PreLLMHook, ProviderAdapter, UserPrompt
+from claw_v2.adapters.base import AdapterError, AdapterUnavailableError, LLMRequest, PostLLMHook, PreLLMHook, ProviderAdapter, UserPrompt
 from claw_v2.adapters.codex import CodexAdapter
 from claw_v2.adapters.google import GoogleAdapter
 from claw_v2.adapters.ollama import OllamaAdapter
 from claw_v2.adapters.openai import OpenAIAdapter
 from claw_v2.config import AppConfig
+from claw_v2.retry_policy import ProviderCircuitBreaker
 from claw_v2.tracing import current_llm_trace, trace_metadata
 from claw_v2.types import Lane, LLMResponse
 
@@ -26,12 +27,14 @@ class LLMRouter:
         audit_sink: Callable[[dict], None] | None = None,
         pre_hooks: list[PreLLMHook] | None = None,
         post_hooks: list[PostLLMHook] | None = None,
+        circuit_breaker: ProviderCircuitBreaker | None = None,
     ) -> None:
         self.config = config
         self.adapters = adapters
         self.audit_sink = audit_sink or (lambda event: None)
         self.pre_hooks: list[PreLLMHook] = list(pre_hooks or [])
         self.post_hooks: list[PostLLMHook] = list(post_hooks or [])
+        self.circuit_breaker = circuit_breaker or ProviderCircuitBreaker()
 
     def ask(
         self,
@@ -77,6 +80,7 @@ class LLMRouter:
             **(request.evidence_pack or {}),
             **current_llm_trace(request.evidence_pack),
         }
+        request.validate()
         # --- Pre-hooks ---
         for hook in self.pre_hooks:
             result = hook(request)
@@ -91,13 +95,14 @@ class LLMRouter:
                     artifacts={"blocked_by": getattr(hook, "__name__", "pre_hook")},
                 )
             request = result
+            request.validate()
 
         adapter = self._adapter_for(selected_provider)
         if lane not in self.NON_TOOL_LANES and not adapter.tool_capable:
             raise ValueError(f"Lane '{lane}' requires a tool-capable provider adapter.")
 
         try:
-            response = adapter.complete(request)
+            response = self._complete_with_circuit(adapter, request)
         except AdapterError as exc:
             fallback_provider = self._pick_fallback(selected_provider, lane)
             if fallback_provider is None:
@@ -110,9 +115,11 @@ class LLMRouter:
                     **asdict(request),
                     "provider": fallback_provider,
                     "model": self.config.advisory_model_for_provider(fallback_provider),
+                    "session_id": _fallback_session_id(request, fallback_provider),
                 }
             )
-            response = fb_adapter.complete(fallback_request)
+            fallback_request.validate()
+            response = self._complete_with_circuit(fb_adapter, fallback_request)
             response.degraded_mode = True
             response.artifacts["fallback_reason"] = str(exc)
             response.artifacts.update(trace_metadata(request.evidence_pack))
@@ -137,6 +144,47 @@ class LLMRouter:
             {"session_id": session_id, "response_text": response.content},
             request=request,
         )
+        return response
+
+    def _complete_with_circuit(self, adapter: ProviderAdapter, request: LLMRequest) -> LLMResponse:
+        decision = self.circuit_breaker.check(request.provider)
+        if not decision.allowed:
+            self._audit_event(
+                "llm_circuit_blocked",
+                request=request,
+                metadata={
+                    "provider": request.provider,
+                    "failures": decision.failures,
+                    "opened_until": decision.opened_until,
+                    "reason": decision.reason,
+                },
+            )
+            raise AdapterUnavailableError(
+                f"Provider circuit open for '{request.provider}' until {decision.opened_until:.0f}: {decision.reason}"
+            )
+        try:
+            response = adapter.complete(request)
+        except AdapterError as exc:
+            transition = self.circuit_breaker.record_failure(request.provider, exc)
+            if transition.status == "open" and transition.changed:
+                self._audit_event(
+                    "llm_circuit_open",
+                    request=request,
+                    metadata={
+                        "provider": request.provider,
+                        "failures": transition.failures,
+                        "opened_until": transition.opened_until,
+                        "reason": transition.reason,
+                    },
+                )
+            raise
+        transition = self.circuit_breaker.record_success(request.provider)
+        if transition.changed:
+            self._audit_event(
+                "llm_circuit_recovered",
+                request=request,
+                metadata={"provider": request.provider},
+            )
         return response
 
     # Fallback order: anthropic ↔ openai; advisory-only providers fall back to Anthropic.
@@ -172,6 +220,29 @@ class LLMRouter:
                 "cost_estimate": response.cost_estimate,
                 "confidence": response.confidence,
                 "degraded_mode": response.degraded_mode,
+                "metadata": {
+                    **metadata,
+                    "trace_id": trace.get("trace_id"),
+                    "root_trace_id": trace.get("root_trace_id"),
+                    "span_id": trace.get("span_id"),
+                    "parent_span_id": trace.get("parent_span_id"),
+                    "job_id": trace.get("job_id"),
+                    "artifact_id": trace.get("artifact_id"),
+                },
+            }
+        )
+
+    def _audit_event(self, action: str, *, request: LLMRequest, metadata: dict) -> None:
+        trace = request.evidence_pack or {}
+        self.audit_sink(
+            {
+                "action": action,
+                "lane": request.lane,
+                "provider": request.provider,
+                "model": request.model,
+                "cost_estimate": 0.0,
+                "confidence": 0.0,
+                "degraded_mode": False,
                 "metadata": {
                     **metadata,
                     "trace_id": trace.get("trace_id"),
@@ -240,3 +311,19 @@ class LLMRouter:
                 raise ValueError(f"Lane '{lane}' requires an evidence_pack.")
             if any(value is not None for value in (allowed_tools, agents, hooks)):
                 raise ValueError(f"Lane '{lane}' cannot receive tool-loop configuration.")
+
+
+def _fallback_session_id(request: LLMRequest, fallback_provider: str) -> str | None:
+    """Return a provider-safe session cursor for fallback requests."""
+    session_id = request.session_id
+    if not session_id:
+        return None
+    if fallback_provider == request.provider:
+        return session_id
+    if fallback_provider == "openai" and _looks_like_openai_response_id(session_id):
+        return session_id
+    return None
+
+
+def _looks_like_openai_response_id(session_id: str) -> bool:
+    return session_id.startswith("resp_") or session_id.startswith("resp-")

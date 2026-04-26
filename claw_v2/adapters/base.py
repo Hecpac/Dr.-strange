@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -40,6 +41,52 @@ class LLMRequest:
     cwd: str | None = None
     cache_ttl: int | None = None
 
+    def validate(self) -> None:
+        """Fail fast on malformed cross-provider requests before adapter calls."""
+        if self.lane not in {"brain", "worker", "verifier", "research", "judge"}:
+            raise ValueError(f"Invalid lane: {self.lane!r}")
+        if not isinstance(self.provider, str) or not self.provider.strip():
+            raise ValueError("LLM provider must be a non-empty string.")
+        if not isinstance(self.model, str) or not self.model.strip():
+            raise ValueError("LLM model must be a non-empty string.")
+        if isinstance(self.prompt, str):
+            if not self.prompt.strip():
+                raise ValueError("LLM prompt must be non-empty.")
+        elif isinstance(self.prompt, list):
+            if not self.prompt:
+                raise ValueError("LLM prompt content blocks must be non-empty.")
+            for index, block in enumerate(self.prompt):
+                if not isinstance(block, dict):
+                    raise ValueError(f"LLM prompt content block {index} must be a dict.")
+        else:
+            raise ValueError("LLM prompt must be a string or list of content blocks.")
+        if self.system_prompt is not None and not isinstance(self.system_prompt, str):
+            raise ValueError("LLM system_prompt must be a string when provided.")
+        if self.effort is not None and (not isinstance(self.effort, str) or not self.effort.strip()):
+            raise ValueError("LLM effort must be a non-empty string when provided.")
+        if self.session_id is not None and not isinstance(self.session_id, str):
+            raise ValueError("LLM session_id must be a string when provided.")
+        if not _finite_number(self.max_budget) or self.max_budget < 0:
+            raise ValueError("LLM max_budget must be a non-negative finite number.")
+        if not _finite_number(self.timeout) or self.timeout <= 0:
+            raise ValueError("LLM timeout must be a positive finite number.")
+        if self.evidence_pack is not None and not isinstance(self.evidence_pack, dict):
+            raise ValueError("LLM evidence_pack must be a dict when provided.")
+        if self.allowed_tools is not None:
+            if not isinstance(self.allowed_tools, list):
+                raise ValueError("LLM allowed_tools must be a list when provided.")
+            if any(not isinstance(tool, str) or not tool.strip() for tool in self.allowed_tools):
+                raise ValueError("LLM allowed_tools entries must be non-empty strings.")
+        if self.agents is not None and not isinstance(self.agents, dict):
+            raise ValueError("LLM agents must be a dict when provided.")
+        if self.hooks is not None and not isinstance(self.hooks, dict):
+            raise ValueError("LLM hooks must be a dict when provided.")
+        if self.cwd is not None and not isinstance(self.cwd, str):
+            raise ValueError("LLM cwd must be a string when provided.")
+        if self.cache_ttl is not None:
+            if not isinstance(self.cache_ttl, int) or isinstance(self.cache_ttl, bool) or self.cache_ttl < 0:
+                raise ValueError("LLM cache_ttl must be a non-negative integer when provided.")
+
 
 class ProviderAdapter(ABC):
     provider_name: str
@@ -48,6 +95,10 @@ class ProviderAdapter(ABC):
     @abstractmethod
     def complete(self, request: LLMRequest) -> LLMResponse:
         raise NotImplementedError
+
+
+def _finite_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))
 
 
 ADVISORY_LANES: frozenset[Lane] = frozenset({"verifier", "research", "judge"})

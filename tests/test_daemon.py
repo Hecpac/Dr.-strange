@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import tempfile
+import time
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock
 
 from claw_v2.cron import CronScheduler, ScheduledJob
 from claw_v2.daemon import ClawDaemon
 from claw_v2.heartbeat import HeartbeatSnapshot
+from claw_v2.task_ledger import TaskLedger
 
 
 class DaemonTickTests(unittest.TestCase):
@@ -38,6 +42,51 @@ class DaemonTickTests(unittest.TestCase):
         result = daemon.tick(now=1000)
         self.assertIn("test_job", result.executed_jobs)
         handler.assert_called_once()
+
+    def test_scheduler_reports_job_errors_to_sink(self) -> None:
+        error_sink = MagicMock()
+        scheduler = CronScheduler(error_sink=error_sink)
+
+        def failing() -> None:
+            raise RuntimeError("boom")
+
+        scheduler.register(ScheduledJob(name="bad_job", interval_seconds=60, handler=failing))
+        executed = scheduler.run_due(now=1000)
+
+        self.assertEqual(executed, ["bad_job"])
+        error_sink.assert_called_once()
+        job, exc = error_sink.call_args.args
+        self.assertEqual(job.name, "bad_job")
+        self.assertEqual(str(exc), "boom")
+
+    def test_tick_reconciles_stale_running_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ledger = TaskLedger(Path(tmpdir) / "claw.db")
+            ledger.create(
+                task_id="task-1",
+                session_id="s1",
+                objective="long task",
+                runtime="coordinator",
+                status="running",
+            )
+            with ledger._lock:
+                ledger._conn.execute(
+                    "UPDATE agent_tasks SET updated_at = ? WHERE task_id = ?",
+                    (time.time() - 120, "task-1"),
+                )
+                ledger._conn.commit()
+            daemon, _, observe = self._make_daemon()
+            daemon.task_ledger = ledger
+            daemon.stale_task_seconds = 60
+            daemon.task_reconciliation_interval = 0
+
+            daemon.tick(now=1000)
+
+            self.assertEqual(ledger.get("task-1").status, "lost")
+            observe.emit.assert_any_call(
+                "daemon_task_reconciliation",
+                payload={"lost_tasks": 1, "older_than_seconds": 60},
+            )
 
 
 class DaemonRunLoopTests(unittest.IsolatedAsyncioTestCase):

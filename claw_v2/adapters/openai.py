@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from importlib import import_module
 from typing import Any, Callable
 
@@ -20,6 +21,8 @@ from claw_v2.types import LLMResponse
 logger = logging.getLogger(__name__)
 
 _MAX_TOOL_ROUNDS = 15
+_OPENAI_RETRYABLE_STATUS_CODES = {408, 409, 429, 500, 502, 503, 504}
+_OPENAI_MAX_ATTEMPTS = 3
 
 
 class OpenAIAdapter(ProviderAdapter):
@@ -52,8 +55,10 @@ class OpenAIAdapter(ProviderAdapter):
                 model=request.model,
                 input=_normalize_responses_input(build_effective_input(request)),
                 instructions=build_effective_system_prompt(request),
-                previous_response_id=request.session_id,
             )
+            previous_response_id = _valid_previous_response_id(request.session_id)
+            if previous_response_id:
+                kwargs["previous_response_id"] = previous_response_id
             if request.effort and _supports_reasoning(request.model):
                 kwargs["reasoning"] = {"effort": request.effort}
 
@@ -65,7 +70,7 @@ class OpenAIAdapter(ProviderAdapter):
                 if schemas:
                     kwargs["tools"] = schemas
 
-            response = client.responses.create(**kwargs)
+            response = _create_response_with_retry(client, kwargs)
 
             # Tool-calling loop
             if use_tools:
@@ -74,6 +79,8 @@ class OpenAIAdapter(ProviderAdapter):
         except ApprovalPending:
             # Tier 3 soft-block — propagate past the adapter boundary so the
             # bot can format /approve for Hector.
+            raise
+        except AdapterError:
             raise
         except Exception as exc:
             raise AdapterError(f"OpenAI Responses request failed: {exc}") from exc
@@ -123,7 +130,7 @@ class OpenAIAdapter(ProviderAdapter):
             )
             if request.effort and _supports_reasoning(request.model):
                 kwargs["reasoning"] = {"effort": request.effort}
-            response = client.responses.create(**kwargs)
+            response = _create_response_with_retry(client, kwargs)
 
         return response
 
@@ -137,6 +144,7 @@ class OpenAIAdapter(ProviderAdapter):
             cost_estimate=0.0,
             artifacts={
                 "response_id": getattr(response, "id", None),
+                "session_id": getattr(response, "id", None),
                 "usage": coerce_usage_dict(getattr(response, "usage", None)),
             },
         )
@@ -158,6 +166,103 @@ def _supports_reasoning(model: str) -> bool:
     return any(model.startswith(prefix) for prefix in _REASONING_MODELS)
 
 
+def _valid_previous_response_id(session_id: str | None) -> str | None:
+    if not session_id:
+        return None
+    if session_id.startswith("resp_") or session_id.startswith("resp-"):
+        return session_id
+    logger.warning("Ignoring non-OpenAI previous_response_id: %s", session_id[:32])
+    return None
+
+
+def _create_response_with_retry(
+    client: Any,
+    kwargs: dict[str, Any],
+    *,
+    max_attempts: int = _OPENAI_MAX_ATTEMPTS,
+) -> Any:
+    for attempt in range(max_attempts):
+        try:
+            return client.responses.create(**kwargs)
+        except ApprovalPending:
+            raise
+        except Exception as exc:
+            if not _is_retryable_openai_error(exc):
+                raise
+            if attempt >= max_attempts - 1:
+                kind = _classify_openai_error(exc)
+                raise AdapterError(
+                    f"OpenAI Responses request {kind} after {max_attempts} attempts: {exc}"
+                ) from exc
+            delay = _retry_delay_seconds(exc, attempt)
+            if delay > 0:
+                time.sleep(delay)
+    raise AdapterError("OpenAI Responses request failed after retry loop exhausted.")
+
+
+def _is_retryable_openai_error(exc: Exception) -> bool:
+    status = _status_code(exc)
+    if status in _OPENAI_RETRYABLE_STATUS_CODES:
+        return True
+    message = str(exc).lower()
+    return any(
+        marker in message
+        for marker in (
+            "rate limit",
+            "too many requests",
+            "temporarily unavailable",
+            "timeout",
+            "timed out",
+            "connection reset",
+            "connection aborted",
+        )
+    )
+
+
+def _classify_openai_error(exc: Exception) -> str:
+    status = _status_code(exc)
+    message = str(exc).lower()
+    if status == 429 or "rate limit" in message or "too many requests" in message:
+        return "rate_limited"
+    return "transient_failure"
+
+
+def _status_code(exc: Exception) -> int | None:
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        response = getattr(exc, "response", None)
+        status = getattr(response, "status_code", None)
+    try:
+        return int(status) if status is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _retry_delay_seconds(exc: Exception, attempt: int) -> float:
+    retry_after = _retry_after_seconds(exc)
+    if retry_after is not None:
+        return min(max(retry_after, 0.0), 2.0)
+    return min(0.25 * (2 ** attempt), 2.0)
+
+
+def _retry_after_seconds(exc: Exception) -> float | None:
+    headers = getattr(exc, "headers", None)
+    if headers is None:
+        response = getattr(exc, "response", None)
+        headers = getattr(response, "headers", None)
+    if headers is None:
+        return None
+    value = None
+    if hasattr(headers, "get"):
+        value = headers.get("retry-after") or headers.get("Retry-After")
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _normalize_responses_input(prompt: Any) -> Any:
     """Wrap content-block lists in a Responses-API message envelope.
 
@@ -170,9 +275,23 @@ def _normalize_responses_input(prompt: Any) -> Any:
     if not isinstance(prompt, list):
         return prompt
     if all(isinstance(item, dict) and item.get("type") == "message" for item in prompt):
-        return prompt
+        return [_normalize_message_item(item) for item in prompt]
+    return [{"type": "message", "role": "user", "content": _normalize_content_blocks(prompt)}]
+
+
+def _normalize_message_item(item: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(item)
+    content = normalized.get("content")
+    if isinstance(content, list):
+        normalized["content"] = _normalize_content_blocks(content)
+    elif isinstance(content, str):
+        normalized["content"] = [{"type": "input_text", "text": content}]
+    return normalized
+
+
+def _normalize_content_blocks(blocks: list[Any]) -> list[dict[str, Any]]:
     content: list[dict[str, Any]] = []
-    for block in prompt:
+    for block in blocks:
         if not isinstance(block, dict):
             continue
         btype = block.get("type")
@@ -194,4 +313,4 @@ def _normalize_responses_input(prompt: Any) -> Any:
             content.append({"type": "input_image", "image_url": url or ""})
         else:
             content.append(block)
-    return [{"type": "message", "role": "user", "content": content}]
+    return content
