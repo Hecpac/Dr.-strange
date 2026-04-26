@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
 from claw_v2.coordinator import CoordinatorService, WorkerTask
@@ -236,6 +237,80 @@ class AgentAwareTests(unittest.TestCase):
         prompt_arg = router.ask.call_args.args[0]
         self.assertIn("hex", prompt_arg)
         self.assertIn("code", prompt_arg)
+
+
+class RetryAndContextTests(unittest.TestCase):
+    def test_worker_lane_retries_once_on_adapter_error(self) -> None:
+        from claw_v2.adapters.base import AdapterError
+        svc, router, observe, _ = _make_service()
+        router.ask.side_effect = [AdapterError("Codex CLI timed out after 120s"), MagicMock(content="done")]
+        task = WorkerTask(name="impl", instruction="build", lane="worker")
+        result = svc._execute_worker(task)
+        self.assertEqual(result.content, "done")
+        self.assertEqual(result.error, "")
+        self.assertEqual(router.ask.call_count, 2)
+        retry_calls = [c for c in observe.emit.call_args_list if c.args and c.args[0] == "coordinator_worker_retry"]
+        self.assertEqual(len(retry_calls), 1)
+
+    def test_worker_lane_gives_up_after_two_attempts(self) -> None:
+        from claw_v2.adapters.base import AdapterError
+        svc, router, *_ = _make_service()
+        router.ask.side_effect = AdapterError("persistent timeout")
+        task = WorkerTask(name="impl", instruction="build", lane="worker")
+        result = svc._execute_worker(task)
+        self.assertEqual(result.content, "")
+        self.assertIn("persistent timeout", result.error)
+        self.assertEqual(router.ask.call_count, 2)
+
+    def test_research_lane_does_not_retry(self) -> None:
+        from claw_v2.adapters.base import AdapterError
+        svc, router, *_ = _make_service()
+        router.ask.side_effect = AdapterError("fail")
+        task = WorkerTask(name="r1", instruction="find", lane="research")
+        svc._execute_worker(task)
+        self.assertEqual(router.ask.call_count, 1)
+
+    def test_verification_receives_implementation_evidence(self) -> None:
+        svc, router, *_ = _make_service()
+        responses: list[Any] = []  # type: ignore[name-defined]
+
+        from claw_v2.coordinator import WorkerResult
+        def fake_ask(prompt, **_kwargs):
+            responses.append(prompt)
+            return MagicMock(content="plan" if "Synthesize" in prompt else "result")
+        router.ask.side_effect = fake_ask
+
+        research = [WorkerTask(name="r1", instruction="find")]
+        impl = [WorkerTask(name="i1", instruction="build", lane="worker")]
+        verify = [WorkerTask(name="v1", instruction="check", lane="verifier")]
+        svc.run("t", "obj", research, impl, verify)
+
+        verify_prompts = [p for p in responses if "## Your task" in p and "check" in p]
+        self.assertEqual(len(verify_prompts), 1)
+        self.assertIn("Implementation Results", verify_prompts[0])
+        self.assertIn("### i1", verify_prompts[0])
+
+    def test_verification_surfaces_implementation_errors(self) -> None:
+        from claw_v2.adapters.base import AdapterError
+        svc, router, *_ = _make_service()
+        captured: list[str] = []
+
+        def fake_ask(prompt, **kwargs):
+            lane = kwargs.get("lane")
+            if lane == "worker":
+                raise AdapterError("Codex CLI timed out after 120s")
+            captured.append(prompt)
+            return MagicMock(content="ok")
+        router.ask.side_effect = fake_ask
+
+        research = [WorkerTask(name="r1", instruction="find")]
+        impl = [WorkerTask(name="i1", instruction="build", lane="worker")]
+        verify = [WorkerTask(name="v1", instruction="check", lane="verifier")]
+        svc.run("t", "obj", research, impl, verify)
+
+        verify_prompts = [p for p in captured if "## Your task" in p and "check" in p]
+        self.assertEqual(len(verify_prompts), 1)
+        self.assertIn("ERROR: Codex CLI timed out after 120s", verify_prompts[0])
 
 
 if __name__ == "__main__":
