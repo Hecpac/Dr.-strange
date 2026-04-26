@@ -1057,6 +1057,59 @@ class BotTests(unittest.TestCase):
                 )
                 self.assertEqual(clean.stdout.strip(), "")
 
+    def test_resumed_coding_task_keeps_dirty_worktree_context(self) -> None:
+        import subprocess as _sub
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            _sub.run(["git", "init", "-q", "-b", "main"], cwd=workspace, check=True)
+            _sub.run(["git", "-C", str(workspace), "config", "user.email", "t@t"], check=True)
+            _sub.run(["git", "-C", str(workspace), "config", "user.name", "t"], check=True)
+            (workspace / "README.md").write_text("hello\n")
+            _sub.run(["git", "-C", str(workspace), "add", "."], check=True)
+            _sub.run(["git", "-C", str(workspace), "commit", "-q", "-m", "init"], check=True)
+            (workspace / "README.md").write_text("partial task work\n")
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(workspace),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.task_ledger.create(
+                    task_id="s1:lost-task",
+                    session_id="s1",
+                    objective="continua el cambio parcial",
+                    mode="coding",
+                    runtime="coordinator",
+                    status="lost",
+                    metadata={"autonomous": True},
+                )
+                runtime.bot.coordinator = MagicMock()
+                runtime.bot.coordinator.run.return_value = CoordinatorResult(
+                    task_id="s1:lost-task",
+                    phase_results={
+                        "research": [WorkerResult(task_name="scope_and_risks", content="scope ok", duration_seconds=0.1)],
+                        "verification": [WorkerResult(task_name="verify_change", content="Verification Status: passed", duration_seconds=0.1)],
+                    },
+                    synthesis="kept dirty context",
+                )
+
+                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/task_resume s1:lost-task")
+                self.assertIn("Tarea reanudada", reply)
+                self.assertTrue(runtime.bot._task_handler.wait_for_task("s1:lost-task", timeout=2))
+
+                stash_list = _sub.run(
+                    ["git", "-C", str(workspace), "stash", "list"],
+                    capture_output=True, text=True, check=True,
+                )
+                self.assertNotIn("claw:autostash:s1:lost-task", stash_list.stdout)
+                self.assertEqual((workspace / "README.md").read_text(), "partial task work\n")
+
     def test_implementation_worker_error_marks_task_failed(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

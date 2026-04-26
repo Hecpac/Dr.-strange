@@ -344,6 +344,7 @@ class TaskHandler:
         objective: str,
         mode: str,
         job_id: str | None = None,
+        resumed: bool = False,
     ) -> None:
         try:
             if self._is_cancelled(task_id):
@@ -358,7 +359,8 @@ class TaskHandler:
                 job_id=job_id,
             ):
                 return
-            self._precheck_worktree(task_id=task_id, mode=mode)
+            if not resumed:
+                self._precheck_worktree(task_id=task_id, mode=mode)
             response = self._run_coordinated_task(
                 session_id,
                 objective,
@@ -755,6 +757,7 @@ class TaskHandler:
                     reason=reason,
                     reclaim_running=True,
                 ),
+                True,
             ),
             daemon=True,
             name=f"autonomous-resume-{record.task_id[-8:]}",
