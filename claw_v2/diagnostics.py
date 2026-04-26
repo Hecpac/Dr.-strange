@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import json
 import os
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
@@ -17,6 +20,7 @@ DEFAULT_LABEL = "com.pachano.claw"
 DEFAULT_PORT = 8765
 DEFAULT_DB_PATH = Path("data/claw.db")
 DEFAULT_ACK_PATH = Path("data/diagnostics_acks.json")
+HEARTBEAT_STALE_AFTER_S = 180.0
 
 
 def collect_diagnostics(
@@ -83,11 +87,13 @@ def _database_summary(
     try:
         conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout = 5000")
     except sqlite3.Error as exc:
         return {"present": True, "error": str(exc)}
     try:
         summary: dict[str, Any] = {"present": True}
         if _table_exists(conn, "observe_stream"):
+            summary["heartbeat"] = _heartbeat_summary(conn)
             latest_errors = _latest_events(
                 conn,
                 event_types=(
@@ -186,6 +192,35 @@ def _latest_events(
         params,
     ).fetchall()
     return [_event_row(row) for row in rows]
+
+
+def _heartbeat_summary(conn: sqlite3.Connection, *, now: float | None = None) -> dict[str, Any]:
+    row = conn.execute(
+        """
+        SELECT id, timestamp, payload
+        FROM observe_stream
+        WHERE event_type = 'daemon_heartbeat'
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    if row is None:
+        return {"present": False}
+    payload = _loads_json(row["payload"])
+    raw_ts = payload.get("ts") if isinstance(payload, dict) else None
+    age_s: float | None = None
+    if isinstance(raw_ts, (int, float)):
+        current = time.time() if now is None else now
+        age_s = max(0.0, float(current) - float(raw_ts))
+    web_serving = payload.get("web_transport_serving") if isinstance(payload, dict) else None
+    return {
+        "present": True,
+        "id": int(row["id"]),
+        "timestamp": row["timestamp"],
+        "ts": raw_ts,
+        "age_s": age_s,
+        "web_transport_serving": web_serving,
+    }
 
 
 def _event_counts_24h(conn: sqlite3.Connection) -> dict[str, int]:
@@ -321,6 +356,43 @@ def _partition_acknowledged_events(
     return actionable, acknowledged
 
 
+@contextlib.contextmanager
+def _ack_file_lock(path: Path) -> Iterator[None]:
+    """Serialize concurrent writers using a sidecar lock file.
+
+    Sidecar avoids inode-swap surprises when the JSON itself is replaced
+    atomically inside the locked region.
+    """
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+def _atomic_write_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2, sort_keys=True)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_name, path)
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
 def acknowledge_events(
     event_ids: list[int],
     *,
@@ -335,18 +407,16 @@ def acknowledge_events(
     path.parent.mkdir(parents=True, exist_ok=True)
     current = time.time() if now is None else now
     expires_at = current + max(0.1, float(hours)) * 3600
-    active = _load_acknowledgements(path, now=current)
-    for event_id in event_ids:
-        active[int(event_id)] = {
-            "event_id": int(event_id),
-            "reason": reason,
-            "created_at": current,
-            "expires_at": expires_at,
-        }
-    path.write_text(
-        json.dumps({"acks": list(active.values())}, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
+    with _ack_file_lock(path):
+        active = _load_acknowledgements(path, now=current)
+        for event_id in event_ids:
+            active[int(event_id)] = {
+                "event_id": int(event_id),
+                "reason": reason,
+                "created_at": current,
+                "expires_at": expires_at,
+            }
+        _atomic_write_json(path, {"acks": list(active.values())})
     return [int(event_id) for event_id in event_ids]
 
 
@@ -359,8 +429,18 @@ def _checks(*, commands: dict[str, dict[str, Any]], database: dict[str, Any], po
     active_tasks = len((database.get("tasks") or {}).get("active") or [])
     latest_errors = len((database.get("observe") or {}).get("latest_errors") or [])
     acknowledged_errors = len((database.get("observe") or {}).get("acknowledged_errors") or [])
-    status = "healthy" if process_ok and port_ok and db_ok and launchd_ok and latest_errors == 0 else "attention"
-    if not process_ok or not port_ok or not db_ok:
+    heartbeat = database.get("heartbeat") or {}
+    heartbeat_age = heartbeat.get("age_s")
+    heartbeat_present = bool(heartbeat.get("present"))
+    heartbeat_stale = (
+        heartbeat_present
+        and isinstance(heartbeat_age, (int, float))
+        and heartbeat_age > HEARTBEAT_STALE_AFTER_S
+    )
+    web_serving_known = heartbeat.get("web_transport_serving")
+    web_thread_dead = web_serving_known is False
+    status = "healthy" if process_ok and port_ok and db_ok and launchd_ok and latest_errors == 0 and not heartbeat_stale and not web_thread_dead else "attention"
+    if not process_ok or not port_ok or not db_ok or heartbeat_stale or web_thread_dead:
         status = "critical"
     return {
         "status": status,
@@ -372,6 +452,10 @@ def _checks(*, commands: dict[str, dict[str, Any]], database: dict[str, Any], po
         "active_tasks": active_tasks,
         "recent_error_events": latest_errors,
         "acknowledged_error_events": acknowledged_errors,
+        "heartbeat_present": heartbeat_present,
+        "heartbeat_age_s": heartbeat_age,
+        "heartbeat_stale": heartbeat_stale,
+        "web_transport_serving": web_serving_known,
     }
 
 
@@ -404,6 +488,14 @@ def format_text(report: dict[str, Any]) -> str:
         if result.get("stderr"):
             lines.append(f"  stderr: {result['stderr'].splitlines()[0][:160]}")
     database = report.get("database") or {}
+    heartbeat = database.get("heartbeat") or {}
+    if heartbeat.get("present"):
+        age = heartbeat.get("age_s")
+        age_text = f"{age:.0f}s" if isinstance(age, (int, float)) else "unknown"
+        lines.append("")
+        lines.append(
+            f"Heartbeat: age={age_text} web_transport_serving={heartbeat.get('web_transport_serving')}"
+        )
     observe = database.get("observe") or {}
     if observe.get("latest_errors"):
         lines.append("")

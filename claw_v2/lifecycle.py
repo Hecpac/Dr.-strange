@@ -5,6 +5,7 @@ import logging
 import os
 import signal
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -360,6 +361,27 @@ async def run() -> int:
             name="daemon_health_check_guard",
             interval_seconds=60,
             handler=_daemon_health_guard,
+        ))
+
+        def _emit_daemon_heartbeat() -> None:
+            web_serving = (
+                web_transport.is_serving()
+                if runtime.config.web_chat_enabled
+                else None
+            )
+            runtime.observe.emit(
+                "daemon_heartbeat",
+                payload={
+                    "pid": os.getpid(),
+                    "ts": time.time(),
+                    "web_transport_serving": web_serving,
+                },
+            )
+
+        runtime.scheduler.register(_SJ(
+            name="daemon_heartbeat",
+            interval_seconds=60,
+            handler=_emit_daemon_heartbeat,
         ))
 
         # Wire ManagedChrome
