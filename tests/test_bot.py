@@ -1093,6 +1093,46 @@ class BotTests(unittest.TestCase):
                 runtime.bot.coordinator.run.assert_not_called()
                 self.assertEqual(runtime.task_ledger.summary(session_id="s1"), {"running": 1})
 
+    def test_operational_alert_message_does_not_start_autonomous_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.coordinator = MagicMock()
+                runtime.memory.update_session_state("s1", autonomy_mode="autonomous")
+
+                reply = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text=(
+                        "Alerta operacional: Auto-research provider failure\n"
+                        "Severidad: critical\n"
+                        "Agent: perf-optimizer\n"
+                        "Reason: codex_timeout\n"
+                        "Failures: 1\n"
+                        "Error: Codex CLI timed out after 300.0s"
+                    ),
+                )
+
+                self.assertIn("Alerta operacional registrada", reply)
+                self.assertIn("no la voy a convertir en tarea autónoma", reply)
+                runtime.bot.coordinator.run.assert_not_called()
+                self.assertEqual(runtime.task_ledger.summary(session_id="s1"), {})
+                self.assertTrue(
+                    any(
+                        event["event_type"] == "operational_alert_input_handled"
+                        for event in runtime.observe.recent_events(limit=5)
+                    )
+                )
+
     def test_coding_task_autostashes_dirty_worktree(self) -> None:
         import subprocess as _sub
         with tempfile.TemporaryDirectory() as tmpdir:
