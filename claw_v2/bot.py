@@ -152,7 +152,10 @@ class BotService:
         self.model_registry = model_registry or ModelRegistry.default()
         self.learning: Any | None = None
         self._wiki_handler = WikiHandler(memory=brain.memory)
-        self._nlm_handler = NlmHandler(update_session_state=brain.memory.update_session_state)
+        self._nlm_handler = NlmHandler(
+            update_session_state=brain.memory.update_session_state,
+            task_ledger=task_ledger,
+        )
         self._capability_status: dict[str, dict[str, Any]] = {}
         self._browse_handler = BrowseHandler(
             config=config,
