@@ -1216,6 +1216,108 @@ class BotTests(unittest.TestCase):
                 self.assertEqual(lifecycle["execution"]["status"], "resumed")
                 self.assertEqual(lifecycle["outcome"]["status"], "succeeded")
 
+    def test_task_resume_reopens_false_success_autonomous_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                old_job = runtime.job_service.enqueue(
+                    kind="coordinator.autonomous_task",
+                    payload={
+                        "task_id": "s1:false-success",
+                        "session_id": "s1",
+                        "objective": "termina el hero del prototipo",
+                        "mode": "coding",
+                    },
+                    resume_key="coordinator:s1:false-success",
+                    metadata={"reason": "initial_run"},
+                )
+                runtime.job_service.complete(old_job.job_id, result={"verification_status": "pending"})
+                runtime.task_ledger.create(
+                    task_id="s1:false-success",
+                    session_id="s1",
+                    objective="termina el hero del prototipo",
+                    mode="coding",
+                    runtime="coordinator",
+                    status="running",
+                    metadata={"autonomous": True, "generic_job_id": old_job.job_id},
+                )
+                runtime.task_ledger.mark_terminal(
+                    "s1:false-success",
+                    status="succeeded",
+                    summary="falta evidencia de screenshots",
+                    verification_status="pending",
+                    artifacts={"response_preview": "Verification Status: pending"},
+                )
+                runtime.bot.coordinator = MagicMock()
+                runtime.bot.coordinator.run.return_value = CoordinatorResult(
+                    task_id="s1:false-success",
+                    phase_results={
+                        "research": [WorkerResult(task_name="scope_and_risks", content="scope ok", duration_seconds=0.1)],
+                        "verification": [WorkerResult(task_name="verify_change", content="Verification Status: passed", duration_seconds=0.1)],
+                    },
+                    synthesis="resumed false success and verified",
+                )
+
+                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/task_resume s1:false-success")
+                self.assertIn("Tarea reanudada", reply)
+                self.assertTrue(runtime.bot._task_handler.wait_for_task("s1:false-success", timeout=2))
+
+                runtime.bot.coordinator.run.assert_called_once()
+                record = runtime.task_ledger.get("s1:false-success")
+                self.assertEqual(record.status, "succeeded")
+                self.assertEqual(record.verification_status, "passed")
+                self.assertEqual(record.metadata["resume_reason"], "manual_resume")
+                self.assertEqual(record.metadata["false_success_verification_status"], "pending")
+                self.assertNotEqual(record.metadata["generic_job_id"], old_job.job_id)
+                resumed_job = runtime.job_service.get(record.metadata["generic_job_id"])
+                self.assertEqual(resumed_job.status, "completed")
+                self.assertEqual(resumed_job.resume_key, "coordinator:s1:false-success")
+                self.assertEqual(runtime.job_service.get(old_job.job_id).status, "completed")
+
+    def test_task_resume_keeps_verified_success_terminal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.task_ledger.create(
+                    task_id="s1:verified-success",
+                    session_id="s1",
+                    objective="corrige el bug del login",
+                    mode="coding",
+                    runtime="coordinator",
+                    status="running",
+                    metadata={"autonomous": True},
+                )
+                runtime.task_ledger.mark_terminal(
+                    "s1:verified-success",
+                    status="succeeded",
+                    summary="verificado",
+                    verification_status="passed",
+                )
+                runtime.bot.coordinator = MagicMock()
+
+                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/task_resume s1:verified-success")
+
+                self.assertIn("already succeeded", reply)
+                runtime.bot.coordinator.run.assert_not_called()
+
     def test_task_cancel_command_marks_running_task_cancelled(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

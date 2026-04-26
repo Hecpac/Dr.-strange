@@ -624,7 +624,8 @@ class TaskHandler:
         record = self.task_ledger.get(task_id)
         if record is None:
             return f"task {task_id} not found"
-        if record.status == "succeeded":
+        false_success = self._is_false_success_record(record)
+        if record.status == "succeeded" and not false_success:
             return f"task {task_id} already succeeded"
         if self._has_live_task_thread(task_id):
             return f"task {task_id} is already running"
@@ -665,11 +666,15 @@ class TaskHandler:
         requested_by_session: str | None = None,
     ) -> None:
         mode = record.mode or _infer_session_mode(record.objective)
+        false_success = self._is_false_success_record(record)
         metadata = dict(record.metadata or {})
         metadata["autonomous"] = True
         metadata["resume_reason"] = reason
         metadata["resume_count"] = int(metadata.get("resume_count") or 0) + 1
         metadata["last_resumed_at"] = time.time()
+        if false_success:
+            metadata["false_success_reopened_at"] = metadata["last_resumed_at"]
+            metadata["false_success_verification_status"] = str(record.verification_status or "unknown")
         if requested_by_session:
             metadata["requested_by_session"] = requested_by_session
         with self._task_lock:
@@ -739,6 +744,7 @@ class TaskHandler:
                 "objective": record.objective,
                 "reason": reason,
                 "resume_count": metadata["resume_count"],
+                "false_success_reopened": false_success,
             },
         )
         thread = threading.Thread(
@@ -835,8 +841,20 @@ class TaskHandler:
         if record.runtime != "coordinator":
             return False
         if record.status == "succeeded":
-            return False
+            return not automatic and TaskHandler._is_false_success_record(record)
         return record.status in {"queued", "running", "failed", "timed_out", "cancelled", "lost"}
+
+    @staticmethod
+    def _is_false_success_record(record: Any) -> bool:
+        metadata = dict(record.metadata or {})
+        verification_status = str(record.verification_status or "unknown").strip().lower()
+        if record.status != "succeeded":
+            return False
+        if record.runtime != "coordinator":
+            return False
+        if metadata.get("autonomous") is not True:
+            return False
+        return verification_status not in {"passed", "ok"}
 
     @staticmethod
     def _ensure_plan_artifact(
