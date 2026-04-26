@@ -4,7 +4,9 @@ import asyncio
 import errno
 import json
 import logging
+import os
 import threading
+import time
 from pathlib import Path
 from typing import Any, Callable
 from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
@@ -48,6 +50,14 @@ class WebTransport:
         self._port = port
         self._server: WSGIServer | None = None
         self._thread: threading.Thread | None = None
+        self._started_at: float | None = None
+
+    def is_serving(self) -> bool:
+        return (
+            self._server is not None
+            and self._thread is not None
+            and self._thread.is_alive()
+        )
 
     @property
     def host(self) -> str:
@@ -69,6 +79,25 @@ class WebTransport:
 
         def _app(environ: dict[str, Any], start_response: Callable[[str, list[tuple[str, str]]], object]) -> list[bytes]:
             path = str(environ.get("PATH_INFO", "/"))
+            if path == "/health":
+                now = time.time()
+                body = json.dumps(
+                    {
+                        "status": "ok",
+                        "pid": os.getpid(),
+                        "ts": now,
+                        "uptime_s": (now - self._started_at) if self._started_at else None,
+                        "port": self.port,
+                    }
+                ).encode("utf-8")
+                start_response(
+                    "200 OK",
+                    [
+                        ("Content-Type", "application/json; charset=utf-8"),
+                        ("Content-Length", str(len(body))),
+                    ],
+                )
+                return [body]
             if path.startswith("/api/"):
                 return self._chat_api.wsgi_app(environ, start_response)
             static_path = "chat.html" if path in {"", "/"} else path.lstrip("/")
@@ -113,6 +142,7 @@ class WebTransport:
             raise OSError(f"Port {self._host}:{self._port} is still in use after retries") from last_error
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
+        self._started_at = time.time()
         await asyncio.sleep(0)
 
     async def stop(self) -> None:
@@ -126,3 +156,4 @@ class WebTransport:
                 logger.warning("Web transport thread did not stop within timeout")
         self._server = None
         self._thread = None
+        self._started_at = None

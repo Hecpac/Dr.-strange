@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import concurrent.futures
+import json
 import sqlite3
 import subprocess
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -124,6 +128,104 @@ class DiagnosticsTests(unittest.TestCase):
                 report["database"]["observe"]["acknowledged_errors"][0]["acknowledgement"]["reason"],
                 "known external credits",
             )
+
+
+class HeartbeatTests(unittest.TestCase):
+    def test_fresh_heartbeat_keeps_status_healthy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            observe = ObserveStream(db_path)
+            observe.emit(
+                "daemon_heartbeat",
+                payload={"pid": 99, "ts": time.time(), "web_transport_serving": True},
+            )
+
+            report = collect_diagnostics(db_path=db_path, port=8765, runner=_healthy_runner)
+
+            self.assertEqual(report["checks"]["status"], "healthy")
+            self.assertTrue(report["checks"]["heartbeat_present"])
+            self.assertFalse(report["checks"]["heartbeat_stale"])
+            self.assertEqual(report["checks"]["web_transport_serving"], True)
+            self.assertEqual(report["database"]["heartbeat"]["web_transport_serving"], True)
+
+    def test_stale_heartbeat_flags_critical(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            observe = ObserveStream(db_path)
+            observe.emit(
+                "daemon_heartbeat",
+                payload={"pid": 99, "ts": time.time() - 600, "web_transport_serving": True},
+            )
+
+            report = collect_diagnostics(db_path=db_path, port=8765, runner=_healthy_runner)
+
+            self.assertEqual(report["checks"]["status"], "critical")
+            self.assertTrue(report["checks"]["heartbeat_stale"])
+
+    def test_web_transport_thread_dead_flags_critical(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            observe = ObserveStream(db_path)
+            observe.emit(
+                "daemon_heartbeat",
+                payload={"pid": 99, "ts": time.time(), "web_transport_serving": False},
+            )
+
+            report = collect_diagnostics(db_path=db_path, port=8765, runner=_healthy_runner)
+
+            self.assertEqual(report["checks"]["status"], "critical")
+            self.assertEqual(report["checks"]["web_transport_serving"], False)
+
+    def test_missing_heartbeat_does_not_penalize_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            observe = ObserveStream(db_path)
+            observe.emit("nlm_research_degraded", payload={"reason": "rate"})
+            with sqlite3.connect(db_path) as conn:
+                conn.execute("UPDATE observe_stream SET timestamp = datetime('now', '-3 days')")
+                conn.commit()
+
+            report = collect_diagnostics(db_path=db_path, port=8765, runner=_healthy_runner)
+
+            self.assertEqual(report["checks"]["status"], "healthy")
+            self.assertFalse(report["checks"]["heartbeat_present"])
+            self.assertFalse(report["checks"]["heartbeat_stale"])
+
+
+class AcknowledgementConcurrencyTests(unittest.TestCase):
+    def test_parallel_acknowledge_events_does_not_lose_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ack_path = Path(tmpdir) / "acks.json"
+            event_ids = list(range(1, 33))
+            barrier = threading.Barrier(len(event_ids))
+
+            def _ack_one(event_id: int) -> None:
+                barrier.wait()
+                acknowledge_events(
+                    [event_id],
+                    ack_path=ack_path,
+                    hours=24,
+                    reason=f"event-{event_id}",
+                )
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(event_ids)) as pool:
+                list(pool.map(_ack_one, event_ids))
+
+            data = json.loads(ack_path.read_text(encoding="utf-8"))
+            recorded = {int(entry["event_id"]) for entry in data["acks"]}
+            self.assertEqual(recorded, set(event_ids))
+
+    def test_acknowledge_events_purges_expired_entries_on_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ack_path = Path(tmpdir) / "acks.json"
+            past = time.time() - 3600
+            acknowledge_events([777], ack_path=ack_path, hours=0.1, reason="stale", now=past)
+
+            acknowledge_events([42], ack_path=ack_path, hours=24, reason="fresh")
+
+            data = json.loads(ack_path.read_text(encoding="utf-8"))
+            recorded = {int(entry["event_id"]) for entry in data["acks"]}
+            self.assertEqual(recorded, {42})
 
 
 class DiagnosticsRunbookTests(unittest.TestCase):

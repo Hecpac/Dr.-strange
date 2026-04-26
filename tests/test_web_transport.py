@@ -69,6 +69,27 @@ class WebTransportTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await transport.stop()
 
+    async def test_serves_health_endpoint(self) -> None:
+        transport = WebTransport(
+            chat_api=LocalChatAPI(bot_service=_StubBotService()),
+            host="127.0.0.1",
+            port=0,
+        )
+        await transport.start()
+        try:
+            with urlopen(f"{transport.base_url}/health") as response:
+                self.assertEqual(response.status, 200)
+                payload = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(payload["status"], "ok")
+            self.assertEqual(payload["port"], transport.port)
+            self.assertIsInstance(payload["pid"], int)
+            self.assertIsInstance(payload["ts"], float)
+            self.assertIsInstance(payload["uptime_s"], float)
+            self.assertTrue(transport.is_serving())
+        finally:
+            await transport.stop()
+        self.assertFalse(transport.is_serving())
+
     async def test_serves_traces_api(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             from claw_v2.observe import ObserveStream
