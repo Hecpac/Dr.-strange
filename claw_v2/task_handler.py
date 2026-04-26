@@ -27,6 +27,7 @@ from claw_v2.bot_helpers import (
     _format_task_approval_response,
     _infer_session_mode,
     _looks_like_proceed_request,
+    _normalize_command_text,
     _stable_task_id,
     _task_approval_summary,
 )
@@ -386,10 +387,35 @@ class TaskHandler:
                 else ""
             )
             checkpoint_error = str(completed_checkpoint.get("error") or "")
+            pending_action = str(completed_checkpoint.get("pending_action") or "")
+            blocked_reason = ""
+            if not terminal_status:
+                blocked_reason = self._blocked_user_input_reason(completed_checkpoint)
+                if blocked_reason:
+                    verification_status = "blocked"
+                    terminal_status = "failed"
+                    checkpoint_error = checkpoint_error or blocked_reason
+                    completed_checkpoint = {
+                        **completed_checkpoint,
+                        "verification_status": "blocked",
+                        "error": checkpoint_error,
+                    }
+                    queue = self.mark_first_task_queue_entry(
+                        self._get_session_state(session_id).get("task_queue") or [],
+                        from_status="pending",
+                        to_status="blocked",
+                    )
+                    self._update_session_state(
+                        session_id,
+                        verification_status="blocked",
+                        pending_action=pending_action,
+                        task_queue=queue,
+                        last_checkpoint=completed_checkpoint,
+                    )
             if not terminal_status:
                 if active_task.get("task_id") == task_id:
                     active_task["status"] = "pending"
-                    active_task["pending_action"] = str(completed_checkpoint.get("pending_action") or "")
+                    active_task["pending_action"] = pending_action
                     active_task["updated_at"] = time.time()
                     active_object["active_task"] = active_task
                     self._update_session_state(session_id, active_object=active_object)
@@ -401,7 +427,7 @@ class TaskHandler:
                         "mode": mode,
                         "session_id": session_id,
                         "verification_status": verification_status,
-                        "pending_action": str(completed_checkpoint.get("pending_action") or ""),
+                        "pending_action": pending_action,
                     },
                 )
                 if self.task_ledger is not None:
@@ -426,7 +452,7 @@ class TaskHandler:
                         "objective": objective,
                         "response": response,
                         "verification_status": verification_status,
-                        "pending_action": str(completed_checkpoint.get("pending_action") or ""),
+                        "pending_action": pending_action,
                     },
                 )
                 return
@@ -945,6 +971,36 @@ class TaskHandler:
         )
         artifacts["response_preview"] = response_preview
         return self._with_job_artifact(task_id, session_id, "pending", artifacts)
+
+    @staticmethod
+    def _blocked_user_input_reason(checkpoint: dict[str, Any]) -> str:
+        pending_action = str(checkpoint.get("pending_action") or "").strip()
+        summary = str(checkpoint.get("summary") or "").strip()
+        error = str(checkpoint.get("error") or "").strip()
+        normalized = _normalize_command_text(f"{pending_action}\n{summary}\n{error}")
+        if not normalized:
+            return ""
+        user_input_markers = (
+            "solicitar al usuario",
+            "preguntar al usuario",
+            "pedir al usuario",
+            "pide al usuario",
+            "requiere del usuario",
+            "falta de evidencia",
+            "falta informacion",
+            "faltan datos",
+            "no hay enlace",
+            "no hay contenido",
+            "no hay exportacion",
+            "no hay evidencia",
+            "proporciona",
+            "comparte",
+            "confirma",
+        )
+        if not any(marker in normalized for marker in user_input_markers):
+            return ""
+        detail = pending_action or summary or error
+        return f"waiting_for_user_input: {detail[:500]}"
 
 
     def _outcome_artifacts(

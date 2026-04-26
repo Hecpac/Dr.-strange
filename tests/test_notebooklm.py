@@ -333,6 +333,7 @@ def _make_bot_with_nlm(nlm_service: NotebookLMService) -> "BotService":
     tmpdir = tempfile.mkdtemp()
     config = make_config(Path(tmpdir))
     brain = MagicMock()
+    brain.memory.get_session_state.return_value = {}
     brain.handle_message.return_value = MagicMock(content="brain response")
     bot = BotService(
         brain=brain,
@@ -446,6 +447,45 @@ class BotCommandTests(unittest.TestCase):
         )
         nlm.start_artifact.assert_called_once_with("nb-full-id", "infographic")
         self.assertIn("infografia", result.lower())
+
+    def test_plain_language_review_latest_notebook_uses_chat(self) -> None:
+        nlm = MagicMock(spec=NotebookLMService)
+        nlm.list_notebooks.return_value = [
+            {"id": "older-id", "title": "Anterior", "created_at": "2026-04-01T08:00:00+00:00"},
+            {"id": "latest-id", "title": "Ultimo", "created_at": "2026-04-02T08:00:00+00:00"},
+        ]
+        nlm.chat.return_value = "Resumen del cuaderno"
+        bot = _make_bot_with_nlm(nlm)
+
+        result = bot.handle_text(
+            user_id="123",
+            session_id="s1",
+            text="Revisa el ultimo cuaderno creado en NotebookLM",
+        )
+
+        nlm.chat.assert_called_once()
+        self.assertEqual(nlm.chat.call_args.args[0], "latest-id")
+        self.assertIn("Revision del ultimo cuaderno", result)
+        self.assertIn("Resumen del cuaderno", result)
+
+    def test_plain_language_review_notebook_preempts_autonomous_coordinator(self) -> None:
+        nlm = MagicMock(spec=NotebookLMService)
+        nlm.list_notebooks.return_value = [
+            {"id": "latest-id", "title": "Ultimo", "created_at": "2026-04-02T08:00:00+00:00"},
+        ]
+        nlm.chat.return_value = "Resumen del cuaderno"
+        bot = _make_bot_with_nlm(nlm)
+        bot.brain.memory.get_session_state.return_value = {"autonomy_mode": "autonomous"}
+        bot.coordinator = MagicMock()
+
+        result = bot.handle_text(
+            user_id="123",
+            session_id="s1",
+            text="Revisa el ultimo cuaderno creado en NotebookLM",
+        )
+
+        self.assertIn("Resumen del cuaderno", result)
+        bot.coordinator.run.assert_not_called()
 
     def test_nlm_podcast_without_id_uses_active_notebook(self) -> None:
         nlm = MagicMock(spec=NotebookLMService)

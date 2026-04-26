@@ -69,6 +69,28 @@ def _format_approval_pending(exc: ApprovalPending) -> str:
     )
 
 
+def _looks_like_task_completion_question(text: str) -> bool:
+    normalized = _normalize_command_text(text)
+    if not any(token in normalized for token in ("tarea", "task", "trabajo")):
+        return False
+    return any(
+        token in normalized
+        for token in (
+            "completaste",
+            "terminaste",
+            "esta completa",
+            "esta completada",
+            "esta terminada",
+            "quedo lista",
+            "quedo listo",
+            "completed",
+            "done",
+            "status",
+            "estado",
+        )
+    )
+
+
 class BotService:
     def __init__(
         self,
@@ -316,6 +338,11 @@ class BotService:
             )
         if command_response is not None:
             return command_response
+        task_status_response = self._maybe_handle_task_status_question(stripped, session_id=session_id)
+        if task_status_response is not None:
+            self._store_memory_turn(session_id, stripped, task_status_response, assistant_limit=2000)
+            self._remember_assistant_turn_state(session_id, stripped, task_status_response)
+            return task_status_response
         self._remember_user_turn_state(session_id, stripped)
         if _looks_like_autonomy_grant(stripped):
             return self._handle_autonomy_grant_response(session_id, stripped)
@@ -342,6 +369,11 @@ class BotService:
             self._store_memory_turn(session_id, stripped, shortcut_response, assistant_limit=2000)
             self._remember_assistant_turn_state(session_id, stripped, shortcut_response)
             return shortcut_response
+        nlm_response = self._nlm_handler.natural_language_response(session_id, stripped)
+        if nlm_response is not None:
+            self._store_memory_turn(session_id, stripped, nlm_response, assistant_limit=4000)
+            self._remember_assistant_turn_state(session_id, stripped, nlm_response)
+            return nlm_response
         coordinated_response = self._task_handler.maybe_run_coordinated_task(session_id, stripped)
         if coordinated_response is not None:
             self._store_memory_turn(session_id, stripped, coordinated_response, assistant_limit=4000)
@@ -351,10 +383,6 @@ class BotService:
         command_response = dispatch_commands(self._post_shortcut_commands, context)
         if command_response is not None:
             return command_response
-
-        nlm_response = self._nlm_handler.natural_language_response(session_id, stripped)
-        if nlm_response is not None:
-            return nlm_response
 
         return self._brain_text_response(session_id, stripped)
 
@@ -1354,3 +1382,59 @@ class BotService:
                 return self._chrome_handler.browse_response("https://ads.google.com", session_id=session_id)
 
         return None
+
+    def _maybe_handle_task_status_question(self, text: str, *, session_id: str) -> str | None:
+        if not _looks_like_task_completion_question(text):
+            return None
+        return self._task_status_question_response(session_id)
+
+    def _task_status_question_response(self, session_id: str) -> str:
+        latest = None
+        if self.task_ledger is not None:
+            records = self.task_ledger.list(session_id=session_id, limit=5)
+            active = [record for record in records if getattr(record, "status", "") in {"queued", "running"}]
+            latest = active[0] if active else (records[0] if records else None)
+        if latest is not None:
+            status = str(getattr(latest, "status", "unknown"))
+            verification = str(getattr(latest, "verification_status", "unknown") or "unknown")
+            objective = str(getattr(latest, "objective", "") or "").strip()
+            summary = str(getattr(latest, "summary", "") or "").strip()
+            error = str(getattr(latest, "error", "") or "").strip()
+            task_id = str(getattr(latest, "task_id", "") or "")
+            detail = summary or objective
+            if status in {"queued", "running"}:
+                return (
+                    "Todavía no. La tarea más reciente sigue activa.\n"
+                    f"Task: `{task_id}`\n"
+                    f"Estado: {status} / verificación: {verification}\n"
+                    f"Detalle: {detail[:500] or 'sin resumen'}"
+                )
+            if status == "succeeded":
+                return (
+                    "Sí. La tarea más reciente cerró correctamente.\n"
+                    f"Task: `{task_id}`\n"
+                    f"Verificación: {verification}\n"
+                    f"Resultado: {detail[:500] or 'sin resumen'}"
+                )
+            if verification == "blocked":
+                return (
+                    "No quedó ejecutada; quedó bloqueada.\n"
+                    f"Task: `{task_id}`\n"
+                    f"Motivo: {(error or detail)[:500] or 'faltó información ejecutable'}"
+                )
+            return (
+                "No. La tarea más reciente ya no está activa, pero no cerró como completada.\n"
+                f"Task: `{task_id}`\n"
+                f"Estado: {status} / verificación: {verification}\n"
+                f"Detalle: {(error or detail)[:500] or 'sin detalle'}"
+            )
+        state = self.brain.memory.get_session_state(session_id)
+        active_task = dict((state.get("active_object") or {}).get("active_task") or {})
+        if active_task:
+            return (
+                "Tengo una tarea en estado de sesión, pero no aparece en el ledger.\n"
+                f"Task: `{active_task.get('task_id', 'unknown')}`\n"
+                f"Estado: {active_task.get('status', 'unknown')}\n"
+                f"Objetivo: {active_task.get('objective', 'sin objetivo')}"
+            )
+        return "No tengo tareas registradas para esta conversación."
