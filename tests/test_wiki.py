@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -399,6 +400,39 @@ class AutoScrapeTests(unittest.TestCase):
         self.assertTrue((svc.raw_dir / "scraped-topic.md").exists())
         text = (svc.wiki_dir / "scraped-topic.md").read_text(encoding="utf-8")
         self.assertIn("sources: [scraped-topic]", text)
+
+    def test_auto_scrape_pauses_when_firecrawl_credits_are_exhausted(self) -> None:
+        observe = MagicMock()
+        svc, router, tmp = _make_wiki(observe=observe)
+        svc.WATCH_SOURCES = [("Test Source", "https://example.com/source")]
+        proc = MagicMock(returncode=1, stdout="", stderr="Payment required: insufficient credits")
+
+        with patch("subprocess.run", return_value=proc):
+            result = svc.auto_scrape_sources()
+
+        self.assertEqual(result["sources_scraped"], 0)
+        self.assertEqual(result["sources_skipped"], 1)
+        self.assertGreater(svc._firecrawl_paused_until, 0)
+        observe.emit.assert_any_call(
+            "firecrawl_paused",
+            payload={
+                "reason": "insufficient_credits",
+                "paused_seconds": 86400,
+                "paused_until": svc._firecrawl_paused_until,
+            },
+        )
+        router.ask.assert_not_called()
+
+    def test_auto_scrape_skips_while_firecrawl_is_paused(self) -> None:
+        observe = MagicMock()
+        svc, _, _ = _make_wiki(observe=observe)
+        svc._firecrawl_paused_until = time.time() + 60
+        svc._firecrawl_pause_reason = "insufficient_credits"
+
+        result = svc.auto_scrape_sources()
+
+        self.assertTrue(result["skipped"])
+        self.assertEqual(result["reason"], "firecrawl_paused")
 
 
 if __name__ == "__main__":

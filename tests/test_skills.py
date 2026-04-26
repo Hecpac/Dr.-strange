@@ -55,6 +55,26 @@ class SkillRegistryTests(unittest.TestCase):
             self.assertEqual(executed["result"]["result"], 7)
             self.assertEqual(registry.list_skills()[0]["use_count"], 1)
 
+    def test_discover_gaps_passes_evidence_pack_to_judge_lane(self) -> None:
+        calls: list[dict] = []
+
+        class Router:
+            def ask(self, *args, **kwargs):
+                calls.append(kwargs)
+                return SimpleNamespace(
+                    content='[{"name": "summarize_logs", "description": "Summarize logs", "task_description": "Create a log summarizer"}]'
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = SkillRegistry(root=Path(tmp), router=Router())
+
+            result = registry.discover_gaps()
+
+            self.assertEqual(result["gaps"][0]["name"], "summarize_logs")
+            self.assertEqual(calls[0]["lane"], "judge")
+            self.assertEqual(calls[0]["evidence_pack"]["operation"], "skill_gap_discovery")
+            self.assertEqual(calls[0]["evidence_pack"]["active_skill_count"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

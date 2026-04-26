@@ -281,6 +281,46 @@ class MergeAndCloseTests(unittest.TestCase):
 
 
 class PollMergesTests(unittest.TestCase):
+    def test_poll_actionable_degrades_and_backs_off_on_linear_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            now = [1000.0]
+            linear = MagicMock(spec=LinearService)
+            linear.list_actionable.side_effect = TimeoutError("The read operation timed out")
+            observe = MagicMock()
+            svc = PipelineService(
+                linear=linear,
+                router=MagicMock(),
+                approvals=MagicMock(),
+                pull_requests=MagicMock(),
+                observe=observe,
+                default_repo_root=Path(tmpdir),
+                state_root=Path(tmpdir) / "pipeline",
+                clock=lambda: now[0],
+            )
+
+            first = svc.poll_actionable()
+            second = svc.poll_actionable()
+
+            self.assertEqual(first, [])
+            self.assertEqual(second, [])
+            self.assertEqual(linear.list_actionable.call_count, 1)
+            observe.emit.assert_any_call(
+                "pipeline_poll_degraded",
+                payload={
+                    "poller": "pipeline_poll",
+                    "reason": "timeout",
+                    "error": "The read operation timed out",
+                    "consecutive_failures": 1,
+                    "backoff_seconds": 300.0,
+                },
+            )
+            skipped_events = [
+                call for call in observe.emit.call_args_list
+                if call.args and call.args[0] == "pipeline_poll_skipped"
+            ]
+            self.assertEqual(len(skipped_events), 1)
+            self.assertEqual(skipped_events[0].kwargs["payload"]["reason"], "linear_backoff")
+
     def test_detects_externally_merged_pr(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             state_root = Path(tmpdir) / "pipeline"
@@ -407,6 +447,36 @@ class LearningLoopTests(unittest.TestCase):
             self.assertIn("Avoid approach 'use library X'", facts[0]["value"])
             self.assertIn("no uses esa libreria", facts[0]["value"])
 
+    def test_consolidate_passes_evidence_pack_to_judge_lane(self) -> None:
+        from claw_v2.learning import LearningLoop
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mem = MemoryStore(Path(tmpdir) / "test.db")
+            router = MagicMock()
+            router.ask.return_value = LLMResponse(
+                content="Switch tools after repeated failures.",
+                lane="judge",
+                provider="anthropic",
+                model="test",
+            )
+            for index in range(10):
+                mem.store_task_outcome(
+                    task_type="coding",
+                    task_id=f"task-{index}",
+                    description=f"Task {index}",
+                    approach="retry same command",
+                    outcome="failure",
+                    lesson="Switch tools after repeated failures.",
+                )
+
+            loop = LearningLoop(memory=mem, router=router)
+            rules = loop.consolidate(min_outcomes=10)
+
+            self.assertEqual(rules, "Switch tools after repeated failures.")
+            evidence_pack = router.ask.call_args.kwargs["evidence_pack"]
+            self.assertEqual(evidence_pack["operation"], "learning_consolidate")
+            self.assertEqual(evidence_pack["outcome_count"], 10)
+
     def test_suggest_soul_updates_stores_reviewable_proposal(self) -> None:
         from claw_v2.learning import LearningLoop
 
@@ -462,6 +532,9 @@ class LearningLoopTests(unittest.TestCase):
             prompt = router.ask.call_args.args[0]
             self.assertIn("<redacted>", prompt)
             self.assertNotIn("sk-secret", prompt)
+            evidence_pack = router.ask.call_args.kwargs["evidence_pack"]
+            self.assertEqual(evidence_pack["operation"], "soul_update_proposal")
+            self.assertGreaterEqual(evidence_pack["signal_count"], 1)
 
     def test_pipeline_injects_lessons(self) -> None:
         """Integration: process_issue should pass past lessons to the LLM prompt."""

@@ -14,12 +14,14 @@ import math
 import re
 import textwrap
 import threading
+import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from claw_v2.llm import LLMRouter
+    from claw_v2.observe import ObserveStream
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +42,27 @@ VALID_CATEGORIES = [
     "Personas",
     "Research",
 ]
+
+_FIRECRAWL_CREDIT_PATTERNS = (
+    "insufficient credits",
+    "not enough credits",
+    "credit balance",
+    "payment required",
+)
+_FIRECRAWL_RATE_LIMIT_PATTERNS = (
+    "rate limit",
+    "too many requests",
+    "429",
+)
+
+
+def classify_firecrawl_failure(text: str) -> str | None:
+    normalized = (text or "").lower()
+    if any(pattern in normalized for pattern in _FIRECRAWL_CREDIT_PATTERNS):
+        return "insufficient_credits"
+    if any(pattern in normalized for pattern in _FIRECRAWL_RATE_LIMIT_PATTERNS):
+        return "rate_limited"
+    return None
 
 
 def _tokenize(text: str) -> list[str]:
@@ -97,8 +120,10 @@ class WikiService:
         router: LLMRouter,
         wiki_root: Path | None = None,
         lane: str = "research",
+        observe: ObserveStream | None = None,
     ) -> None:
         self.router = router
+        self.observe = observe
         self.root = wiki_root or _DEFAULT_WIKI_ROOT
         self.raw_dir = self.root / "raw"
         self.wiki_dir = self.root / "wiki"
@@ -115,6 +140,8 @@ class WikiService:
         self._lock = threading.Lock()
         self._embeddings: dict[str, list[float]] = self._load_embeddings()
         self._graph: dict[str, list[dict]] = self._load_graph()
+        self._firecrawl_paused_until = 0.0
+        self._firecrawl_pause_reason = ""
 
     # ------------------------------------------------------------------
     # Ingest (two-step chain-of-thought)
@@ -663,8 +690,27 @@ class WikiService:
     def auto_scrape_sources(self) -> dict:
         """Scrape watched sources via firecrawl, extract key items, ingest new ones."""
         import subprocess
+        now = time.time()
+        if self._firecrawl_paused_until > now:
+            remaining = int(self._firecrawl_paused_until - now)
+            self._emit(
+                "wiki_scrape_skipped",
+                {
+                    "reason": "firecrawl_paused",
+                    "remaining_seconds": remaining,
+                    "detail": self._firecrawl_pause_reason,
+                },
+            )
+            return {
+                "sources_scraped": 0,
+                "pages_ingested": 0,
+                "skipped": True,
+                "reason": "firecrawl_paused",
+                "remaining_seconds": remaining,
+            }
         scraped = 0
         ingested = 0
+        skipped = 0
         for name, url in self.WATCH_SOURCES:
             try:
                 result = subprocess.run(
@@ -672,7 +718,17 @@ class WikiService:
                     capture_output=True, text=True, timeout=60,
                 )
                 if result.returncode != 0 or not result.stdout.strip():
+                    failure = classify_firecrawl_failure(result.stderr or result.stdout)
+                    if failure == "insufficient_credits":
+                        self._pause_firecrawl("insufficient_credits")
+                        skipped += 1
+                        break
+                    if failure == "rate_limited":
+                        self._pause_firecrawl("rate_limited", seconds=60 * 60)
+                        skipped += 1
+                        break
                     logger.warning("Wiki scrape failed for %s: %s", name, result.stderr[:200])
+                    skipped += 1
                     continue
                 scraped += 1
                 content = result.stdout[:8000]
@@ -710,8 +766,30 @@ class WikiService:
                     ingested += int(ingest_result.get("pages_written", 0))
             except Exception:
                 logger.exception("Wiki scrape error for %s", name)
+                skipped += 1
         self._append_log("auto_scrape", f"scraped={scraped} ingested={ingested}", ingested)
-        return {"sources_scraped": scraped, "pages_ingested": ingested}
+        return {"sources_scraped": scraped, "pages_ingested": ingested, "sources_skipped": skipped}
+
+    def _pause_firecrawl(self, reason: str, *, seconds: int = 24 * 60 * 60) -> None:
+        self._firecrawl_pause_reason = reason
+        self._firecrawl_paused_until = time.time() + seconds
+        logger.warning("Firecrawl auto-scrape paused: %s", reason)
+        self._emit(
+            "firecrawl_paused",
+            {
+                "reason": reason,
+                "paused_seconds": seconds,
+                "paused_until": self._firecrawl_paused_until,
+            },
+        )
+
+    def _emit(self, event_type: str, payload: dict) -> None:
+        if self.observe is None:
+            return
+        try:
+            self.observe.emit(event_type, payload=payload)
+        except Exception:
+            logger.debug("Wiki observe emit failed", exc_info=True)
 
     # ------------------------------------------------------------------
     # NotebookLM → Wiki sync

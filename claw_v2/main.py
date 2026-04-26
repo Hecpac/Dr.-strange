@@ -453,7 +453,12 @@ def _setup_agent_services(
             promotion_executor=GitBranchPromotionExecutor(config.workspace_root),
         )
 
-    auto_research = AutoResearchAgentService(router=router, store=agent_store, experiment_runner=experiment_runner)
+    auto_research = AutoResearchAgentService(
+        router=router,
+        store=agent_store,
+        experiment_runner=experiment_runner,
+        observe=observe,
+    )
     sub_agents = SubAgentService(config.agent_definitions_root, router, agent_store)
     discovered = sub_agents.discover()
     if discovered:
@@ -516,7 +521,12 @@ def _setup_operational_services(
     kairos: KairosService,
     startup_health: StartupHealthReport,
 ) -> tuple[ClawDaemon, BotService, PipelineService, DevBrowserService, BrowserUseService, ComputerUseService]:
-    daemon = ClawDaemon(scheduler=CronScheduler(), heartbeat=heartbeat, observe=observe)
+    daemon = ClawDaemon(
+        scheduler=CronScheduler(),
+        heartbeat=heartbeat,
+        observe=observe,
+        task_ledger=task_ledger,
+    )
     browser = DevBrowserService(
         dev_browser_path=config.dev_browser_path,
         browsers_path=config.dev_browser_browsers_path,
@@ -677,7 +687,17 @@ def _setup_scheduler(
     pipeline: PipelineService,
     startup_health: StartupHealthReport,
 ) -> tuple[CronScheduler, AutoDreamService, WikiService, SkillRegistry, A2AService]:
-    scheduler = CronScheduler(persistence=memory)
+    def _cron_error_sink(job: ScheduledJob, exc: BaseException) -> None:
+        observe.emit(
+            "scheduled_job_error",
+            payload={
+                "job": job.name,
+                "error": str(exc)[:500],
+                "metadata": job.metadata,
+            },
+        )
+
+    scheduler = CronScheduler(persistence=memory, error_sink=_cron_error_sink)
     skipped_capabilities = startup_health.degraded_capabilities()
 
     def _skip_for(*capabilities: str) -> Callable[[], str | None]:
@@ -808,8 +828,37 @@ def _setup_scheduler(
                     ),
                 },
             )
+        state = auto_research.inspect(agent_name)
+        if state.get("paused"):
+            observe.emit(
+                "perf_optimizer_skipped",
+                payload={
+                    "agent": agent_name,
+                    "reason": state.get("pause_reason") or state.get("last_action") or "paused",
+                    "last_error": state.get("last_error", ""),
+                    "consecutive_failures": state.get("consecutive_failures", 0),
+                },
+            )
+            return
         result = auto_research.run_loop(agent_name, max_experiments=3)
-        observe.emit("perf_optimizer_done", payload={"experiments": result.experiments_run, "metric": result.last_metric})
+        if result.paused:
+            observe.emit(
+                "perf_optimizer_paused",
+                payload={
+                    "experiments": result.experiments_run,
+                    "reason": result.reason,
+                    "metric": result.last_metric,
+                },
+            )
+            return
+        observe.emit(
+            "perf_optimizer_done",
+            payload={
+                "experiments": result.experiments_run,
+                "metric": result.last_metric,
+                "reason": result.reason,
+            },
+        )
 
     scheduler.register(ScheduledJob(name="heartbeat", interval_seconds=config.heartbeat_interval, handler=heartbeat.emit))
     scheduler.register(ScheduledJob(name="kairos_tick", interval_seconds=600, handler=kairos.tick))
@@ -841,7 +890,7 @@ def _setup_scheduler(
         )
     )
 
-    wiki = WikiService(router=router)
+    wiki = WikiService(router=router, observe=observe)
     bot.wiki = wiki
     kairos.wiki = wiki
     scheduler.register(ScheduledJob(name="wiki_lint", interval_seconds=86400, handler=wiki.lint))

@@ -4,9 +4,10 @@ import json
 import re
 import shutil
 import subprocess
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from claw_v2.approval import ApprovalManager
 from claw_v2.github import GitHubPullRequestService
@@ -47,6 +48,7 @@ class PipelineService:
         state_root: Path | None = None,
         memory: MemoryStore | None = None,
         learning: LearningLoop | None = None,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         self.linear = linear
         self.router = router
@@ -59,6 +61,9 @@ class PipelineService:
         self.state_root.mkdir(parents=True, exist_ok=True)
         self.memory = memory
         self.learning = learning
+        self.clock = clock or time.time
+        self._linear_poll_failures = 0
+        self._linear_poll_backoff_until = 0.0
         cleanup_stale_worktrees(default_repo_root)
 
     def process_issue(self, issue_id: str, *, repo_root: Path | None = None) -> PipelineRun:
@@ -189,24 +194,38 @@ class PipelineService:
 
     def poll_merges(self) -> list[PipelineRun]:
         """Check all pr_created runs and close those whose PRs have been merged externally."""
+        if self._linear_poll_backed_off("pipeline_poll_merges"):
+            return []
         closed: list[PipelineRun] = []
-        for path in sorted(self.state_root.glob("*.json")):
-            run = self._load_run_from_path(path)
-            if run.status != "pr_created" or not run.pr_url:
-                continue
-            pr_number = _parse_pr_number_from_url(run.pr_url)
-            if pr_number is None:
-                continue
-            state = self.pull_requests.get_pr_state(pr_number)
-            if state == "MERGED":
-                run.status = "done"
-                self.linear.update_status(run.issue_id, "Done")
-                self._save_run(run)
-                closed.append(run)
+        try:
+            for path in sorted(self.state_root.glob("*.json")):
+                run = self._load_run_from_path(path)
+                if run.status != "pr_created" or not run.pr_url:
+                    continue
+                pr_number = _parse_pr_number_from_url(run.pr_url)
+                if pr_number is None:
+                    continue
+                state = self.pull_requests.get_pr_state(pr_number)
+                if state == "MERGED":
+                    run.status = "done"
+                    self.linear.update_status(run.issue_id, "Done")
+                    self._save_run(run)
+                    closed.append(run)
+        except Exception as exc:
+            self._record_linear_poll_failure("pipeline_poll_merges", exc)
+            return []
+        self._record_linear_poll_success()
         return closed
 
     def poll_actionable(self) -> list[PipelineRun]:
-        issues = self.linear.list_actionable()
+        if self._linear_poll_backed_off("pipeline_poll"):
+            return []
+        try:
+            issues = self.linear.list_actionable()
+        except Exception as exc:
+            self._record_linear_poll_failure("pipeline_poll", exc)
+            return []
+        self._record_linear_poll_success()
         runs: list[PipelineRun] = []
         for issue in issues:
             existing = self._try_load_run(issue.id)
@@ -215,6 +234,42 @@ class PipelineService:
             run = self.process_issue(issue.id)
             runs.append(run)
         return runs
+
+    def _linear_poll_backed_off(self, poller: str) -> bool:
+        now = self.clock()
+        if now >= self._linear_poll_backoff_until:
+            return False
+        if self.observe:
+            self.observe.emit(
+                "pipeline_poll_skipped",
+                payload={
+                    "poller": poller,
+                    "reason": "linear_backoff",
+                    "retry_after_seconds": round(self._linear_poll_backoff_until - now, 3),
+                    "consecutive_failures": self._linear_poll_failures,
+                },
+            )
+        return True
+
+    def _record_linear_poll_failure(self, poller: str, exc: BaseException) -> None:
+        self._linear_poll_failures += 1
+        backoff_seconds = min(3600.0, 300.0 * (2 ** max(0, self._linear_poll_failures - 1)))
+        self._linear_poll_backoff_until = self.clock() + backoff_seconds
+        if self.observe:
+            self.observe.emit(
+                "pipeline_poll_degraded",
+                payload={
+                    "poller": poller,
+                    "reason": _classify_external_error(exc),
+                    "error": str(exc)[:500],
+                    "consecutive_failures": self._linear_poll_failures,
+                    "backoff_seconds": backoff_seconds,
+                },
+            )
+
+    def _record_linear_poll_success(self) -> None:
+        self._linear_poll_failures = 0
+        self._linear_poll_backoff_until = 0.0
 
     def list_active(self) -> list[PipelineRun]:
         active: list[PipelineRun] = []
@@ -267,6 +322,17 @@ def _validate_branch_name(branch: str) -> str:
 def _slugify_branch(issue_id: str, title: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:40]
     return f"feat/{issue_id.lower()}-{slug}"
+
+
+def _classify_external_error(exc: BaseException) -> str:
+    text = f"{type(exc).__name__}: {exc}".lower()
+    if "timeout" in text or "timed out" in text:
+        return "timeout"
+    if "rate" in text or "429" in text:
+        return "rate_limited"
+    if "unauthorized" in text or "forbidden" in text or "401" in text or "403" in text:
+        return "auth"
+    return "external_error"
 
 
 def _build_code_prompt(issue: LinearIssue, run: PipelineRun, *, past_lessons: str = "") -> str:

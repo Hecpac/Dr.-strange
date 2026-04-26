@@ -3,7 +3,9 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock
 
+from claw_v2.adapters.base import AdapterError
 from claw_v2.agents import AgentDefinition, AutoResearchAgentService, ExperimentRecord, FileAgentStore, StagnationDetector, SubAgentService
 from claw_v2.eval_mocks import build_test_router, scripted_experiment_runner
 
@@ -75,6 +77,57 @@ class AgentServiceTests(unittest.TestCase):
             self.assertTrue(result.paused)
             self.assertEqual(result.reason, "stagnating")
             self.assertTrue(service.status("deployer-1").paused)
+
+    def test_run_loop_pauses_and_records_adapter_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = make_config(root)
+            router = build_test_router(config)
+            store = FileAgentStore(config.agent_state_root)
+            observe = MagicMock()
+            calls = 0
+
+            def failing_runner(agent_name: str, experiment_number: int, state: dict) -> ExperimentRecord:
+                nonlocal calls
+                calls += 1
+                raise AdapterError("Codex CLI timed out after 120.0s")
+
+            service = AutoResearchAgentService(
+                router=router,
+                store=store,
+                experiment_runner=failing_runner,
+                observe=observe,
+            )
+            service.create_agent(AgentDefinition(name="operator-timeout", agent_class="operator", instruction="Improve"))
+
+            result = service.run_loop("operator-timeout", max_experiments=3)
+
+            self.assertEqual(result.experiments_run, 0)
+            self.assertTrue(result.paused)
+            self.assertEqual(result.reason, "codex_timeout")
+            state = service.inspect("operator-timeout")
+            self.assertTrue(state["paused"])
+            self.assertEqual(state["pause_reason"], "codex_timeout")
+            self.assertEqual(state["consecutive_failures"], 1)
+            self.assertIn("Codex CLI timed out", state["last_error"])
+            observe.emit.assert_called_once()
+            event_type = observe.emit.call_args.args[0]
+            payload = observe.emit.call_args.kwargs["payload"]
+            self.assertEqual(event_type, "auto_research_adapter_error")
+            self.assertEqual(payload["agent"], "operator-timeout")
+            self.assertEqual(payload["reason"], "codex_timeout")
+
+            paused_result = service.run_loop("operator-timeout", max_experiments=3)
+            self.assertEqual(paused_result.experiments_run, 0)
+            self.assertEqual(paused_result.reason, "codex_timeout")
+            self.assertEqual(calls, 1)
+
+            service.resume("operator-timeout")
+            service.experiment_runner = scripted_experiment_runner([ExperimentRecord(1, 0.2, 0.1, "improved")])
+            recovered = service.run_loop("operator-timeout", max_experiments=1)
+            self.assertEqual(recovered.reason, "completed")
+            self.assertFalse(recovered.paused)
+            self.assertEqual(service.inspect("operator-timeout")["consecutive_failures"], 0)
 
     def test_update_controls_persists_promotion_settings(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

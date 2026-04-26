@@ -3,18 +3,24 @@ from __future__ import annotations
 import csv
 import filecmp
 import json
+import logging
 import re
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from claw_v2.adapters.base import AdapterError
 from claw_v2.brain import BrainService
 from claw_v2.llm import LLMRouter
 from claw_v2.tools import default_allowed_tools_for, is_valid_agent_class
 
 _UNSET = object()
+_ERROR_SNIPPET_CHARS = 500
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -189,11 +195,13 @@ class AutoResearchAgentService:
         store: FileAgentStore,
         experiment_runner: Callable[[str, int, dict], ExperimentRecord],
         detector: StagnationDetector | None = None,
+        observe: Any | None = None,
     ) -> None:
         self.router = router
         self.store = store
         self.experiment_runner = experiment_runner
         self.detector = detector or StagnationDetector()
+        self.observe = observe
 
     def create_agent(
         self,
@@ -223,6 +231,8 @@ class AutoResearchAgentService:
             "trust_level": 1,
             "experiments_today": 0,
             "paused": False,
+            "pause_reason": "",
+            "consecutive_failures": 0,
             "last_verified_state": {"metric": None},
         }
         if state:
@@ -239,17 +249,33 @@ class AutoResearchAgentService:
         )
         return response.content
 
-    def run_loop(self, agent_name: str, max_experiments: int) -> LoopResult:
+    def run_loop(self, agent_name: str, max_experiments: int, *, force: bool = False) -> LoopResult:
         state = self.store.load_state(agent_name)
-        state["paused"] = False
-        self.store.save_state(agent_name, state)
         history = self.store.load_history(agent_name)
         last_metric = state.get("last_verified_state", {}).get("metric")
+        if state.get("paused"):
+            if not force:
+                return LoopResult(0, True, _pause_reason(state), last_metric)
+            state["paused"] = False
+            state["pause_reason"] = ""
+            state["last_action"] = "resumed_for_run"
+            self.store.save_state(agent_name, state)
         for experiment_number in range(1, max_experiments + 1):
-            record = self.experiment_runner(agent_name, experiment_number, state)
+            try:
+                record = self.experiment_runner(agent_name, experiment_number, state)
+            except AdapterError as exc:
+                return self._record_adapter_failure(
+                    agent_name,
+                    state,
+                    experiments_run=experiment_number - 1,
+                    last_metric=last_metric,
+                    exc=exc,
+                )
             self.store.append_result(agent_name, record)
             history.append(record)
             last_metric = record.metric_value
+            state["consecutive_failures"] = 0
+            state.pop("pause_reason", None)
             state["experiments_today"] = state.get("experiments_today", 0) + 1
             state["last_verified_state"] = {"metric": record.metric_value}
             state["last_action"] = f"experiment_{experiment_number}:{record.status}"
@@ -262,17 +288,40 @@ class AutoResearchAgentService:
                 return LoopResult(experiment_number, True, "stagnating", record.metric_value)
         return LoopResult(max_experiments, False, "completed", last_metric)
 
-    def run_until(self, agent_name: str, *, max_experiments: int, target_metric: float) -> LoopResult:
+    def run_until(
+        self,
+        agent_name: str,
+        *,
+        max_experiments: int,
+        target_metric: float,
+        force: bool = False,
+    ) -> LoopResult:
         state = self.store.load_state(agent_name)
-        state["paused"] = False
-        self.store.save_state(agent_name, state)
         history = self.store.load_history(agent_name)
         last_metric = state.get("last_verified_state", {}).get("metric")
+        if state.get("paused"):
+            if not force:
+                return LoopResult(0, True, _pause_reason(state), last_metric)
+            state["paused"] = False
+            state["pause_reason"] = ""
+            state["last_action"] = "resumed_for_run"
+            self.store.save_state(agent_name, state)
         for experiment_number in range(1, max_experiments + 1):
-            record = self.experiment_runner(agent_name, experiment_number, state)
+            try:
+                record = self.experiment_runner(agent_name, experiment_number, state)
+            except AdapterError as exc:
+                return self._record_adapter_failure(
+                    agent_name,
+                    state,
+                    experiments_run=experiment_number - 1,
+                    last_metric=last_metric,
+                    exc=exc,
+                )
             self.store.append_result(agent_name, record)
             history.append(record)
             last_metric = record.metric_value
+            state["consecutive_failures"] = 0
+            state.pop("pause_reason", None)
             state["experiments_today"] = state.get("experiments_today", 0) + 1
             state["last_verified_state"] = {"metric": record.metric_value}
             state["last_action"] = f"experiment_{experiment_number}:{record.status}"
@@ -315,19 +364,60 @@ class AutoResearchAgentService:
             return None
         return history[-1]
 
-    def pause(self, agent_name: str) -> dict:
+    def pause(self, agent_name: str, *, reason: str = "manual", error: str | None = None) -> dict:
         state = self.store.load_state(agent_name)
         state["paused"] = True
-        state["last_action"] = "paused"
+        state["pause_reason"] = reason
+        state["last_action"] = f"paused:{reason}" if reason else "paused"
+        if error:
+            state["last_error"] = error[:_ERROR_SNIPPET_CHARS]
+            state["last_error_at"] = time.time()
         self.store.save_state(agent_name, state)
         return state
 
     def resume(self, agent_name: str) -> dict:
         state = self.store.load_state(agent_name)
         state["paused"] = False
+        state["pause_reason"] = ""
+        state["consecutive_failures"] = 0
         state["last_action"] = "resumed"
         self.store.save_state(agent_name, state)
         return state
+
+    def _record_adapter_failure(
+        self,
+        agent_name: str,
+        state: dict,
+        *,
+        experiments_run: int,
+        last_metric: float | None,
+        exc: AdapterError,
+    ) -> LoopResult:
+        reason = _classify_adapter_error(exc)
+        error = str(exc)[:_ERROR_SNIPPET_CHARS]
+        failures = int(state.get("consecutive_failures") or 0) + 1
+        state["paused"] = True
+        state["pause_reason"] = reason
+        state["consecutive_failures"] = failures
+        state["last_error"] = error
+        state["last_error_type"] = type(exc).__name__
+        state["last_error_at"] = time.time()
+        state["last_action"] = f"paused:{reason}"
+        self.store.save_state(agent_name, state)
+        payload = {
+            "agent": agent_name,
+            "reason": reason,
+            "error": error,
+            "consecutive_failures": failures,
+            "experiments_run": experiments_run,
+        }
+        if self.observe is not None:
+            try:
+                self.observe.emit("auto_research_adapter_error", payload=payload)
+            except Exception:
+                logger.exception("auto_research failure event emit failed for %s", agent_name)
+        logger.warning("auto_research agent %s paused after adapter failure: %s", agent_name, error)
+        return LoopResult(experiments_run, True, reason, last_metric)
 
     def update_controls(
         self,
@@ -1107,3 +1197,24 @@ def _validate_branch_name(name: str) -> None:
         raise ValueError("promotion_branch_name is not a valid git branch name")
     if any(char in name for char in " ~^:?*[\\"):
         raise ValueError("promotion_branch_name is not a valid git branch name")
+
+
+def _pause_reason(state: dict) -> str:
+    reason = str(state.get("pause_reason") or "").strip()
+    if reason:
+        return reason
+    last_action = str(state.get("last_action") or "").strip()
+    return last_action or "paused"
+
+
+def _classify_adapter_error(exc: AdapterError) -> str:
+    text = str(exc).lower()
+    if "codex cli timed out" in text:
+        return "codex_timeout"
+    if "timed out" in text or "timeout" in text:
+        return "provider_timeout"
+    if "rate_limited" in text or "rate limit" in text or "429" in text:
+        return "provider_rate_limited"
+    if "authentication" in text or "not authenticated" in text or "login" in text:
+        return "provider_auth"
+    return "adapter_error"
