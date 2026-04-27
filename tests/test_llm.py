@@ -314,6 +314,164 @@ class LLMRouterTests(unittest.TestCase):
             from claw_v2.adapters.codex import CodexAdapter
             self.assertIsInstance(router.adapters["codex"], CodexAdapter)
 
+    def test_fallback_post_hooks_receive_fallback_request(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+
+            def failing(_: LLMRequest) -> LLMResponse:
+                raise AdapterUnavailableError("provider unavailable")
+
+            def fallback(request: LLMRequest) -> LLMResponse:
+                return LLMResponse(
+                    content="ok", lane=request.lane,
+                    provider="anthropic", model=request.model,
+                )
+
+            seen: dict = {}
+
+            def post_hook(req: LLMRequest, response: LLMResponse) -> LLMResponse:
+                seen["provider"] = req.provider
+                seen["model"] = req.model
+                return response
+
+            router = LLMRouter(
+                config=config,
+                adapters={
+                    "openai": StaticAdapter("openai", tool_capable=False, responder=failing),
+                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=fallback),
+                },
+            )
+            router.post_hooks.append(post_hook)
+            router.ask("verify", lane="verifier", evidence_pack={"diff": "x"})
+
+            self.assertEqual(seen["provider"], "anthropic")
+
+    def test_fallback_audit_uses_fallback_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+
+            def failing(_: LLMRequest) -> LLMResponse:
+                raise AdapterUnavailableError("provider unavailable")
+
+            def fallback(request: LLMRequest) -> LLMResponse:
+                return LLMResponse(
+                    content="ok", lane=request.lane,
+                    provider="anthropic", model=request.model,
+                )
+
+            audit_log: list[dict] = []
+            router = LLMRouter(
+                config=config,
+                adapters={
+                    "openai": StaticAdapter("openai", tool_capable=False, responder=failing),
+                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=fallback),
+                },
+                audit_sink=audit_log.append,
+            )
+            router.ask("verify", lane="verifier", evidence_pack={"diff": "x"})
+
+            fallback_events = [e for e in audit_log if e["action"] == "llm_fallback"]
+            self.assertEqual(len(fallback_events), 1)
+            event = fallback_events[0]
+            self.assertEqual(event["provider"], "anthropic")
+            self.assertEqual(event["metadata"]["fallback_provider"], "anthropic")
+
+    def test_fallback_post_hooks_symmetric(self) -> None:
+        for primary, fallback_provider in (("openai", "anthropic"), ("anthropic", "openai")):
+            with self.subTest(primary=primary, fallback=fallback_provider):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    config = make_config(Path(tmpdir))
+
+                    def failing(_: LLMRequest) -> LLMResponse:
+                        raise AdapterUnavailableError("provider unavailable")
+
+                    def fallback(request: LLMRequest, fb=fallback_provider) -> LLMResponse:
+                        return LLMResponse(
+                            content="ok", lane=request.lane,
+                            provider=fb, model=request.model,
+                        )
+
+                    seen: dict = {}
+
+                    def post_hook(req: LLMRequest, response: LLMResponse) -> LLMResponse:
+                        seen["provider"] = req.provider
+                        return response
+
+                    router = LLMRouter(
+                        config=config,
+                        adapters={
+                            primary: StaticAdapter(primary, tool_capable=False, responder=failing),
+                            fallback_provider: StaticAdapter(fallback_provider, tool_capable=True, responder=fallback),
+                        },
+                    )
+                    router.post_hooks.append(post_hook)
+                    router.ask("verify", lane="verifier", evidence_pack={"diff": "x"}, provider=primary)
+
+                    self.assertEqual(seen["provider"], fallback_provider)
+
+    def test_pre_hook_blocked_is_audited(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+
+            def block(_request: LLMRequest) -> None:
+                return None
+
+            block.__name__ = "test_block"
+
+            audit_log: list[dict] = []
+            router = LLMRouter(
+                config=config,
+                adapters={
+                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=echo_response("anthropic")),
+                },
+                audit_sink=audit_log.append,
+            )
+            router.pre_hooks.append(block)
+            response = router.ask("hola", lane="brain")
+
+            self.assertEqual(response.provider, "none")
+            blocked_events = [e for e in audit_log if e["action"] == "llm_pre_hook_blocked"]
+            self.assertEqual(len(blocked_events), 1)
+            self.assertEqual(blocked_events[0]["metadata"]["blocked_by"], "test_block")
+
+    def test_router_uses_provider_after_pre_hook_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+
+            def primary(request: LLMRequest) -> LLMResponse:
+                return LLMResponse(
+                    content="from anthropic",
+                    lane=request.lane,
+                    provider="anthropic",
+                    model=request.model,
+                )
+
+            def secondary(request: LLMRequest) -> LLMResponse:
+                return LLMResponse(
+                    content="from openai",
+                    lane=request.lane,
+                    provider="openai",
+                    model=request.model,
+                )
+
+            router = LLMRouter(
+                config=config,
+                adapters={
+                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=primary),
+                    "openai": StaticAdapter("openai", tool_capable=True, responder=secondary),
+                },
+            )
+
+            def reroute_to_openai(request: LLMRequest) -> LLMRequest:
+                request.provider = "openai"
+                return request
+
+            router.pre_hooks.append(reroute_to_openai)
+            response = router.ask("hi", lane="brain", provider="anthropic")
+
+            self.assertEqual(response.provider, "openai")
+            self.assertEqual(response.content, "from openai")
+
 
 if __name__ == "__main__":
     unittest.main()

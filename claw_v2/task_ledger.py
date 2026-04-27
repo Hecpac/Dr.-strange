@@ -8,6 +8,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
+from claw_v2.task_completion import COMPLETION_CANDIDATES, validate_completion
+
 
 TERMINAL_STATUSES = frozenset({"succeeded", "failed", "timed_out", "cancelled", "lost"})
 VALID_STATUSES = frozenset({"queued", "running", *TERMINAL_STATUSES})
@@ -178,6 +180,35 @@ class TaskLedger:
     ) -> TaskRecord | None:
         if status not in TERMINAL_STATUSES:
             raise ValueError(f"terminal status required, got {status!r}")
+        if status in COMPLETION_CANDIDATES:
+            decision = validate_completion(
+                {
+                    "status": status,
+                    "verification_status": verification_status,
+                    "summary": summary,
+                    "artifacts": dict(artifacts or {}),
+                    "evidence": dict((artifacts or {}).get("evidence") or {}),
+                }
+            )
+            if decision.final_status != "succeeded":
+                self._emit(
+                    "task_false_success_prevented",
+                    {
+                        "task_id": task_id,
+                        "requested_status": status,
+                        "final_status": decision.final_status,
+                        "verification_status": decision.verification_status,
+                        "reason": decision.reason,
+                        "missing_evidence": list(decision.missing_evidence),
+                    },
+                )
+                return self.mark_running_checkpoint(
+                    task_id,
+                    summary=summary,
+                    error=error or f"completion blocked: {decision.reason}",
+                    verification_status=decision.verification_status or "missing_evidence",
+                    artifacts=artifacts,
+                )
         now = time.time()
         with self._lock:
             self._conn.execute(

@@ -11,6 +11,7 @@ from claw_v2.adapters.base import (
     AdapterUnavailableError,
     LLMRequest,
     ProviderAdapter,
+    StreamInterruptedError,
     build_effective_input,
     build_effective_system_prompt,
     coerce_usage_dict,
@@ -47,7 +48,34 @@ class OpenAIAdapter(ProviderAdapter):
 
     def complete(self, request: LLMRequest) -> LLMResponse:
         if self._transport is not None:
-            return self._transport(request)
+            try:
+                return self._transport(request)
+            except AdapterError as exc:
+                if not _is_stale_previous_response_error(exc):
+                    raise
+                if not request.session_id:
+                    raise
+                stale = request.session_id
+                fresh_request = _request_without_session(request)
+                response = self._transport(fresh_request)
+                response.artifacts["session_recovery"] = "previous_response_id_reset"
+                response.artifacts["stale_session_id"] = stale
+                return response
+        try:
+            return self._complete_via_sdk(request)
+        except AdapterError as exc:
+            if not _is_stale_previous_response_error(exc):
+                raise
+            if not request.session_id:
+                raise
+            stale = request.session_id
+            fresh_request = _request_without_session(request)
+            response = self._complete_via_sdk(fresh_request)
+            response.artifacts["session_recovery"] = "previous_response_id_reset"
+            response.artifacts["stale_session_id"] = stale
+            return response
+
+    def _complete_via_sdk(self, request: LLMRequest) -> LLMResponse:
         sdk = self._load_sdk()
         client = sdk.OpenAI(api_key=self._api_key) if self._api_key else sdk.OpenAI()
         try:
@@ -83,6 +111,11 @@ class OpenAIAdapter(ProviderAdapter):
         except AdapterError:
             raise
         except Exception as exc:
+            if _is_stream_idle_error(exc):
+                raise StreamInterruptedError(
+                    f"OpenAI stream interrupted: {exc}",
+                    partial_output=_extract_partial_output(exc),
+                ) from exc
             raise AdapterError(f"OpenAI Responses request failed: {exc}") from exc
 
         return self._build_response(response, request)
@@ -164,6 +197,49 @@ _REASONING_MODELS = {"o3", "o3-mini", "o4-mini", "gpt-5.5", "gpt-5.4", "gpt-5.4-
 
 def _supports_reasoning(model: str) -> bool:
     return any(model.startswith(prefix) for prefix in _REASONING_MODELS)
+
+
+_STREAM_IDLE_MARKERS = (
+    "stream idle timeout",
+    "partial response received",
+    "stream_idle_timeout",
+    "incomplete chunked read",
+    "stream interrupted",
+)
+
+
+def _is_stream_idle_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(marker in text for marker in _STREAM_IDLE_MARKERS)
+
+
+def _extract_partial_output(exc: Exception) -> str:
+    partial = getattr(exc, "partial_output", None)
+    if isinstance(partial, str):
+        return partial
+    return ""
+
+
+_STALE_PREVIOUS_RESPONSE_MARKERS = (
+    "previous_response_not_found",
+    "invalid 'previous_response_id'",
+    "invalid previous_response_id",
+    "previous response with id",
+    "previous_response_id cannot be resolved",
+)
+
+
+def _is_stale_previous_response_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(marker in text for marker in _STALE_PREVIOUS_RESPONSE_MARKERS)
+
+
+def _request_without_session(request: LLMRequest) -> LLMRequest:
+    from dataclasses import replace
+    evidence = dict(request.evidence_pack or {})
+    evidence["session_recovery"] = "openai_previous_response_id_reset"
+    evidence["stale_session_id"] = request.session_id
+    return replace(request, session_id=None, evidence_pack=evidence)
 
 
 def _valid_previous_response_id(session_id: str | None) -> str | None:

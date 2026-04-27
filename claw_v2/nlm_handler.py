@@ -61,8 +61,19 @@ class NlmHandler:
             if response.startswith("Error"):
                 recorder.fail(response)
             else:
-                recorder.succeed(response)
+                recorder.succeed(response, evidence=self._evidence_for_intent(session_id, intent, response))
             return response
+
+    def _evidence_for_intent(self, session_id: str, intent: str, response: str) -> dict[str, Any]:
+        notebook = self._active_notebooks.get(session_id) or {}
+        evidence: dict[str, Any] = {"handler_result": response[:1000]}
+        if notebook.get("id"):
+            evidence["notebook_id"] = notebook["id"]
+        if notebook.get("title"):
+            evidence["notebook_title"] = notebook["title"]
+        if intent == "review_latest":
+            evidence["review_summary"] = response[:1000]
+        return evidence
 
     def _classify_intent(self, text: str) -> str | None:
         if _looks_like_recent_notebook_review(text):
@@ -114,7 +125,7 @@ class NlmHandler:
                 status="running",
                 metadata={"intent": intent},
             )
-            recorder.bind(task_id)
+            recorder.bind(task_id, intent=intent)
         except Exception:
             logger.debug("nlm task ledger create failed", exc_info=True)
         try:
@@ -284,17 +295,52 @@ class NlmHandler:
         return notebook["id"]
 
 
+_NLM_INTENT_TO_TASK_KIND: dict[str, str] = {
+    "create_notebook": "notebooklm_create",
+    "review_latest": "notebooklm_review",
+}
+
+
 class _NlmTaskRecorder:
     def __init__(self, task_ledger: Any | None) -> None:
         self._task_ledger = task_ledger
         self._task_id: str | None = None
+        self._intent: str | None = None
         self._finalized = False
 
-    def bind(self, task_id: str) -> None:
+    def bind(self, task_id: str, *, intent: str | None = None) -> None:
         self._task_id = task_id
+        self._intent = intent
 
-    def succeed(self, summary: str) -> None:
-        self._mark("succeeded", verification_status="passed", summary=summary[:1000])
+    def succeed(self, summary: str, *, evidence: dict[str, Any] | None = None) -> None:
+        from claw_v2.verification_profiles import verify_profile_evidence
+
+        evidence_dict = dict(evidence or {"handler_result": summary[:1000]})
+        task_kind = _NLM_INTENT_TO_TASK_KIND.get(self._intent or "")
+        if task_kind is not None:
+            decision = verify_profile_evidence(task_kind=task_kind, evidence=evidence_dict)
+            if decision.status == "passed":
+                self._mark(
+                    "succeeded",
+                    verification_status="passed",
+                    summary=summary[:1000],
+                    artifacts=evidence_dict,
+                )
+                return
+            self._mark(
+                "succeeded" if decision.status == "blocked" else "failed",
+                verification_status=decision.status,
+                summary=summary[:1000],
+                artifacts=evidence_dict,
+                error=";".join(decision.missing_evidence) if decision.missing_evidence else "",
+            )
+            return
+        self._mark(
+            "succeeded",
+            verification_status="passed",
+            summary=summary[:1000],
+            artifacts=evidence_dict,
+        )
 
     def fail(self, error: str) -> None:
         self._mark("failed", verification_status="failed", error=error[:1000])
@@ -307,7 +353,15 @@ class _NlmTaskRecorder:
             return
         self._mark("failed", verification_status="failed", error="task_finalized_without_outcome")
 
-    def _mark(self, status: str, *, verification_status: str, summary: str = "", error: str = "") -> None:
+    def _mark(
+        self,
+        status: str,
+        *,
+        verification_status: str,
+        summary: str = "",
+        error: str = "",
+        artifacts: dict[str, Any] | None = None,
+    ) -> None:
         if self._finalized or self._task_ledger is None or self._task_id is None:
             self._finalized = True
             return
@@ -318,6 +372,7 @@ class _NlmTaskRecorder:
                 summary=summary,
                 error=error,
                 verification_status=verification_status,
+                artifacts=artifacts,
             )
         except Exception:
             logger.debug("nlm task ledger mark_terminal failed", exc_info=True)

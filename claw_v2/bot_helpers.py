@@ -580,6 +580,22 @@ def _coordinator_checkpoint(result: CoordinatorResult, *, objective: str) -> dic
         "summary": summary,
         "verification_status": verification_status,
     }
+
+    structured = _coordinator_result_to_structured(
+        result,
+        objective=objective,
+        verification_status=verification_status,
+        pending_action=pending_action,
+        implementation_error=implementation_error,
+    )
+    semantic_errors = _validate_structured_semantics(structured)
+    if semantic_errors:
+        checkpoint["coordinator_semantic_errors"] = ";".join(semantic_errors)
+        if verification_status == "passed":
+            verification_status = "pending"
+            checkpoint["verification_status"] = "pending"
+    checkpoint["coordinator_result"] = structured
+
     if pending_action:
         checkpoint["pending_action"] = pending_action
     elif implementation_error:
@@ -589,6 +605,89 @@ def _coordinator_checkpoint(result: CoordinatorResult, *, objective: str) -> dic
     elif implementation_error:
         checkpoint["error"] = implementation_error
     return checkpoint
+
+
+def _coordinator_result_to_structured(
+    result: CoordinatorResult,
+    *,
+    objective: str,
+    verification_status: str,
+    pending_action: str | None,
+    implementation_error: str,
+) -> dict[str, Any]:
+    from claw_v2.coordinator_schema import coerce_unstructured_coordinator_output
+
+    actions: list[dict[str, str]] = []
+    for phase, items in result.phase_results.items():
+        for item in items:
+            if item.error:
+                continue
+            if not getattr(item, "content", None):
+                continue
+            actions.append({
+                "agent": "coordinator",
+                "action": str(getattr(item, "task_name", phase)),
+                "tool": str(phase),
+                "result": str(item.content)[:500],
+            })
+
+    evidence: list[dict[str, str]] = []
+    if verification_status == "passed" and not implementation_error:
+        # Only implementation phase counts as concrete evidence.
+        # Verification phase output is a check, not the artifact itself —
+        # treat it as a verification check, not evidence.
+        for item in result.phase_results.get("implementation", []):
+            if item.error or not getattr(item, "content", None):
+                continue
+            evidence.append({
+                "type": "implementation",
+                "name": str(getattr(item, "task_name", "implementation")),
+                "value": str(item.content)[:500],
+            })
+
+    blockers: list[str] = []
+    if result.error:
+        blockers.append(f"coordinator_error: {result.error}")
+    if implementation_error:
+        blockers.append(f"implementation_error: {implementation_error}")
+
+    if not actions and not evidence:
+        coerced = coerce_unstructured_coordinator_output(result.synthesis or objective)
+        coerced["task_kind"] = "coordinator_unstructured"
+        coerced["blockers"] = blockers + coerced["blockers"]
+        return coerced
+
+    status_map = {
+        "passed": "executed",
+        "failed": "failed",
+        "blocked": "blocked",
+        "pending": "pending",
+        "awaiting_approval": "blocked",
+    }
+    status = status_map.get(verification_status, "pending")
+    if blockers and status == "executed":
+        status = "blocked"
+
+    return {
+        "status": status,
+        "task_kind": "coordinator",
+        "actions_taken": actions,
+        "evidence": evidence,
+        "changed_files": [],
+        "verification": {
+            "status": verification_status if verification_status in {"passed", "pending", "failed", "blocked"} else "pending",
+            "checks": [],
+        },
+        "blockers": blockers,
+        "next_user_action": pending_action,
+        "summary_for_user": (result.synthesis or objective)[:1000],
+    }
+
+
+def _validate_structured_semantics(structured: dict[str, Any]) -> list[str]:
+    from claw_v2.coordinator_schema import validate_coordinator_semantics
+
+    return validate_coordinator_semantics(structured)
 
 
 def _format_worker_results(results: list[Any]) -> str:

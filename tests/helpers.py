@@ -43,6 +43,8 @@ def make_config(root: Path) -> AppConfig:
         agent_definitions_root=root / "agent_definitions",
         eval_artifacts_root=root / "evals",
         eval_on_self_improve=True,
+        self_improve_test_timeout_seconds=600,
+        autonomous_maintenance_enabled=True,
         use_compaction=False,
         cache_prefix_ttl=3600,
         allowed_paths=[],

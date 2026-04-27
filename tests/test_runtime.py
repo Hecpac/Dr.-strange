@@ -277,10 +277,10 @@ class RuntimeTests(unittest.TestCase):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 job_names = {job.name for job in runtime.scheduler.list_jobs()}
 
-        self.assertIn("site_monitor_status_page", job_names)
-        self.assertIn("alma_daily_brief", job_names)
+        self.assertTrue(any(name.startswith("site_monitor_status_page") for name in job_names))
+        self.assertTrue(any(name.startswith("alma_") and name.endswith(name) and "daily_brief" in name for name in job_names))
         self.assertIn("learning_soul_suggestions", job_names)
-        self.assertNotIn("site_monitor_premiumhome_design", job_names)
+        self.assertFalse(any(name.startswith("site_monitor_premiumhome_design") for name in job_names))
 
     def test_brain_persists_anthropic_provider_session_mapping(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

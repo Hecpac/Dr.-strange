@@ -12,9 +12,37 @@ from claw_v2.types import Lane, LLMResponse
 class AdapterError(RuntimeError):
     """Base error for provider adapter failures."""
 
+    def __init__(self, message: str, *, metadata: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.metadata: dict[str, Any] = dict(metadata or {})
+
 
 class AdapterUnavailableError(AdapterError):
     """Raised when a provider adapter cannot be used in the current environment."""
+
+
+class StreamInterruptedError(AdapterError):
+    """Raised when the provider stream was cut off mid-response (idle/timeout)."""
+
+    def __init__(
+        self,
+        message: str = "stream_interrupted",
+        *,
+        partial_output: str = "",
+        retryable: bool = True,
+        reason: str = "stream_idle_timeout",
+    ) -> None:
+        super().__init__(
+            message,
+            metadata={
+                "reason": reason,
+                "partial_output": partial_output[:4000],
+                "retryable": retryable,
+            },
+        )
+        self.partial_output = partial_output
+        self.retryable = retryable
+        self.reason = reason
 
 
 UserContentBlock = dict[str, Any]

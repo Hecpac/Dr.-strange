@@ -142,6 +142,380 @@ class BotTests(unittest.TestCase):
                 self.assertGreaterEqual(replay["event_count"], 1)
                 self.assertTrue(any(event["event_type"] == "llm_response" for event in replay["events"]))
 
+    def test_trace_replay_redacts_sensitive_payloads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                trace_id = "trace-redact-test"
+                runtime.observe.emit(
+                    "synthetic_secret",
+                    lane="brain",
+                    provider="anthropic",
+                    model="test",
+                    trace_id=trace_id,
+                    payload={"note": "user typed /approve abc-123 secret-token-xyz to confirm"},
+                )
+                replay = runtime.bot.handle_text(user_id="123", session_id="s1", text=f"/trace {trace_id}")
+                self.assertNotIn("secret-token-xyz", replay)
+                self.assertIn("[REDACTED]", replay)
+
+    def test_social_publish_requires_approval_before_publishing(self) -> None:
+        from unittest.mock import MagicMock
+        from claw_v2.content import PostDraft
+        from claw_v2.social import PublishResult
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                draft = PostDraft(account="acme", platform="x", text="hello", hashtags=["#ai"])
+                runtime.bot.content_engine = MagicMock()
+                runtime.bot.content_engine.generate_batch.return_value = [draft]
+                publisher_mock = MagicMock()
+                publisher_mock.publish.return_value = PublishResult(
+                    platform="x", account="acme", post_id="42",
+                    url="https://x.com/acme/42", published_at="2026-04-26",
+                )
+                runtime.bot.social_publisher = publisher_mock
+
+                first = runtime.bot.handle_text(user_id="123", session_id="s1", text="/social_publish acme")
+                payload = json.loads(first)
+
+                self.assertEqual(payload["status"], "approval_required")
+                self.assertIn("approval_id", payload)
+                self.assertIn("approval_token", payload)
+                self.assertEqual(publisher_mock.publish.call_count, 0)
+
+                approval_id = payload["approval_id"]
+                token = payload["approval_token"]
+                second = runtime.bot.handle_text(
+                    user_id="123", session_id="s1",
+                    text=f"/social_approve {approval_id} {token}",
+                )
+
+                self.assertEqual(publisher_mock.publish.call_count, 1)
+                self.assertIn("post_id", second)
+
+    def test_stream_interrupted_marks_running_checkpoint_with_partial(self) -> None:
+        from unittest.mock import MagicMock
+        from claw_v2.adapters.base import StreamInterruptedError
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.coordinator = MagicMock()
+                runtime.bot.coordinator.run.side_effect = StreamInterruptedError(
+                    "OpenAI stream idle timeout - partial response received",
+                    partial_output="parcial sintetizado: paso 1",
+                )
+
+                runtime.bot.handle_text(user_id="123", session_id="s1", text="/autonomy autonomous")
+                reply = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="corrige el bug del login",
+                )
+                self.assertIn("Tarea autónoma iniciada", reply)
+                task_id = re.search(r"`([^`]+)`", reply).group(1)
+                self.assertTrue(runtime.bot._task_handler.wait_for_task(task_id, timeout=2))
+
+                record = runtime.task_ledger.get(task_id)
+                self.assertEqual(record.status, "running")
+                self.assertEqual(record.verification_status, "interrupted")
+                self.assertIn("parcial sintetizado", record.artifacts.get("partial_output", ""))
+
+                events = [
+                    e for e in runtime.observe.recent_events(limit=50)
+                    if e["event_type"] == "stream_interrupted_checkpointed"
+                ]
+                self.assertGreaterEqual(len(events), 1)
+
+    def test_quality_command_returns_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.task_ledger.create(
+                    task_id="tg-1:done",
+                    session_id="tg-1",
+                    objective="ship",
+                    runtime="coordinator",
+                    status="running",
+                )
+                runtime.task_ledger.mark_terminal(
+                    "tg-1:done",
+                    status="succeeded",
+                    summary="done",
+                    verification_status="passed",
+                    artifacts={"diff": "+1 -0"},
+                )
+                response = runtime.bot.handle_text(user_id="123", session_id="tg-1", text="/quality")
+                payload = json.loads(response)
+                self.assertIn("tasks", payload)
+                self.assertIn("quality", payload)
+                self.assertIn("top_failure_reasons", payload)
+                self.assertIn("provider_health", payload)
+                self.assertGreaterEqual(payload["tasks"]["verified_success"], 1)
+
+    def test_diagnose_task_explains_missing_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.task_ledger.create(
+                    task_id="tg-1:nb",
+                    session_id="tg-1",
+                    objective="crear cuaderno IA",
+                    runtime="nlm_natural_language",
+                    status="running",
+                    metadata={"intent": "create_notebook"},
+                )
+                runtime.task_ledger.mark_running_checkpoint(
+                    "tg-1:nb",
+                    summary="empezó pero falta cuaderno",
+                    error="missing notebook artifact",
+                    verification_status="missing_evidence",
+                    artifacts={"handler_result": "started"},
+                )
+                response = runtime.bot.handle_text(
+                    user_id="123", session_id="tg-1", text="/diagnose_task tg-1:nb",
+                )
+                self.assertIn("tg-1:nb", response)
+                self.assertIn("missing_evidence", response)
+                self.assertIn("evidencia", response.lower())
+                self.assertIn("/task_resume tg-1:nb", response)
+
+    def test_meta_questions_do_not_start_new_task(self) -> None:
+        from unittest.mock import MagicMock
+
+        meta_questions = [
+            "¿Completaste la tarea?",
+            "Porque no pudiste completar la tarea?",
+            "Qué pasó con el job?",
+            "Crea el cuaderno que te pedí",
+            "Continúa con eso",
+            "Retoma la anterior",
+        ]
+        for text in meta_questions:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+                env = {
+                    "DB_PATH": str(root / "data" / "claw.db"),
+                    "WORKSPACE_ROOT": str(root / "workspace"),
+                    "AGENT_STATE_ROOT": str(root / "agents"),
+                    "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                    "APPROVALS_ROOT": str(root / "approvals"),
+                    "TELEGRAM_ALLOWED_USER_ID": "123",
+                }
+                with patch.dict(os.environ, env, clear=False):
+                    runtime = build_runtime(anthropic_executor=fake_anthropic)
+                    runtime.task_ledger.create(
+                        task_id="tg-1:prev",
+                        session_id="tg-1",
+                        objective="cuaderno previo",
+                        runtime="coordinator",
+                        status="running",
+                        metadata={"autonomous": True},
+                    )
+                    runtime.bot.coordinator = MagicMock()
+                    runtime.bot._nlm_handler = MagicMock()
+                    runtime.bot._nlm_handler.natural_language_response.return_value = None
+                    runtime.bot._nlm_handler.dispatch.return_value = "nlm dispatch should not run"
+                    runtime.memory.update_session_state("tg-1", autonomy_mode="autonomous")
+
+                    before = len(runtime.task_ledger.list(session_id="tg-1"))
+                    runtime.bot.handle_text(user_id="123", session_id="tg-1", text=text)
+                    after = len(runtime.task_ledger.list(session_id="tg-1"))
+
+                    self.assertEqual(after, before, msg=f"text {text!r} created a new task")
+                    runtime.bot.coordinator.run.assert_not_called()
+                    runtime.bot._nlm_handler.natural_language_response.assert_not_called()
+
+    def test_failure_diagnostic_response_explains_previous_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.task_ledger.create(
+                    task_id="tg-1:nb-prev",
+                    session_id="tg-1",
+                    objective="crear cuaderno IA energia",
+                    runtime="coordinator",
+                    status="running",
+                    metadata={"autonomous": True},
+                )
+                runtime.task_ledger.mark_terminal(
+                    "tg-1:nb-prev",
+                    status="failed",
+                    error="codex_timeout: provider unavailable",
+                    verification_status="failed",
+                    summary="provider down",
+                )
+                reply = runtime.bot.handle_text(
+                    user_id="123", session_id="tg-1",
+                    text="¿Por qué falló la tarea?",
+                )
+                self.assertIn("tg-1:nb-prev", reply)
+                self.assertIn("codex_timeout", reply)
+                self.assertIn("/task_resume", reply)
+
+    def test_pipeline_merge_requires_approval_before_merging(self) -> None:
+        from unittest.mock import MagicMock
+        from claw_v2.pipeline import PipelineRun
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                pipeline_mock = MagicMock()
+                pipeline_mock._load_run.return_value = PipelineRun(
+                    issue_id="HEC-9", branch_name="feat/hec-9",
+                    repo_root=str(root), status="pr_created",
+                    pr_url="https://github.com/owner/repo/pull/9",
+                )
+                pipeline_mock.merge_and_close.return_value = PipelineRun(
+                    issue_id="HEC-9", branch_name="feat/hec-9",
+                    repo_root=str(root), status="done",
+                    pr_url="https://github.com/owner/repo/pull/9",
+                )
+                runtime.bot.pipeline = pipeline_mock
+
+                first = runtime.bot.handle_text(user_id="123", session_id="s1", text="/pipeline_merge HEC-9")
+                payload = json.loads(first)
+
+                self.assertEqual(payload["status"], "approval_required")
+                self.assertEqual(payload["issue"], "HEC-9")
+                self.assertEqual(pipeline_mock.merge_and_close.call_count, 0)
+
+                approval_id = payload["approval_id"]
+                token = payload["approval_token"]
+                second = runtime.bot.handle_text(
+                    user_id="123", session_id="s1",
+                    text=f"/pipeline_merge_confirm {approval_id} {token}",
+                )
+
+                self.assertEqual(pipeline_mock.merge_and_close.call_count, 1)
+                self.assertIn("done", second)
+
+    def test_pipeline_merge_blocks_when_pr_not_created(self) -> None:
+        from unittest.mock import MagicMock
+        from claw_v2.pipeline import PipelineRun
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                pipeline_mock = MagicMock()
+                pipeline_mock._load_run.return_value = PipelineRun(
+                    issue_id="HEC-9", branch_name="feat/hec-9",
+                    repo_root=str(root), status="awaiting_approval", pr_url=None,
+                )
+                runtime.bot.pipeline = pipeline_mock
+
+                response = runtime.bot.handle_text(user_id="123", session_id="s1", text="/pipeline_merge HEC-9")
+                payload = json.loads(response)
+
+                self.assertEqual(payload["status"], "not_mergeable")
+                self.assertEqual(pipeline_mock.merge_and_close.call_count, 0)
+
+    def test_social_publish_rejects_invalid_approval_token(self) -> None:
+        from unittest.mock import MagicMock
+        from claw_v2.content import PostDraft
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                draft = PostDraft(account="acme", platform="x", text="hi", hashtags=[])
+                runtime.bot.content_engine = MagicMock()
+                runtime.bot.content_engine.generate_batch.return_value = [draft]
+                publisher_mock = MagicMock()
+                runtime.bot.social_publisher = publisher_mock
+
+                first = runtime.bot.handle_text(user_id="123", session_id="s1", text="/social_publish acme")
+                approval_id = json.loads(first)["approval_id"]
+
+                response = runtime.bot.handle_text(
+                    user_id="123", session_id="s1",
+                    text=f"/social_approve {approval_id} wrong-token",
+                )
+                self.assertEqual(response, "approval rejected")
+                self.assertEqual(publisher_mock.publish.call_count, 0)
+
     def test_trace_command_reports_missing_trace(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -321,7 +695,7 @@ class BotTests(unittest.TestCase):
                 self.assertEqual(state["autonomy_mode"], "autonomous")
                 self.assertIn("push", state["active_object"]["autonomy_grant"]["allowed_without_phase_approval"])
 
-    def test_telegram_sessions_default_to_autonomous_until_explicit_override(self) -> None:
+    def test_telegram_sessions_default_to_assisted_until_explicit_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             env = {
@@ -337,13 +711,13 @@ class BotTests(unittest.TestCase):
 
                 runtime.bot.handle_text(user_id="123", session_id="tg-123", text="hola")
                 state = runtime.memory.get_session_state("tg-123")
-                self.assertEqual(state["autonomy_mode"], "autonomous")
+                self.assertEqual(state["autonomy_mode"], "assisted")
                 self.assertEqual(state["active_object"]["autonomy_configured"]["source"], "telegram_default")
 
-                runtime.bot.handle_text(user_id="123", session_id="tg-123", text="/autonomy assisted")
+                runtime.bot.handle_text(user_id="123", session_id="tg-123", text="/autonomy autonomous")
                 runtime.bot.handle_text(user_id="123", session_id="tg-123", text="hola de nuevo")
                 state = runtime.memory.get_session_state("tg-123")
-                self.assertEqual(state["autonomy_mode"], "assisted")
+                self.assertEqual(state["autonomy_mode"], "autonomous")
                 self.assertEqual(state["active_object"]["autonomy_configured"]["source"], "command")
 
     def test_option_followups_and_proceed_use_session_state(self) -> None:
@@ -993,6 +1367,7 @@ class BotTests(unittest.TestCase):
                     task_id=task_id,
                     phase_results={
                         "research": [WorkerResult(task_name="scope_and_risks", content="scope ok", duration_seconds=0.1)],
+                        "implementation": [WorkerResult(task_name="apply_patch", content="patched files: login.py", duration_seconds=0.1)],
                         "verification": [WorkerResult(task_name="verify_change", content="Verification Status: passed", duration_seconds=0.1)],
                     },
                     synthesis="verified after resume",
@@ -1089,7 +1464,8 @@ class BotTests(unittest.TestCase):
                     text="Completaste la tarea ?",
                 )
 
-                self.assertIn("sigue activa", reply)
+                self.assertIn("s1:running-task", reply)
+                self.assertIn("running", reply.lower())
                 runtime.bot.coordinator.run.assert_not_called()
                 self.assertEqual(runtime.task_ledger.summary(session_id="s1"), {"running": 1})
 
@@ -1321,6 +1697,7 @@ class BotTests(unittest.TestCase):
                     task_id="s1:lost-task",
                     phase_results={
                         "research": [WorkerResult(task_name="scope_and_risks", content="scope ok", duration_seconds=0.1)],
+                        "implementation": [WorkerResult(task_name="apply_patch", content="patched files: login.py", duration_seconds=0.1)],
                         "verification": [WorkerResult(task_name="verify_change", content="Verification Status: passed", duration_seconds=0.1)],
                     },
                     synthesis="resumed and verified",
@@ -1377,6 +1754,8 @@ class BotTests(unittest.TestCase):
                     status="running",
                     metadata={"autonomous": True, "generic_job_id": old_job.job_id},
                 )
+                # Sprint 1: writing succeeded+pending must be redirected to a running checkpoint
+                # by the completion validator (false_success_prevented).
                 runtime.task_ledger.mark_terminal(
                     "s1:false-success",
                     status="succeeded",
@@ -1384,14 +1763,19 @@ class BotTests(unittest.TestCase):
                     verification_status="pending",
                     artifacts={"response_preview": "Verification Status: pending"},
                 )
+                redirected = runtime.task_ledger.get("s1:false-success")
+                self.assertEqual(redirected.status, "running")
+                self.assertNotEqual(redirected.verification_status, "passed")
+
                 runtime.bot.coordinator = MagicMock()
                 runtime.bot.coordinator.run.return_value = CoordinatorResult(
                     task_id="s1:false-success",
                     phase_results={
                         "research": [WorkerResult(task_name="scope_and_risks", content="scope ok", duration_seconds=0.1)],
+                        "implementation": [WorkerResult(task_name="apply_patch", content="patched files: hero.html", duration_seconds=0.1)],
                         "verification": [WorkerResult(task_name="verify_change", content="Verification Status: passed", duration_seconds=0.1)],
                     },
-                    synthesis="resumed false success and verified",
+                    synthesis="resumed and verified",
                 )
 
                 reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/task_resume s1:false-success")
@@ -1403,7 +1787,6 @@ class BotTests(unittest.TestCase):
                 self.assertEqual(record.status, "succeeded")
                 self.assertEqual(record.verification_status, "passed")
                 self.assertEqual(record.metadata["resume_reason"], "manual_resume")
-                self.assertEqual(record.metadata["false_success_verification_status"], "pending")
                 self.assertNotEqual(record.metadata["generic_job_id"], old_job.job_id)
                 resumed_job = runtime.job_service.get(record.metadata["generic_job_id"])
                 self.assertEqual(resumed_job.status, "completed")
@@ -1437,6 +1820,7 @@ class BotTests(unittest.TestCase):
                     status="succeeded",
                     summary="verificado",
                     verification_status="passed",
+                    artifacts={"test_output": "5 passed"},
                 )
                 runtime.bot.coordinator = MagicMock()
 
