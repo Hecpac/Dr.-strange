@@ -516,6 +516,17 @@ class TaskHandler:
                 },
             )
         except Exception as exc:
+            from claw_v2.adapters.base import StreamInterruptedError
+            if isinstance(exc, StreamInterruptedError):
+                self._handle_stream_interrupted(
+                    task_id=task_id,
+                    session_id=session_id,
+                    objective=objective,
+                    mode=mode,
+                    job_id=job_id,
+                    exc=exc,
+                )
+                return
             error = f"{type(exc).__name__}: {exc}"
             self._fail_autonomous_job(
                 task_id=task_id,
@@ -1251,6 +1262,64 @@ class TaskHandler:
         record_id = job_id or self._active_job_id_for_task(task_id)
         if record_id is not None:
             self.job_service.fail(record_id, error=error, retry=False, checkpoint=checkpoint)
+
+    def _handle_stream_interrupted(
+        self,
+        *,
+        task_id: str,
+        session_id: str,
+        objective: str,
+        mode: str,
+        job_id: str | None,
+        exc: Any,
+    ) -> None:
+        partial = str(getattr(exc, "partial_output", "") or "")[:4000]
+        reason = str(getattr(exc, "reason", "") or "stream_idle_timeout")
+        error_msg = f"stream_interrupted: {reason}"
+        checkpoint = {
+            "operation": "coordinator",
+            "mode": mode,
+            "session_id": session_id,
+            "reason": reason,
+            "partial_output": partial,
+            "retryable": True,
+        }
+        self._defer_autonomous_job(task_id=task_id, job_id=job_id, checkpoint=checkpoint)
+        if self.task_ledger is not None:
+            artifacts = self._outcome_artifacts(
+                task_id=task_id,
+                session_id=session_id,
+                status="interrupted",
+                summary=f"Stream interrupted: {reason}",
+                objective=objective,
+                mode=mode,
+                error=error_msg,
+                verification_status="interrupted",
+                extra={
+                    "partial_output": partial,
+                    "stream_interrupted": {
+                        "reason": reason,
+                        "retryable": True,
+                    },
+                },
+            )
+            self.task_ledger.mark_running_checkpoint(
+                task_id,
+                summary=f"Stream interrupted: {reason}",
+                error=error_msg,
+                verification_status="interrupted",
+                artifacts=artifacts,
+            )
+        self._emit(
+            "stream_interrupted_checkpointed",
+            {
+                "session_id": session_id,
+                "task_id": task_id,
+                "objective": objective,
+                "reason": reason,
+                "partial_output_chars": len(partial),
+            },
+        )
 
     def _defer_autonomous_job(
         self,

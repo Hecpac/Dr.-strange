@@ -128,6 +128,8 @@ class ClawRuntime:
     skill_registry: SkillRegistry | None = None
     a2a: A2AService | None = None
     startup_health: StartupHealthReport | None = None
+    tool_registry: object | None = None
+    openai_tool_executor: object | None = None
 
 
 def _noop_experiment_runner(agent_name: str, experiment_number: int, state: dict) -> object:
@@ -143,18 +145,29 @@ def _noop_experiment_runner(agent_name: str, experiment_number: int, state: dict
     )
 
 
-def _is_git_repo(path: str) -> bool:
-    completed = subprocess.run(
-        ["git", "-C", path, "rev-parse", "--is-inside-work-tree"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+def _is_git_repo(path: str | Path) -> bool:
+    git_path = shutil.which("git")
+    if git_path is None:
+        return False
+    try:
+        completed = subprocess.run(
+            [git_path, "-C", str(path), "rev-parse", "--is-inside-work-tree"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return False
     return completed.returncode == 0 and completed.stdout.strip() == "true"
 
 
 def _sanitize_job_name(value: str) -> str:
-    return "".join(ch if ch.isalnum() else "_" for ch in value.lower()).strip("_") or "job"
+    import hashlib
+
+    slug = "".join(ch if ch.isalnum() else "_" for ch in value.lower()).strip("_") or "job"
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:8]
+    return f"{slug}_{digest}"
 
 
 def _resolve_pytest_command(repo_root: Path) -> tuple[list[str], str | None]:
@@ -170,9 +183,15 @@ def _resolve_pytest_command(repo_root: Path) -> tuple[list[str], str | None]:
 
 
 def _probe_writable(path: Path) -> None:
-    probe = path / ".claw_write_probe"
-    probe.write_text("ok", encoding="utf-8")
-    probe.unlink(missing_ok=True)
+    import os
+    import tempfile
+
+    fd, probe_name = tempfile.mkstemp(prefix=".claw_write_probe_", dir=str(path), text=True)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write("ok")
+    finally:
+        Path(probe_name).unlink(missing_ok=True)
 
 
 def _find_local_chrome() -> str | None:
@@ -337,7 +356,7 @@ def _setup_llm_stack(
     google_transport: Callable[[LLMRequest], LLMResponse] | None,
     ollama_transport: Callable[[LLMRequest], LLMResponse] | None,
     codex_transport: Callable[[LLMRequest], LLMResponse] | None,
-) -> tuple[LLMRouter, LearningLoop, BrainService]:
+) -> tuple[LLMRouter, LearningLoop, BrainService, "ToolRegistry", Callable[[str, dict], dict]]:
     def audit_sink(event: dict) -> None:
         observe.emit(
             event["action"],
@@ -368,12 +387,18 @@ def _setup_llm_stack(
     if anthropic_executor is None:
         anthropic_executor = create_claude_sdk_executor(config, observe=observe, approvals=approvals)
 
-    pre_hooks: list = [make_daily_cost_gate(observe, config.daily_cost_limit)] if config.daily_cost_limit > 0 else []
+    if config.daily_cost_limit is None:
+        pre_hooks: list = [make_daily_cost_gate(observe, 10.0)]
+    elif config.daily_cost_limit > 0:
+        pre_hooks = [make_daily_cost_gate(observe, config.daily_cost_limit)]
+    else:
+        raise ValueError("daily_cost_limit must be positive or None")
     pre_hooks.append(make_anti_distillation_hook())
     post_hooks = [make_decision_logger(observe)]
 
     # Build OpenAI tool executor from ToolRegistry
     from claw_v2.tools import ToolRegistry
+    from claw_v2.tool_policy import daemon_can_auto_approve
 
     tool_registry = ToolRegistry.default(workspace_root=config.workspace_root, memory=memory)
     openai_tool_schemas = tool_registry.openai_tool_schemas()
@@ -389,11 +414,10 @@ def _setup_llm_stack(
 
     def openai_tool_executor(name: str, args: dict) -> dict:
         daemon_reason = current_daemon_reason()
-        gate = (
-            build_system_auto_approve_gate(approvals, reason=daemon_reason)
-            if daemon_reason is not None
-            else telegram_gate
-        )
+        if daemon_reason is not None and daemon_can_auto_approve(name):
+            gate = build_system_auto_approve_gate(approvals, reason=daemon_reason)
+        else:
+            gate = telegram_gate
         return tool_registry.execute(
             name,
             args,
@@ -428,7 +452,7 @@ def _setup_llm_stack(
         learning=learning,
         checkpoint=checkpoint,
     )
-    return router, learning, brain
+    return router, learning, brain, tool_registry, openai_tool_executor
 
 
 def _setup_agent_services(
@@ -479,7 +503,7 @@ def _setup_agent_services(
         registry_path=registry_path,
         sub_agents=sub_agents,
         default_agent_model=config.worker_model,
-        default_daily_budget=config.daily_cost_limit or 10.0,
+        default_daily_budget=(config.daily_cost_limit if config.daily_cost_limit is not None else 10.0),
     )
     kairos = KairosService(
         router=router,
@@ -710,6 +734,19 @@ def _setup_scheduler(
 
         return inner
 
+    def _maintenance_skip() -> str | None:
+        if not config.autonomous_maintenance_enabled:
+            return "autonomous_maintenance_disabled"
+        return None
+
+    def _skip_maintenance_or(*capabilities: str) -> Callable[[], str | None]:
+        capability_check = _skip_for(*capabilities)
+
+        def inner() -> str | None:
+            return _maintenance_skip() or capability_check()
+
+        return inner
+
     def _self_improve_handler() -> None:
         observe.emit("self_improve_start", payload={})
         repo_root = config.pipeline_repo_root or config.workspace_root
@@ -718,13 +755,21 @@ def _setup_scheduler(
             observe.emit("self_improve_blocked", payload={"reason": "pytest_unavailable"})
             return
 
-        test_result = subprocess.run(
-            pytest_args,
-            capture_output=True,
-            text=True,
-            check=False,
-            cwd=str(repo_root),
-        )
+        try:
+            test_result = subprocess.run(
+                pytest_args,
+                capture_output=True,
+                text=True,
+                check=False,
+                cwd=str(repo_root),
+                timeout=config.self_improve_test_timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as exc:
+            observe.emit(
+                "self_improve_blocked",
+                payload={"reason": "tests_timeout", "timeout": exc.timeout},
+            )
+            return
         if test_result.returncode != 0:
             observe.emit("self_improve_blocked", payload={"reason": "tests_failed", "output": (test_result.stdout or "")[-500:]})
             return
@@ -872,7 +917,7 @@ def _setup_scheduler(
                     name="self_improve",
                     observe=observe,
                     handler=_self_improve_handler,
-                    skip_if=_skip_for("git", "pytest"),
+                    skip_if=_skip_maintenance_or("git", "pytest"),
                 ),
             )
         )
@@ -880,13 +925,29 @@ def _setup_scheduler(
     scheduler.register(ScheduledJob(name="daily_metrics", interval_seconds=86400, handler=_daily_metrics_handler))
 
     dream = AutoDreamService(memory=memory, observe=observe, router=router)
-    scheduler.register(ScheduledJob(name="auto_dream", interval_seconds=86400, handler=dream.run))
+    scheduler.register(
+        ScheduledJob(
+            name="auto_dream",
+            interval_seconds=86400,
+            handler=_wrap_job_handler(
+                name="auto_dream",
+                observe=observe,
+                handler=dream.run,
+                skip_if=_maintenance_skip,
+            ),
+        )
+    )
     scheduler.register(ScheduledJob(name="learning_consolidate", interval_seconds=86400, handler=learning.consolidate))
     scheduler.register(
         ScheduledJob(
             name="learning_soul_suggestions",
             interval_seconds=86400,
-            handler=lambda: learning.suggest_soul_updates(observe=observe, soul_text=system_prompt),
+            handler=_wrap_job_handler(
+                name="learning_soul_suggestions",
+                observe=observe,
+                handler=lambda: learning.suggest_soul_updates(observe=observe, soul_text=system_prompt),
+                skip_if=_maintenance_skip,
+            ),
         )
     )
 
@@ -895,8 +956,24 @@ def _setup_scheduler(
     kairos.wiki = wiki
     scheduler.register(ScheduledJob(name="wiki_lint", interval_seconds=86400, handler=wiki.lint))
     scheduler.register(ScheduledJob(name="wiki_confidence", interval_seconds=604800, handler=wiki.recompute_confidence))
-    scheduler.register(ScheduledJob(name="wiki_research", interval_seconds=43200, handler=wiki.auto_research))
-    scheduler.register(ScheduledJob(name="wiki_scrape", interval_seconds=43200, handler=wiki.auto_scrape_sources))
+    scheduler.register(
+        ScheduledJob(
+            name="wiki_research",
+            interval_seconds=43200,
+            handler=_wrap_job_handler(
+                name="wiki_research", observe=observe, handler=wiki.auto_research, skip_if=_maintenance_skip,
+            ),
+        )
+    )
+    scheduler.register(
+        ScheduledJob(
+            name="wiki_scrape",
+            interval_seconds=43200,
+            handler=_wrap_job_handler(
+                name="wiki_scrape", observe=observe, handler=wiki.auto_scrape_sources, skip_if=_maintenance_skip,
+            ),
+        )
+    )
 
     _register_site_monitor_jobs(scheduler=scheduler, observe=observe, sites=config.monitored_sites)
 
@@ -909,7 +986,12 @@ def _setup_scheduler(
         ScheduledJob(
             name="skill_expand",
             interval_seconds=86400,
-            handler=_wrap_job_handler(name="skill_expand", observe=observe, handler=skill_registry.auto_expand),
+            handler=_wrap_job_handler(
+                name="skill_expand",
+                observe=observe,
+                handler=skill_registry.auto_expand,
+                skip_if=_maintenance_skip,
+            ),
         )
     )
     scheduler.register(
@@ -928,7 +1010,7 @@ def _setup_scheduler(
                 name="perf_optimizer",
                 observe=observe,
                 handler=_perf_optimizer_handler,
-                skip_if=_skip_for("git"),
+                skip_if=_skip_maintenance_or("git"),
             ),
         )
     )
@@ -973,7 +1055,7 @@ def build_runtime(
     workspace_bootstrap = agent_workspace.ensure()
     observe.emit("agent_workspace_bootstrap", payload=workspace_bootstrap.to_dict())
     system_prompt = agent_workspace.system_prompt(fallback=system_prompt)
-    router, learning, brain = _setup_llm_stack(
+    router, learning, brain, tool_registry, openai_tool_executor = _setup_llm_stack(
         config=config,
         memory=memory,
         observe=observe,
@@ -1071,6 +1153,8 @@ def build_runtime(
         skill_registry=skill_registry,
         a2a=a2a,
         startup_health=startup_health,
+        tool_registry=tool_registry,
+        openai_tool_executor=openai_tool_executor,
     )
 
 

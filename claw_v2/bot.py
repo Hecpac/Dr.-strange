@@ -26,6 +26,7 @@ from claw_v2.terminal_handler import TerminalHandler
 from claw_v2.wiki_handler import WikiHandler
 from claw_v2.coordinator import CoordinatorService
 from claw_v2.content import ContentEngine
+from claw_v2.redaction import redact_sensitive
 from claw_v2.github import GitHubPullRequestService
 from claw_v2.heartbeat import HeartbeatService
 from claw_v2.model_registry import (
@@ -89,6 +90,50 @@ def _looks_like_task_completion_question(text: str) -> bool:
             "estado",
         )
     )
+
+
+_TASK_TERMS = (
+    "tarea", "task", "trabajo", "job", "cuaderno", "notebook",
+    "pipeline", "run", "proceso",
+)
+
+_DIAGNOSTIC_TERMS = (
+    "por que", "por qué", "porque", "que paso", "qué pasó",
+    "fallo", "falló", "no pudiste", "no pudo", "no completaste",
+    "no terminaste", "no se completo", "no quedo", "no quedó",
+    "quedo pendiente", "bloqueada", "bloqueado", "error",
+    "failed", "why failed",
+)
+
+_FOLLOWUP_TERMS = (
+    "continua", "continúa", "retoma", "reanuda", "sigue",
+    "hazlo", "crealo", "créalo", "lo que te pedi", "lo que te pedí",
+    "que te pedi", "que te pedí", "la anterior", "el anterior",
+    "eso mismo", "termina eso",
+)
+
+
+def _looks_like_task_diagnostic_question(text: str) -> bool:
+    normalized = _normalize_command_text(text)
+    return any(t in normalized for t in _TASK_TERMS) and any(t in normalized for t in _DIAGNOSTIC_TERMS)
+
+
+def _looks_like_previous_task_followup(text: str) -> bool:
+    normalized = _normalize_command_text(text)
+    return any(token in normalized for token in _FOLLOWUP_TERMS)
+
+
+def _looks_like_short_meta_question(text: str) -> bool:
+    normalized = _normalize_command_text(text).strip()
+    if len(normalized) >= 120:
+        return False
+    is_question = "?" in text or normalized.startswith(("porque", "por que", "por qué", "que paso", "qué pasó"))
+    if not is_question:
+        return False
+    return any(token in normalized for token in (
+        "tarea", "task", "job", "cuaderno", "notebook",
+        "completaste", "fallo", "falló",
+    ))
 
 
 def _looks_like_operational_alert(text: str) -> bool:
@@ -363,11 +408,11 @@ class BotService:
             self._store_memory_turn(session_id, stripped, operational_alert_response, assistant_limit=2000)
             self._remember_assistant_turn_state(session_id, stripped, operational_alert_response)
             return operational_alert_response
-        task_status_response = self._maybe_handle_task_status_question(stripped, session_id=session_id)
-        if task_status_response is not None:
-            self._store_memory_turn(session_id, stripped, task_status_response, assistant_limit=2000)
-            self._remember_assistant_turn_state(session_id, stripped, task_status_response)
-            return task_status_response
+        task_intent_response = self._maybe_handle_task_intent(stripped, session_id=session_id)
+        if task_intent_response is not None:
+            self._store_memory_turn(session_id, stripped, task_intent_response, assistant_limit=2000)
+            self._remember_assistant_turn_state(session_id, stripped, task_intent_response)
+            return task_intent_response
         self._remember_user_turn_state(session_id, stripped)
         if _looks_like_autonomy_grant(stripped):
             return self._handle_autonomy_grant_response(session_id, stripped)
@@ -419,6 +464,8 @@ class BotService:
             BotCommand("model", self._handle_model_command, exact=("/models", "/model", "/model status"), prefixes=("/model ",)),
             BotCommand("tokens", self._handle_tokens_command, exact=("/tokens",)),
             BotCommand("spending", self._handle_spending_command, exact=("/spending",)),
+            BotCommand("quality", self._handle_quality_command, exact=("/quality",)),
+            BotCommand("diagnose_task", self._handle_diagnose_task_command, prefixes=("/diagnose_task ",)),
             BotCommand("task_run", self._handle_task_run_command, exact=("/task_run",), prefixes=("/task_run ",)),
             BotCommand("autonomy", self._handle_autonomy_command, exact=("/autonomy", "/autonomy_policy"), prefixes=("/autonomy ",)),
             BotCommand("jobs", self._handle_jobs_command, exact=("/jobs",), prefixes=("/jobs ", "/job_status ", "/job_trace ", "/job_resume ", "/job_cancel ", "/task_resume ", "/task_cancel ")),
@@ -449,8 +496,8 @@ class BotService:
             BotCommand("approvals", self._handle_approvals_command, exact=("/approvals",), prefixes=("/approval_status ", "/approve ", "/task_approve ", "/task_abort ")),
             BotCommand("traces", self._handle_traces_command, exact=("/traces",), prefixes=("/traces ", "/trace ")),
             BotCommand("feedback", self._handle_feedback_command, exact=("/feedback",), prefixes=("/feedback ",)),
-            BotCommand("pipeline", self._handle_pipeline_command, exact=("/pipeline", "/pipeline_approve", "/pipeline_merge", "/pipeline_status"), prefixes=("/pipeline_approve ", "/pipeline_merge ", "/pipeline ")),
-            BotCommand("social", self._handle_social_command, exact=("/social_preview", "/social_publish", "/social_status"), prefixes=("/social_preview ", "/social_publish ")),
+            BotCommand("pipeline", self._handle_pipeline_command, exact=("/pipeline", "/pipeline_approve", "/pipeline_merge", "/pipeline_status"), prefixes=("/pipeline_approve ", "/pipeline_merge ", "/pipeline_merge_confirm ", "/pipeline ")),
+            BotCommand("social", self._handle_social_command, exact=("/social_preview", "/social_publish", "/social_status"), prefixes=("/social_preview ", "/social_publish ", "/social_approve ")),
             *self._nlm_handler.commands(),
         ]
 
@@ -584,6 +631,15 @@ class BotService:
 
     def _handle_spending_command(self, context: CommandContext) -> str:
         return self._spending_response()
+
+    def _handle_quality_command(self, context: CommandContext) -> str:
+        return self._quality_response()
+
+    def _handle_diagnose_task_command(self, context: CommandContext) -> str:
+        parts = context.stripped.split(maxsplit=1)
+        if len(parts) != 2:
+            return "usage: /diagnose_task <task_id>"
+        return self._diagnose_task_response(parts[1].strip())
 
     def _handle_task_run_command(self, context: CommandContext) -> str:
         if context.stripped == "/task_run":
@@ -966,17 +1022,78 @@ class BotService:
                     result = self.pipeline.complete_pipeline(run.issue_id)
                     return json.dumps({"status": result.status, "pr_url": result.pr_url}, indent=2)
             return "approval recorded but no matching pipeline run found"
-        if stripped.startswith("/pipeline_merge "):
+        if stripped.startswith("/pipeline_merge_confirm "):
             if self.pipeline is None:
                 return "pipeline service unavailable"
-            parts = stripped.split(maxsplit=1)
-            issue_id = parts[1].strip()
+            if self.approvals is None:
+                return "approval manager unavailable"
+            parts = stripped.split(maxsplit=2)
+            if len(parts) != 3:
+                return "usage: /pipeline_merge_confirm <approval_id> <token>"
+            approval_id, token = parts[1], parts[2]
+            try:
+                payload = self.approvals.read(approval_id)
+            except FileNotFoundError:
+                return f"approval not found: {approval_id}"
+            action = payload.get("action") or ""
+            if not action.startswith("pipeline_merge:"):
+                return f"approval {approval_id} is not a pipeline_merge approval"
+            issue_id = action.split(":", 1)[1]
+            approved = self.approvals.approve(approval_id, token)
+            if not approved:
+                return "approval rejected"
             try:
                 run = self.pipeline.merge_and_close(issue_id)
                 return json.dumps({"issue": run.issue_id, "status": run.status, "pr_url": run.pr_url}, indent=2)
             except Exception:
                 logger.exception("pipeline merge error for %s", issue_id)
                 return "merge error — check logs for details"
+        if stripped.startswith("/pipeline_merge "):
+            if self.pipeline is None:
+                return "pipeline service unavailable"
+            if self.approvals is None:
+                return "approval manager unavailable — cannot merge without approval"
+            parts = stripped.split(maxsplit=1)
+            issue_id = parts[1].strip()
+            try:
+                run = self.pipeline._load_run(issue_id)
+            except FileNotFoundError:
+                return f"pipeline run not found: {issue_id}"
+            except Exception:
+                logger.exception("pipeline_merge load error for %s", issue_id)
+                return "merge error — check logs for details"
+            if run.status != "pr_created" or not run.pr_url:
+                return json.dumps(
+                    {
+                        "status": "not_mergeable",
+                        "issue": run.issue_id,
+                        "current_status": run.status,
+                        "pr_url": run.pr_url,
+                        "reason": "PR is not in pr_created state or has no URL",
+                    },
+                    indent=2,
+                )
+            pending = self.approvals.create(
+                action=f"pipeline_merge:{issue_id}",
+                summary=f"Merge PR {run.pr_url} for {issue_id}",
+                metadata={
+                    "tier": "tier3",
+                    "issue_id": issue_id,
+                    "pr_url": run.pr_url,
+                    "branch": run.branch_name,
+                },
+            )
+            return json.dumps(
+                {
+                    "status": "approval_required",
+                    "issue": issue_id,
+                    "pr_url": run.pr_url,
+                    "approval_id": pending.approval_id,
+                    "approval_token": pending.token,
+                    "confirm_with": f"/pipeline_merge_confirm {pending.approval_id} {pending.token}",
+                },
+                indent=2,
+            )
         if stripped.startswith("/pipeline_status"):
             if self.pipeline is None:
                 return "pipeline service unavailable"
@@ -1022,14 +1139,91 @@ class BotService:
         if stripped.startswith("/social_publish "):
             if self.content_engine is None or self.social_publisher is None:
                 return "social services unavailable"
+            if self.approvals is None:
+                return "approval manager unavailable — cannot publish without approval"
             parts = stripped.split(maxsplit=1)
             account = parts[1]
             try:
                 drafts = self.content_engine.generate_batch(account)
-                results = [self.social_publisher.publish(d) for d in drafts]
-                return json.dumps([{"platform": r.platform, "post_id": r.post_id, "url": r.url} for r in results], indent=2)
+            except FileNotFoundError:
+                return f"account not found: {account}"
             except Exception:
-                logger.exception("social_publish error for %s", account)
+                logger.exception("social_publish preview error for %s", account)
+                return "error generating drafts — check logs"
+            preview = [
+                {"platform": d.platform, "text": d.text, "hashtags": list(d.hashtags)}
+                for d in drafts
+            ]
+            pending = self.approvals.create(
+                action=f"social_publish:{account}",
+                summary=f"Publish {len(drafts)} draft(s) for {account}",
+                metadata={
+                    "tier": "tier3",
+                    "account": account,
+                    "drafts": [
+                        {
+                            "account": d.account,
+                            "platform": d.platform,
+                            "text": d.text,
+                            "hashtags": list(d.hashtags),
+                            "media_prompt": d.media_prompt,
+                            "scheduled_for": d.scheduled_for,
+                        }
+                        for d in drafts
+                    ],
+                },
+            )
+            return json.dumps(
+                {
+                    "status": "approval_required",
+                    "account": account,
+                    "approval_id": pending.approval_id,
+                    "approval_token": pending.token,
+                    "confirm_with": f"/social_approve {pending.approval_id} {pending.token}",
+                    "drafts": preview,
+                },
+                indent=2,
+            )
+        if stripped.startswith("/social_approve "):
+            if self.content_engine is None or self.social_publisher is None:
+                return "social services unavailable"
+            if self.approvals is None:
+                return "approval manager unavailable"
+            parts = stripped.split(maxsplit=2)
+            if len(parts) != 3:
+                return "usage: /social_approve <approval_id> <token>"
+            approval_id, token = parts[1], parts[2]
+            from claw_v2.content import PostDraft
+            try:
+                payload = self.approvals.read(approval_id)
+            except FileNotFoundError:
+                return f"approval not found: {approval_id}"
+            action = payload.get("action") or ""
+            if not action.startswith("social_publish:"):
+                return f"approval {approval_id} is not a social_publish approval"
+            approved = self.approvals.approve(approval_id, token)
+            if not approved:
+                return "approval rejected"
+            try:
+                drafts_meta = (payload.get("metadata") or {}).get("drafts") or []
+                drafts = [
+                    PostDraft(
+                        account=d["account"],
+                        platform=d["platform"],
+                        text=d["text"],
+                        hashtags=list(d.get("hashtags") or []),
+                        media_prompt=d.get("media_prompt"),
+                        scheduled_for=d.get("scheduled_for"),
+                    )
+                    for d in drafts_meta
+                ]
+                results = [self.social_publisher.publish(d) for d in drafts]
+                return json.dumps(
+                    [{"platform": r.platform, "post_id": r.post_id, "url": r.url} for r in results],
+                    indent=2,
+                )
+            except Exception:
+                logger.exception("social_publish execution error for %s", approval_id)
                 return "error publishing — check logs"
         return f"usage: {stripped} <argument>"
 
@@ -1153,6 +1347,133 @@ class BotService:
             "recommendation": recommendation,
         }, indent=2, sort_keys=True)
 
+    def _quality_response(self) -> str:
+        ledger_summary: dict[str, int] = {}
+        if self.task_ledger is not None:
+            try:
+                ledger_summary = self.task_ledger.summary()
+            except Exception:
+                ledger_summary = {}
+        verified = int(ledger_summary.get("succeeded", 0))
+        pending = int(ledger_summary.get("running", 0)) + int(ledger_summary.get("queued", 0))
+        blocked = int(ledger_summary.get("blocked", 0))
+        failed = int(ledger_summary.get("failed", 0)) + int(ledger_summary.get("timed_out", 0))
+        interrupted = int(ledger_summary.get("lost", 0))
+        total = verified + pending + blocked + failed + interrupted
+        events: list[dict[str, Any]] = []
+        if self.observe is not None:
+            try:
+                events = self.observe.recent_events(limit=500)
+            except Exception:
+                events = []
+        counts: dict[str, int] = {}
+        for event in events:
+            kind = event.get("event_type")
+            if isinstance(kind, str):
+                counts[kind] = counts.get(kind, 0) + 1
+        false_success_prevented = counts.get("task_false_success_prevented", 0)
+        provider_session_reset = counts.get("provider_session_reset", 0)
+        stream_interrupted = counts.get("stream_interrupted_checkpointed", 0)
+        llm_fallback = counts.get("llm_fallback", 0)
+        failure_reasons: dict[str, int] = {}
+        for event in events:
+            if event.get("event_type") not in {
+                "task_false_success_prevented",
+                "scheduled_job_skipped",
+                "self_improve_blocked",
+            }:
+                continue
+            payload = event.get("payload") or {}
+            reason = payload.get("reason") if isinstance(payload, dict) else None
+            if isinstance(reason, str) and reason:
+                failure_reasons[reason] = failure_reasons.get(reason, 0) + 1
+        top_reasons = sorted(failure_reasons.items(), key=lambda kv: kv[1], reverse=True)[:5]
+        verified_rate = round(verified / total, 3) if total else 0.0
+        payload = {
+            "window_hours": 24,
+            "tasks": {
+                "total": total,
+                "verified_success": verified,
+                "pending": pending,
+                "blocked": blocked,
+                "failed": failed,
+                "interrupted": interrupted,
+            },
+            "quality": {
+                "verified_success_rate": verified_rate,
+                "false_success_prevented": false_success_prevented,
+            },
+            "top_failure_reasons": [
+                {"reason": reason, "count": count}
+                for reason, count in top_reasons
+            ],
+            "provider_health": {
+                "provider_session_reset": provider_session_reset,
+                "stream_interrupted_checkpointed": stream_interrupted,
+                "llm_fallback": llm_fallback,
+            },
+        }
+        return redact_sensitive(json.dumps(payload, indent=2, sort_keys=True), limit=0)
+
+    def _diagnose_task_response(self, task_id: str) -> str:
+        if self.task_ledger is None:
+            return "task ledger unavailable"
+        record = self.task_ledger.get(task_id)
+        if record is None:
+            return f"task not found: {task_id}"
+        status = str(getattr(record, "status", "unknown"))
+        verification = str(getattr(record, "verification_status", "unknown") or "unknown")
+        objective = str(getattr(record, "objective", "") or "").strip()
+        summary = str(getattr(record, "summary", "") or "").strip()
+        error = str(getattr(record, "error", "") or "").strip()
+        artifacts = dict(getattr(record, "artifacts", {}) or {})
+        metadata = dict(getattr(record, "metadata", {}) or {})
+        task_kind = str(metadata.get("intent") or metadata.get("task_kind") or "unknown")
+        evidence_keys = [
+            key for key in (
+                "handler_result", "notebook_id", "notebook_title", "review_summary",
+                "diff", "test_output", "changed_files", "pr_url", "sources",
+                "screenshot_after", "partial_output",
+            )
+            if artifacts.get(key)
+        ]
+        last_event = "n/a"
+        if self.observe is not None:
+            try:
+                events = self.observe.recent_events(limit=200)
+                for event in events:
+                    payload = event.get("payload") or {}
+                    if isinstance(payload, dict) and payload.get("task_id") == task_id:
+                        last_event = f"{event.get('event_type')}: {payload.get('reason') or payload.get('verification_status') or ''}"
+                        break
+            except Exception:
+                last_event = "n/a"
+        can_resume = (
+            status in {"running", "lost", "failed", "queued"}
+            or verification in {"pending", "missing_evidence", "interrupted", "blocked"}
+        )
+        lines = [
+            f"Task: `{task_id}`",
+            f"Estado: {status} / verificación: {verification}",
+            f"Task kind: {task_kind}",
+            f"Objetivo: {objective[:300] or '(sin objetivo)'}",
+        ]
+        if evidence_keys:
+            lines.append(f"Evidencia presente: {', '.join(evidence_keys)}")
+        else:
+            lines.append("Evidencia presente: ninguna")
+        if verification in {"missing_evidence", "pending"}:
+            lines.append("Falta evidencia para cerrarla.")
+        if error:
+            lines.append(f"Error registrado: {error[:300]}")
+        elif summary:
+            lines.append(f"Último resumen: {summary[:300]}")
+        if last_event != "n/a":
+            lines.append(f"Último evento relevante: {last_event}")
+        if can_resume:
+            lines.append(f"Siguiente paso: `/task_resume {task_id}`")
+        return redact_sensitive("\n".join(lines), limit=0)
+
     def _spending_response(self) -> str:
         if self.observe is None:
             return "observe stream unavailable"
@@ -1223,7 +1544,7 @@ class BotService:
         result: dict[str, Any] = {"trace_id": trace_id, "event_count": len(replay), "events": replay}
         if html_path:
             result["html"] = html_path
-        return json.dumps(result, indent=2, sort_keys=True)
+        return redact_sensitive(json.dumps(result, indent=2, sort_keys=True), limit=0)
 
     def _job_trace_response(self, job_id: str, *, limit: int) -> str:
         if self.observe is None:
@@ -1248,7 +1569,10 @@ class BotService:
             }
             for event in events
         ]
-        return json.dumps({"job_id": job_id, "event_count": len(replay), "events": replay}, indent=2, sort_keys=True)
+        return redact_sensitive(
+            json.dumps({"job_id": job_id, "event_count": len(replay), "events": replay}, indent=2, sort_keys=True),
+            limit=0,
+        )
 
 
 
@@ -1330,16 +1654,14 @@ class BotService:
         active_object = dict(current.get("active_object") or {})
         if active_object.get("autonomy_configured"):
             return
-        if current.get("autonomy_mode") == "autonomous":
-            return
         active_object["autonomy_configured"] = {
-            "mode": "autonomous",
+            "mode": "assisted",
             "source": "telegram_default",
         }
         self.brain.memory.update_session_state(
             session_id,
-            autonomy_mode="autonomous",
-            step_budget=_default_step_budget("autonomous"),
+            autonomy_mode="assisted",
+            step_budget=_default_step_budget("assisted"),
             active_object=active_object,
         )
 
@@ -1451,6 +1773,30 @@ class BotService:
             lines.append("Acción: revisar `/jobs`, `/tasks` o `scripts/diagnose.sh` antes de reintentar.")
         return "\n".join(lines)
 
+    def _classify_task_intent(self, text: str, *, session_id: str) -> dict[str, Any]:
+        if _looks_like_operational_alert(text):
+            return {"intent": "operational_alert", "should_start_task": False}
+        if _looks_like_task_diagnostic_question(text) or _looks_like_short_meta_question(text):
+            return {"intent": "failure_diagnostic", "should_start_task": False}
+        if _looks_like_task_completion_question(text):
+            return {"intent": "status_question", "should_start_task": False}
+        if _looks_like_previous_task_followup(text):
+            return {"intent": "resume_previous", "should_start_task": False}
+        if text.strip().startswith("/"):
+            return {"intent": "command", "should_start_task": False}
+        return {"intent": "unknown", "should_start_task": True}
+
+    def _maybe_handle_task_intent(self, text: str, *, session_id: str) -> str | None:
+        intent = self._classify_task_intent(text, session_id=session_id)
+        kind = intent["intent"]
+        if kind == "status_question":
+            return self._task_status_question_response(session_id)
+        if kind == "failure_diagnostic":
+            return self._task_failure_diagnostic_response(session_id)
+        if kind == "resume_previous":
+            return self._task_resume_previous_response(session_id)
+        return None
+
     def _task_status_question_response(self, session_id: str) -> str:
         latest = None
         if self.task_ledger is not None:
@@ -1501,3 +1847,58 @@ class BotService:
                 f"Objetivo: {active_task.get('objective', 'sin objetivo')}"
             )
         return "No tengo tareas registradas para esta conversación."
+
+    def _latest_relevant_task(self, session_id: str) -> Any | None:
+        if self.task_ledger is None:
+            return None
+        records = self.task_ledger.list(session_id=session_id, limit=10)
+        if not records:
+            return None
+        return records[0]
+
+    def _task_failure_diagnostic_response(self, session_id: str) -> str:
+        latest = self._latest_relevant_task(session_id)
+        if latest is None:
+            return "No encontré una tarea reciente para diagnosticar en esta conversación."
+        status = str(getattr(latest, "status", "unknown"))
+        verification = str(getattr(latest, "verification_status", "unknown") or "unknown")
+        error = str(getattr(latest, "error", "") or "").strip()
+        summary = str(getattr(latest, "summary", "") or "").strip()
+        task_id = str(getattr(latest, "task_id", "") or "")
+        reason = error or summary or "no hay detalle suficiente registrado"
+        can_resume = (
+            status in {"failed", "running", "lost", "timed_out"}
+            or verification in {"blocked", "pending", "missing_evidence"}
+        )
+        lines = [
+            "No voy a crear otra tarea para esto; revisé la tarea más reciente.",
+            f"Task: `{task_id}`",
+            f"Cierre: {status} / verificación: {verification}",
+            f"Motivo: {reason[:700]}",
+        ]
+        if can_resume:
+            lines.append(f"Para reanudarla: `/task_resume {task_id}`")
+        return "\n".join(lines)
+
+    def _task_resume_previous_response(self, session_id: str) -> str:
+        latest = self._latest_relevant_task(session_id)
+        if latest is None:
+            return "No encontré una tarea anterior para reanudar."
+        status = str(getattr(latest, "status", "unknown"))
+        task_id = str(getattr(latest, "task_id", "") or "")
+        if status in {"succeeded", "completed", "done", "closed"}:
+            return (
+                "La tarea más reciente ya cerró como completada; no necesita reanudarse.\n"
+                f"Task: `{task_id}`"
+            )
+        if status == "cancelled":
+            return (
+                "La tarea más reciente fue cancelada; necesito que me confirmes si quieres reabrirla.\n"
+                f"Task: `{task_id}`"
+            )
+        return (
+            "Antes de crear otra tarea, te confirmo la anterior.\n"
+            f"Task: `{task_id}`\n"
+            f"Estado actual: {status}\n"
+            f"Para reanudarla: `/task_resume {task_id}`"
+        )

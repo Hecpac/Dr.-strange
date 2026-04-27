@@ -266,6 +266,8 @@ class AppConfig:
     agent_definitions_root: Path
     eval_artifacts_root: Path
     eval_on_self_improve: bool
+    self_improve_test_timeout_seconds: int
+    autonomous_maintenance_enabled: bool
     use_compaction: bool
     cache_prefix_ttl: int
     allowed_paths: list[Path]
@@ -296,7 +298,7 @@ class AppConfig:
     browserbase_keep_alive: bool
     sandbox_capability_profile: str
     sdk_bypass_permissions: bool
-    daily_cost_limit: float
+    daily_cost_limit: float | None
     chrome_cdp_enabled: bool
     claw_chrome_port: int
     computer_use_enabled: bool
@@ -363,6 +365,8 @@ class AppConfig:
             agent_definitions_root=Path(os.getenv("AGENT_DEFINITIONS_ROOT", str(cwd / "agents"))),
             eval_artifacts_root=Path(os.getenv("EVAL_ARTIFACTS_ROOT", str(home / ".claw" / "evals"))),
             eval_on_self_improve=_env_bool("EVAL_ON_SELF_IMPROVE", True),
+            self_improve_test_timeout_seconds=_env_int("SELF_IMPROVE_TEST_TIMEOUT_SECONDS", 600),
+            autonomous_maintenance_enabled=_env_bool("CLAW_AUTONOMOUS_MAINTENANCE_ENABLED", True),
             use_compaction=_env_bool("USE_COMPACTION", True),
             cache_prefix_ttl=_env_int("CACHE_PREFIX_TTL", 3600),
             allowed_paths=[Path(p) for p in os.getenv("ALLOWED_PATHS", "").split(":") if p],
@@ -400,7 +404,11 @@ class AppConfig:
             browserbase_keep_alive=_env_bool("BROWSERBASE_KEEP_ALIVE", False),
             sandbox_capability_profile=os.getenv("SANDBOX_CAPABILITY_PROFILE", "engineer"),
             sdk_bypass_permissions=_env_bool("SDK_BYPASS_PERMISSIONS", True),
-            daily_cost_limit=_env_float("DAILY_COST_LIMIT", 0.0),
+            daily_cost_limit=(
+                _env_float("DAILY_COST_LIMIT", 0.0)
+                if "DAILY_COST_LIMIT" in os.environ
+                else None
+            ),
             chrome_cdp_enabled=_env_bool("CHROME_CDP_ENABLED", True),
             claw_chrome_port=_env_int("CLAW_CHROME_PORT", 9250),
             computer_use_enabled=_env_bool("COMPUTER_USE_ENABLED", True),

@@ -152,6 +152,24 @@ def default_allowed_tools_for(agent_class: AgentClass) -> list[str]:
     return sorted(name for name, classes in DEFAULT_TOOL_AGENT_CLASSES.items() if agent_class in classes)
 
 
+def _ensure_strict_schema(schema: dict) -> dict:
+    """Recursively add additionalProperties=false to all object schemas."""
+    if not isinstance(schema, dict):
+        return schema
+    cleaned = dict(schema)
+    if cleaned.get("type") == "object" and "additionalProperties" not in cleaned:
+        cleaned["additionalProperties"] = False
+    properties = cleaned.get("properties")
+    if isinstance(properties, dict):
+        cleaned["properties"] = {
+            key: _ensure_strict_schema(value) for key, value in properties.items()
+        }
+    items = cleaned.get("items")
+    if isinstance(items, dict):
+        cleaned["items"] = _ensure_strict_schema(items)
+    return cleaned
+
+
 @dataclass(slots=True)
 class ToolDefinition:
     name: str
@@ -260,6 +278,8 @@ class ToolRegistry:
         self._definitions: dict[str, ToolDefinition] = {}
 
     def register(self, definition: ToolDefinition) -> None:
+        if definition.parameter_schema is not None:
+            definition.parameter_schema = _ensure_strict_schema(definition.parameter_schema)
         self._definitions[definition.name] = definition
 
     def get(self, name: str) -> ToolDefinition:
@@ -401,6 +421,12 @@ class ToolRegistry:
             path = _safe_path(args["path"])
             return {"path": str(path), "content": path.read_text(encoding="utf-8")}
 
+        def read_workspace_nonsecret(args: dict) -> dict:
+            from claw_v2.tool_policy import validate_workspace_path
+
+            path = validate_workspace_path(args["path"], workspace_root=workspace_root)
+            return {"path": str(path), "content": path.read_text(encoding="utf-8")}
+
         def write_file(args: dict) -> dict:
             path = _safe_path(args["path"])
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -461,6 +487,25 @@ class ToolRegistry:
                 handler=read_file,
                 tier=TIER_READ_ONLY,
                 parameter_schema={"type": "object", "properties": {"path": {"type": "string", "description": "Absolute file path"}}, "required": ["path"]},
+            )
+        )
+        registry.register(
+            ToolDefinition(
+                name="file.read_workspace_nonsecret",
+                description="Read a non-secret file from inside WORKSPACE_ROOT (daemon-safe).",
+                allowed_agent_classes=("researcher", "operator", "deployer"),
+                handler=read_workspace_nonsecret,
+                tier=TIER_READ_ONLY,
+                parameter_schema={
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Path inside WORKSPACE_ROOT; secret paths are rejected.",
+                        }
+                    },
+                    "required": ["path"],
+                },
             )
         )
         registry.register(

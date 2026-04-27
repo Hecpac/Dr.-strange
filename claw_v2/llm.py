@@ -10,6 +10,7 @@ from claw_v2.adapters.google import GoogleAdapter
 from claw_v2.adapters.ollama import OllamaAdapter
 from claw_v2.adapters.openai import OpenAIAdapter
 from claw_v2.config import AppConfig
+from claw_v2.redaction import redact_sensitive
 from claw_v2.retry_policy import ProviderCircuitBreaker
 from claw_v2.tracing import current_llm_trace, trace_metadata
 from claw_v2.types import Lane, LLMResponse
@@ -85,26 +86,34 @@ class LLMRouter:
         for hook in self.pre_hooks:
             result = hook(request)
             if result is None:
-                return LLMResponse(
+                hook_name = getattr(hook, "__name__", "pre_hook")
+                blocked = LLMResponse(
                     content="Request blocked by pre-hook.",
                     lane=request.lane,
                     provider="none",
                     model="none",
                     confidence=0.0,
                     cost_estimate=0.0,
-                    artifacts={"blocked_by": getattr(hook, "__name__", "pre_hook")},
+                    artifacts={"blocked_by": hook_name},
                 )
+                self._audit(
+                    "llm_pre_hook_blocked",
+                    blocked,
+                    {"blocked_by": hook_name, "session_id": session_id},
+                    request=request,
+                )
+                return blocked
             request = result
             request.validate()
 
-        adapter = self._adapter_for(selected_provider)
+        adapter = self._adapter_for(request.provider)
         if lane not in self.NON_TOOL_LANES and not adapter.tool_capable:
             raise ValueError(f"Lane '{lane}' requires a tool-capable provider adapter.")
 
         try:
             response = self._complete_with_circuit(adapter, request)
         except AdapterError as exc:
-            fallback_provider = self._pick_fallback(selected_provider, lane)
+            fallback_provider = self._pick_fallback(request.provider, lane)
             if fallback_provider is None:
                 raise
             fb_adapter = self._adapter_for(fallback_provider)
@@ -122,14 +131,18 @@ class LLMRouter:
             response = self._complete_with_circuit(fb_adapter, fallback_request)
             response.degraded_mode = True
             response.artifacts["fallback_reason"] = str(exc)
-            response.artifacts.update(trace_metadata(request.evidence_pack))
+            response.artifacts.update(trace_metadata(fallback_request.evidence_pack))
             for hook in self.post_hooks:
-                response = hook(request, response)
+                response = hook(fallback_request, response)
             self._audit(
                 "llm_fallback",
                 response,
-                {"requested_provider": selected_provider, "fallback_provider": fallback_provider, "response_text": response.content},
-                request=request,
+                {
+                    "requested_provider": selected_provider,
+                    "fallback_provider": fallback_provider,
+                    "response_text": redact_sensitive(response.content),
+                },
+                request=fallback_request,
             )
             return response
 
@@ -141,7 +154,7 @@ class LLMRouter:
         self._audit(
             "llm_response",
             response,
-            {"session_id": session_id, "response_text": response.content},
+            {"session_id": session_id, "response_text": redact_sensitive(response.content)},
             request=request,
         )
         return response

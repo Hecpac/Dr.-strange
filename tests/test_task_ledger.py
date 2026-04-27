@@ -80,6 +80,54 @@ class TaskLedgerTests(unittest.TestCase):
             self.assertEqual(events[0]["job_id"], "task-1")
             self.assertEqual(events[0]["artifact_id"], "job:abc")
 
+    def test_succeeded_without_evidence_redirects_to_running_and_emits_event(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "observe.db")
+            ledger = TaskLedger(Path(tmpdir) / "claw.db", observe=observe)
+
+            ledger.create(
+                task_id="task-fs",
+                session_id="s1",
+                objective="ship feature",
+                runtime="coordinator",
+                status="running",
+            )
+
+            result = ledger.mark_terminal(
+                "task-fs",
+                status="succeeded",
+                summary="Step 1: plan...\nStep 2: execute...",
+                verification_status="pending",
+            )
+
+            self.assertEqual(result.status, "running")
+            self.assertNotEqual(result.verification_status, "passed")
+
+            events = [e for e in observe.recent_events(limit=20) if e["event_type"] == "task_false_success_prevented"]
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["payload"]["task_id"], "task-fs")
+            self.assertEqual(events[0]["payload"]["requested_status"], "succeeded")
+
+    def test_succeeded_with_evidence_and_passed_verification_persists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ledger = TaskLedger(Path(tmpdir) / "claw.db")
+            ledger.create(
+                task_id="task-ok",
+                session_id="s1",
+                objective="ship feature",
+                runtime="coordinator",
+                status="running",
+            )
+            terminal = ledger.mark_terminal(
+                "task-ok",
+                status="succeeded",
+                summary="Done.",
+                verification_status="passed",
+                artifacts={"pr_url": "https://example.com/pr/1"},
+            )
+            self.assertEqual(terminal.status, "succeeded")
+            self.assertEqual(terminal.verification_status, "passed")
+
     def test_marks_stale_running_tasks_lost(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             ledger = TaskLedger(Path(tmpdir) / "claw.db")
