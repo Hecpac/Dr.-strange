@@ -76,6 +76,7 @@ def _default_monitored_sites() -> list[MonitoredSiteConfig]:
 def _default_scheduled_sub_agents() -> list[ScheduledSubAgentConfig]:
     return [
         ScheduledSubAgentConfig(agent="alma", skill="daily-brief", interval_seconds=86400, lane="worker"),
+        ScheduledSubAgentConfig(agent="alma", skill="ai-news-daily", interval_seconds=86400, lane="worker"),
         ScheduledSubAgentConfig(agent="alma", skill="content-radar", interval_seconds=43200, lane="worker"),
         ScheduledSubAgentConfig(agent="hex", skill="bug-triage", interval_seconds=86400, lane="worker"),
         ScheduledSubAgentConfig(agent="rook", skill="health-audit", interval_seconds=21600, lane="worker"),
