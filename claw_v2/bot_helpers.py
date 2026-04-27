@@ -182,11 +182,13 @@ _COMPUTER_READ_TOKENS = (
     "describe la pantalla",
 )
 _NLM_CREATE_RE = re.compile(
-    r"^\s*(?:por favor\s+)?(?:(?:cr[eé]a(?:me)?)|(?:genera(?:me)?)|(?:haz(?:me)?)|quiero|necesito)\s+"
+    r"^\s*(?:por favor\s+)?(?:(?:ahora|ya|tambi[eé]n|tb)\s+)?"
+    r"(?:(?:cr[eé]a(?:me)?)|(?:genera(?:me)?)|(?:haz(?:me)?)|quiero|necesito)\s+"
     r"(?:un\s+)?(?:cuaderno|notebook)(?:\s+(?:en\s+notebooklm))?"
-    r"(?:\s+(?:sobre|de(?:l)?))?\s+(.+?)\s*$",
-    re.IGNORECASE,
+    r"[,;:]?(?:\s+(?:sobre|de(?:l)?))?[,;:]?\s+(.+?)\s*$",
+    re.IGNORECASE | re.DOTALL,
 )
+_NLM_VOICE_PREFIX_RE = re.compile(r"^\s*\[\s*nota\s+de\s+voz\s*\]\s*:?\s*", re.IGNORECASE)
 _NLM_ARTIFACT_KINDS = {
     "podcast": "podcast",
     "infografia": "infographic",
@@ -315,8 +317,13 @@ def _default_step_budget(autonomy_mode: str) -> int:
     return 2
 
 
+def _strip_voice_prefix(text: str) -> str:
+    return _NLM_VOICE_PREFIX_RE.sub("", text, count=1)
+
+
 def _extract_nlm_create_topic(text: str) -> str | None:
-    match = _NLM_CREATE_RE.match(text.strip())
+    cleaned = _strip_voice_prefix(text).strip()
+    match = _NLM_CREATE_RE.match(cleaned)
     if not match:
         return None
     topic = match.group(1).strip()
@@ -324,7 +331,8 @@ def _extract_nlm_create_topic(text: str) -> str | None:
 
 
 def _extract_nlm_artifact_kind(text: str) -> str | None:
-    normalized = _normalize_command_text(text)
+    cleaned = _strip_voice_prefix(text)
+    normalized = _normalize_command_text(cleaned)
     if not any(token in normalized for token in _NLM_ACTION_TOKENS):
         return None
     for token, kind in _NLM_ARTIFACT_KINDS.items():
