@@ -9,6 +9,7 @@ from typing import Any, Callable, Iterator
 
 from claw_v2.bot_commands import BotCommand, CommandContext
 from claw_v2.bot_helpers import _extract_nlm_artifact_kind, _extract_nlm_create_topic
+from claw_v2.nlm_context import NotebookContext, resolve_latest_notebook_context
 
 logger = logging.getLogger(__name__)
 
@@ -19,11 +20,13 @@ class NlmHandler:
         update_session_state: Callable[..., None] | None = None,
         *,
         task_ledger: Any | None = None,
+        get_session_state: Callable[[str], dict[str, Any]] | None = None,
     ) -> None:
         self.notebooklm: Any | None = None
         self._active_notebooks: dict[str, dict[str, str]] = {}
         self._update_session_state = update_session_state or (lambda *a, **kw: None)
         self._task_ledger = task_ledger
+        self._get_session_state = get_session_state
 
     def commands(self) -> list[BotCommand]:
         return [
@@ -98,10 +101,26 @@ class NlmHandler:
                 return None
             target = self._active_notebook_id(session_id)
             if target is None:
-                return "No hay cuaderno activo. Primero dime `creame un cuaderno sobre ...`."
+                return self._missing_notebook_response(session_id)
             self._set_active_notebook(session_id, target)
             return self.notebooklm.start_artifact(target, kind)
         return None
+
+    def _missing_notebook_response(self, session_id: str) -> str:
+        ctx = self._resolve_notebook_context(session_id)
+        if not ctx.found:
+            return "No hay cuaderno activo. Primero dime `creame un cuaderno sobre ...`."
+        title = ctx.notebook_title or (ctx.notebook_id or "")[:8]
+        if ctx.notebook_id:
+            self._set_active_notebook(session_id, ctx.notebook_id, ctx.notebook_title)
+        if ctx.confidence == "low" and ctx.reason == "multiple_candidates":
+            return (
+                f"Encontré varios cuadernos recientes; usaré el más reciente registrado: {title}."
+            )
+        return (
+            "No veo cuaderno activo en esta sesión, pero encontré el último registrado: "
+            f"{title}. Lo usaré para esta acción."
+        )
 
     @contextmanager
     def _record_task(
@@ -268,7 +287,7 @@ class NlmHandler:
     def _podcast_response(self, session_id: str, notebook_id: str | None) -> str:
         target = notebook_id or self._active_notebook_id(session_id)
         if target is None:
-            return "No hay cuaderno activo. Primero dime `creame un cuaderno sobre ...`."
+            return self._missing_notebook_response(session_id)
         self._set_active_notebook(session_id, target)
         return self.notebooklm.start_podcast(target)
 
@@ -290,9 +309,33 @@ class NlmHandler:
 
     def _active_notebook_id(self, session_id: str) -> str | None:
         notebook = self._active_notebooks.get(session_id)
-        if notebook is None:
-            return None
-        return notebook["id"]
+        if notebook is not None:
+            return notebook["id"]
+        # Fallback: read persisted active_object from session state
+        if self._get_session_state is not None:
+            try:
+                state = self._get_session_state(session_id) or {}
+            except Exception:
+                state = {}
+            active = state.get("active_object") or {}
+            if isinstance(active, dict) and active.get("kind") == "notebook":
+                notebook_id = active.get("id")
+                title = active.get("title")
+                if notebook_id:
+                    self._active_notebooks[session_id] = {
+                        "id": str(notebook_id),
+                        "title": str(title or notebook_id)[:40],
+                    }
+                    return str(notebook_id)
+        return None
+
+    def _resolve_notebook_context(self, session_id: str) -> NotebookContext:
+        return resolve_latest_notebook_context(
+            session_id=session_id,
+            get_session_state=self._get_session_state,
+            task_ledger=self._task_ledger,
+            notebooklm_backend=self.notebooklm,
+        )
 
 
 _NLM_INTENT_TO_TASK_KIND: dict[str, str] = {

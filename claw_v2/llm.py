@@ -87,19 +87,25 @@ class LLMRouter:
             result = hook(request)
             if result is None:
                 hook_name = getattr(hook, "__name__", "pre_hook")
+                block_reason = getattr(hook, "block_reason", None) or "no_reason_provided"
+                content = f"Request blocked by pre-hook ({hook_name}). Reason: {block_reason}"
                 blocked = LLMResponse(
-                    content="Request blocked by pre-hook.",
+                    content=content,
                     lane=request.lane,
                     provider="none",
                     model="none",
                     confidence=0.0,
                     cost_estimate=0.0,
-                    artifacts={"blocked_by": hook_name},
+                    artifacts={"blocked_by": hook_name, "block_reason": block_reason},
                 )
                 self._audit(
                     "llm_pre_hook_blocked",
                     blocked,
-                    {"blocked_by": hook_name, "session_id": session_id},
+                    {
+                        "blocked_by": hook_name,
+                        "block_reason": block_reason,
+                        "session_id": session_id,
+                    },
                     request=request,
                 )
                 return blocked

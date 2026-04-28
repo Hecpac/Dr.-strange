@@ -387,10 +387,13 @@ def _setup_llm_stack(
     if anthropic_executor is None:
         anthropic_executor = create_claude_sdk_executor(config, observe=observe, approvals=approvals)
 
+    auth_mode = getattr(config, "claude_auth_mode", "auto")
     if config.daily_cost_limit is None:
-        pre_hooks: list = [make_daily_cost_gate(observe, 10.0)]
+        pre_hooks: list = [make_daily_cost_gate(observe, 10.0, auth_mode=auth_mode)]
     elif config.daily_cost_limit > 0:
-        pre_hooks = [make_daily_cost_gate(observe, config.daily_cost_limit)]
+        pre_hooks = [
+            make_daily_cost_gate(observe, config.daily_cost_limit, auth_mode=auth_mode)
+        ]
     else:
         raise ValueError("daily_cost_limit must be positive or None")
     pre_hooks.append(make_anti_distillation_hook())
@@ -681,6 +684,8 @@ def _register_sub_agent_jobs(
             ScheduledJob(
                 name=job_name,
                 interval_seconds=job.interval_seconds,
+                daily_at=job.daily_at,
+                timezone=job.timezone,
                 handler=_wrap_job_handler(
                     name=job_name,
                     observe=observe,

@@ -520,6 +520,7 @@ class RuntimeTests(unittest.TestCase):
                 "PIPELINE_STATE_ROOT": str(root / "pipeline"),
                 "TELEGRAM_ALLOWED_USER_ID": "123",
                 "DAILY_COST_LIMIT": "0.10",
+                "CLAUDE_AUTH_MODE": "api_key",
             }
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)

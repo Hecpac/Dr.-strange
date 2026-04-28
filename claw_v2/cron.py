@@ -3,7 +3,9 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from typing import Callable, Protocol
+from zoneinfo import ZoneInfo
 
 
 logger = logging.getLogger(__name__)
@@ -20,11 +22,38 @@ class CronPersistence(Protocol):
 @dataclass(slots=True)
 class ScheduledJob:
     name: str
-    interval_seconds: int
+    interval_seconds: int | None
     handler: JobHandler
+    daily_at: str | None = None
+    timezone: str | None = None
     last_run_at: float = 0.0
     runs: int = 0
     metadata: dict = field(default_factory=dict)
+
+
+def _next_due_for_daily_at(
+    daily_at: str, timezone: str, last_run_at: float, *, now: float
+) -> float:
+    """Compute next epoch seconds when this daily_at job should fire.
+
+    `daily_at` is "HH:MM" 24-hour. `timezone` is a ZoneInfo key.
+    Returns absolute epoch seconds for the next firing.
+    """
+    tz = ZoneInfo(timezone)
+    hour_str, minute_str = daily_at.split(":")
+    hour = int(hour_str)
+    minute = int(minute_str)
+    now_dt = datetime.fromtimestamp(now, tz=tz)
+    candidate = now_dt.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    last_run_dt = datetime.fromtimestamp(last_run_at, tz=tz) if last_run_at > 0 else None
+    if last_run_dt is not None and last_run_dt.date() == candidate.date():
+        # Already ran today: schedule next run for tomorrow at HH:MM.
+        candidate = candidate + timedelta(days=1)
+    elif candidate <= now_dt:
+        # HH:MM already passed today and we haven't run; fire now (next firing
+        # window is the past; due immediately).
+        return now
+    return candidate.timestamp()
 
 
 class CronScheduler:
@@ -56,7 +85,7 @@ class CronScheduler:
         current = time.time() if now is None else now
         executed: list[str] = []
         for job in self._jobs.values():
-            if job.runs > 0 and current - job.last_run_at < job.interval_seconds:
+            if not self._is_due(job, current):
                 continue
             try:
                 job.handler()
@@ -76,3 +105,20 @@ class CronScheduler:
                 except Exception:
                     logger.exception("cron persistence failed for %s", job.name)
         return executed
+
+    def _is_due(self, job: ScheduledJob, current: float) -> bool:
+        # daily_at takes precedence when set
+        if job.daily_at and job.timezone:
+            try:
+                next_due = _next_due_for_daily_at(
+                    job.daily_at, job.timezone, job.last_run_at, now=current
+                )
+            except Exception:
+                logger.exception("daily_at parse failed for %s", job.name)
+                return False
+            return current >= next_due
+        if job.interval_seconds is None:
+            return False
+        if job.runs == 0:
+            return True
+        return current - job.last_run_at >= job.interval_seconds

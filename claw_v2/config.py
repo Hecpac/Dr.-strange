@@ -62,7 +62,9 @@ class MonitoredSiteConfig:
 class ScheduledSubAgentConfig:
     agent: str
     skill: str
-    interval_seconds: int
+    interval_seconds: int | None = None
+    daily_at: str | None = None  # "HH:MM" 24-hour
+    timezone: str | None = None  # e.g., "America/Chicago"
     lane: str = "worker"
 
 
@@ -76,7 +78,13 @@ def _default_monitored_sites() -> list[MonitoredSiteConfig]:
 def _default_scheduled_sub_agents() -> list[ScheduledSubAgentConfig]:
     return [
         ScheduledSubAgentConfig(agent="alma", skill="daily-brief", interval_seconds=86400, lane="worker"),
-        ScheduledSubAgentConfig(agent="alma", skill="ai-news-daily", interval_seconds=86400, lane="worker"),
+        ScheduledSubAgentConfig(
+            agent="alma",
+            skill="ai-news-daily",
+            daily_at="08:00",
+            timezone="America/Chicago",
+            lane="worker",
+        ),
         ScheduledSubAgentConfig(agent="alma", skill="content-radar", interval_seconds=43200, lane="worker"),
         ScheduledSubAgentConfig(agent="hex", skill="bug-triage", interval_seconds=86400, lane="worker"),
         ScheduledSubAgentConfig(agent="rook", skill="health-audit", interval_seconds=21600, lane="worker"),
@@ -220,11 +228,19 @@ def _coerce_scheduled_sub_agents(raw: object) -> list[ScheduledSubAgentConfig]:
     for entry in raw:
         if not isinstance(entry, dict):
             raise ValueError("each scheduled_sub_agents entry must be a mapping")
+        interval_raw = entry.get("interval_seconds")
+        interval_seconds = int(interval_raw) if interval_raw is not None else None
+        daily_at_raw = entry.get("daily_at")
+        daily_at = str(daily_at_raw).strip() if daily_at_raw else None
+        timezone_raw = entry.get("timezone")
+        timezone = str(timezone_raw).strip() if timezone_raw else None
         jobs.append(
             ScheduledSubAgentConfig(
                 agent=str(entry.get("agent", "")).strip(),
                 skill=str(entry.get("skill", "")).strip(),
-                interval_seconds=int(entry.get("interval_seconds", 0)),
+                interval_seconds=interval_seconds,
+                daily_at=daily_at,
+                timezone=timezone,
                 lane=str(entry.get("lane", "worker")).strip() or "worker",
             )
         )
@@ -481,8 +497,35 @@ class AppConfig:
         for job in self.scheduled_sub_agents:
             if not job.agent or not job.skill:
                 raise ValueError("scheduled_sub_agents entries must include agent and skill.")
-            if job.interval_seconds <= 0:
-                raise ValueError(f"scheduled job '{job.agent}:{job.skill}' interval_seconds must be positive.")
+            has_interval = job.interval_seconds is not None and job.interval_seconds > 0
+            has_daily_at = bool(job.daily_at)
+            if not has_interval and not has_daily_at:
+                raise ValueError(
+                    f"scheduled job '{job.agent}:{job.skill}' must declare interval_seconds or daily_at."
+                )
+            if has_daily_at:
+                try:
+                    parts = str(job.daily_at).split(":")
+                    if len(parts) != 2:
+                        raise ValueError("malformed")
+                    hour = int(parts[0])
+                    minute = int(parts[1])
+                    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                        raise ValueError("out_of_range")
+                except Exception as exc:
+                    raise ValueError(
+                        f"scheduled job '{job.agent}:{job.skill}' daily_at must be HH:MM (00-23:00-59)."
+                    ) from exc
+                if not job.timezone:
+                    raise ValueError(
+                        f"scheduled job '{job.agent}:{job.skill}' daily_at requires timezone."
+                    )
+                try:
+                    ZoneInfo(job.timezone)
+                except ZoneInfoNotFoundError as exc:
+                    raise ValueError(
+                        f"scheduled job '{job.agent}:{job.skill}' has invalid timezone: {job.timezone}"
+                    ) from exc
             if not job.lane:
                 raise ValueError(f"scheduled job '{job.agent}:{job.skill}' must include a lane.")
 

@@ -225,6 +225,36 @@ class DailyCostGateTests(unittest.TestCase):
             result = gate(self._make_request())
             self.assertIsNotNone(result)
 
+    def test_subscription_mode_skips_gate_even_over_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "test.db")
+            observe.emit(
+                "llm_response",
+                lane="brain",
+                provider="anthropic",
+                model="opus",
+                payload={"cost_estimate": 25.0},  # well over $10 limit
+            )
+            gate = make_daily_cost_gate(observe, daily_limit=10.0, auth_mode="subscription")
+            result = gate(self._make_request())
+            self.assertIsNotNone(result, "subscription mode must NOT block on cost")
+            self.assertIsNone(getattr(gate, "block_reason", "not-set"))
+
+    def test_api_key_mode_still_blocks_over_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "test.db")
+            observe.emit(
+                "llm_response",
+                lane="brain",
+                provider="anthropic",
+                model="opus",
+                payload={"cost_estimate": 12.0},
+            )
+            gate = make_daily_cost_gate(observe, daily_limit=10.0, auth_mode="api_key")
+            result = gate(self._make_request())
+            self.assertIsNone(result)
+            self.assertIn("daily_cost_limit_exceeded", gate.block_reason)
+
 
 class DecisionLoggerTests(unittest.TestCase):
     def test_emits_llm_decision_event(self) -> None:
