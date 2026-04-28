@@ -44,15 +44,35 @@ _DECOY_POOL: list[str] = [
 ]
 
 
-def make_daily_cost_gate(observe: ObserveStream, daily_limit: float = 10.0) -> PreLLMHook:
+def make_daily_cost_gate(
+    observe: ObserveStream,
+    daily_limit: float = 10.0,
+    *,
+    auth_mode: str = "auto",
+) -> PreLLMHook:
+    """Daily cost gate.
+
+    Subscription mode (Claude Pro/Max + ChatGPT Pro etc.) does NOT bill
+    per-call: SDK still reports `total_cost_usd` for parity, but it is not
+    real spend. We skip the gate entirely in subscription mode to avoid
+    blocking real work after the SDK's notional total crosses the limit.
+    """
     def daily_cost_gate(request: LLMRequest) -> LLMRequest | None:
+        if auth_mode == "subscription":
+            daily_cost_gate.block_reason = None
+            return request
         total_today = observe.total_cost_today()
         if total_today >= daily_limit:
             logger.warning("Daily cost limit reached: $%.2f >= $%.2f", total_today, daily_limit)
+            daily_cost_gate.block_reason = (
+                f"daily_cost_limit_exceeded (${total_today:.2f} >= ${daily_limit:.2f})"
+            )
             return None
+        daily_cost_gate.block_reason = None
         return request
 
     daily_cost_gate.__name__ = "daily_cost_gate"
+    daily_cost_gate.block_reason = None
     return daily_cost_gate
 
 

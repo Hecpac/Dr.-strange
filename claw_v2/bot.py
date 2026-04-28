@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
@@ -16,6 +17,20 @@ from claw_v2.approval import ApprovalManager
 from claw_v2.approval_gate import ApprovalPending
 from claw_v2.brain import BrainService
 from claw_v2.bot_commands import BotCommand, CommandContext, dispatch_commands
+from claw_v2.capability_router import (
+    CapabilityRoute,
+    RuntimeAliveProbe,
+    classify_autonomy_intent,
+    route_request,
+)
+from claw_v2.execution_environment import (
+    ExecutionEnvironment,
+    detect_execution_environment,
+)
+from claw_v2.runtime_handoff import (
+    create_runtime_handoff,
+    format_handoff_message,
+)
 from claw_v2.checkpoint_handler import CheckpointHandler
 from claw_v2.chrome_handler import ChromeHandler
 from claw_v2.computer_handler import ComputerHandler
@@ -58,6 +73,25 @@ _CAPABILITY_MESSAGES = {
     "computer_control": "Lo siento, mi módulo de control de escritorio está actualmente degradado y no puedo ejecutar acciones interactivas.",
     "browser_use": "Lo siento, mi backend de automatización web está actualmente degradado y no puedo completar ese flujo web.",
 }
+
+
+_PRE_HOOK_BLOCK_PREFIX = "Request blocked by pre-hook"
+_PRE_HOOK_BLOCK_RE = re.compile(
+    r"^Request blocked by pre-hook \(([^)]+)\)\. Reason: (.+)$"
+)
+PRE_HOOK_BLOCK_REPEATED_THRESHOLD = 5
+PRE_HOOK_BLOCK_REPEATED_WINDOW_MINUTES = 10
+
+
+def _looks_like_pre_hook_block(content: str) -> bool:
+    return content.strip().startswith(_PRE_HOOK_BLOCK_PREFIX)
+
+
+def _parse_pre_hook_block(content: str) -> tuple[str, str] | None:
+    match = _PRE_HOOK_BLOCK_RE.match(content.strip())
+    if match is None:
+        return None
+    return match.group(1), match.group(2)
 
 
 def _format_approval_pending(exc: ApprovalPending) -> str:
@@ -200,8 +234,11 @@ class BotService:
         self._nlm_handler = NlmHandler(
             update_session_state=brain.memory.update_session_state,
             task_ledger=task_ledger,
+            get_session_state=brain.memory.get_session_state,
         )
         self._capability_status: dict[str, dict[str, Any]] = {}
+        self._runtime_probe: RuntimeAliveProbe | None = None
+        self._execution_environment: ExecutionEnvironment | None = None
         self._browse_handler = BrowseHandler(
             config=config,
             observe=observe,
@@ -361,6 +398,150 @@ class BotService:
         reason = str(status.get("reason", "")).strip()
         return f"{base} {reason}".strip()
 
+    def _capability_available(self, name: str) -> bool:
+        status = self._capability_status.get(name)
+        if status is None:
+            return True
+        return bool(status.get("available", True))
+
+    def _scheduled_skill_available(self, skill: str) -> bool:
+        scheduled = getattr(self.config, "scheduled_sub_agents", None) or []
+        for entry in scheduled:
+            if getattr(entry, "skill", None) == skill:
+                return True
+        return False
+
+    def _runtime_alive(self) -> bool:
+        if self._runtime_probe is None:
+            port = int(getattr(self.config, "web_chat_port", 8765))
+            self._runtime_probe = RuntimeAliveProbe(port=port)
+        return self._runtime_probe.is_alive()
+
+    def _current_environment(self) -> ExecutionEnvironment:
+        if self._execution_environment is None:
+            workspace_root = getattr(self.config, "workspace_root", None)
+            self._execution_environment = detect_execution_environment(
+                workspace_root=str(workspace_root) if workspace_root else None
+            )
+        return self._execution_environment
+
+    def _maybe_handle_capability_route(
+        self, text: str, *, session_id: str
+    ) -> str | None:
+        # Guard: slash commands NO se interceptan; van a sus handlers existentes.
+        if not text or text.lstrip().startswith("/"):
+            return None
+        intent = classify_autonomy_intent(text)
+        if intent.task_kind == "unknown":
+            return None
+        # Skip notebooklm here — el NlmHandler downstream tiene su propio resolver.
+        if intent.task_kind.startswith("notebooklm"):
+            return None
+        # Acciones críticas (publish/merge/deploy) las maneja la autonomy policy
+        # existente en task_handler con su propio mensaje. No interceptamos.
+        from claw_v2.capability_router import CRITICAL_TASK_KINDS
+
+        if intent.task_kind in CRITICAL_TASK_KINDS:
+            return None
+        env = self._current_environment()
+        route = route_request(
+            intent,
+            skill_available=self._scheduled_skill_available,
+            runtime_alive=self._runtime_alive(),
+            chrome_cdp=self._capability_available("chrome_cdp"),
+            web_available=self._capability_available("browser_use"),
+            current_environment=env.kind,
+        )
+        self._emit_capability_route_event(route, session_id=session_id)
+        if route.route == "runtime_handoff":
+            return self._dispatch_runtime_handoff(route, session_id=session_id)
+        if route.route == "approval_required":
+            return route.next_action
+        if route.route == "blocked":
+            return route.next_action
+        if route.route == "skill":
+            return (
+                f"He delegado tu petición ({route.task_kind}) a la skill "
+                f"`{route.skill}`. {route.next_action}"
+            )
+        if route.route == "runtime":
+            return f"Ejecutando {route.task_kind} vía runtime. {route.next_action}"
+        if route.route == "cdp":
+            return None  # Existing chrome handler / browse handler downstream picks up.
+        if route.route == "local":
+            return None  # Existing handlers pick up.
+        return None
+
+    def _dispatch_runtime_handoff(
+        self, route: CapabilityRoute, *, session_id: str
+    ) -> str:
+        workspace_root = getattr(self.config, "workspace_root", None)
+        queue_root = (
+            Path(workspace_root) / "runtime_handoffs"
+            if workspace_root is not None
+            else Path("data") / "runtime_handoffs"
+        )
+        port = int(getattr(self.config, "web_chat_port", 8765))
+        try:
+            handoff = create_runtime_handoff(
+                goal=route.task_kind,
+                session_id=session_id,
+                required_capabilities=list(route.required_capabilities),
+                queue_root=queue_root,
+                gateway_port=port,
+            )
+        except Exception:
+            logger.exception("failed to create runtime handoff")
+            return (
+                "Esta sesión no puede ejecutar la misión y no pude crear un "
+                "handoff. Reinicia Claw producción con: "
+                "`cd ~/Projects/Dr.-strange && ./scripts/restart.sh`"
+            )
+        if self.observe is not None:
+            try:
+                self.observe.emit(
+                    "runtime_handoff_created",
+                    payload={
+                        "handoff_id": handoff.handoff_id,
+                        "session_id": session_id,
+                        "task_kind": route.task_kind,
+                        "dispatch_method": handoff.dispatch_method,
+                        "queue_path": handoff.queue_path,
+                        "status": handoff.status,
+                    },
+                )
+            except Exception:
+                logger.exception("failed to emit runtime_handoff_created")
+        return format_handoff_message(handoff)
+
+    def _emit_capability_route_event(
+        self, route: CapabilityRoute, *, session_id: str
+    ) -> None:
+        if self.observe is None:
+            return
+        event_type = (
+            "capability_route_blocked"
+            if route.route == "blocked"
+            else "capability_route_selected"
+        )
+        try:
+            self.observe.emit(
+                event_type,
+                payload={
+                    "session_id": session_id,
+                    "route": route.route,
+                    "reason": route.reason,
+                    "task_kind": route.task_kind,
+                    "required_capabilities": list(route.required_capabilities),
+                    "available_capabilities": list(route.available_capabilities),
+                    "missing_capabilities": list(route.missing_capabilities),
+                    "skill": route.skill,
+                    "ask_user": route.ask_user,
+                },
+            )
+        except Exception:
+            logger.exception("failed to emit capability route event")
+
     def _memory_compaction_enabled(self) -> bool:
         return bool(getattr(self.config, "use_compaction", False))
 
@@ -413,6 +594,11 @@ class BotService:
             self._store_memory_turn(session_id, stripped, task_intent_response, assistant_limit=2000)
             self._remember_assistant_turn_state(session_id, stripped, task_intent_response)
             return task_intent_response
+        capability_route_response = self._maybe_handle_capability_route(stripped, session_id=session_id)
+        if capability_route_response is not None:
+            self._store_memory_turn(session_id, stripped, capability_route_response, assistant_limit=2000)
+            self._remember_assistant_turn_state(session_id, stripped, capability_route_response)
+            return capability_route_response
         self._remember_user_turn_state(session_id, stripped)
         if _looks_like_autonomy_grant(stripped):
             return self._handle_autonomy_grant_response(session_id, stripped)
@@ -1254,6 +1440,8 @@ class BotService:
         content = raw_content.strip()
         if not content or content == "(no result)":
             content = "Recibido. ¿Qué quieres que haga con esto?"
+        elif _looks_like_pre_hook_block(content):
+            content = self._maybe_augment_pre_hook_block(content)
         elif runtime_capability_question:
             content = _enforce_runtime_capability_sections(content)
         elif link_analysis_context is not None:
@@ -1287,6 +1475,47 @@ class BotService:
             )
         self._remember_assistant_turn_state(session_id, source_text, content)
         return content
+
+    def _maybe_augment_pre_hook_block(self, content: str) -> str:
+        parsed = _parse_pre_hook_block(content)
+        if parsed is None or self.observe is None:
+            return content
+        hook_name, reason = parsed
+        try:
+            recent = self.observe.recent_events(limit=200)
+        except Exception:
+            return content
+        cutoff_minutes = PRE_HOOK_BLOCK_REPEATED_WINDOW_MINUTES
+        same_hook_count = 0
+        for event in recent:
+            if event.get("event_type") != "llm_pre_hook_blocked":
+                continue
+            payload = event.get("payload") or {}
+            if not isinstance(payload, dict):
+                continue
+            if payload.get("blocked_by") != hook_name:
+                continue
+            same_hook_count += 1
+        if same_hook_count <= PRE_HOOK_BLOCK_REPEATED_THRESHOLD:
+            return content
+        try:
+            self.observe.emit(
+                "pre_hook_blocked_repeated",
+                payload={
+                    "hook": hook_name,
+                    "reason": reason,
+                    "count": same_hook_count,
+                    "window_minutes": cutoff_minutes,
+                },
+            )
+        except Exception:
+            logger.exception("failed to emit pre_hook_blocked_repeated")
+        alert = (
+            f"⚠️ Atención: hook `{hook_name}` está bloqueando llamadas LLM repetidamente "
+            f"({same_hook_count} en últimos {cutoff_minutes} min). Razón: {reason}. "
+            "Revisa configuración.\n\n"
+        )
+        return alert + content
 
     def handle_multimodal(
         self,
@@ -1375,6 +1604,22 @@ class BotService:
         provider_session_reset = counts.get("provider_session_reset", 0)
         stream_interrupted = counts.get("stream_interrupted_checkpointed", 0)
         llm_fallback = counts.get("llm_fallback", 0)
+        pre_hook_blocked_count = counts.get("llm_pre_hook_blocked", 0)
+        pre_hook_blocked_repeated_count = counts.get("pre_hook_blocked_repeated", 0)
+        capability_route_selected_count = counts.get("capability_route_selected", 0)
+        capability_route_blocked_count = counts.get("capability_route_blocked", 0)
+        notebook_context_resolved_count = counts.get(
+            "notebook_context_resolved", 0
+        )
+        pre_hook_top_hooks: dict[str, int] = {}
+        for event in events:
+            if event.get("event_type") != "llm_pre_hook_blocked":
+                continue
+            payload = event.get("payload") or {}
+            hook = payload.get("blocked_by") if isinstance(payload, dict) else None
+            if isinstance(hook, str) and hook:
+                pre_hook_top_hooks[hook] = pre_hook_top_hooks.get(hook, 0) + 1
+        top_pre_hooks = sorted(pre_hook_top_hooks.items(), key=lambda kv: kv[1], reverse=True)[:3]
         failure_reasons: dict[str, int] = {}
         for event in events:
             if event.get("event_type") not in {
@@ -1411,6 +1656,19 @@ class BotService:
                 "provider_session_reset": provider_session_reset,
                 "stream_interrupted_checkpointed": stream_interrupted,
                 "llm_fallback": llm_fallback,
+            },
+            "pre_hook_blocks": {
+                "count": pre_hook_blocked_count,
+                "repeated_count": pre_hook_blocked_repeated_count,
+                "top_hooks": [
+                    {"hook": hook, "count": count}
+                    for hook, count in top_pre_hooks
+                ],
+            },
+            "autonomy_routing": {
+                "capability_route_selected_count": capability_route_selected_count,
+                "capability_route_blocked_count": capability_route_blocked_count,
+                "notebook_context_resolved_count": notebook_context_resolved_count,
             },
         }
         return redact_sensitive(json.dumps(payload, indent=2, sort_keys=True), limit=0)

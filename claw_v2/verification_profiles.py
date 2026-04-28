@@ -87,6 +87,13 @@ PROFILES: dict[str, VerificationProfile] = {
         human_approval_required=True,
         verifier_required=True,
     ),
+    "ai_news_brief": VerificationProfile(
+        task_kind="ai_news_brief",
+        required_evidence=("sources", "claim_map", "fetched_at"),
+        allowed_risk="low",
+        human_approval_required=False,
+        verifier_required=False,
+    ),
 }
 
 
