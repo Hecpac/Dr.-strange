@@ -7,6 +7,7 @@ guarding, NotebookLM resolver, and approval-required negative controls.
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -94,6 +95,62 @@ class AutonomyE2ETests(unittest.TestCase):
                 self.assertEqual(payload.get("task_kind"), "ai_news_brief")
                 self.assertFalse(payload.get("ask_user"))
 
+    def test_ai_news_skill_route_executes_background_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            with patch.dict(os.environ, _runtime(root), clear=False):
+                runtime = build_runtime(anthropic_executor=_stub_llm)
+                self._force_production_env(runtime)
+                runtime.bot._runtime_probe = type(
+                    "P", (), {"is_alive": lambda self: True}
+                )()
+                calls: list[tuple[str, str, str, str]] = []
+
+                def fake_run_skill(agent: str, skill: str, context: str = "", *, lane: str = "research") -> str:
+                    calls.append((agent, skill, context, lane))
+                    return "AI Brief listo\nFuente: test"
+
+                runtime.bot.sub_agents.run_skill = fake_run_skill  # type: ignore[method-assign]
+                reply = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="dame noticias AI de hoy",
+                )
+
+                self.assertIn("Tarea de skill iniciada", reply)
+                self.assertIn("ai-news-daily", reply)
+                match = re.search(r"`([^`]+:skill:\d+)`", reply)
+                self.assertIsNotNone(match)
+                task_id = match.group(1)
+                self.assertTrue(runtime.bot.wait_for_skill_task(task_id, timeout=2.0))
+                self.assertEqual(calls[0][0], "alma")
+                self.assertEqual(calls[0][1], "ai-news-daily")
+                self.assertIn("dame noticias AI de hoy", calls[0][2])
+                record = runtime.task_ledger.get(task_id)
+                self.assertIsNotNone(record)
+                self.assertEqual(record.status, "succeeded")
+                self.assertEqual(record.verification_status, "passed")
+                completed = self._events_of(runtime, "autonomous_task_completed")
+                self.assertTrue(completed)
+                self.assertEqual(completed[-1]["payload"]["task_id"], task_id)
+
+    def test_plain_status_is_local_and_does_not_call_llm(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            with patch.dict(os.environ, _runtime(root), clear=False):
+                runtime = build_runtime(anthropic_executor=_stub_llm)
+                runtime.bot._runtime_probe = type(
+                    "P", (), {"is_alive": lambda self: True}
+                )()
+                reply = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="tg-1",
+                    text="Estas vivo",
+                )
+                self.assertIn("Estoy vivo", reply)
+                self.assertIn("/restart", reply)
+                self.assertEqual(self._events_of(runtime, "llm_response"), [])
+
     def test_ai_news_blocked_when_no_route_available(self) -> None:
         from claw_v2.execution_environment import ExecutionEnvironment
 
@@ -146,6 +203,7 @@ class AutonomyE2ETests(unittest.TestCase):
                 runtime.bot._runtime_probe = type(
                     "P", (), {"is_alive": lambda self: False}
                 )()
+                runtime.config.web_chat_port = 1
                 reply = runtime.bot.handle_text(
                     user_id="123",
                     session_id="s1",

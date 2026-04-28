@@ -32,6 +32,23 @@ def _healthy_runner(args: list[str], **_: object) -> subprocess.CompletedProcess
     return _completed(args, 1, "", "unknown command")
 
 
+def _sandboxed_process_runner(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+    if args[:2] == ["launchctl", "list"]:
+        return _completed(args, 1, "", "")
+    if args[:2] == ["launchctl", "print"]:
+        return _completed(args, 0, "state = running\npid = 123\n")
+    if args[:2] == ["pgrep", "-fl"]:
+        return _completed(
+            args,
+            3,
+            "",
+            "sysmon request failed with error: sysmond service not found\npgrep: Cannot get process list",
+        )
+    if args and args[0] == "lsof":
+        return _completed(args, 0, "Python 123 user 3u IPv4 TCP 127.0.0.1:8765 (LISTEN)\n")
+    return _completed(args, 1, "", "unknown command")
+
+
 class DiagnosticsTests(unittest.TestCase):
     def test_collects_process_port_database_jobs_tasks_and_actionable_events(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -107,6 +124,21 @@ class DiagnosticsTests(unittest.TestCase):
             self.assertEqual(report["checks"]["status"], "healthy")
             self.assertEqual(report["checks"]["recent_error_events"], 0)
             self.assertEqual(report["database"]["observe"]["latest_errors"], [])
+
+    def test_process_probe_failure_uses_launchd_and_port_as_liveness(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            ObserveStream(db_path).emit(
+                "daemon_heartbeat",
+                payload={"pid": 123, "ts": time.time(), "web_transport_serving": True},
+            )
+
+            report = collect_diagnostics(db_path=db_path, port=8765, runner=_sandboxed_process_runner)
+
+            self.assertEqual(report["checks"]["status"], "healthy")
+            self.assertTrue(report["checks"]["process_running"])
+            self.assertTrue(report["checks"]["launchd_loaded"])
+            self.assertTrue(report["checks"]["port_listening"])
 
     def test_acknowledged_events_do_not_keep_status_in_attention(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
