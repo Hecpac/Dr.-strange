@@ -8,8 +8,9 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from claw_v2.cron import CronScheduler, ScheduledJob
-from claw_v2.daemon import ClawDaemon
+from claw_v2.daemon import ClawDaemon, TickResult
 from claw_v2.heartbeat import HeartbeatSnapshot
+from claw_v2.jobs import JobService
 from claw_v2.task_ledger import TaskLedger
 
 
@@ -88,6 +89,38 @@ class DaemonTickTests(unittest.TestCase):
                 payload={"lost_tasks": 1, "older_than_seconds": 60},
             )
 
+    def test_tick_cancels_jobs_for_terminal_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            ledger = TaskLedger(db_path)
+            jobs = JobService(db_path)
+            ledger.create(
+                task_id="task-1",
+                session_id="s1",
+                objective="old task",
+                runtime="coordinator",
+                status="lost",
+            )
+            job = jobs.enqueue(
+                kind="coordinator.autonomous_task",
+                payload={"task_id": "task-1", "session_id": "s1"},
+                resume_key="coordinator:task-1",
+            )
+            daemon, _, observe = self._make_daemon()
+            daemon.task_ledger = ledger
+            daemon.job_service = jobs
+
+            daemon.tick(now=1000)
+
+            cancelled = jobs.get(job.job_id)
+            self.assertIsNotNone(cancelled)
+            self.assertEqual(cancelled.status, "cancelled")
+            self.assertEqual(cancelled.error, "orphaned_by_task:lost")
+            observe.emit.assert_any_call(
+                "daemon_job_reconciliation",
+                payload={"cancelled_orphan_jobs": 1},
+            )
+
 
 class DaemonRunLoopTests(unittest.IsolatedAsyncioTestCase):
     async def test_run_loop_stops_on_shutdown(self) -> None:
@@ -110,6 +143,7 @@ class DaemonRunLoopTests(unittest.IsolatedAsyncioTestCase):
         )
         daemon = ClawDaemon(scheduler=scheduler, heartbeat=heartbeat)
         shutdown = asyncio.Event()
+        loop = asyncio.get_running_loop()
 
         original_tick = daemon.tick
 
@@ -117,7 +151,7 @@ class DaemonRunLoopTests(unittest.IsolatedAsyncioTestCase):
             nonlocal tick_count
             tick_count += 1
             if tick_count >= 2:
-                shutdown.set()
+                loop.call_soon_threadsafe(shutdown.set)
             return original_tick(**kwargs)
 
         daemon.tick = counting_tick
@@ -133,19 +167,42 @@ class DaemonRunLoopTests(unittest.IsolatedAsyncioTestCase):
         observe = MagicMock()
         daemon = ClawDaemon(scheduler=scheduler, heartbeat=heartbeat, observe=observe)
         shutdown = asyncio.Event()
+        loop = asyncio.get_running_loop()
         call_count = 0
 
         def exploding_tick(**kwargs):
             nonlocal call_count
             call_count += 1
             if call_count >= 2:
-                shutdown.set()
+                loop.call_soon_threadsafe(shutdown.set)
             raise RuntimeError("boom")
 
         daemon.tick = exploding_tick
         await daemon.run_loop(shutdown, interval=0.01)
         self.assertGreaterEqual(call_count, 2)
         observe.emit.assert_called()
+
+    async def test_run_loop_emits_liveness_while_tick_blocks(self) -> None:
+        scheduler = CronScheduler()
+        heartbeat = MagicMock()
+        heartbeat.collect.return_value = HeartbeatSnapshot(
+            timestamp="t", pending_approvals=0, pending_approval_ids=[], agents={}, lane_metrics={},
+        )
+        observe = MagicMock()
+        daemon = ClawDaemon(scheduler=scheduler, heartbeat=heartbeat, observe=observe)
+        shutdown = asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        def slow_tick(**kwargs):
+            time.sleep(0.05)
+            loop.call_soon_threadsafe(shutdown.set)
+            return TickResult(executed_jobs=[], heartbeat=heartbeat.collect.return_value)
+
+        daemon.tick = slow_tick
+        await daemon.run_loop(shutdown, interval=0.01)
+
+        event_names = [call.args[0] for call in observe.emit.call_args_list]
+        self.assertIn("daemon_heartbeat", event_names)
 
 
 if __name__ == "__main__":

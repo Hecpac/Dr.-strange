@@ -422,8 +422,19 @@ def acknowledge_events(
 
 def _checks(*, commands: dict[str, dict[str, Any]], database: dict[str, Any], port: int) -> dict[str, Any]:
     launchd_ok = bool(commands["launchctl_list"].get("ok") or commands["launchctl_print"].get("ok"))
-    process_ok = bool(commands["processes"].get("stdout"))
     port_ok = f":{port}" in str(commands["port_listener"].get("stdout") or "")
+    process_probe = commands["processes"]
+    process_probe_stderr = str(process_probe.get("stderr") or "")
+    process_probe_unavailable = (
+        not process_probe.get("ok")
+        and (
+            "Cannot get process list" in process_probe_stderr
+            or "sysmond service not found" in process_probe_stderr
+        )
+    )
+    process_ok = bool(process_probe.get("stdout")) or (
+        process_probe_unavailable and launchd_ok and port_ok
+    )
     db_ok = bool(database.get("present")) and not database.get("error")
     active_jobs = len((database.get("jobs") or {}).get("active") or [])
     active_tasks = len((database.get("tasks") or {}).get("active") or [])

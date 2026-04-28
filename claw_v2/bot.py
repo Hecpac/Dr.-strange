@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import signal
+import threading
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
@@ -293,6 +297,8 @@ class BotService:
             auto_research=auto_research,
             pull_requests=pull_requests,
         )
+        self._skill_threads: dict[str, threading.Thread] = {}
+        self._skill_lock = threading.Lock()
         self._pre_state_commands = self._build_pre_state_commands()
         self._post_shortcut_commands = self._build_post_shortcut_commands()
 
@@ -411,6 +417,14 @@ class BotService:
                 return True
         return False
 
+    def _scheduled_skill_lane(self, skill: str) -> str:
+        scheduled = getattr(self.config, "scheduled_sub_agents", None) or []
+        for entry in scheduled:
+            if getattr(entry, "skill", None) == skill:
+                lane = str(getattr(entry, "lane", "") or "").strip()
+                return lane or "worker"
+        return "worker"
+
     def _runtime_alive(self) -> bool:
         if self._runtime_probe is None:
             port = int(getattr(self.config, "web_chat_port", 8765))
@@ -460,10 +474,7 @@ class BotService:
         if route.route == "blocked":
             return route.next_action
         if route.route == "skill":
-            return (
-                f"He delegado tu petición ({route.task_kind}) a la skill "
-                f"`{route.skill}`. {route.next_action}"
-            )
+            return self._start_skill_task(route, text, session_id=session_id)
         if route.route == "runtime":
             return f"Ejecutando {route.task_kind} vía runtime. {route.next_action}"
         if route.route == "cdp":
@@ -471,6 +482,330 @@ class BotService:
         if route.route == "local":
             return None  # Existing handlers pick up.
         return None
+
+    def _start_skill_task(
+        self,
+        route: CapabilityRoute,
+        user_text: str,
+        *,
+        session_id: str,
+    ) -> str:
+        agent_name = route.agent or "alma"
+        skill_name = route.skill or ""
+        sub_agents = getattr(self, "sub_agents", None)
+        if sub_agents is None or not skill_name:
+            return f"Skill no disponible para `{route.task_kind}`."
+        try:
+            agent_def = sub_agents.get_agent(agent_name)
+        except Exception:
+            agent_def = None
+        if agent_def is None:
+            return f"Sub-agente `{agent_name}` no disponible para `{skill_name}`."
+        if skill_name not in getattr(agent_def, "skills", {}):
+            return f"Skill `{skill_name}` no disponible en `{agent_name}`."
+
+        task_id = f"{session_id}:skill:{time.time_ns()}"
+        lane = self._scheduled_skill_lane(skill_name)
+        state = self.brain.memory.get_session_state(session_id)
+        active_object = dict(state.get("active_object") or {})
+        active_object["active_task"] = {
+            "task_id": task_id,
+            "objective": user_text,
+            "task_kind": route.task_kind,
+            "route": "skill",
+            "agent": agent_name,
+            "skill": skill_name,
+            "status": "running",
+            "started_at": time.time(),
+        }
+        self.brain.memory.update_session_state(
+            session_id,
+            mode="research",
+            verification_status="running",
+            pending_action=None,
+            last_checkpoint={
+                "summary": f"Skill task started: {skill_name}",
+                "verification_status": "running",
+                "task_id": task_id,
+            },
+            active_object=active_object,
+        )
+        if self.task_ledger is not None:
+            self.task_ledger.create(
+                task_id=task_id,
+                session_id=session_id,
+                objective=user_text,
+                mode="research",
+                runtime="sub_agent_skill",
+                provider=getattr(agent_def, "provider", None),
+                model=getattr(agent_def, "model", None),
+                status="running",
+                route=active_object.get("last_channel_route") if isinstance(active_object.get("last_channel_route"), dict) else {},
+                metadata={
+                    "agent": agent_name,
+                    "skill": skill_name,
+                    "task_kind": route.task_kind,
+                    "autonomous": True,
+                },
+                artifacts={
+                    "skill": skill_name,
+                    "agent": agent_name,
+                    "dispatch_reason": route.reason,
+                },
+            )
+        self._emit_skill_task_event(
+            "skill_task_started",
+            task_id=task_id,
+            session_id=session_id,
+            user_text=user_text,
+            agent=agent_name,
+            skill=skill_name,
+            task_kind=route.task_kind,
+        )
+        thread = threading.Thread(
+            target=self._run_skill_task,
+            args=(task_id, session_id, user_text, agent_name, skill_name, lane, route.task_kind),
+            daemon=True,
+            name=f"skill-task-{task_id[-8:]}",
+        )
+        with self._skill_lock:
+            self._skill_threads[task_id] = thread
+        thread.start()
+        return (
+            f"Voy con eso vía skill `{skill_name}` ({agent_name}).\n\n"
+            f"Tarea de skill iniciada: `{task_id}`\n"
+            "Te aviso por Telegram cuando cierre con resultado."
+        )
+
+    def _run_skill_task(
+        self,
+        task_id: str,
+        session_id: str,
+        user_text: str,
+        agent_name: str,
+        skill_name: str,
+        lane: str,
+        task_kind: str,
+    ) -> None:
+        try:
+            sub_agents = getattr(self, "sub_agents", None)
+            if sub_agents is None:
+                raise RuntimeError("sub-agent service unavailable")
+            context = f"User request from Telegram:\n{user_text}"
+            result = sub_agents.run_skill(agent_name, skill_name, context=context, lane=lane)
+            if _looks_like_pre_hook_block(result):
+                result = self._maybe_augment_pre_hook_block(result)
+                self._mark_skill_task_failed(
+                    task_id=task_id,
+                    session_id=session_id,
+                    user_text=user_text,
+                    agent=agent_name,
+                    skill=skill_name,
+                    task_kind=task_kind,
+                    error=result,
+                    verification_status="blocked",
+                )
+                return
+            summary = result.strip().splitlines()[0][:500] if result.strip() else f"Skill {skill_name} completed"
+            self._mark_skill_task_succeeded(
+                task_id=task_id,
+                session_id=session_id,
+                user_text=user_text,
+                agent=agent_name,
+                skill=skill_name,
+                task_kind=task_kind,
+                result=result,
+                summary=summary,
+            )
+        except Exception as exc:
+            self._mark_skill_task_failed(
+                task_id=task_id,
+                session_id=session_id,
+                user_text=user_text,
+                agent=agent_name,
+                skill=skill_name,
+                task_kind=task_kind,
+                error=f"{type(exc).__name__}: {exc}",
+                verification_status="failed",
+            )
+        finally:
+            with self._skill_lock:
+                self._skill_threads.pop(task_id, None)
+
+    def wait_for_skill_task(self, task_id: str, timeout: float = 5.0) -> bool:
+        with self._skill_lock:
+            thread = self._skill_threads.get(task_id)
+        if thread is None:
+            return True
+        thread.join(timeout=timeout)
+        return not thread.is_alive()
+
+    def _mark_skill_task_succeeded(
+        self,
+        *,
+        task_id: str,
+        session_id: str,
+        user_text: str,
+        agent: str,
+        skill: str,
+        task_kind: str,
+        result: str,
+        summary: str,
+    ) -> None:
+        self._update_skill_active_task(
+            session_id=session_id,
+            task_id=task_id,
+            status="completed",
+            checkpoint_summary=summary,
+            verification_status="passed",
+        )
+        artifacts = {
+            "skill": skill,
+            "agent": agent,
+            "task_kind": task_kind,
+            "skill_result": result[:20000],
+        }
+        if self.task_ledger is not None:
+            self.task_ledger.mark_terminal(
+                task_id,
+                status="succeeded",
+                summary=summary,
+                verification_status="passed",
+                artifacts=artifacts,
+            )
+        self._emit_skill_task_event(
+            "sub_agent_skill",
+            task_id=task_id,
+            session_id=session_id,
+            user_text=user_text,
+            agent=agent,
+            skill=skill,
+            task_kind=task_kind,
+            result=result,
+        )
+        self._emit_skill_task_event(
+            "autonomous_task_completed",
+            task_id=task_id,
+            session_id=session_id,
+            user_text=user_text,
+            agent=agent,
+            skill=skill,
+            task_kind=task_kind,
+            response=result,
+            verification_status="passed",
+            terminal_status="succeeded",
+        )
+
+    def _mark_skill_task_failed(
+        self,
+        *,
+        task_id: str,
+        session_id: str,
+        user_text: str,
+        agent: str,
+        skill: str,
+        task_kind: str,
+        error: str,
+        verification_status: str,
+    ) -> None:
+        self._update_skill_active_task(
+            session_id=session_id,
+            task_id=task_id,
+            status="failed",
+            checkpoint_summary=f"Skill task failed: {error[:300]}",
+            verification_status=verification_status,
+            error=error,
+        )
+        if self.task_ledger is not None:
+            self.task_ledger.mark_terminal(
+                task_id,
+                status="failed",
+                summary=f"Skill task failed: {skill}",
+                error=error,
+                verification_status=verification_status,
+                artifacts={
+                    "skill": skill,
+                    "agent": agent,
+                    "task_kind": task_kind,
+                    "error": error[:2000],
+                },
+            )
+        self._emit_skill_task_event(
+            "autonomous_task_failed",
+            task_id=task_id,
+            session_id=session_id,
+            user_text=user_text,
+            agent=agent,
+            skill=skill,
+            task_kind=task_kind,
+            response=error,
+            error=error,
+            verification_status=verification_status,
+        )
+
+    def _update_skill_active_task(
+        self,
+        *,
+        session_id: str,
+        task_id: str,
+        status: str,
+        checkpoint_summary: str,
+        verification_status: str,
+        error: str = "",
+    ) -> None:
+        state = self.brain.memory.get_session_state(session_id)
+        active_object = dict(state.get("active_object") or {})
+        active_task = dict(active_object.get("active_task") or {})
+        if active_task.get("task_id") == task_id:
+            active_task["status"] = status
+            active_task["updated_at"] = time.time()
+            if status in {"completed", "failed"}:
+                active_task["completed_at"] = time.time()
+            if error:
+                active_task["error"] = error
+            active_object["active_task"] = active_task
+        self.brain.memory.update_session_state(
+            session_id,
+            verification_status=verification_status,
+            pending_action=None,
+            last_checkpoint={
+                "summary": checkpoint_summary,
+                "verification_status": verification_status,
+                "task_id": task_id,
+                **({"error": error} if error else {}),
+            },
+            active_object=active_object,
+        )
+
+    def _emit_skill_task_event(
+        self,
+        event_type: str,
+        *,
+        task_id: str,
+        session_id: str,
+        user_text: str,
+        agent: str,
+        skill: str,
+        task_kind: str,
+        **extra: Any,
+    ) -> None:
+        if self.observe is None:
+            return
+        try:
+            self.observe.emit(
+                event_type,
+                payload={
+                    "task_id": task_id,
+                    "session_id": session_id,
+                    "objective": user_text,
+                    "agent": agent,
+                    "skill": skill,
+                    "task_kind": task_kind,
+                    **extra,
+                },
+            )
+        except Exception:
+            logger.exception("failed to emit %s", event_type)
 
     def _dispatch_runtime_handoff(
         self, route: CapabilityRoute, *, session_id: str
@@ -594,6 +929,11 @@ class BotService:
             self._store_memory_turn(session_id, stripped, task_intent_response, assistant_limit=2000)
             self._remember_assistant_turn_state(session_id, stripped, task_intent_response)
             return task_intent_response
+        operational_status_response = self._maybe_handle_operational_status(stripped, session_id=session_id)
+        if operational_status_response is not None:
+            self._store_memory_turn(session_id, stripped, operational_status_response, assistant_limit=2000)
+            self._remember_assistant_turn_state(session_id, stripped, operational_status_response)
+            return operational_status_response
         capability_route_response = self._maybe_handle_capability_route(stripped, session_id=session_id)
         if capability_route_response is not None:
             self._store_memory_turn(session_id, stripped, capability_route_response, assistant_limit=2000)
@@ -646,6 +986,7 @@ class BotService:
         return [
             BotCommand("help", self._handle_help_command, exact=("/help",), prefixes=("/help ",)),
             BotCommand("status", self._handle_status_command, exact=("/status",)),
+            BotCommand("restart", self._handle_restart_command, exact=("/restart",)),
             BotCommand("config", self._handle_config_command, exact=("/config",)),
             BotCommand("model", self._handle_model_command, exact=("/models", "/model", "/model status"), prefixes=("/model ",)),
             BotCommand("tokens", self._handle_tokens_command, exact=("/tokens",)),
@@ -697,6 +1038,32 @@ class BotService:
 
     def _handle_status_command(self, context: CommandContext) -> str:
         return json.dumps(asdict(self.heartbeat.collect()), indent=2, sort_keys=True)
+
+    def _handle_restart_command(self, context: CommandContext) -> str:
+        if self.observe is not None:
+            try:
+                self.observe.emit(
+                    "telegram_restart_requested",
+                    payload={
+                        "session_id": context.session_id,
+                        "user_id": context.user_id,
+                        "pid": os.getpid(),
+                    },
+                )
+            except Exception:
+                logger.exception("failed to emit telegram_restart_requested")
+        thread = threading.Thread(
+            target=self._delayed_self_restart,
+            daemon=True,
+            name="telegram-restart",
+        )
+        thread.start()
+        return "Reiniciando Claw producción. Si launchd está activo, vuelvo en unos segundos."
+
+    @staticmethod
+    def _delayed_self_restart(delay_seconds: float = 2.0) -> None:
+        time.sleep(delay_seconds)
+        os.kill(os.getpid(), signal.SIGTERM)
 
     def _handle_config_command(self, context: CommandContext) -> str:
         if self.config is None:
@@ -2054,6 +2421,46 @@ class BotService:
         if kind == "resume_previous":
             return self._task_resume_previous_response(session_id)
         return None
+
+    def _maybe_handle_operational_status(self, text: str, *, session_id: str) -> str | None:
+        normalized = _normalize_command_text(text).strip()
+        compact = re.sub(r"[^a-z0-9]+", "", normalized)
+        if normalized not in {
+            "status",
+            "estado",
+            "estas",
+            "estas?",
+            "estas ?",
+            "estas vivo",
+            "estas viva",
+            "estas ahi",
+            "estas ahi?",
+            "estas ahi ?",
+            "ping",
+        } and compact not in {"estas", "estasvivo", "estasviva", "estasahi"}:
+            return None
+        active_count = 0
+        latest_line = "sin tareas recientes"
+        if self.task_ledger is not None:
+            records = self.task_ledger.list(session_id=session_id, limit=5)
+            active = [record for record in records if getattr(record, "status", "") in {"queued", "running"}]
+            active_count = len(active)
+            if records:
+                latest = active[0] if active else records[0]
+                latest_line = (
+                    f"{getattr(latest, 'status', 'unknown')} / "
+                    f"{getattr(latest, 'verification_status', 'unknown') or 'unknown'} — "
+                    f"`{getattr(latest, 'task_id', 'unknown')}`"
+                )
+        web_port = int(getattr(self.config, "web_chat_port", 8765)) if self.config is not None else 8765
+        runtime = "vivo" if self._runtime_alive() else "sin respuesta local"
+        return (
+            "Estoy vivo.\n"
+            f"Runtime local: {runtime} en :{web_port}\n"
+            f"Tareas activas en esta sesión: {active_count}\n"
+            f"Última tarea: {latest_line}\n"
+            "Comandos útiles: `/jobs`, `/tasks`, `/quality`, `/restart`."
+        )
 
     def _task_status_question_response(self, session_id: str) -> str:
         latest = None

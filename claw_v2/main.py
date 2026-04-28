@@ -553,6 +553,7 @@ def _setup_operational_services(
         heartbeat=heartbeat,
         observe=observe,
         task_ledger=task_ledger,
+        job_service=job_service,
     )
     browser = DevBrowserService(
         dev_browser_path=config.dev_browser_path,
