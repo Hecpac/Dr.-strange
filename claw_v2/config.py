@@ -43,7 +43,7 @@ _SECONDARY_PROVIDER_DEFAULT_MODELS: dict[str, str] = {
     "openai": "gpt-5.4-mini",
     "google": "gemini-2.5-pro",
     "ollama": "gemma4",
-    "codex": "codex-mini-latest",
+    "codex": "gpt-5.5-codex",
 }
 
 
@@ -530,12 +530,13 @@ class AppConfig:
                 raise ValueError(f"scheduled job '{job.agent}:{job.skill}' must include a lane.")
 
     def provider_for_lane(self, lane: Lane) -> str:
+        critic_provider = "codex" if self.brain_provider == "anthropic" else "anthropic"
         mapping = {
             "brain": self.brain_provider,
             "worker": self.worker_provider,
-            "verifier": self.verifier_provider or self.brain_provider,
+            "verifier": self.verifier_provider or critic_provider,
             "research": self.research_provider or self.brain_provider,
-            "judge": self.judge_provider or self.brain_provider,
+            "judge": self.judge_provider or critic_provider,
         }
         return mapping[lane]
 
