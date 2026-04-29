@@ -71,7 +71,10 @@ def _open_nlm_page(browser) -> "Page":
             continue
 
     page = context.new_page()
-    page.set_viewport_size({"width": 1280, "height": 900})
+    try:
+        page.set_viewport_size({"width": 1280, "height": 900})
+    except Exception:
+        pass
     page.goto(NLM_HOME, wait_until="domcontentloaded", timeout=30_000)
     return page
 
