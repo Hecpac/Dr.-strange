@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 MAX_TELEGRAM_LEN = 4096
 MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024  # 20 MB
 DEFAULT_IMAGE_PROMPT = "El usuario envio esta imagen por Telegram. Analizala y responde de forma util."
+_IMAGES_DIR = Path.home() / ".claw" / "images"
 DEFAULT_CONNECTION_POOL_SIZE = 32
 DEFAULT_POOL_TIMEOUT = 30.0
 DEFAULT_REQUEST_TIMEOUT = 30.0
@@ -100,9 +101,10 @@ def _build_image_content_blocks(
     *,
     caption: str | None,
     mime_type: str | None = None,
+    durable_path: Path | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
     prompt_text = caption.strip() if caption and caption.strip() else DEFAULT_IMAGE_PROMPT
-    memory_text = "[Imagen adjunta]"
+    memory_text = f"[Imagen adjunta] path: {durable_path or image_path}"
     if caption and caption.strip():
         memory_text = f"{memory_text}\n{caption.strip()}"
     resolved_mime_type = _resolve_image_mime_type(image_path, mime_type)
@@ -712,15 +714,22 @@ class TelegramTransport:
         started_at = time.perf_counter()
         await _maybe_send_chat_action(update.message, "typing")
         file = await context.bot.get_file(file_id)
-        tmp_path = Path(
-            f"/tmp/claw-image-{file_unique_id}{_download_suffix(getattr(file, 'file_path', None), mime_type)}"
-        )
+        suffix = _download_suffix(getattr(file, 'file_path', None), mime_type)
+        tmp_path = Path(f"/tmp/claw-image-{file_unique_id}{suffix}")
+        _IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+        durable_path = _IMAGES_DIR / f"{file_unique_id}{suffix}"
         await file.download_to_drive(str(tmp_path))
+        try:
+            import shutil
+            shutil.copy2(str(tmp_path), str(durable_path))
+        except Exception:
+            durable_path = tmp_path
         try:
             content_blocks, memory_text = _build_image_content_blocks(
                 tmp_path,
                 caption=caption,
                 mime_type=mime_type,
+                durable_path=durable_path,
             )
             response = await asyncio.to_thread(
                 self._handle_agent_multimodal_sync,

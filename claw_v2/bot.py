@@ -148,8 +148,8 @@ def _looks_like_chatgpt_interactive_request(normalized: str) -> bool:
 def _chatgpt_browser_task_instruction(text: str) -> str:
     return (
         "Usa Chrome/CDP con la sesión autenticada del usuario. "
-        "Abre https://chatgpt.com/ en un chat nuevo, realiza exactamente esta tarea, "
-        "verifica el resultado visible y termina con un resumen breve:\n"
+        "Si ya hay un tab de ChatGPT abierto, úsalo. Si no, abre https://chatgpt.com/ en un chat nuevo. "
+        "Realiza exactamente esta tarea, verifica el resultado visible y termina con un resumen breve:\n"
         f"{text.strip()}"
     )
 
