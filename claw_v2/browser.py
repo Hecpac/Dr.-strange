@@ -23,6 +23,14 @@ class BrowserError(Exception):
     """Raised when a dev-browser operation fails."""
 
 
+def _try_set_viewport(page: Any, width: int, height: int) -> None:
+    # CDP-attached pages on existing Chrome may not support Emulation.setDeviceMetricsOverride
+    try:
+        page.set_viewport_size({"width": width, "height": height})
+    except Exception:
+        pass
+
+
 @dataclass(slots=True)
 class BrowseResult:
     url: str
@@ -229,7 +237,7 @@ console.log(JSON.stringify({{
             browser = _cdp_connect(pw, cdp_url)
             context = browser.contexts[0]
             page = _select_cdp_page(context, page_index=page_index, page_title=page_title, page_url_pattern=page_url_pattern)
-            page.set_viewport_size({"width": 1280, "height": 900})
+            _try_set_viewport(page, 1280, 900)
             page.goto(url, wait_until="domcontentloaded", timeout=30_000)
             _wait_for_dynamic_content(page, url)
             text = _extract_page_text(page)
@@ -253,7 +261,7 @@ console.log(JSON.stringify({{
             browser = _cdp_connect(pw, cdp_url)
             context = browser.contexts[0]
             page = _select_cdp_page(context, page_index=page_index, page_title=page_title, page_url_pattern=page_url_pattern)
-            page.set_viewport_size({"width": 1280, "height": 900})
+            _try_set_viewport(page, 1280, 900)
             _wait_for_dynamic_content(page, page.url)
             screenshot_path = f"/tmp/claw-{safe_name}"
             page.screenshot(path=screenshot_path)
@@ -342,7 +350,7 @@ console.log(JSON.stringify({{
                     browser.close()
                     raise BrowserError("browserbase session did not expose a browser context")
                 page = context.pages[0] if context.pages else context.new_page()
-                page.set_viewport_size({"width": 1280, "height": 900})
+                _try_set_viewport(page, 1280, 900)
                 page.goto(url, wait_until="domcontentloaded", timeout=30_000)
                 _wait_for_dynamic_content(page, url)
                 text = _extract_page_text(page)

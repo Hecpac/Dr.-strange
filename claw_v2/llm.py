@@ -136,7 +136,7 @@ class LLMRouter:
             fallback_request.validate()
             response = self._complete_with_circuit(fb_adapter, fallback_request)
             response.degraded_mode = True
-            response.artifacts["fallback_reason"] = str(exc)
+            response.artifacts["fallback_reason"] = redact_sensitive(str(exc))
             response.artifacts.update(trace_metadata(fallback_request.evidence_pack))
             for hook in self.post_hooks:
                 response = hook(fallback_request, response)

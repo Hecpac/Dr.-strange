@@ -5,6 +5,8 @@ import errno
 import json
 import logging
 import os
+import signal
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -26,6 +28,22 @@ def _content_type_for(path: str) -> str:
     if path.endswith(".css"):
         return "text/css; charset=utf-8"
     return "text/html; charset=utf-8"
+
+
+def _kill_port_holder(port: int) -> None:
+    try:
+        result = subprocess.run(
+            ["lsof", "-ti", f"TCP:{port}", "-sTCP:LISTEN"],
+            capture_output=True, text=True, timeout=3,
+        )
+        for pid_str in result.stdout.strip().splitlines():
+            try:
+                os.kill(int(pid_str), signal.SIGTERM)
+                logger.warning("Sent SIGTERM to pid %s holding port %d", pid_str.strip(), port)
+            except (ValueError, ProcessLookupError, PermissionError):
+                pass
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
 
 
 class _QuietHandler(WSGIRequestHandler):
@@ -137,6 +155,8 @@ class WebTransport:
                 last_error = exc
                 if exc.errno != errno.EADDRINUSE or self._port == 0:
                     raise
+                if attempt == 0:
+                    _kill_port_holder(self._port)
                 await asyncio.sleep(0.25 * (attempt + 1))
         if self._server is None:
             raise OSError(f"Port {self._host}:{self._port} is still in use after retries") from last_error
