@@ -5,7 +5,11 @@ This runbook covers the local production contract for Claw on Hector's Mac.
 ## Runtime Contract
 
 - Launchd label: `com.pachano.claw`
+- Watchdog label: `com.pachano.claw-watchdog`
+- Chrome CDP label: `com.claw.chrome-cdp`
 - Entrypoint: `ops/claw-launcher.sh`
+- Watchdog: `ops/claw-watchdog.sh`
+- Chrome CDP supervisor: `ops/chrome-cdp-launcher.sh`
 - Python process: `.venv/bin/python -m claw_v2.main`
 - Web UI: `http://127.0.0.1:8765/`
 - Chat API: `POST /api/chat`
@@ -46,6 +50,15 @@ The diagnostic checks:
 - active autonomous task records
 - cron run state
 
+The launchd watchdog runs `ops/claw-watchdog.sh` on its interval. It does not
+restart Claw for ordinary `attention` states; it restarts only when diagnostics
+reports a `critical` condition tied to process, port, heartbeat, or web transport
+liveness.
+
+Chrome CDP is managed by `ops/chrome-cdp-launcher.sh` when installed via
+`ops/com.claw.chrome-cdp.plist`. The launcher reuses a healthy CDP process and
+refuses to remove `SingletonLock` while the configured profile is active.
+
 ## Restart
 
 Prefer the repo restart wrapper:
@@ -81,6 +94,7 @@ Launchd:
 ```bash
 launchctl list com.pachano.claw
 launchctl print "gui/$(id -u)/com.pachano.claw"
+launchctl print "gui/$(id -u)/com.claw.chrome-cdp"
 ```
 
 Port:

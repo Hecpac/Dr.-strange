@@ -9,6 +9,8 @@ import unittest
 from pathlib import Path
 
 from claw_v2.approval import ApprovalManager
+from claw_v2.approval_gate import ApprovalPending, approved_tool_invocation, build_telegram_approval_gate
+from claw_v2.tools import TIER_REQUIRES_APPROVAL, ToolDefinition
 
 
 class ApprovalManagerTests(unittest.TestCase):
@@ -41,6 +43,27 @@ class ApprovalManagerTests(unittest.TestCase):
             thread.join(timeout=1.0)
             self.assertTrue(finished.is_set())
             self.assertEqual(result["payload"]["status"], "pending")
+
+    def test_approved_tool_invocation_allows_one_matching_tool_call(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = ApprovalManager(Path(tmpdir), "secret")
+            gate = build_telegram_approval_gate(manager)
+            definition = ToolDefinition(
+                name="GPTImage",
+                description="Generate an image",
+                allowed_agent_classes=("operator",),
+                handler=lambda args: {"ok": True},
+                tier=TIER_REQUIRES_APPROVAL,
+            )
+
+            with approved_tool_invocation(
+                tool="GPTImage",
+                approval_id="approval-1",
+                reason="test",
+            ):
+                gate(definition, {"prompt": "ok"})
+                with self.assertRaises(ApprovalPending):
+                    gate(definition, {"prompt": "second"})
 
 
 if __name__ == "__main__":

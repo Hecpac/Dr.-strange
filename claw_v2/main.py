@@ -416,13 +416,14 @@ def _setup_llm_stack(
     telegram_gate = build_telegram_approval_gate(approvals)
 
     def openai_tool_executor(name: str, args: dict) -> dict:
+        registry_tool_name = tool_registry.original_tool_name_from_openai(name)
         daemon_reason = current_daemon_reason()
-        if daemon_reason is not None and daemon_can_auto_approve(name):
+        if daemon_reason is not None and daemon_can_auto_approve(registry_tool_name):
             gate = build_system_auto_approve_gate(approvals, reason=daemon_reason)
         else:
             gate = telegram_gate
         return tool_registry.execute(
-            name,
+            registry_tool_name,
             args,
             agent_class="operator",
             approval_gate=gate,
@@ -1054,6 +1055,7 @@ def build_runtime(
 
     memory, observe, metrics, approvals, bus, agent_store = _setup_core_state(config)
     task_ledger = TaskLedger(config.db_path, observe=observe)
+    task_ledger.reconcile_false_successes()
     job_service = JobService(config.db_path, observe=observe)
     model_registry = ModelRegistry.default()
     startup_health = _run_startup_healthchecks(config, observe)

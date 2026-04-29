@@ -53,10 +53,23 @@ For non-trivial tasks, you may include a concise private execution trace before 
 Do not include step-by-step hidden chain-of-thought. Use only brief decision notes, checks performed, and blockers.
 When reporting task status, prefer the task ledger over memory or model inference.
 If evidence is missing, say what evidence is missing — do not infer success from conversational history alone.
+Never emit internal tool-call transcripts such as `to=functions...`, `to=multi_tool_use...`, `tool_uses`, `recipient_name`, or JSON tool invocation blobs in the visible response.
 Shape:
 <trace>short operational reasoning summary for logs</trace>
 <response>concise user-facing reply</response>
 No user-visible text is valid outside <response> tags."""
+
+INTERNAL_TOOL_TRACE_FALLBACK = (
+    "La salida del modelo contenía trazas internas de herramientas y la oculté. "
+    "Repite la instrucción y la ejecuto limpio."
+)
+
+_INTERNAL_TOOL_TRACE_PATTERNS = (
+    re.compile(r"(?<!\w)to=(?:functions|multi_tool_use|web|image_gen|tool_search)\.", re.IGNORECASE),
+    re.compile(r"(?<!\w)to=[A-Z][A-Za-z0-9_]*(?=\s|[\{\(\[]|$)"),
+    re.compile(r'"recipient_name"\s*:\s*"(?:functions|multi_tool_use|web|image_gen|tool_search)\.', re.IGNORECASE),
+    re.compile(r'"tool_uses"\s*:\s*\[', re.IGNORECASE),
+)
 
 SELF_HEALING_LOOP_CONTRACT = """# Self-healing loop
 When a tool returns an error:
@@ -104,6 +117,13 @@ Restart and status rules:
 - For status, verify launchctl list com.pachano.claw, ps -p <pid>, and lsof -nP -iTCP:8765 -sTCP:LISTEN before reporting success.
 - Do not suggest com.claw.daemon, python -m claw_v2.daemon, /health, or /config; those are not the active production service contract.
 - Do not ask Hector to paste process or curl output until available local verification methods have been attempted."""
+
+CAPABILITY_DENIAL_CONTRACT = """# Capability denial contract
+Before saying you cannot access a browser, desktop, terminal, filesystem, network, or tool:
+1. Check the runtime capability context in the current prompt and the task/session state.
+2. If a capability is listed as available, route the task through that capability or state the exact deterministic route you will use.
+3. If access is unavailable, cite the concrete degraded capability or failed check.
+Never ask Hector to enable a browser bridge, Chrome/CDP, desktop control, or tool access when the runtime context says that capability is already available."""
 
 CONVERSATIONAL_STYLE_CONTRACT = """# Conversational style
 Hector wants the agent to sound fluid, direct, and human, not like a rigid status machine.
@@ -1027,7 +1047,8 @@ def _brain_system_prompt(system_prompt: str) -> str:
         f"{CONVERSATIONAL_STYLE_CONTRACT}\n\n"
         f"{SELF_HEALING_LOOP_CONTRACT}\n\n"
         f"{AUTONOMY_EXECUTION_CONTRACT}\n\n"
-        f"{RUNTIME_OPERATIONS_CONTRACT}"
+        f"{RUNTIME_OPERATIONS_CONTRACT}\n\n"
+        f"{CAPABILITY_DENIAL_CONTRACT}"
     )
 
 
@@ -1037,14 +1058,26 @@ def _extract_visible_brain_response(response: LLMResponse) -> LLMResponse:
     if trace:
         response.artifacts["reasoning_trace"] = trace
     if visible is not None:
-        response.artifacts["raw_response"] = content
-        response.content = visible
+        response.artifacts["raw_response"] = (
+            "[suppressed_internal_tool_trace]"
+            if _looks_like_internal_tool_trace(content)
+            else content
+        )
+        response.content = _suppress_internal_tool_trace(response, visible)
     elif content.strip():
         stripped = content.strip()
-        response.artifacts["reasoning_trace"] = f"Unwrapped SDK output: {stripped}"
         if _looks_like_runtime_preamble(stripped):
+            response.artifacts["reasoning_trace"] = f"Unwrapped SDK output: {stripped}"
             response.content = ""
+        elif _looks_like_internal_tool_trace(stripped):
+            response.artifacts["contract_violation"] = "internal_tool_trace"
+            response.artifacts["internal_tool_trace_suppressed"] = True
+            response.artifacts["reasoning_trace"] = (
+                "Unwrapped SDK output contained an internal tool-call transcript and was suppressed."
+            )
+            response.content = INTERNAL_TOOL_TRACE_FALLBACK
         else:
+            response.artifacts["reasoning_trace"] = f"Unwrapped SDK output: {stripped}"
             response.artifacts["contract_violation"] = "missing_response_tags"
             response.content = stripped
     return response
@@ -1071,6 +1104,27 @@ def _looks_like_runtime_preamble(content: str) -> bool:
         or "the following skills have been auto-loaded" in lowered
         or lowered.startswith("auto-loaded skills")
     )
+
+
+def _looks_like_internal_tool_trace(content: str) -> bool:
+    return any(pattern.search(content) for pattern in _INTERNAL_TOOL_TRACE_PATTERNS)
+
+
+def _suppress_internal_tool_trace(response: LLMResponse, content: str) -> str:
+    if not _looks_like_internal_tool_trace(content):
+        return content
+    response.artifacts["contract_violation"] = "internal_tool_trace"
+    response.artifacts["internal_tool_trace_suppressed"] = True
+    _append_reasoning_trace(
+        response,
+        "Internal tool-call transcript suppressed from visible output.",
+    )
+    return INTERNAL_TOOL_TRACE_FALLBACK
+
+
+def _append_reasoning_trace(response: LLMResponse, note: str) -> None:
+    existing = str(response.artifacts.get("reasoning_trace") or "").strip()
+    response.artifacts["reasoning_trace"] = f"{existing}\n\n{note}" if existing else note
 
 
 def _aggregate_verifier_votes(votes: list[dict]) -> dict:

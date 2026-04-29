@@ -6,6 +6,7 @@ import inspect
 import logging
 import mimetypes
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,20 @@ DEFAULT_REQUEST_TIMEOUT = 30.0
 DEFAULT_MEDIA_WRITE_TIMEOUT = 60.0
 DEFAULT_GET_UPDATES_POOL_SIZE = 8
 
+_IMAGE_PATH_RE = re.compile(r"(/[^`\s]+?\.(?:png|jpe?g|webp))", re.IGNORECASE)
+_SEND_IMAGE_REQUEST_WORDS = (
+    "ponla",
+    "mandala",
+    "mándala",
+    "enviala",
+    "envíala",
+    "subela",
+    "súbela",
+    "pasala",
+    "pásala",
+)
+_TELEGRAM_TARGET_WORDS = ("telegram", "aqui", "aquí", "chat")
+
 
 def _split_message(text: str, max_len: int = MAX_TELEGRAM_LEN) -> list[str]:
     if not text:
@@ -38,6 +53,24 @@ def _split_message(text: str, max_len: int = MAX_TELEGRAM_LEN) -> list[str]:
         parts.append(text[:max_len])
         text = text[max_len:]
     return parts
+
+
+def _looks_like_latest_image_send_request(text: str) -> bool:
+    lowered = text.strip().lower()
+    return (
+        any(word in lowered for word in _SEND_IMAGE_REQUEST_WORDS)
+        and any(word in lowered for word in _TELEGRAM_TARGET_WORDS)
+    )
+
+
+def _latest_existing_image_path(messages: list[dict[str, Any]]) -> Path | None:
+    for message in reversed(messages):
+        content = str(message.get("content") or "")
+        for match in reversed(_IMAGE_PATH_RE.findall(content)):
+            path = Path(match).expanduser()
+            if path.exists() and path.is_file():
+                return path
+    return None
 
 
 def _env_int(name: str, default: int) -> int:
@@ -369,7 +402,16 @@ class TelegramTransport:
         started_at = time.perf_counter()
         await _maybe_send_chat_action(update.message, "typing")
         try:
-            response = await self._handle_agent_text(user_id=user_id, session_id=session_id, text=text)
+            direct_response = await self._maybe_send_latest_generated_image(
+                update=update,
+                user_id=user_id,
+                session_id=session_id,
+                text=text,
+            )
+            if direct_response is not None:
+                response = direct_response
+            else:
+                response = await self._handle_agent_text(user_id=user_id, session_id=session_id, text=text)
         except Exception as exc:
             logger.exception("Error handling message")
             err_str = str(exc)
@@ -428,6 +470,47 @@ class TelegramTransport:
             response_parts=len(parts),
             response_chars=len(response),
         )
+
+    async def _maybe_send_latest_generated_image(
+        self,
+        *,
+        update: Update,
+        user_id: str,
+        session_id: str,
+        text: str,
+    ) -> str | None:
+        if not _looks_like_latest_image_send_request(text):
+            return None
+        memory = getattr(self._bot_service, "memory", None)
+        if memory is None or not hasattr(memory, "get_recent_messages"):
+            return None
+        messages = memory.get_recent_messages(session_id, limit=20)
+        image_path = _latest_existing_image_path(messages)
+        if image_path is None:
+            return None
+        try:
+            chat_id = int(update.effective_chat.id)
+        except (TypeError, ValueError):
+            return None
+        sent = await self.send_photo(
+            chat_id=chat_id,
+            photo_path=str(image_path),
+            caption="Imagen generada por Claw",
+        )
+        if not sent:
+            return f"Encontré la imagen, pero Telegram bloqueó el envío desde `{image_path}`."
+        self._record_direct_image_send(session_id=session_id, user_id=user_id, text=text, image_path=image_path)
+        return "Te la puse aquí en Telegram."
+
+    def _record_direct_image_send(self, *, session_id: str, user_id: str, text: str, image_path: Path) -> None:
+        memory = getattr(self._bot_service, "memory", None)
+        if memory is None or not hasattr(memory, "store_message"):
+            return
+        try:
+            memory.store_message(session_id, "user", text)
+            memory.store_message(session_id, "assistant", f"Imagen enviada por Telegram: `{image_path}`")
+        except Exception:
+            logger.debug("Could not record direct Telegram image send for user %s", user_id, exc_info=True)
 
     async def _handle_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_authorized(update):
@@ -734,17 +817,18 @@ class TelegramTransport:
             response_chars=len(response),
         )
 
-    async def send_photo(self, *, chat_id: int, photo_path: str, caption: str | None = None) -> None:
+    async def send_photo(self, *, chat_id: int, photo_path: str, caption: str | None = None) -> bool:
         if self._app is None:
-            return
+            return False
         import tempfile
         resolved = Path(photo_path).resolve()
         allowed_roots = (Path(tempfile.gettempdir()).resolve(), Path("/tmp"), Path("/private/tmp"), Path.home())
         if not any(resolved.is_relative_to(root) for root in allowed_roots):
             logger.error("send_photo blocked: %s is outside allowed directories", resolved)
-            return
+            return False
         with open(resolved, "rb") as photo:
             await self._app.bot.send_photo(chat_id=chat_id, photo=photo, caption=caption)
+        return True
 
     async def send_video_url(self, *, chat_id: int, video_url: str, caption: str | None = None) -> None:
         """Send a video by URL to a Telegram chat."""

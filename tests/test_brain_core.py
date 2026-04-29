@@ -239,6 +239,41 @@ class HandleMessageTests(unittest.TestCase):
         msgs = self.memory.get_recent_messages("s1")
         self.assertEqual(msgs[-1]["content"], "I checked the files and fixed it.")
 
+    def test_suppresses_unwrapped_internal_tool_trace(self) -> None:
+        self.router.ask.return_value = LLMResponse(
+            content=(
+                "Voy a verificar el script.to=functions.Read "
+                '{"path":"/Users/hector/Projects/Dr.-strange/scripts/_send_image_telegram.py"}'
+            ),
+            lane="brain",
+            provider="openai",
+            model="gpt-5.4-mini",
+        )
+
+        result = self.brain.handle_message("s1", "ponla aqui")
+
+        self.assertIn("trazas internas", result.content)
+        self.assertNotIn("to=functions", result.content)
+        self.assertEqual(result.artifacts["contract_violation"], "internal_tool_trace")
+        self.assertTrue(result.artifacts["internal_tool_trace_suppressed"])
+        msgs = self.memory.get_recent_messages("s1")
+        self.assertNotIn("to=functions", msgs[-1]["content"])
+
+    def test_suppresses_internal_tool_trace_inside_response_block(self) -> None:
+        self.router.ask.return_value = LLMResponse(
+            content="<trace>tried a tool</trace><response>Listo.to=GPTImage {}</response>",
+            lane="brain",
+            provider="openai",
+            model="gpt-5.4-mini",
+        )
+
+        result = self.brain.handle_message("s1", "genera imagen")
+
+        self.assertIn("trazas internas", result.content)
+        self.assertNotIn("to=GPTImage", result.content)
+        self.assertEqual(result.artifacts["raw_response"], "[suppressed_internal_tool_trace]")
+        self.assertIn("suppressed", result.artifacts["reasoning_trace"])
+
     def test_discards_runtime_preamble_from_claude_code(self) -> None:
         self.router.ask.return_value = LLMResponse(
             content="# Auto-loaded skills\nThe following skills have been auto-loaded into context for use:",

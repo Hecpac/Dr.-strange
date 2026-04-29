@@ -35,6 +35,7 @@ if TYPE_CHECKING:  # avoid circular at runtime
 # Default is the interactive Telegram mode; daemon/Kairos code paths flip
 # this to "system" via `system_approval_mode(reason=...)` context manager.
 _DAEMON_REASON: ContextVar[str | None] = ContextVar("claw_daemon_reason", default=None)
+_APPROVED_TOOL_CONTEXT: ContextVar[dict | None] = ContextVar("claw_approved_tool_context", default=None)
 
 
 @contextlib.contextmanager
@@ -56,6 +57,29 @@ def system_approval_mode(reason: str) -> Iterator[None]:
 def current_daemon_reason() -> str | None:
     """Return the active daemon reason, or None when running in Telegram mode."""
     return _DAEMON_REASON.get()
+
+
+@contextlib.contextmanager
+def approved_tool_invocation(*, tool: str, approval_id: str, reason: str) -> Iterator[None]:
+    """Allow one already-approved interactive Tier 3 tool invocation.
+
+    This is used when Hector approves a pending tool request from the same
+    Telegram session and the bot retries the original instruction. The approval
+    remains one-shot: a second Tier 3 call in the same retry must request a new
+    approval.
+    """
+    token = _APPROVED_TOOL_CONTEXT.set(
+        {
+            "tool": tool,
+            "approval_id": approval_id,
+            "reason": reason,
+            "used": False,
+        }
+    )
+    try:
+        yield
+    finally:
+        _APPROVED_TOOL_CONTEXT.reset(token)
 
 
 @dataclass(slots=True)
@@ -89,6 +113,14 @@ def build_telegram_approval_gate(
     """
 
     def gate(definition: "ToolDefinition", args: dict) -> None:
+        approved_context = _APPROVED_TOOL_CONTEXT.get()
+        if (
+            isinstance(approved_context, dict)
+            and not approved_context.get("used")
+            and approved_context.get("tool") == definition.name
+        ):
+            approved_context["used"] = True
+            return
         summary = f"{definition.name}({', '.join(sorted(args.keys()))})"
         pending = approvals.create(
             action=f"tool:{definition.name}",

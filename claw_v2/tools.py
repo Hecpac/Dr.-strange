@@ -170,6 +170,19 @@ def _ensure_strict_schema(schema: dict) -> dict:
     return cleaned
 
 
+_OPENAI_TOOL_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
+def _openai_tool_name(name: str) -> str:
+    """Return an OpenAI-compatible function name for a local tool name."""
+    if _OPENAI_TOOL_NAME_RE.fullmatch(name):
+        return name
+    return "".join(
+        char if re.fullmatch(r"[a-zA-Z0-9_-]", char) else f"_x{ord(char):02x}_"
+        for char in name
+    )
+
+
 @dataclass(slots=True)
 class ToolDefinition:
     name: str
@@ -297,18 +310,33 @@ class ToolRegistry:
     def openai_tool_schemas(self, agent_class: AgentClass | None = None) -> list[dict]:
         """Export tool definitions as OpenAI function-calling schemas."""
         schemas: list[dict] = []
+        seen_names: dict[str, str] = {}
         for defn in self._definitions.values():
             if defn.parameter_schema is None:
                 continue
             if agent_class and agent_class not in defn.allowed_agent_classes:
                 continue
+            openai_name = _openai_tool_name(defn.name)
+            if openai_name in seen_names and seen_names[openai_name] != defn.name:
+                raise ValueError(
+                    f"OpenAI tool name collision: {seen_names[openai_name]} and {defn.name}"
+                )
+            seen_names[openai_name] = defn.name
             schemas.append({
                 "type": "function",
-                "name": defn.name,
+                "name": openai_name,
                 "description": defn.description,
                 "parameters": defn.parameter_schema,
             })
         return schemas
+
+    def original_tool_name_from_openai(self, name: str) -> str:
+        if name in self._definitions:
+            return name
+        for defn in self._definitions.values():
+            if _openai_tool_name(defn.name) == name:
+                return defn.name
+        return name
 
     def execute(
         self,

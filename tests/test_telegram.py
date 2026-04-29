@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from claw_v2.memory import MemoryStore
 from claw_v2.telegram import TelegramTransport, _split_message
 
 
@@ -180,6 +182,44 @@ class HandleTextTests(unittest.IsolatedAsyncioTestCase):
             session_id="tg-1",
             text="hello",
         )
+
+    async def test_send_latest_image_request_bypasses_agent_and_sends_photo(self) -> None:
+        db_path = Path(tempfile.mkdtemp()) / "test.db"
+        memory = MemoryStore(db_path)
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            tmp.write(b"\x89PNG\r\n\x1a\n")
+            image_path = Path(tmp.name)
+        try:
+            memory.store_message(
+                "tg-1",
+                "assistant",
+                f"Resultado generado: `{image_path}`",
+            )
+            bot_service = MagicMock()
+            bot_service.observe = MagicMock()
+            bot_service.memory = memory
+            transport = TelegramTransport(
+                bot_service=bot_service, token="t", allowed_user_id="123",
+            )
+            transport._app = MagicMock()
+            transport._app.bot = AsyncMock()
+            update = MagicMock()
+            update.effective_user.id = 123
+            update.effective_chat.id = 1
+            update.message.text = "Ponla aquí en telegram"
+            update.message.reply_text = AsyncMock()
+            update.message.chat.send_action = AsyncMock()
+
+            await transport._handle_text(update, MagicMock())
+
+            transport._app.bot.send_photo.assert_awaited_once()
+            bot_service.handle_text.assert_not_called()
+            self.assertEqual(update.message.reply_text.await_args.args[0], "Te la puse aquí en Telegram.")
+            messages = memory.get_recent_messages("tg-1")
+            self.assertEqual(messages[-2]["content"], "Ponla aquí en telegram")
+            self.assertIn("Imagen enviada por Telegram", messages[-1]["content"])
+        finally:
+            image_path.unlink(missing_ok=True)
 
     async def test_claude_sdk_failures_return_specific_message(self) -> None:
         transport = TelegramTransport(

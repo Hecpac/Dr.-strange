@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from claw_v2.adapters.base import LLMRequest
+from claw_v2.approval_gate import ApprovalPending
 from claw_v2.agents import AgentDefinition, ExperimentRecord
 from claw_v2.coordinator import CoordinatorResult, WorkerResult
 from claw_v2.eval_mocks import scripted_experiment_runner
@@ -2421,6 +2422,65 @@ class BotTests(unittest.TestCase):
                 )
                 self.assertEqual(status, "pending")
 
+    def test_natural_language_tool_approval_retries_original_request(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                pending = runtime.approvals.create("tool:GPTImage", "GPTImage(prompt)")
+                mock_handle_message = MagicMock(
+                    side_effect=[
+                        ApprovalPending(
+                            approval_id=pending.approval_id,
+                            token=pending.token,
+                            tool="GPTImage",
+                            summary="GPTImage(prompt)",
+                        ),
+                        LLMResponse(
+                            content="imagen creada",
+                            lane="brain",
+                            provider="openai",
+                            model="gpt-5.4-mini",
+                        ),
+                    ]
+                )
+
+                with patch.object(type(runtime.brain), "handle_message", mock_handle_message):
+                    first = runtime.bot.handle_text(
+                        user_id="123",
+                        session_id="tg-123",
+                        text="Ejecuta la herramienta protegida de prueba",
+                    )
+                    self.assertIn("/approve", first)
+                    state = runtime.brain.memory.get_session_state("tg-123")
+                    self.assertEqual(
+                        state["active_object"]["pending_tool_approval"]["approval_id"],
+                        pending.approval_id,
+                    )
+                    messages = runtime.brain.memory.get_recent_messages("tg-123", limit=2)
+                    self.assertEqual(messages[0]["content"], "Ejecuta la herramienta protegida de prueba")
+                    self.assertNotIn(pending.token, messages[1]["content"])
+
+                    second = runtime.bot.handle_text(user_id="123", session_id="tg-123", text="Aprobada")
+
+                self.assertEqual(runtime.approvals.status(pending.approval_id), "approved")
+                self.assertIn("Reintenté la acción original", second)
+                self.assertIn("imagen creada", second)
+                retried_message = mock_handle_message.call_args_list[1].args[1]
+                self.assertIn("Ejecuta la herramienta protegida de prueba", retried_message)
+                self.assertEqual(
+                    mock_handle_message.call_args_list[1].kwargs["memory_text"],
+                    "Ejecuta la herramienta protegida de prueba",
+                )
+
     def test_agent_control_commands(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -2844,6 +2904,142 @@ class BotTests(unittest.TestCase):
                     cdp_url="http://localhost:9250",
                     page_url_pattern="ads.google.com",
                 )
+
+    def test_natural_language_chatgpt_new_chat_uses_chrome_cdp(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                from claw_v2.browser import BrowseResult
+
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.browser = MagicMock()
+                runtime.bot.managed_chrome = MagicMock()
+                runtime.bot.managed_chrome.cdp_url = "http://localhost:9250"
+                runtime.bot.browser.chrome_navigate.return_value = BrowseResult(
+                    url="https://chatgpt.com/",
+                    title="ChatGPT",
+                    content="Message ChatGPT",
+                )
+                result = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="Abre chrome y inicia un nuevo chat en ChatGPT",
+                )
+                self.assertIn("ChatGPT abierto en Chrome", result)
+                runtime.bot.browser.chrome_navigate.assert_called_once_with(
+                    "https://chatgpt.com/",
+                    cdp_url="http://localhost:9250",
+                    page_url_pattern="chatgpt.com",
+                )
+
+    def test_natural_language_chatgpt_image_request_uses_browser_automation(self) -> None:
+        class StubBrowserUse:
+            def __init__(self) -> None:
+                self.instruction = ""
+
+            async def run_task(self, instruction: str) -> str:
+                self.instruction = instruction
+                return "imagen solicitada en ChatGPT"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                browser_use = StubBrowserUse()
+                runtime.bot.browser_use = browser_use
+                result = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="Abre chrome y pídele a ChatGPT una imagen que represente mi marca",
+                )
+                self.assertEqual(result, "imagen solicitada en ChatGPT")
+                self.assertIn("https://chatgpt.com/", browser_use.instruction)
+                self.assertIn("imagen que represente mi marca", browser_use.instruction)
+
+    def test_brain_prompt_includes_runtime_capability_context(self) -> None:
+        captured: dict[str, str] = {}
+
+        def capture_prompt(request: LLMRequest) -> LLMResponse:
+            captured["prompt"] = str(request.prompt)
+            return LLMResponse(
+                content="<response>ok</response>",
+                lane=request.lane,
+                provider="anthropic",
+                model=request.model,
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=capture_prompt)
+                runtime.bot.browser = MagicMock()
+                runtime.bot.managed_chrome = MagicMock()
+                runtime.bot.managed_chrome.cdp_url = "http://localhost:9250"
+                runtime.bot.browser_use = MagicMock()
+
+                result = runtime.bot.handle_text(user_id="123", session_id="s1", text="responde prueba")
+
+                self.assertEqual(result, "ok")
+                self.assertIn("# Runtime capability context", captured["prompt"])
+                self.assertIn("Chrome CDP: available (http://localhost:9250)", captured["prompt"])
+                self.assertIn("Browser automation: available", captured["prompt"])
+                self.assertIn("do not say 'no tengo acceso", captured["prompt"])
+
+    def test_blocks_false_capability_denial_when_browser_available(self) -> None:
+        def false_denial(request: LLMRequest) -> LLMResponse:
+            return LLMResponse(
+                content="<response>No puedo hacerlo porque no tengo acceso al navegador. Habilita el browser bridge.</response>",
+                lane=request.lane,
+                provider="anthropic",
+                model=request.model,
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=false_denial)
+                runtime.bot.browser = MagicMock()
+                runtime.bot.managed_chrome = MagicMock()
+                runtime.bot.managed_chrome.cdp_url = "http://localhost:9250"
+                runtime.bot.browser_use = MagicMock()
+
+                result = runtime.bot.handle_text(user_id="123", session_id="s1", text="responde prueba")
+
+                self.assertIn("No voy a asumir falta de acceso", result)
+                self.assertIn("Chrome/CDP", result)
+                self.assertNotIn("Habilita el browser bridge", result)
 
     @patch("claw_v2.browse_handler._jina_read")
     def test_natural_language_url_uses_isolated_browse(self, mock_jina) -> None:

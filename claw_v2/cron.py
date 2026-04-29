@@ -65,8 +65,11 @@ class CronScheduler:
         self._jobs: dict[str, ScheduledJob] = {}
         self._persistence = persistence
         self._error_sink = error_sink
+        self._restored_state: dict[str, tuple[float, int]] | None = None
 
     def register(self, job: ScheduledJob) -> None:
+        if self._restored_state is not None and job.name in self._restored_state:
+            job.last_run_at, job.runs = self._restored_state[job.name]
         self._jobs[job.name] = job
 
     def restore(self) -> None:
@@ -74,6 +77,7 @@ class CronScheduler:
         if self._persistence is None:
             return
         saved = self._persistence.load_cron_state()
+        self._restored_state = saved
         for name, job in self._jobs.items():
             if name in saved:
                 job.last_run_at, job.runs = saved[name]

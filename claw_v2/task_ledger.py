@@ -301,6 +301,80 @@ class TaskLedger:
             self._emit("task_ledger_reconciled_lost", {"count": changed, "older_than_seconds": older_than_seconds})
         return int(changed or 0)
 
+    def reconcile_false_successes(self, *, limit: int = 100) -> int:
+        """Demote historical succeeded rows that do not pass completion validation."""
+        now = time.time()
+        changed = 0
+        reconciled: list[dict[str, Any]] = []
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT *
+                FROM agent_tasks
+                WHERE status = 'succeeded'
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (max(1, min(int(limit), 1000)),),
+            ).fetchall()
+            for row in rows:
+                record = self._row_to_record(row)
+                decision = validate_completion(
+                    {
+                        "status": record.status,
+                        "verification_status": record.verification_status,
+                        "summary": record.summary,
+                        "artifacts": dict(record.artifacts or {}),
+                        "evidence": dict((record.artifacts or {}).get("evidence") or {}),
+                    }
+                )
+                if decision.final_status == "succeeded":
+                    continue
+                metadata = dict(record.metadata or {})
+                metadata.update(
+                    {
+                        "reconciled_false_success": True,
+                        "reconciled_from_status": record.status,
+                        "reconciled_from_verification_status": record.verification_status,
+                        "reconciled_reason": decision.reason,
+                        "reconciled_at": now,
+                    }
+                )
+                verification_status = decision.verification_status or record.verification_status or "pending"
+                error = record.error or f"reconciled false success: {decision.reason}"
+                self._conn.execute(
+                    """
+                    UPDATE agent_tasks
+                    SET status = 'failed',
+                        completed_at = COALESCE(completed_at, ?),
+                        error = ?,
+                        verification_status = ?,
+                        metadata_json = ?,
+                        updated_at = ?
+                    WHERE task_id = ?
+                    """,
+                    (
+                        now,
+                        error,
+                        verification_status,
+                        json.dumps(metadata, sort_keys=True),
+                        now,
+                        record.task_id,
+                    ),
+                )
+                changed += 1
+                reconciled.append(
+                    {
+                        "task_id": record.task_id,
+                        "verification_status": verification_status,
+                        "reason": decision.reason,
+                    }
+                )
+            self._conn.commit()
+        if changed:
+            self._emit("task_false_success_reconciled", {"count": changed, "tasks": reconciled})
+        return changed
+
     def get(self, task_id: str) -> TaskRecord | None:
         with self._lock:
             row = self._conn.execute("SELECT * FROM agent_tasks WHERE task_id = ?", (task_id,)).fetchone()

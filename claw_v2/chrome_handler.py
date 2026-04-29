@@ -94,6 +94,25 @@ class ChromeHandler:
             return tweet_fallback[:6000]
         return f"**{result.title}** ({result.url})\n\n{result.content[:6000]}"
 
+    def chatgpt_new_chat_response(self, *, session_id: str | None = None) -> str:
+        url = "https://chatgpt.com/"
+        self._remember_url(session_id, url)
+        degraded = self._check_capability("chrome_cdp", "Chrome no disponible.")
+        if degraded is not None:
+            return degraded
+        if self.browser is None or self.managed_chrome is None:
+            return "Chrome no disponible."
+        try:
+            result = self.browser.chrome_navigate(
+                url,
+                cdp_url=self.managed_chrome.cdp_url,
+                page_url_pattern="chatgpt.com",
+            )
+        except Exception as exc:
+            return _format_chrome_cdp_error(exc, prefix="chrome browse error")
+        title = result.title or "ChatGPT"
+        return f"ChatGPT abierto en Chrome en un chat nuevo: **{title}** ({result.url})"
+
     def shot_response(self, command: str) -> str:
         degraded = self._check_capability("chrome_cdp", "Chrome no disponible.")
         if degraded is not None:

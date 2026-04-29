@@ -19,6 +19,18 @@ class RedactSensitiveTests(unittest.TestCase):
         text = "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig"
         self.assertNotIn("eyJhbGciOiJIUzI1NiJ9", redact_sensitive(text))
 
+    def test_strips_query_string_token(self) -> None:
+        text = "https://example.com/form?token=secret-token-123456789&mode=cyber"
+        result = redact_sensitive(text)
+        self.assertNotIn("secret-token-123456789", result)
+        self.assertIn("[REDACTED]", result)
+
+    def test_strips_google_api_key(self) -> None:
+        text = "GOOGLE_API_KEY=AIzaSyDapFhUqfj8Inzc8GeEfzLRqsg3Hlrq2Bs"
+        result = redact_sensitive(text)
+        self.assertNotIn("AIzaSy", result)
+        self.assertIn("[REDACTED]", result)
+
     def test_strips_approve_command(self) -> None:
         text = "User typed /approve abc-123 secret-token-xyz to confirm"
         result = redact_sensitive(text)

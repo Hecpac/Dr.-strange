@@ -8,3 +8,4 @@ pyautogui
 rank-bm25
 pypdf
 playwright
+browser-use>=0.11.13

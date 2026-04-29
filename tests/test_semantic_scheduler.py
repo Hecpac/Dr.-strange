@@ -8,6 +8,18 @@ from claw_v2.config import ScheduledSubAgentConfig, _default_scheduled_sub_agent
 from claw_v2.cron import CronScheduler, ScheduledJob, _next_due_for_daily_at
 
 
+class FakeCronPersistence:
+    def __init__(self, saved: dict[str, tuple[float, int]]) -> None:
+        self.saved = saved
+        self.writes: list[tuple[str, float, int]] = []
+
+    def load_cron_state(self) -> dict[str, tuple[float, int]]:
+        return dict(self.saved)
+
+    def save_cron_job(self, job_name: str, last_run_at: float, runs: int) -> None:
+        self.writes.append((job_name, last_run_at, runs))
+
+
 def _ts(year: int, month: int, day: int, hour: int, minute: int, tz: str) -> float:
     dt = datetime(year, month, day, hour, minute, tzinfo=ZoneInfo(tz))
     return dt.timestamp()
@@ -83,6 +95,23 @@ class CronSchedulerTests(unittest.TestCase):
         next_day = _ts(2026, 4, 28, 8, 0, "America/Chicago")
         scheduler.run_due(now=next_day)
         self.assertEqual(called["count"], 2)
+
+    def test_late_registered_job_uses_restored_state(self) -> None:
+        persistence = FakeCronPersistence({"nlm_wiki_sync": (1000.0, 1)})
+        scheduler = CronScheduler(persistence=persistence)
+        scheduler.restore()
+        called = {"count": 0}
+
+        def handler() -> None:
+            called["count"] += 1
+
+        scheduler.register(
+            ScheduledJob(name="nlm_wiki_sync", interval_seconds=43200, handler=handler)
+        )
+        scheduler.run_due(now=2000.0)
+
+        self.assertEqual(called["count"], 0)
+        self.assertEqual(persistence.writes, [])
 
 
 class DefaultsTests(unittest.TestCase):

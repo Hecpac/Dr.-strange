@@ -1,14 +1,31 @@
 # tests/test_chrome.py
 from __future__ import annotations
 
-import subprocess
+import tempfile
 import unittest
-from unittest.mock import MagicMock, patch, call
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 from claw_v2.chrome import ManagedChrome, ChromeStartError
 
 
 class ManagedChromeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._find_chrome_patcher = patch(
+            "claw_v2.chrome._find_chrome",
+            return_value="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        )
+        self.mock_find_chrome = self._find_chrome_patcher.start()
+        self.addCleanup(self._find_chrome_patcher.stop)
+
+        self._cdp_ready_patcher = patch("claw_v2.chrome._is_cdp_ready", return_value=False)
+        self.mock_cdp_ready = self._cdp_ready_patcher.start()
+        self.addCleanup(self._cdp_ready_patcher.stop)
+
+        self._profile_pids_patcher = patch("claw_v2.chrome._profile_user_data_pids", return_value=[])
+        self.mock_profile_user_data_pids = self._profile_pids_patcher.start()
+        self.addCleanup(self._profile_pids_patcher.stop)
+
     @patch("claw_v2.chrome._check_port_pids")
     @patch("claw_v2.chrome._wait_for_port_free")
     @patch("subprocess.Popen")
@@ -89,6 +106,43 @@ class ManagedChromeTests(unittest.TestCase):
         mc.start(headless=False)
         args = mock_popen.call_args[0][0]
         self.assertNotIn("--headless=new", args)
+
+    @patch("claw_v2.chrome._check_port_pids")
+    @patch("subprocess.Popen")
+    def test_start_reuses_existing_ready_cdp_chrome(self, mock_popen, mock_pids) -> None:
+        mock_pids.return_value = [(1234, "Google Chrome")]
+        self.mock_cdp_ready.return_value = True
+        mc = ManagedChrome(port=9250, profile_dir="/tmp/test-profile")
+        mc.start()
+        mock_popen.assert_not_called()
+        self.assertIsNone(mc._process)
+
+    @patch("claw_v2.chrome._check_port_pids")
+    @patch("claw_v2.chrome._wait_for_profile_free")
+    def test_start_errors_when_profile_active_without_ready_cdp(self, mock_wait_profile, mock_pids) -> None:
+        mock_pids.return_value = []
+        self.mock_profile_user_data_pids.return_value = [4321]
+        mc = ManagedChrome(port=9250, profile_dir="/tmp/test-profile")
+        with self.assertRaises(ChromeStartError) as ctx:
+            mc.start()
+        self.assertIn("/tmp/test-profile", str(ctx.exception))
+        self.assertIn("4321", str(ctx.exception))
+
+    @patch("claw_v2.chrome._check_port_pids")
+    @patch("subprocess.Popen")
+    @patch("claw_v2.chrome._wait_for_cdp_ready")
+    def test_start_removes_stale_singleton_lock(self, mock_ready, mock_popen, mock_pids) -> None:
+        mock_pids.return_value = []
+        proc = MagicMock()
+        proc.poll.return_value = None
+        mock_popen.return_value = proc
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lock_path = f"{tmpdir}/SingletonLock"
+            with open(lock_path, "w", encoding="utf-8") as lock_file:
+                lock_file.write("stale")
+            mc = ManagedChrome(port=9250, profile_dir=tmpdir)
+            mc.start()
+            self.assertFalse(Path(lock_path).exists())
 
 
 if __name__ == "__main__":

@@ -64,6 +64,72 @@ class SecondaryProviderAdapterTests(unittest.TestCase):
         self.assertEqual(recorded["request_kwargs"]["previous_response_id"], "resp_prev_123")
         self.assertIn("# Evidence Pack", recorded["request_kwargs"]["input"])
 
+    def test_openai_brain_lane_attaches_default_tools_when_allowlist_is_none(self) -> None:
+        recorded: dict[str, object] = {}
+        fake_response = SimpleNamespace(
+            id="resp_123",
+            output_text="checked local logs",
+            output=[],
+            usage=None,
+        )
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                self.responses = SimpleNamespace(create=self.create)
+
+            def create(self, **kwargs):
+                recorded["request_kwargs"] = kwargs
+                return fake_response
+
+        request = make_request()
+        request.lane = "brain"
+        request.evidence_pack = {}
+        request.session_id = None
+        request.allowed_tools = None
+        adapter = OpenAIAdapter(
+            api_key="sk-test",
+            tool_executor=lambda _name, _args: {"ok": True},
+            tool_schemas=[
+                {"type": "function", "name": "shell.run", "parameters": {"type": "object"}},
+                {"type": "function", "name": "observe.recent_events_redacted", "parameters": {"type": "object"}},
+            ],
+        )
+
+        with patch("claw_v2.adapters.openai.import_module", return_value=SimpleNamespace(OpenAI=FakeClient)):
+            response = adapter.complete(request)
+
+        self.assertEqual(response.content, "checked local logs")
+        self.assertEqual(
+            recorded["request_kwargs"]["tools"],
+            [
+                {"type": "function", "name": "shell.run", "parameters": {"type": "object"}},
+                {"type": "function", "name": "observe.recent_events_redacted", "parameters": {"type": "object"}},
+            ],
+        )
+
+    def test_openai_advisory_lane_does_not_attach_tools_by_default(self) -> None:
+        recorded: dict[str, object] = {}
+        fake_response = SimpleNamespace(id="resp_123", output_text="risk is low", usage=None)
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                self.responses = SimpleNamespace(create=self.create)
+
+            def create(self, **kwargs):
+                recorded["request_kwargs"] = kwargs
+                return fake_response
+
+        adapter = OpenAIAdapter(
+            api_key="sk-test",
+            tool_executor=lambda _name, _args: {"ok": True},
+            tool_schemas=[{"type": "function", "name": "shell.run", "parameters": {"type": "object"}}],
+        )
+
+        with patch("claw_v2.adapters.openai.import_module", return_value=SimpleNamespace(OpenAI=FakeClient)):
+            adapter.complete(make_request())
+
+        self.assertNotIn("tools", recorded["request_kwargs"])
+
     def test_openai_adapter_omits_non_openai_previous_response_id(self) -> None:
         recorded: dict[str, object] = {}
         fake_response = SimpleNamespace(id="resp_123", output_text="ok", usage=None)

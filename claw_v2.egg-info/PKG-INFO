@@ -14,6 +14,7 @@ Requires-Dist: pyautogui
 Requires-Dist: rank-bm25
 Requires-Dist: pypdf
 Requires-Dist: playwright
+Requires-Dist: browser-use>=0.11.13
 
 # Claw v2.1 — Product Requirements Document
 
