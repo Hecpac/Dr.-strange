@@ -33,6 +33,23 @@ class ToolRegistryTests(unittest.TestCase):
             self.assertIn("WebSearch", researcher_tools)
             self.assertNotIn("Write", researcher_tools)
 
+    def test_openai_tool_schema_names_are_api_safe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            registry = ToolRegistry.default(workspace_root=workspace)
+
+            schemas = registry.openai_tool_schemas()
+            names = {schema["name"] for schema in schemas}
+
+            self.assertIn("file_x2e_read_workspace_nonsecret", names)
+            self.assertNotIn("file.read_workspace_nonsecret", names)
+            self.assertTrue(all("." not in name for name in names))
+            self.assertEqual(
+                registry.original_tool_name_from_openai("file_x2e_read_workspace_nonsecret"),
+                "file.read_workspace_nonsecret",
+            )
+
     def test_write_tool_respects_sandbox(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir) / "workspace"

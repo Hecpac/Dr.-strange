@@ -49,6 +49,18 @@ def _sandboxed_process_runner(args: list[str], **_: object) -> subprocess.Comple
     return _completed(args, 1, "", "unknown command")
 
 
+def _leaky_runner(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+    if args[:2] == ["launchctl", "list"]:
+        return _completed(args, 0, "OPENAI_API_KEY=sk-test-very-secret-token-123456\n")
+    if args[:2] == ["launchctl", "print"]:
+        return _completed(args, 0, "state = running\n")
+    if args[:2] == ["pgrep", "-fl"]:
+        return _completed(args, 0, "123 .venv/bin/python -m claw_v2.main\n")
+    if args and args[0] == "lsof":
+        return _completed(args, 0, "Python 123 user 3u IPv4 TCP 127.0.0.1:8765 (LISTEN)\n")
+    return _completed(args, 1, "", "ANTHROPIC_API_KEY=sk-ant-api03-secret-token-123456789\n")
+
+
 class DiagnosticsTests(unittest.TestCase):
     def test_collects_process_port_database_jobs_tasks_and_actionable_events(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -161,6 +173,30 @@ class DiagnosticsTests(unittest.TestCase):
                 "known external credits",
             )
 
+    def test_report_redacts_sensitive_command_output_and_event_payloads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            observe = ObserveStream(db_path)
+            observe.emit(
+                "llm_circuit_open",
+                payload={
+                    "reason": (
+                        "policy block: https://claude.com/form/cyber-use-case"
+                        "?token=secret-token-123456789"
+                    )
+                },
+            )
+
+            report = collect_diagnostics(db_path=db_path, port=8765, runner=_leaky_runner)
+            rendered = json.dumps(report)
+            text = format_text(report)
+
+            self.assertNotIn("sk-test-very-secret-token", rendered)
+            self.assertNotIn("secret-token-123456789", rendered)
+            self.assertNotIn("sk-test-very-secret-token", text)
+            self.assertNotIn("secret-token-123456789", text)
+            self.assertIn("[REDACTED]", rendered)
+
 
 class HeartbeatTests(unittest.TestCase):
     def test_fresh_heartbeat_keeps_status_healthy(self) -> None:
@@ -264,15 +300,22 @@ class DiagnosticsRunbookTests(unittest.TestCase):
     def test_diagnose_wrapper_has_valid_bash_syntax(self) -> None:
         subprocess.run(["bash", "-n", "scripts/diagnose.sh"], check=True)
         subprocess.run(["bash", "-n", "scripts/restart.sh"], check=True)
+        subprocess.run(["bash", "-n", "ops/claw-watchdog.sh"], check=True)
+        subprocess.run(["bash", "-n", "ops/chrome-cdp-launcher.sh"], check=True)
 
     def test_runbook_documents_core_operational_commands(self) -> None:
         text = Path("docs/OPERATIONS_RUNBOOK.md").read_text()
         restart = Path("scripts/restart.sh").read_text()
+        watchdog = Path("ops/claw-watchdog.sh").read_text()
 
         for expected in (
             "com.pachano.claw",
+            "com.pachano.claw-watchdog",
+            "com.claw.chrome-cdp",
             "bash scripts/diagnose.sh",
             "bash scripts/restart.sh",
+            "ops/claw-watchdog.sh",
+            "ops/chrome-cdp-launcher.sh",
             "127.0.0.1:8765",
             "/status",
             "/jobs",
@@ -283,6 +326,7 @@ class DiagnosticsRunbookTests(unittest.TestCase):
             self.assertIn(expected, text)
         self.assertIn("--ack-current", text)
         self.assertIn("launchctl kickstart -k", restart)
+        self.assertIn("critical restartable condition", watchdog)
 
 
 if __name__ == "__main__":

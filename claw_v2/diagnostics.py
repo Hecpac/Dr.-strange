@@ -13,6 +13,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
+from claw_v2.redaction import redact_sensitive
+
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 
@@ -70,8 +72,8 @@ def _run_command(args: list[str], *, runner: Runner, timeout: float = 5.0) -> di
     return {
         "ok": result.returncode == 0,
         "returncode": result.returncode,
-        "stdout": (result.stdout or "").strip()[:4000],
-        "stderr": (result.stderr or "").strip()[:4000],
+        "stdout": redact_sensitive((result.stdout or "").strip(), limit=4000),
+        "stderr": redact_sensitive((result.stderr or "").strip(), limit=4000),
         "cmd": args,
     }
 
@@ -248,7 +250,7 @@ def _event_row(row: sqlite3.Row) -> dict[str, Any]:
         "trace_id": row["trace_id"],
         "job_id": row["job_id"],
         "artifact_id": row["artifact_id"],
-        "payload": _loads_json(row["payload"]),
+        "payload": redact_sensitive(_loads_json(row["payload"]), limit=4000),
     }
 
 
@@ -270,7 +272,7 @@ def _active_jobs(conn: sqlite3.Connection, *, limit: int) -> list[dict[str, Any]
         """,
         (limit,),
     ).fetchall()
-    return [dict(row) for row in rows]
+    return [_redacted_row_dict(row) for row in rows]
 
 
 def _active_tasks(conn: sqlite3.Connection, *, limit: int) -> list[dict[str, Any]]:
@@ -284,7 +286,7 @@ def _active_tasks(conn: sqlite3.Connection, *, limit: int) -> list[dict[str, Any
         """,
         (limit,),
     ).fetchall()
-    return [dict(row) for row in rows]
+    return [_redacted_row_dict(row) for row in rows]
 
 
 def _cron_state(conn: sqlite3.Connection, *, limit: int) -> list[dict[str, Any]]:
@@ -297,7 +299,11 @@ def _cron_state(conn: sqlite3.Connection, *, limit: int) -> list[dict[str, Any]]
         """,
         (limit,),
     ).fetchall()
-    return [dict(row) for row in rows]
+    return [_redacted_row_dict(row) for row in rows]
+
+
+def _redacted_row_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return redact_sensitive(dict(row), limit=4000)
 
 
 def _loads_json(raw: Any) -> Any:

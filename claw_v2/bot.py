@@ -18,7 +18,7 @@ from claw_v2.agent_handler import AgentHandler
 from claw_v2.browse_handler import BrowseHandler
 from claw_v2.task_handler import TaskHandler
 from claw_v2.approval import ApprovalManager
-from claw_v2.approval_gate import ApprovalPending
+from claw_v2.approval_gate import ApprovalPending, approved_tool_invocation
 from claw_v2.brain import BrainService
 from claw_v2.bot_commands import BotCommand, CommandContext, dispatch_commands
 from claw_v2.capability_router import (
@@ -77,12 +77,89 @@ _CAPABILITY_MESSAGES = {
     "computer_control": "Lo siento, mi módulo de control de escritorio está actualmente degradado y no puedo ejecutar acciones interactivas.",
     "browser_use": "Lo siento, mi backend de automatización web está actualmente degradado y no puedo completar ese flujo web.",
 }
+_CHATGPT_TARGET_TOKENS = ("chatgpt", "chat gpt", "chat.openai.com")
+_CHATGPT_OPEN_TOKENS = (
+    "abre",
+    "abrir",
+    "open",
+    "inicia",
+    "iniciar",
+    "nuevo chat",
+    "nueva conversacion",
+    "new chat",
+)
+_CHATGPT_INTERACTIVE_TOKENS = (
+    "pidele",
+    "pidelo",
+    "crea",
+    "crear",
+    "genera",
+    "generar",
+    "imagen",
+    "foto",
+    "image",
+    "prompt",
+    "escribe",
+    "manda",
+    "envia",
+)
+_CAPABILITY_DENIAL_TERMS = (
+    "no puedo",
+    "no tengo acceso",
+    "no tengo una herramienta",
+    "no dispongo",
+    "no hay acceso",
+    "no hay herramienta",
+    "habilita",
+    "habilitas",
+    "browser bridge",
+)
+_CAPABILITY_SURFACE_TERMS = (
+    "navegador",
+    "browser",
+    "chrome",
+    "cdp",
+    "desktop",
+    "escritorio",
+    "terminal",
+    "herramienta",
+    "tool",
+)
 
 
 _PRE_HOOK_BLOCK_PREFIX = "Request blocked by pre-hook"
 _PRE_HOOK_BLOCK_RE = re.compile(
     r"^Request blocked by pre-hook \(([^)]+)\)\. Reason: (.+)$"
 )
+
+
+def _looks_like_chatgpt_browser_request(normalized: str) -> bool:
+    if not any(token in normalized for token in _CHATGPT_TARGET_TOKENS):
+        return False
+    return any(token in normalized for token in _CHATGPT_OPEN_TOKENS + _CHATGPT_INTERACTIVE_TOKENS)
+
+
+def _looks_like_chatgpt_interactive_request(normalized: str) -> bool:
+    if not any(token in normalized for token in _CHATGPT_TARGET_TOKENS):
+        return False
+    return any(token in normalized for token in _CHATGPT_INTERACTIVE_TOKENS)
+
+
+def _chatgpt_browser_task_instruction(text: str) -> str:
+    return (
+        "Usa Chrome/CDP con la sesión autenticada del usuario. "
+        "Abre https://chatgpt.com/ en un chat nuevo, realiza exactamente esta tarea, "
+        "verifica el resultado visible y termina con un resumen breve:\n"
+        f"{text.strip()}"
+    )
+
+
+def _looks_like_unverified_capability_denial(text: str) -> bool:
+    normalized = _normalize_command_text(text)
+    return (
+        any(term in normalized for term in _CAPABILITY_DENIAL_TERMS)
+        and any(term in normalized for term in _CAPABILITY_SURFACE_TERMS)
+    )
 PRE_HOOK_BLOCK_REPEATED_THRESHOLD = 5
 PRE_HOOK_BLOCK_REPEATED_WINDOW_MINUTES = 10
 
@@ -106,6 +183,39 @@ def _format_approval_pending(exc: ApprovalPending) -> str:
         f"Resumen: {exc.summary}\n\n"
         f"Comando: `/approve {exc.approval_id} {exc.token}`"
     )
+
+
+def _format_approval_pending_for_memory(exc: ApprovalPending) -> str:
+    return (
+        "Acción de Tier 3 pendiente de aprobación.\n"
+        f"Tool: {exc.tool}\n"
+        f"Resumen: {exc.summary}\n"
+        f"Approval ID: {exc.approval_id}\n"
+        "Token omitido en memoria."
+    )
+
+
+def _looks_like_pending_tool_approval_grant(text: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9\s]+", " ", _normalize_command_text(text)).strip()
+    normalized = re.sub(r"\s+", " ", normalized)
+    return normalized in {
+        "aprobada",
+        "aprobado",
+        "apruebalo",
+        "apruebala",
+        "aprobalo",
+        "aprobala",
+        "autorizado",
+        "autorizada",
+        "confirmado",
+        "confirmada",
+        "confirmo",
+        "dale",
+        "ok",
+        "si",
+        "yes",
+        "approved",
+    }
 
 
 def _looks_like_task_completion_question(text: str) -> bool:
@@ -940,6 +1050,9 @@ class BotService:
             self._remember_assistant_turn_state(session_id, stripped, capability_route_response)
             return capability_route_response
         self._remember_user_turn_state(session_id, stripped)
+        pending_tool_approval = self._handle_pending_tool_approval_grant_response(session_id, stripped)
+        if pending_tool_approval is not None:
+            return pending_tool_approval
         if _looks_like_autonomy_grant(stripped):
             return self._handle_autonomy_grant_response(session_id, stripped)
         stateful_followup = self._maybe_resolve_stateful_followup(stripped, session_id=session_id)
@@ -1793,6 +1906,7 @@ class BotService:
             prompt_text = _format_tweet_analysis_prompt(text, enriched)
         if runtime_capability_question:
             prompt_text = _format_runtime_capability_prompt(prompt_text)
+        prompt_text = self._with_runtime_capability_context(prompt_text)
         try:
             response = self.brain.handle_message(
                 session_id,
@@ -1801,6 +1915,11 @@ class BotService:
                 task_type="telegram_message",
             )
         except ApprovalPending as exc:
+            self._record_pending_tool_approval(
+                session_id=session_id,
+                user_text=source_text,
+                exc=exc,
+            )
             return _format_approval_pending(exc)
 
         raw_content = response.content or ""
@@ -1809,6 +1928,10 @@ class BotService:
             content = "Recibido. ¿Qué quieres que haga con esto?"
         elif _looks_like_pre_hook_block(content):
             content = self._maybe_augment_pre_hook_block(content)
+        elif _looks_like_unverified_capability_denial(content):
+            corrected = self._correct_unverified_capability_denial(content)
+            if corrected is not None:
+                content = corrected
         elif runtime_capability_question:
             content = _enforce_runtime_capability_sections(content)
         elif link_analysis_context is not None:
@@ -1842,6 +1965,139 @@ class BotService:
             )
         self._remember_assistant_turn_state(session_id, source_text, content)
         return content
+
+    def _with_runtime_capability_context(self, prompt_text: str) -> str:
+        context = self._runtime_capability_context()
+        if not context:
+            return prompt_text
+        return f"{context}\n\n# User request\n{prompt_text}"
+
+    def _runtime_capability_context(self) -> str:
+        lines = ["# Runtime capability context", "Use this as current local runtime evidence before claiming a capability is unavailable."]
+        if self._capability_available("chrome_cdp") and self.browser is not None and self.managed_chrome is not None:
+            cdp_url = str(getattr(self.managed_chrome, "cdp_url", "") or "")
+            detail = f"available ({cdp_url})" if cdp_url else "available"
+            lines.append(f"- Chrome CDP: {detail}")
+        else:
+            reason = self._capability_unavailable_message("chrome_cdp", "unavailable")
+            lines.append(f"- Chrome CDP: unavailable{f' - {reason}' if reason else ''}")
+        if self._capability_available("browser_use") and self.browser_use is not None:
+            lines.append("- Browser automation: available")
+        else:
+            reason = self._capability_unavailable_message("browser_use", "unavailable")
+            lines.append(f"- Browser automation: unavailable{f' - {reason}' if reason else ''}")
+        if self._capability_available("computer_use") and self.computer is not None:
+            lines.append("- Desktop/screenshot: available")
+        else:
+            reason = self._capability_unavailable_message("computer_use", "unavailable")
+            lines.append(f"- Desktop/screenshot: unavailable{f' - {reason}' if reason else ''}")
+        if self._capability_available("computer_control") and self.computer is not None:
+            lines.append("- Desktop actions: available")
+        else:
+            reason = self._capability_unavailable_message("computer_control", "unavailable")
+            lines.append(f"- Desktop actions: unavailable{f' - {reason}' if reason else ''}")
+        if self.terminal_bridge is not None:
+            lines.append("- Terminal bridge: available")
+        else:
+            lines.append("- Terminal bridge: unavailable")
+        lines.append("Rule: do not say 'no tengo acceso/no puedo usar navegador/herramientas' unless the relevant line above is unavailable or a concrete attempted route failed.")
+        return "\n".join(lines)
+
+    def _correct_unverified_capability_denial(self, content: str) -> str | None:
+        available = []
+        if self._capability_available("chrome_cdp") and self.browser is not None and self.managed_chrome is not None:
+            cdp_url = str(getattr(self.managed_chrome, "cdp_url", "") or "")
+            available.append(f"Chrome/CDP{f' ({cdp_url})' if cdp_url else ''}")
+        if self._capability_available("browser_use") and self.browser_use is not None:
+            available.append("browser automation")
+        if self._capability_available("computer_use") and self.computer is not None:
+            available.append("desktop/screenshot")
+        if self._capability_available("computer_control") and self.computer is not None:
+            available.append("desktop actions")
+        if self.terminal_bridge is not None:
+            available.append("terminal bridge")
+        if not available:
+            return None
+        return (
+            "No voy a asumir falta de acceso sin evidencia: en este runtime aparecen disponibles "
+            f"{', '.join(available)}. La respuesta del modelo fue bloqueada porque contradice las "
+            "capacidades actuales; voy a usar una ruta determinística o verificar la capacidad concreta antes de decir que no puedo."
+        )
+
+    def _record_pending_tool_approval(
+        self,
+        *,
+        session_id: str,
+        user_text: str,
+        exc: ApprovalPending,
+    ) -> None:
+        self._store_memory_turn(
+            session_id,
+            user_text,
+            _format_approval_pending_for_memory(exc),
+            assistant_limit=2000,
+        )
+        state = self.brain.memory.get_session_state(session_id)
+        active_object = dict(state.get("active_object") or {})
+        active_object["pending_tool_approval"] = {
+            "approval_id": exc.approval_id,
+            "tool": exc.tool,
+            "summary": exc.summary,
+            "original_text": user_text,
+            "created_at": time.time(),
+        }
+        self.brain.memory.update_session_state(
+            session_id,
+            pending_action=user_text,
+            verification_status="awaiting_tool_approval",
+            active_object=active_object,
+        )
+
+    def _clear_pending_tool_approval(self, session_id: str, approval_id: str | None = None) -> None:
+        state = self.brain.memory.get_session_state(session_id)
+        active_object = dict(state.get("active_object") or {})
+        pending = active_object.get("pending_tool_approval")
+        if approval_id is None or not isinstance(pending, dict) or pending.get("approval_id") == approval_id:
+            active_object.pop("pending_tool_approval", None)
+            self.brain.memory.update_session_state(
+                session_id,
+                pending_action=None,
+                verification_status="unknown",
+                active_object=active_object,
+            )
+
+    def _handle_pending_tool_approval_grant_response(self, session_id: str, text: str) -> str | None:
+        state = self.brain.memory.get_session_state(session_id)
+        active_object = dict(state.get("active_object") or {})
+        pending = active_object.get("pending_tool_approval")
+        if not isinstance(pending, dict):
+            return None
+        if not _looks_like_pending_tool_approval_grant(text):
+            return None
+        approval_id = str(pending.get("approval_id") or "")
+        tool = str(pending.get("tool") or "")
+        original_text = str(pending.get("original_text") or "").strip()
+        if not approval_id or not tool or not original_text:
+            return "Hay una aprobación pendiente, pero le falta contexto para reintentar. Reenvíame el objetivo concreto."
+        try:
+            status = self.approvals.status(approval_id)
+        except FileNotFoundError:
+            self._clear_pending_tool_approval(session_id, approval_id)
+            return f"La aprobación pendiente `{approval_id}` ya no existe. Reenvíame el objetivo concreto."
+        if status == "pending":
+            if not self.approvals.approve_internal(approval_id):
+                return "No pude registrar la aprobación pendiente. Usa `/approvals` para revisar el estado."
+        elif status != "approved":
+            self._clear_pending_tool_approval(session_id, approval_id)
+            return f"La aprobación `{approval_id}` está en estado `{status}`. Reenvíame el objetivo si quieres intentarlo de nuevo."
+        self._clear_pending_tool_approval(session_id, approval_id)
+        with approved_tool_invocation(
+            tool=tool,
+            approval_id=approval_id,
+            reason="telegram_owner_followup",
+        ):
+            result = self._brain_text_response(session_id, original_text, memory_text=original_text)
+        return f"Aprobación registrada. Reintenté la acción original.\n\n{result}"
 
     def _maybe_augment_pre_hook_block(self, content: str) -> str:
         parsed = _parse_pre_hook_block(content)
@@ -2337,6 +2593,14 @@ class BotService:
             if recent_tweet_url is not None:
                 return _BrainShortcut(f"{text}\n\n{recent_tweet_url}")
 
+        chatgpt_response = self._maybe_handle_chatgpt_browser_request(
+            text,
+            normalized=normalized,
+            session_id=session_id,
+        )
+        if chatgpt_response is not None:
+            return chatgpt_response
+
         if _computer_instruction_requires_actions(text):
             return self._computer_handler.action_response(text, session_id)
 
@@ -2354,6 +2618,27 @@ class BotService:
                 return self._chrome_handler.browse_response("https://ads.google.com", session_id=session_id)
 
         return None
+
+    def _maybe_handle_chatgpt_browser_request(
+        self,
+        text: str,
+        *,
+        normalized: str,
+        session_id: str,
+    ) -> str | None:
+        if not _looks_like_chatgpt_browser_request(normalized):
+            return None
+        if _looks_like_chatgpt_interactive_request(normalized) and self.browser_use is not None:
+            degraded = self._capability_unavailable_message(
+                "browser_use",
+                "browser use unavailable",
+            )
+            if degraded is None:
+                return self._computer_handler.action_response(
+                    _chatgpt_browser_task_instruction(text),
+                    session_id,
+                )
+        return self._chrome_handler.chatgpt_new_chat_response(session_id=session_id)
 
     def _maybe_handle_task_status_question(self, text: str, *, session_id: str) -> str | None:
         if not _looks_like_task_completion_question(text):

@@ -7,6 +7,7 @@ from importlib import import_module
 from typing import Any, Callable
 
 from claw_v2.adapters.base import (
+    ADVISORY_LANES,
     AdapterError,
     AdapterUnavailableError,
     LLMRequest,
@@ -90,8 +91,12 @@ class OpenAIAdapter(ProviderAdapter):
             if request.effort and _supports_reasoning(request.model):
                 kwargs["reasoning"] = {"effort": request.effort}
 
-            # Attach tools if available and requested
-            use_tools = self.tool_capable and request.allowed_tools is not None
+            # Non-advisory lanes are expected to stay operational after a
+            # cross-provider fallback. A None allowlist means "use the default
+            # tool surface" for these lanes, matching the Anthropic adapter.
+            use_tools = self.tool_capable and (
+                request.allowed_tools is not None or request.lane not in ADVISORY_LANES
+            )
             if use_tools:
                 allowed = set(request.allowed_tools or [])
                 schemas = [s for s in self._tool_schemas if not allowed or s["name"] in allowed]
