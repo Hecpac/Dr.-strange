@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from claw_v2.chrome import ManagedChrome, ChromeStartError
+from claw_v2.chrome import ManagedChrome, ChromeStartError, _profile_user_data_pids
 
 
 class ManagedChromeTests(unittest.TestCase):
@@ -143,6 +143,26 @@ class ManagedChromeTests(unittest.TestCase):
             mc = ManagedChrome(port=9250, profile_dir=tmpdir)
             mc.start()
             self.assertFalse(Path(lock_path).exists())
+
+
+class ProfileUserDataPidsTests(unittest.TestCase):
+    # Regression for Bug #7: ps without -ww truncates long command lines on macOS,
+    # causing --user-data-dir paths near/past col 80 to be missed.
+    def test_detects_user_data_dir_in_long_command_line(self) -> None:
+        profile = "/Users/hector/.claw/chrome-profile"
+        padding = "x" * 200
+        long_line = f"  1234 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --{padding} --user-data-dir={profile} --remote-debugging-port=9222"
+        with patch("claw_v2.chrome.subprocess.check_output", return_value=long_line):
+            pids = _profile_user_data_pids(profile)
+        self.assertEqual(pids, [1234])
+
+    def test_misses_user_data_dir_when_line_truncated(self) -> None:
+        profile = "/Users/hector/.claw/chrome-profile"
+        # Simulate what ps without -ww would return: line cut before the flag appears
+        truncated = f"  1234 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --remote"
+        with patch("claw_v2.chrome.subprocess.check_output", return_value=truncated):
+            pids = _profile_user_data_pids(profile)
+        self.assertEqual(pids, [])
 
 
 if __name__ == "__main__":

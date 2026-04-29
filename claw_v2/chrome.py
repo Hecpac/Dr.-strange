@@ -135,7 +135,7 @@ def _profile_user_data_pids(profile_dir: str) -> list[int]:
     target = str(Path(profile_dir).expanduser().resolve(strict=False))
     try:
         output = subprocess.check_output(
-            ["ps", "-ax", "-o", "pid=,command="],
+            ["ps", "-axww", "-o", "pid=,command="],
             text=True,
             stderr=subprocess.DEVNULL,
         )
