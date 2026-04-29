@@ -774,8 +774,15 @@ class BrainService:
         }
 
     def _secondary_verifier_provider(self, primary_provider: str) -> str | None:
-        candidates = ("openai", "anthropic", "google", "ollama", "codex")
-        for candidate in candidates:
+        preferred_pair = {
+            "anthropic": "codex",
+            "codex": "anthropic",
+            "openai": "anthropic",
+        }
+        preferred = preferred_pair.get(primary_provider)
+        if preferred and preferred in self.router.adapters:
+            return preferred
+        for candidate in ("codex", "anthropic", "openai", "google", "ollama"):
             if candidate != primary_provider and candidate in self.router.adapters:
                 return candidate
         return None
@@ -1157,6 +1164,24 @@ def _aggregate_verifier_votes(votes: list[dict]) -> dict:
             "missing_checks": [],
             "confidence": _average_confidence(clean_votes),
             "consensus_status": "unanimous_approve",
+        }
+    single_clean_approve = (
+        len(clean_votes) == 1
+        and clean_votes[0].get("recommendation") == "approve"
+        and clean_votes[0].get("risk_level") == "low"
+        and not blockers
+        and not missing_checks
+    )
+    if single_clean_approve:
+        return {
+            "recommendation": "approve",
+            "risk_level": "low",
+            "summary": "Single verifier approved a low-risk action.",
+            "reasons": reasons,
+            "blockers": [],
+            "missing_checks": [],
+            "confidence": _average_confidence(clean_votes),
+            "consensus_status": "single_verifier_approve",
         }
     consensus_status = "verifier_error" if has_error else "disagreement"
     summary_parts = [str(vote.get("summary", "")).strip() for vote in all_votes if str(vote.get("summary", "")).strip()]

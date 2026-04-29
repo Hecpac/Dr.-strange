@@ -952,5 +952,51 @@ class ParseVerifierPayloadTests(unittest.TestCase):
         self.assertEqual(parsed["risk_level"], "low")
 
 
+class AggregateVerifierVotesTests(unittest.TestCase):
+    @staticmethod
+    def _vote(recommendation: str, risk_level: str, *, error: str | None = None) -> dict:
+        vote = {
+            "recommendation": recommendation,
+            "risk_level": risk_level,
+            "summary": f"{recommendation}/{risk_level}",
+            "reasons": [],
+            "blockers": [],
+            "missing_checks": [],
+            "confidence": 0.9,
+        }
+        if error is not None:
+            vote["error"] = error
+        return vote
+
+    def test_single_clean_voter_low_risk_approve_proceeds(self) -> None:
+        from claw_v2.brain import _aggregate_verifier_votes
+
+        result = _aggregate_verifier_votes([self._vote("approve", "low")])
+
+        self.assertEqual(result["recommendation"], "approve")
+        self.assertEqual(result["risk_level"], "low")
+        self.assertEqual(result["consensus_status"], "single_verifier_approve")
+        self.assertEqual(result["blockers"], [])
+        self.assertEqual(result["missing_checks"], [])
+
+    def test_single_clean_voter_medium_risk_falls_to_needs_approval(self) -> None:
+        from claw_v2.brain import _aggregate_verifier_votes
+
+        result = _aggregate_verifier_votes([self._vote("approve", "medium")])
+
+        self.assertEqual(result["recommendation"], "needs_approval")
+        self.assertNotEqual(result["consensus_status"], "single_verifier_approve")
+
+    def test_two_voters_low_risk_approve_keeps_unanimous_approve(self) -> None:
+        from claw_v2.brain import _aggregate_verifier_votes
+
+        result = _aggregate_verifier_votes(
+            [self._vote("approve", "low"), self._vote("approve", "low")]
+        )
+
+        self.assertEqual(result["recommendation"], "approve")
+        self.assertEqual(result["consensus_status"], "unanimous_approve")
+
+
 if __name__ == "__main__":
     unittest.main()
