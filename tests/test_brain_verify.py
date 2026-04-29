@@ -951,6 +951,16 @@ class ParseVerifierPayloadTests(unittest.TestCase):
         self.assertEqual(parsed["recommendation"], "approve")
         self.assertEqual(parsed["risk_level"], "low")
 
+    def test_null_confidence_clamps_to_zero(self) -> None:
+        from claw_v2.brain import _parse_verifier_payload
+
+        parsed = _parse_verifier_payload(
+            '{"recommendation":"approve","risk_level":"low","summary":"ok",'
+            '"reasons":[],"blockers":[],"missing_checks":[],"confidence":null}'
+        )
+
+        self.assertEqual(parsed["confidence"], 0.0)
+
 
 class AggregateVerifierVotesTests(unittest.TestCase):
     @staticmethod
