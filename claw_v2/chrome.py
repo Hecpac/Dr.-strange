@@ -24,6 +24,7 @@ class ManagedChrome:
         self.port = port
         self.profile_dir = str(Path(profile_dir).expanduser())
         self._process: subprocess.Popen | None = None
+        self._attached_pid: int | None = None
 
     @property
     def cdp_url(self) -> str:
@@ -35,7 +36,8 @@ class ManagedChrome:
         if pids and _is_cdp_ready(self.port, timeout=1):
             if all(any(cn in name.lower() for cn in _CHROME_NAMES) for _, name in pids):
                 self._process = None
-                logger.info("ManagedChrome reusing existing CDP Chrome on port %d", self.port)
+                self._attached_pid = pids[0][0]
+                logger.info("ManagedChrome reusing existing CDP Chrome on port %d (PID %d)", self.port, self._attached_pid)
                 return
         for pid, name in pids:
             if any(cn in name.lower() for cn in _CHROME_NAMES):
@@ -79,6 +81,8 @@ class ManagedChrome:
         logger.info("ManagedChrome started on port %d (PID %d)", self.port, self._process.pid)
 
     def stop(self) -> None:
+        """Stop Chrome. Kills the process whether it was launched or attached — that is
+        the contract /chrome_login needs to transition from headless to visible."""
         if self._process is not None:
             self._process.terminate()
             try:
@@ -87,6 +91,21 @@ class ManagedChrome:
                 self._process.kill()
             self._process = None
             logger.info("ManagedChrome stopped")
+        elif self._attached_pid is not None:
+            import os, signal
+            pid = self._attached_pid
+            try:
+                os.kill(pid, signal.SIGTERM)
+                _wait_for_port_free(self.port, timeout=5)
+                try:
+                    os.kill(pid, 0)
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            except ProcessLookupError:
+                pass
+            self._attached_pid = None
+            logger.info("ManagedChrome detached and killed attached Chrome PID %d", pid)
 
     def ensure(self) -> None:
         if self._process is not None and self._process.poll() is None:

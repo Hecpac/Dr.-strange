@@ -145,6 +145,56 @@ class ManagedChromeTests(unittest.TestCase):
             self.assertFalse(Path(lock_path).exists())
 
 
+class ManagedChromeAttachStopTests(unittest.TestCase):
+    # Regression for Bug #1: stop() was a no-op when start() attached to an existing
+    # Chrome (self._process stayed None). /chrome_login relies on stop() to kill Chrome
+    # before restarting visible.
+
+    def _make_mc(self, tmpdir: str) -> ManagedChrome:
+        return ManagedChrome(port=9250, profile_dir=tmpdir)
+
+    def test_stop_kills_attached_pid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mc = self._make_mc(tmpdir)
+            with (
+                patch("claw_v2.chrome._check_port_pids", return_value=[(9999, "Google Chrome")]),
+                patch("claw_v2.chrome._is_cdp_ready", return_value=True),
+            ):
+                mc.start()
+            self.assertIsNone(mc._process)
+            self.assertEqual(mc._attached_pid, 9999)
+
+            killed: list[tuple[int, int]] = []
+            def fake_kill(pid: int, sig: int) -> None:
+                killed.append((pid, sig))
+
+            with (
+                patch("claw_v2.chrome._wait_for_port_free"),
+                patch("os.kill", side_effect=[None, ProcessLookupError()]),
+            ):
+                mc.stop()
+
+            self.assertIsNone(mc._attached_pid)
+
+    def test_stop_is_not_noop_after_attach(self) -> None:
+        """Without the fix, stop() would silently do nothing after attach."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mc = self._make_mc(tmpdir)
+            with (
+                patch("claw_v2.chrome._check_port_pids", return_value=[(1234, "Google Chrome")]),
+                patch("claw_v2.chrome._is_cdp_ready", return_value=True),
+            ):
+                mc.start()
+            self.assertEqual(mc._attached_pid, 1234)
+            # After stop(), _attached_pid must be cleared (not None from the start)
+            with (
+                patch("claw_v2.chrome._wait_for_port_free"),
+                patch("os.kill", side_effect=ProcessLookupError()),
+            ):
+                mc.stop()
+            self.assertIsNone(mc._attached_pid)
+
+
 class ProfileUserDataPidsTests(unittest.TestCase):
     # Regression for Bug #7: ps without -ww truncates long command lines on macOS,
     # causing --user-data-dir paths near/past col 80 to be missed.
