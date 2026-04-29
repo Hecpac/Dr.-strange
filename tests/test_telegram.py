@@ -341,7 +341,8 @@ class HandleImageTests(unittest.IsolatedAsyncioTestCase):
         _, kwargs = mock_to_thread.await_args
         self.assertEqual(kwargs["user_id"], "123")
         self.assertEqual(kwargs["session_id"], "tg-1")
-        self.assertEqual(kwargs["memory_text"], "[Imagen adjunta]\nrevisa esta foto")
+        self.assertIn("[Imagen adjunta] path:", kwargs["memory_text"])
+        self.assertIn("revisa esta foto", kwargs["memory_text"])
         blocks = kwargs["content_blocks"]
         self.assertEqual(blocks[0]["type"], "text")
         self.assertEqual(blocks[0]["text"], "revisa esta foto")
@@ -382,7 +383,7 @@ class HandleImageTests(unittest.IsolatedAsyncioTestCase):
         update.message.reply_text.assert_awaited_once()
         self.assertEqual(update.message.reply_text.await_args.args[0], "doc response")
         _, kwargs = mock_to_thread.await_args
-        self.assertEqual(kwargs["memory_text"], "[Imagen adjunta]")
+        self.assertIn("[Imagen adjunta] path:", kwargs["memory_text"])
         blocks = kwargs["content_blocks"]
         self.assertEqual(blocks[0]["type"], "text")
         self.assertIn("Telegram", blocks[0]["text"])
