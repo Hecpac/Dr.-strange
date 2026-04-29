@@ -1235,10 +1235,6 @@ def _average_confidence(votes: list[dict]) -> float:
     return round(sum(float(vote.get("confidence") or 0.0) for vote in votes) / len(votes), 3)
 
 
-def _risk_rank(value: str) -> int:
-    return {"low": 0, "medium": 1, "high": 2, "critical": 3}.get(value, 1)
-
-
 def _looks_like_knowledge_question(message: str) -> bool:
     stripped = message.strip().lower()
     if "?" in stripped:
