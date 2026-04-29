@@ -344,10 +344,10 @@ class MemoryStore:
             _apply_pending_restore(self.db_path)
         except Exception:
             logger.debug("Pending restore check failed", exc_info=True)
-        self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self._conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=10)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA busy_timeout=5000")
+        self._conn.execute("PRAGMA busy_timeout=10000")
         self._conn.executescript(SCHEMA)
         self._lock = threading.Lock()
         self._migrate()
@@ -1047,16 +1047,20 @@ class MemoryStore:
 
     def save_cron_job(self, job_name: str, last_run_at: float, runs: int) -> None:
         with self._lock:
-            self._conn.execute(
-                """
-                INSERT INTO cron_state (job_name, last_run_at, runs)
-                VALUES (?, ?, ?)
-                ON CONFLICT(job_name)
-                DO UPDATE SET last_run_at = excluded.last_run_at, runs = excluded.runs
-                """,
-                (job_name, last_run_at, runs),
-            )
-            self._conn.commit()
+            try:
+                self._conn.execute(
+                    """
+                    INSERT INTO cron_state (job_name, last_run_at, runs)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(job_name)
+                    DO UPDATE SET last_run_at = excluded.last_run_at, runs = excluded.runs
+                    """,
+                    (job_name, last_run_at, runs),
+                )
+                self._conn.commit()
+            except sqlite3.OperationalError:
+                self._conn.rollback()
+                raise
 
     # --- Semantic memory ---
 

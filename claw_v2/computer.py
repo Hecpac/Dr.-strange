@@ -194,7 +194,7 @@ class CodexComputerBackend:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=120,
+                timeout=300,
             )
         except FileNotFoundError as exc:
             raise RuntimeError(
@@ -202,7 +202,7 @@ class CodexComputerBackend:
             ) from exc
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(
-                "Codex CLI timed out after 120s for computer use task"
+                "Codex CLI timed out after 300s for computer use task"
             ) from exc
 
         if result.returncode != 0:

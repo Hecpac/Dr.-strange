@@ -536,6 +536,7 @@ class GitWorktreeExperimentRunner:
         worktree_path = self.worktree_root / agent_name / f"exp-{experiment_number}"
         worktree_path.parent.mkdir(parents=True, exist_ok=True)
         workspace_mode = self._prepare_workspace(worktree_path)
+        remove_workspace = True
         try:
             response = self.router.ask(
                 self._build_worker_prompt(agent_name, experiment_number, state),
@@ -584,8 +585,12 @@ class GitWorktreeExperimentRunner:
                 promotion_commit_sha=promotion_commit_sha,
                 promotion_branch_name=promotion_branch_name,
             )
+        except AdapterError as exc:
+            remove_workspace = False
+            raise AdapterError(f"{exc}; preserved experiment workspace at {worktree_path}") from exc
         finally:
-            self._remove_workspace(worktree_path, workspace_mode)
+            if remove_workspace:
+                self._remove_workspace(worktree_path, workspace_mode)
 
     def _build_worker_prompt(self, agent_name: str, experiment_number: int, state: dict) -> str:
         instruction = state.get("instruction", "").strip()
