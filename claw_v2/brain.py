@@ -1149,6 +1149,9 @@ def _append_reasoning_trace(response: LLMResponse, note: str) -> None:
     response.artifacts["reasoning_trace"] = f"{existing}\n\n{note}" if existing else note
 
 
+_single_verifier_warned: bool = False
+
+
 def _aggregate_verifier_votes(votes: list[dict]) -> dict:
     clean_votes = [vote for vote in votes if not vote.get("error")]
     all_votes = votes or []
@@ -1161,15 +1164,31 @@ def _aggregate_verifier_votes(votes: list[dict]) -> dict:
     recommendations = {vote.get("recommendation") for vote in clean_votes}
     risk_levels = [str(vote.get("risk_level", "medium")) for vote in all_votes]
     highest_risk = max(risk_levels or ["medium"], key=_risk_rank)
-    unanimous_approve = (
-        len(clean_votes) >= 2
-        and len(clean_votes) == len(all_votes)
+    total_voters = len(all_votes)
+    # Single-voter deployments (all Anthropic, no secondary) must still be able to approve.
+    # _apply_policy_floor still applies after this, so high/critical risk will require
+    # human approval regardless.
+    consensus_approve = (
+        len(clean_votes) >= 1
+        and len(clean_votes) == total_voters
         and recommendations == {"approve"}
         and highest_risk in {"low", "medium"}
         and not blockers
         and not missing_checks
     )
-    if unanimous_approve:
+    if consensus_approve:
+        global _single_verifier_warned
+        if total_voters >= 2:
+            consensus_status = "unanimous_approve"
+        else:
+            consensus_status = "single_verifier_approve"
+            if not _single_verifier_warned:
+                logger.warning(
+                    "Critical action approved with a single verifier vote (no secondary provider "
+                    "configured). Policy floors still apply. Set a secondary_verifier_provider "
+                    "for stronger consensus guarantees."
+                )
+                _single_verifier_warned = True
         return {
             "recommendation": "approve",
             "risk_level": highest_risk,
@@ -1178,7 +1197,7 @@ def _aggregate_verifier_votes(votes: list[dict]) -> dict:
             "blockers": [],
             "missing_checks": [],
             "confidence": _average_confidence(clean_votes),
-            "consensus_status": "unanimous_approve",
+            "consensus_status": consensus_status,
         }
     consensus_status = "verifier_error" if has_error else "disagreement"
     summary_parts = [str(vote.get("summary", "")).strip() for vote in all_votes if str(vote.get("summary", "")).strip()]

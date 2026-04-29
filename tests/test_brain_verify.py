@@ -952,6 +952,43 @@ class ParseVerifierPayloadTests(unittest.TestCase):
         self.assertEqual(parsed["risk_level"], "low")
 
 
+class TestAggregateVerifierVotes(unittest.TestCase):
+    # Regression for Bug #5: unanimous_approve required len(clean_votes) >= 2,
+    # blocking all critical actions in single-provider deployments.
+
+    def _vote(self, recommendation: str = "approve", risk: str = "low", error: str | None = None) -> dict:
+        v: dict = {"recommendation": recommendation, "risk_level": risk, "confidence": 0.9,
+                   "reasons": [], "blockers": [], "missing_checks": [], "summary": "ok"}
+        if error:
+            v["error"] = error
+        return v
+
+    def test_single_voter_approve_low_risk(self) -> None:
+        from claw_v2.brain import _aggregate_verifier_votes
+        result = _aggregate_verifier_votes([self._vote()])
+        self.assertEqual(result["recommendation"], "approve")
+        self.assertEqual(result["consensus_status"], "single_verifier_approve")
+
+    def test_two_voters_approve_unanimous(self) -> None:
+        from claw_v2.brain import _aggregate_verifier_votes
+        result = _aggregate_verifier_votes([self._vote(), self._vote()])
+        self.assertEqual(result["recommendation"], "approve")
+        self.assertEqual(result["consensus_status"], "unanimous_approve")
+
+    def test_single_voter_high_risk_still_needs_approval(self) -> None:
+        from claw_v2.brain import _aggregate_verifier_votes, _apply_policy_floor
+        result = _aggregate_verifier_votes([self._vote(risk="high")])
+        # high risk: consensus_approve condition fails (highest_risk not in {low,medium})
+        self.assertEqual(result["recommendation"], "needs_approval")
+
+    def test_single_voter_with_blocker_does_not_approve(self) -> None:
+        from claw_v2.brain import _aggregate_verifier_votes
+        v = self._vote()
+        v["blockers"] = ["missing test coverage"]
+        result = _aggregate_verifier_votes([v])
+        self.assertEqual(result["recommendation"], "needs_approval")
+
+
 class TestSessionIdIsolation(unittest.TestCase):
     # Regression for Bug #3: _last_confidence was a single float shared across
     # concurrent sessions. Session A's confidence bled into session B's critical action.
