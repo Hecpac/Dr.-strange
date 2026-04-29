@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from claw_v2.adapters.base import AdapterError
 from claw_v2.agents import (
     ExperimentEvaluation,
     GitBranchPromotionExecutor,
@@ -106,6 +107,49 @@ class WorktreeRunnerTests(unittest.TestCase):
             self.assertEqual(router.calls[0]["cwd"], str(root / "worktrees" / "agent-a" / "exp-1"))
             self.assertFalse((repo / "experiment.txt").exists())
             self.assertFalse((root / "worktrees" / "agent-a" / "exp-1").exists())
+
+    def test_worktree_runner_preserves_workspace_on_adapter_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo = root / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+            (repo / "README.md").write_text("hello\n", encoding="utf-8")
+            subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True, text=True)
+
+            class TimeoutRouter(FakeRouter):
+                def ask(self, prompt: str, **kwargs) -> LLMResponse:
+                    self.calls.append({"prompt": prompt, **kwargs})
+                    worktree = Path(kwargs["cwd"])
+                    (worktree / "partial.txt").write_text("partial\n", encoding="utf-8")
+                    raise AdapterError("Codex CLI timed out after 300.0s")
+
+            router = TimeoutRouter()
+            runner = GitWorktreeExperimentRunner(
+                repo_root=repo,
+                worktree_root=root / "worktrees",
+                router=router,
+                evaluator=lambda path, state, diff: ExperimentEvaluation(0.75, "improved", "0.75"),
+            )
+
+            with self.assertRaisesRegex(AdapterError, "preserved experiment workspace"):
+                runner(
+                    "agent-timeout",
+                    1,
+                    {
+                        "instruction": "Change the workspace",
+                        "allowed_tools": ["Write"],
+                        "last_verified_state": {"metric": 0.5},
+                    },
+                )
+
+            preserved = root / "worktrees" / "agent-timeout" / "exp-1"
+            self.assertTrue(preserved.exists())
+            self.assertEqual((preserved / "partial.txt").read_text(encoding="utf-8"), "partial\n")
+            self.assertFalse((repo / "partial.txt").exists())
 
     def test_worktree_runner_can_gate_promotion_through_brain(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
