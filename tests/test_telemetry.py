@@ -6,9 +6,10 @@ import threading
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 from claw_v2.config import AppConfig
-from claw_v2.telemetry import append_jsonl, generate_id, now_iso, read_jsonl
+from claw_v2.telemetry import append_jsonl, generate_id, latest_by_id, now_iso, read_jsonl
 
 
 class GenerateIdTests(unittest.TestCase):
@@ -54,24 +55,49 @@ class JsonlTelemetryTests(unittest.TestCase):
         self.assertNotIn("secret-token-123456", raw)
         self.assertIn("[REDACTED]", raw)
 
-    def test_thread_safe_concurrent_writes(self) -> None:
+    def test_flock_safe_concurrent_writes_are_valid_json(self) -> None:
         path = self.root / "concurrent.jsonl"
         errors: list[Exception] = []
 
-        def write(n: int) -> None:
-            try:
-                append_jsonl(path, {"n": n})
-            except Exception as exc:
-                errors.append(exc)
+        def write(thread_index: int) -> None:
+            for item_index in range(100):
+                try:
+                    append_jsonl(path, {"thread": thread_index, "item": item_index})
+                except Exception as exc:
+                    errors.append(exc)
 
-        threads = [threading.Thread(target=write, args=(index,)) for index in range(20)]
+        threads = [threading.Thread(target=write, args=(index,)) for index in range(10)]
         for thread in threads:
             thread.start()
         for thread in threads:
             thread.join()
 
         self.assertEqual(errors, [])
-        self.assertEqual(len(path.read_text(encoding="utf-8").splitlines()), 20)
+        lines = path.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), 1000)
+        for line in lines:
+            parsed = json.loads(line)
+            self.assertIn("thread", parsed)
+            self.assertIn("item", parsed)
+
+    def test_append_rejects_lines_over_one_mb_without_modifying_file(self) -> None:
+        path = self.root / "events.jsonl"
+        append_jsonl(path, {"before": True})
+        before = path.read_text(encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "exceeds 1MB cap"):
+            append_jsonl(path, {"payload": ["x" * 1024 for _ in range(2048)]})
+
+        self.assertEqual(path.read_text(encoding="utf-8"), before)
+
+    def test_append_fsyncs_after_each_write(self) -> None:
+        path = self.root / "events.jsonl"
+
+        with patch("claw_v2.telemetry.os.fsync") as fsync:
+            append_jsonl(path, {"n": 1})
+            append_jsonl(path, {"n": 2})
+
+        self.assertEqual(fsync.call_count, 2)
 
     def test_read_jsonl_skips_corrupt_lines(self) -> None:
         path = self.root / "events.jsonl"
@@ -84,6 +110,17 @@ class JsonlTelemetryTests(unittest.TestCase):
         append_jsonl(path, {"n": 1})
 
         json.loads(path.read_text(encoding="utf-8").strip())
+
+    def test_latest_by_id_returns_highest_goal_revision(self) -> None:
+        path = self.root / "goals.jsonl"
+        append_jsonl(path, {"goal_id": "g_1", "goal_revision": 1, "objective": "old"})
+        append_jsonl(path, {"goal_id": "g_1", "goal_revision": 2, "objective": "new"})
+        append_jsonl(path, {"goal_id": "g_2", "goal_revision": 1, "objective": "other"})
+
+        latest = latest_by_id(path, "goal_id")
+
+        self.assertEqual(latest["g_1"]["objective"], "new")
+        self.assertEqual(latest["g_2"]["objective"], "other")
 
 
 class TelemetryConfigTests(unittest.TestCase):
@@ -103,4 +140,3 @@ class TelemetryConfigTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

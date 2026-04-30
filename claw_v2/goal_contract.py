@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from claw_v2.telemetry import append_jsonl, generate_id, now_iso, read_jsonl
+from claw_v2.telemetry import append_jsonl, generate_id, latest_by_id, now_iso, read_jsonl
 
 GoalRiskProfile = Literal["tier_1", "tier_2", "tier_2_5", "tier_3"]
 GOAL_SCHEMA_VERSION = "goal_contract.v1"
@@ -15,6 +15,7 @@ GOAL_RISK_PROFILES = frozenset({"tier_1", "tier_2", "tier_2_5", "tier_3"})
 class GoalContract:
     goal_id: str
     objective: str
+    goal_revision: int = 1
     constraints: list[str] = field(default_factory=list)
     assumptions: list[str] = field(default_factory=list)
     allowed_actions: list[str] = field(default_factory=list)
@@ -31,6 +32,8 @@ class GoalContract:
     def __post_init__(self) -> None:
         if not self.objective.strip():
             raise ValueError("objective is required")
+        if self.goal_revision < 1:
+            raise ValueError("goal_revision must be >= 1")
         if self.risk_profile not in GOAL_RISK_PROFILES:
             raise ValueError(f"invalid risk_profile: {self.risk_profile}")
 
@@ -38,6 +41,7 @@ class GoalContract:
         return {
             "schema_version": self.schema_version,
             "goal_id": self.goal_id,
+            "goal_revision": self.goal_revision,
             "objective": self.objective,
             "constraints": list(self.constraints),
             "assumptions": list(self.assumptions),
@@ -57,6 +61,7 @@ class GoalContract:
         return cls(
             goal_id=str(data["goal_id"]),
             objective=str(data["objective"]),
+            goal_revision=int(data.get("goal_revision") or 1),
             constraints=_str_list(data.get("constraints")),
             assumptions=_str_list(data.get("assumptions")),
             allowed_actions=_str_list(data.get("allowed_actions")),
@@ -114,15 +119,32 @@ def update_goal(
     goal: GoalContract,
     *,
     observe: Any | None = None,
+    session_id: str = "runtime",
     **updates: Any,
 ) -> GoalContract:
-    data = goal.to_dict()
+    if _is_goal_completed(telemetry_root, goal.goal_id):
+        raise ValueError(f"goal {goal.goal_id} is completed and cannot be updated")
+    latest = latest_by_id(_goals_path(telemetry_root), "goal_id").get(goal.goal_id)
+    data = dict(latest or goal.to_dict())
     for key, value in updates.items():
         if value is not None:
             data[key] = value
+    data["goal_revision"] = int(data.get("goal_revision") or 1) + 1
     data["updated_at"] = now_iso()
     updated = GoalContract.from_dict(data)
     append_jsonl(_goals_path(telemetry_root), updated.to_dict())
+    from claw_v2.action_events import emit_event
+
+    emit_event(
+        telemetry_root,
+        event_type="goal_updated",
+        actor="claw",
+        goal_id=updated.goal_id,
+        goal_revision=updated.goal_revision,
+        session_id=session_id,
+        risk_level="low",
+        observe=None,
+    )
     if observe is not None:
         observe.emit("goal_updated", payload=updated.to_dict())
     return updated
@@ -134,6 +156,17 @@ def load_goals(telemetry_root: Path | str) -> list[GoalContract]:
 
 def _goals_path(telemetry_root: Path | str) -> Path:
     return Path(telemetry_root).expanduser() / "goals.jsonl"
+
+
+def _events_path(telemetry_root: Path | str) -> Path:
+    return Path(telemetry_root).expanduser() / "events.jsonl"
+
+
+def _is_goal_completed(telemetry_root: Path | str, goal_id: str) -> bool:
+    for event in read_jsonl(_events_path(telemetry_root)):
+        if event.get("event_type") == "goal_completed" and event.get("goal_id") == goal_id:
+            return True
+    return False
 
 
 def _str_list(value: Any) -> list[str]:
@@ -149,4 +182,3 @@ def _optional_str(value: Any) -> str | None:
         return None
     text = str(value)
     return text if text else None
-
