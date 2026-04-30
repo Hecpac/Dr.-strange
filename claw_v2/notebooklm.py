@@ -541,13 +541,13 @@ class NotebookLMService:
             return {"used": False, "summary": "", "error": str(fallback_exc)}
 
     async def _async_research(self, notebook_id: str, query: str, mode: str) -> int:
-        async with self._client_ctx(timeout=300) as client:
+        async with self._client_ctx(timeout=1200) as client:
             task = await client.research.start(notebook_id, query, source="web", mode=mode)
             if task is None:
                 raise RuntimeError("Research start returned no task")
             task_id = task["task_id"]
             import time as _time
-            deadline = _time.monotonic() + 600
+            deadline = _time.monotonic() + 1200
             while _time.monotonic() < deadline:
                 poll = await client.research.poll(notebook_id)
                 if poll.get("status") == "completed":
@@ -566,7 +566,7 @@ class NotebookLMService:
                         raise last_exc  # type: ignore[misc]
                     return 0
                 await asyncio.sleep(15)
-            raise TimeoutError("Research did not complete within 10 minutes")
+            raise TimeoutError("Research did not complete within 20 minutes")
 
     def start_podcast(self, notebook_id: str) -> str:
         return self.start_artifact(notebook_id, "podcast")
