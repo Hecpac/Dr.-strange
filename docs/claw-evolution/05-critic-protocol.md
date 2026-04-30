@@ -59,6 +59,8 @@ El crítico **no** recibe:
 - `goal_alignment` (0.0–1.0) es la lectura del Critic sobre qué tan bien la acción
   propuesta encaja con el Goal Contract. **No es lo mismo que `gdi_score`** —
   el GDI mide drift en la trayectoria; `goal_alignment` evalúa la acción puntual.
+- `tier_2_5` debe evaluarse como caso sensible de Tier 2: el Critic verifica request
+  explícito, rama no protegida, ausencia de force-push y plan de verificación posterior.
 - `revise` requiere `required_fix` con al menos un ítem accionable.
 - `block` requiere razón concreta: contradicción explícita, evidencia faltante crítica,
   o riesgo inaceptable.

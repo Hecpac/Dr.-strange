@@ -1,6 +1,6 @@
 # Claw Evolution Plan — Overview
 
-Last revised: 2026-04-28
+Last revised: 2026-04-30
 
 ## Objetivo
 
@@ -78,6 +78,8 @@ La idea de "dos procesos Claude en paralelo" queda como una etapa posterior
 - `06-active-recall.md`
 - `07-far-doubt-flags.md`
 - `08-storage-and-redaction.md`
+- `09-openclaw-derived-adoptions.md`
+- `10-next-phase-checklist.md`
 
 ## Criterios de éxito por fase
 

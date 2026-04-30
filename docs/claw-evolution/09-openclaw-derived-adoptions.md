@@ -1,7 +1,7 @@
 # P6 — Adopciones derivadas de OpenClaw 2026.4.26
 
 Última revisión: 2026-04-28
-Status: backlog (siguiente paso después del Claw Evolution Plan P0–P5)
+Status: partially implemented (A and E landed; B/C/D/F remain backlog)
 
 ## Contexto
 
@@ -24,6 +24,8 @@ como hardening operativo del runtime de Claw, no como evolución cognitiva.
 - **Acción:** capturar `BrokenPipeError` y `ConnectionResetError`
   explícitamente en `send_text`, `send_photo`, `send_video_url` y los
   message handlers. Loguear como warning no-fatal y continuar.
+- **Estado:** implementado para envíos proactivos (`send_text`, `send_photo`,
+  `send_video_url`) con tests. Los handlers mantienen fallback genérico.
 - **Esfuerzo:** ~10 líneas, alto leverage.
 
 ### B. Atomic install + swap para auto-updates de Claw
@@ -63,6 +65,8 @@ como hardening operativo del runtime de Claw, no como evolución cognitiva.
   o logs, expone el secret.
 - **Acción:** redaction obligatoria de campos `*token*`, `*key*`, `*secret*`,
   `*password*` antes de `observe.emit` o cualquier append a JSONL/MEMORY.
+- **Estado:** implementado en `redaction.py` y usado por el writer JSONL de
+  telemetry; cubierto por tests.
 - **Esfuerzo:** bajo, se monta sobre la redaction de P0.
 
 ### F. Realpath caching en sandbox path resolution
