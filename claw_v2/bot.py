@@ -2698,6 +2698,14 @@ class BotService:
         return {"intent": "unknown", "should_start_task": True}
 
     def _maybe_handle_task_intent(self, text: str, *, session_id: str) -> str | None:
+        # HOTFIX: brittle canned task intent router over-triggers on generic
+        # task-related questions and bypasses the brain. Reversible via env
+        # flag CLAW_DISABLE_TASK_INTENT_ROUTER=1 (default ON until evidence-
+        # aware classifier is in place).
+        # TODO: replace with explicit task_id / recent-context check.
+        if os.getenv("CLAW_DISABLE_TASK_INTENT_ROUTER", "1") == "1":
+            return None
+
         intent = self._classify_task_intent(text, session_id=session_id)
         kind = intent["intent"]
         if kind == "status_question":
