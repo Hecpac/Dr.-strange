@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -40,6 +41,12 @@ class GoalContractTests(unittest.TestCase):
         self.assertEqual(loaded[0].objective, "Ship P0 telemetry")
         self.assertEqual(loaded[0].allowed_actions, ["write_file"])
 
+    def test_parent_goal_id_none_serializes_as_json_null(self) -> None:
+        create_goal(self.root, objective="Root goal", parent_goal_id=None)
+
+        raw = (self.root / "goals.jsonl").read_text(encoding="utf-8").strip()
+        self.assertIsNone(json.loads(raw)["parent_goal_id"])
+
     def test_update_goal_appends_new_version_with_same_goal_id(self) -> None:
         goal = create_goal(self.root, objective="Old objective")
         updated = update_goal(self.root, goal, objective="New objective", constraints=["stay local"])
@@ -63,4 +70,3 @@ class GoalContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

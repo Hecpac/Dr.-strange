@@ -54,12 +54,15 @@ def redact_text(text: str, *, limit: int = 2000) -> str:
 
 def redact_sensitive(value: Any, *, limit: int = 2000) -> Any:
     if value is None:
-        return ""
+        return None
     if isinstance(value, str):
         return redact_text(value, limit=limit)
     if isinstance(value, dict):
         out: dict[Any, Any] = {}
         for key, val in value.items():
+            if val is None:
+                out[key] = None
+                continue
             if isinstance(key, str) and _should_redact_field(key, val):
                 out[key] = "[REDACTED]"
             else:
