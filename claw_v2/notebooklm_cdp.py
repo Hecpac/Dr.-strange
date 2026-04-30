@@ -250,7 +250,7 @@ def deep_research(
 
         # 1. Open the source-mode dropdown and switch to Deep Research.
         try:
-            page.locator("text=Investigación rápida").first.click(timeout=15_000)
+            page.locator("text=Fast Research").first.click(timeout=15_000)
             page.locator("text=Deep Research").first.click(timeout=10_000)
         except Exception as exc:
             raise CdpNotebookLMError(
