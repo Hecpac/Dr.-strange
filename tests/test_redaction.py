@@ -41,6 +41,12 @@ class RedactSensitiveTests(unittest.TestCase):
         text = '{"approval_token": "abc123def456"}'
         self.assertNotIn("abc123def456", redact_sensitive(text))
 
+    def test_strips_standalone_telegram_bot_token(self) -> None:
+        text = "Bot 123456789:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+        result = redact_sensitive(text)
+        self.assertNotIn("123456789:ABC", result)
+        self.assertIn("<REDACTED:telegram_token>", result)
+
     def test_truncates_long_text(self) -> None:
         text = "a" * 5000
         result = redact_sensitive(text, limit=100)
