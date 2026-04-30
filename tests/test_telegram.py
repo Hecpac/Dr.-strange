@@ -434,6 +434,37 @@ class SendPhotoTests(unittest.IsolatedAsyncioTestCase):
         finally:
             Path(tmp_path).unlink(missing_ok=True)
 
+    async def test_send_photo_treats_broken_pipe_as_nonfatal(self) -> None:
+        transport = TelegramTransport(
+            bot_service=MagicMock(), token="t", allowed_user_id="123",
+        )
+        transport._app = MagicMock()
+        transport._app.bot = AsyncMock()
+        transport._app.bot.send_photo.side_effect = BrokenPipeError("EPIPE")
+
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            tmp.write(b"\x89PNG\r\n\x1a\n")
+            tmp_path = tmp.name
+
+        try:
+            sent = await transport.send_photo(chat_id=1, photo_path=tmp_path)
+        finally:
+            Path(tmp_path).unlink(missing_ok=True)
+
+        self.assertFalse(sent)
+
+    async def test_send_text_treats_connection_reset_as_nonfatal(self) -> None:
+        transport = TelegramTransport(
+            bot_service=MagicMock(), token="t", allowed_user_id="123",
+        )
+        transport._app = MagicMock()
+        transport._app.bot = AsyncMock()
+        transport._app.bot.send_message.side_effect = ConnectionResetError("reset")
+
+        await transport.send_text(chat_id=1, text="hello")
+
+        transport._app.bot.send_message.assert_awaited_once()
+
 
 if __name__ == "__main__":
     unittest.main()

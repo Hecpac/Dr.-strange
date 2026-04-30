@@ -44,6 +44,7 @@ _SEND_IMAGE_REQUEST_WORDS = (
     "pásala",
 )
 _TELEGRAM_TARGET_WORDS = ("telegram", "aqui", "aquí", "chat")
+_NONFATAL_SEND_ERRORS = (BrokenPipeError, ConnectionResetError)
 
 
 def _split_message(text: str, max_len: int = MAX_TELEGRAM_LEN) -> list[str]:
@@ -72,6 +73,10 @@ def _latest_existing_image_path(messages: list[dict[str, Any]]) -> Path | None:
             if path.exists() and path.is_file():
                 return path
     return None
+
+
+def _log_nonfatal_send_error(operation: str, exc: BaseException) -> None:
+    logger.warning("%s failed with non-fatal stream error: %s", operation, exc)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -835,27 +840,37 @@ class TelegramTransport:
         if not any(resolved.is_relative_to(root) for root in allowed_roots):
             logger.error("send_photo blocked: %s is outside allowed directories", resolved)
             return False
-        with open(resolved, "rb") as photo:
-            await self._app.bot.send_photo(chat_id=chat_id, photo=photo, caption=caption)
+        try:
+            with open(resolved, "rb") as photo:
+                await self._app.bot.send_photo(chat_id=chat_id, photo=photo, caption=caption)
+        except _NONFATAL_SEND_ERRORS as exc:
+            _log_nonfatal_send_error("send_photo", exc)
+            return False
         return True
 
     async def send_video_url(self, *, chat_id: int, video_url: str, caption: str | None = None) -> None:
         """Send a video by URL to a Telegram chat."""
         if self._app is None:
             return
-        await self._app.bot.send_video(chat_id=chat_id, video=video_url, caption=caption)
+        try:
+            await self._app.bot.send_video(chat_id=chat_id, video=video_url, caption=caption)
+        except _NONFATAL_SEND_ERRORS as exc:
+            _log_nonfatal_send_error("send_video_url", exc)
 
     async def send_text(self, *, chat_id: int, text: str, parse_mode: str | None = None) -> None:
         """Send a proactive text message, split to Telegram's message limit."""
         if self._app is None:
             return
         for part in _split_message(text):
-            await self._app.bot.send_message(
-                chat_id=chat_id,
-                text=part,
-                parse_mode=parse_mode,
-                link_preview_options=_NO_PREVIEW,
-            )
+            try:
+                await self._app.bot.send_message(
+                    chat_id=chat_id,
+                    text=part,
+                    parse_mode=parse_mode,
+                    link_preview_options=_NO_PREVIEW,
+                )
+            except _NONFATAL_SEND_ERRORS as exc:
+                _log_nonfatal_send_error("send_text", exc)
 
     async def _handle_text_content(self, update: Update, text: str) -> None:
         user_id = str(update.effective_user.id)
