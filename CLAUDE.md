@@ -35,3 +35,7 @@ Transform tasks into verifiable goals:
 - "Add validation" → "Write tests for invalid inputs, then make them pass"
 - "Fix the bug" → "Write a test that reproduces it, then make it pass"
 - "Refactor X" → "Ensure tests pass before and after"
+
+## 5. Worktrees
+
+Worktrees ubicados en `.worktrees/` (local al proyecto). No commitear contenido de ese directorio.
