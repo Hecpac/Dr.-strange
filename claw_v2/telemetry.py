@@ -71,3 +71,20 @@ def read_jsonl(path: Path | str) -> list[dict[str, Any]]:
             else:
                 logger.warning("Skipping non-object JSONL line %s in %s", line_number, target)
     return rows
+
+
+def latest_by_id(path: Path | str, id_field: str) -> dict[str, dict]:
+    state: dict[str, dict] = {}
+    target = Path(path).expanduser()
+    if not target.exists():
+        return state
+    with target.open(encoding="utf-8") as fh:
+        for line in fh:
+            entry = json.loads(line)
+            key = entry[id_field]
+            existing = state.get(key)
+            current_rev = entry.get("goal_revision", 0)
+            existing_rev = existing.get("goal_revision", 0) if existing else -1
+            if current_rev > existing_rev:
+                state[key] = entry
+    return state
