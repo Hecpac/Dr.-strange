@@ -227,6 +227,7 @@ class RuntimeTests(unittest.TestCase):
                 "APPROVALS_ROOT": str(root / "approvals"),
                 "PIPELINE_STATE_ROOT": str(root / "pipeline"),
                 "WORKER_PROVIDER": "anthropic",
+                "VERIFIER_PROVIDER": "anthropic",
             }
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)

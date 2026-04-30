@@ -31,6 +31,17 @@ _REDACTED_FIELDS = frozenset({
     "bearer",
 })
 
+_REDACTED_FIELD_FRAGMENTS = (
+    "token",
+    "secret",
+    "password",
+    "api_key",
+    "access_token",
+    "authorization",
+    "credential",
+    "cookie",
+)
+
 
 def redact_text(text: str, *, limit: int = 2000) -> str:
     redacted = text
@@ -49,7 +60,7 @@ def redact_sensitive(value: Any, *, limit: int = 2000) -> Any:
     if isinstance(value, dict):
         out: dict[Any, Any] = {}
         for key, val in value.items():
-            if isinstance(key, str) and key.lower() in _REDACTED_FIELDS and isinstance(val, str) and val:
+            if isinstance(key, str) and _should_redact_field(key, val):
                 out[key] = "[REDACTED]"
             else:
                 out[key] = redact_sensitive(val, limit=limit)
@@ -59,3 +70,14 @@ def redact_sensitive(value: Any, *, limit: int = 2000) -> Any:
     if isinstance(value, tuple):
         return tuple(redact_sensitive(item, limit=limit) for item in value)
     return value
+
+
+def _should_redact_field(key: str, value: Any) -> bool:
+    lowered = key.lower()
+    if lowered in _REDACTED_FIELDS:
+        return isinstance(value, str) and bool(value)
+    if any(fragment in lowered for fragment in _REDACTED_FIELD_FRAGMENTS):
+        return isinstance(value, str) and bool(value)
+    if "key" in lowered and isinstance(value, str) and len(value) >= 8:
+        return True
+    return False

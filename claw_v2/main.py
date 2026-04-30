@@ -403,7 +403,12 @@ def _setup_llm_stack(
     from claw_v2.tools import ToolRegistry
     from claw_v2.tool_policy import daemon_can_auto_approve
 
-    tool_registry = ToolRegistry.default(workspace_root=config.workspace_root, memory=memory)
+    tool_registry = ToolRegistry.default(
+        workspace_root=config.workspace_root,
+        memory=memory,
+        observe=observe,
+        telemetry_root=config.telemetry_root,
+    )
     openai_tool_schemas = tool_registry.openai_tool_schemas()
 
     # Paso 4 (HEC-14): wire ApprovalManager into the dispatcher via a gate.

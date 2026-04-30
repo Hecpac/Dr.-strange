@@ -1,0 +1,86 @@
+from __future__ import annotations
+
+import tempfile
+import unittest
+from pathlib import Path
+
+from claw_v2.action_events import (
+    ACTION_EVENT_SCHEMA_VERSION,
+    ActionResult,
+    ProposedAction,
+    emit_event,
+    load_events,
+)
+
+
+class FakeObserve:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict]] = []
+
+    def emit(self, event_type: str, *, payload: dict | None = None, **_: object) -> None:
+        self.events.append((event_type, payload or {}))
+
+
+class ActionEventTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_emit_event_persists_schema_versioned_event(self) -> None:
+        event = emit_event(
+            self.root,
+            event_type="action_executed",
+            actor="claw",
+            goal_id="g_1",
+            session_id="tg-1",
+            proposed_next_action=ProposedAction(
+                tool="git_push",
+                args_redacted={"remote": "origin", "telegram_bot_token": "secret-token-123456"},
+                tier="tier_2_5",
+                rationale_brief="publish authorized branch",
+            ),
+            risk_level="medium",
+            claims=["c_1"],
+            evidence_refs=["c_1"],
+            result=ActionResult(status="success", output_hash="sha256:abc"),
+        )
+
+        self.assertEqual(event.schema_version, ACTION_EVENT_SCHEMA_VERSION)
+        loaded = load_events(self.root)
+        self.assertEqual(len(loaded), 1)
+        self.assertEqual(loaded[0].proposed_next_action.tier, "tier_2_5")  # type: ignore[union-attr]
+        raw = (self.root / "events.jsonl").read_text(encoding="utf-8")
+        self.assertNotIn("secret-token-123456", raw)
+
+    def test_invalid_event_type_fails(self) -> None:
+        with self.assertRaisesRegex(ValueError, "event_type"):
+            emit_event(
+                self.root,
+                event_type="unknown",  # type: ignore[arg-type]
+                actor="claw",
+                goal_id="g_1",
+                session_id="tg-1",
+            )
+
+    def test_observe_mirrors_typed_event(self) -> None:
+        observe = FakeObserve()
+        emit_event(
+            self.root,
+            event_type="risk_escalated",
+            actor="claw",
+            goal_id="g_1",
+            session_id="tg-1",
+            risk_level="high",
+            observe=observe,
+        )
+
+        self.assertEqual(observe.events[0][0], "risk_escalated")
+        self.assertEqual(observe.events[0][1]["schema_version"], ACTION_EVENT_SCHEMA_VERSION)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
