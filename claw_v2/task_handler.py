@@ -224,7 +224,7 @@ class TaskHandler:
             text=f"Autonomous task {task_id} started in {mode} mode.",
             status="started",
         )
-        self._p0_emit_task_event(
+        proposed_event_id = self._p0_emit_task_event(
             event_type="action_proposed",
             goal_id=goal_id,
             session_id=session_id,
@@ -234,6 +234,12 @@ class TaskHandler:
             status=None,
             claims=[claim_id] if claim_id else [],
         )
+        if proposed_event_id:
+            active_task = dict(active_object.get("active_task") or {})
+            if active_task.get("task_id") == task_id:
+                active_task["p0_proposed_event_id"] = proposed_event_id
+                active_object["active_task"] = active_task
+                self._update_session_state(session_id, active_object=active_object)
         job_id = self._enqueue_autonomous_job(
             task_id=task_id,
             session_id=session_id,
@@ -924,7 +930,7 @@ class TaskHandler:
             text=f"Autonomous task {record.task_id} was resumed for {reason}.",
             status="resumed",
         )
-        self._p0_emit_task_event(
+        proposed_event_id = self._p0_emit_task_event(
             event_type="action_proposed",
             goal_id=goal_id,
             session_id=record.session_id,
@@ -934,6 +940,12 @@ class TaskHandler:
             status=None,
             claims=[claim_id] if claim_id else [],
         )
+        if proposed_event_id:
+            active_task = dict(active_object.get("active_task") or {})
+            if active_task.get("task_id") == record.task_id:
+                active_task["p0_proposed_event_id"] = proposed_event_id
+                active_object["active_task"] = active_task
+                self._update_session_state(record.session_id, active_object=active_object)
         thread = threading.Thread(
             target=self._run_autonomous_task,
             args=(
@@ -1366,10 +1378,13 @@ class TaskHandler:
         status: str | None,
         error: str = "",
         claims: list[str] | None = None,
-    ) -> None:
+        originating_event_id: str | None = None,
+    ) -> str | None:
         if self._telemetry_root is None or not goal_id:
-            return
+            return None
         try:
+            if event_type != "action_proposed" and not originating_event_id:
+                originating_event_id = self._p0_proposed_event_id_for_task(session_id, task_id)
             result = None
             if status is not None:
                 result = ActionResult(
@@ -1377,12 +1392,13 @@ class TaskHandler:
                     output_hash="",
                     error=error or None,
                 )
-            emit_event(
+            event = emit_event(
                 self._telemetry_root,
                 event_type=event_type,  # type: ignore[arg-type]
                 actor="claw",
                 goal_id=goal_id,
                 session_id=session_id,
+                originating_event_id=originating_event_id,
                 proposed_next_action=ProposedAction(
                     tool="coordinator.autonomous_task",
                     args_redacted={"task_id": task_id, "mode": mode, "objective": objective[:240]},
@@ -1394,8 +1410,18 @@ class TaskHandler:
                 result=result,
                 observe=self.observe,
             )
+            return event.event_id
         except Exception:
-            return
+            return None
+
+    def _p0_proposed_event_id_for_task(self, session_id: str, task_id: str) -> str | None:
+        state = self._get_session_state(session_id)
+        active_object = dict(state.get("active_object") or {})
+        active_task = dict(active_object.get("active_task") or {})
+        if active_task.get("task_id") != task_id:
+            return None
+        event_id = active_task.get("p0_proposed_event_id")
+        return str(event_id) if event_id else None
 
     def _record_ledger_task_started(
         self,

@@ -408,7 +408,7 @@ class ToolRegistry:
             self._emit_autonomy_event("AUTONOMY_BYPASS", definition, agent_class)
         p0_goal_id = goal_id or self._p0_runtime_goal_id()
         p0_session_id = session_id or "runtime"
-        self._emit_p0_tool_event(
+        proposed_event_id = self._emit_p0_tool_event(
             event_type="action_proposed",
             definition=definition,
             args=args,
@@ -434,6 +434,7 @@ class ToolRegistry:
                 agent_class=agent_class,
                 goal_id=p0_goal_id,
                 session_id=p0_session_id,
+                originating_event_id=proposed_event_id,
                 result=ActionResult(status="failure", output_hash="", error=f"{type(exc).__name__}: {exc}"),
                 claims=[claim_id] if claim_id else [],
             )
@@ -450,6 +451,7 @@ class ToolRegistry:
             agent_class=agent_class,
             goal_id=p0_goal_id,
             session_id=p0_session_id,
+            originating_event_id=proposed_event_id,
             result=ActionResult(status="success", output_hash=_result_hash(result), error=None),
             claims=[claim_id] if claim_id else [],
         )
@@ -517,16 +519,18 @@ class ToolRegistry:
         session_id: str,
         result: ActionResult | None,
         claims: list[str],
-    ) -> None:
+        originating_event_id: str | None = None,
+    ) -> str | None:
         if self.telemetry_root is None:
-            return
+            return None
         try:
-            emit_event(
+            event = emit_event(
                 self.telemetry_root,
                 event_type=event_type,  # type: ignore[arg-type]
                 actor="claw",
                 goal_id=goal_id,
                 session_id=session_id,
+                originating_event_id=originating_event_id,
                 proposed_next_action=ProposedAction(
                     tool=definition.name,
                     args_redacted=args,
@@ -538,8 +542,9 @@ class ToolRegistry:
                 result=result,
                 observe=self.observe,
             )
+            return event.event_id
         except Exception:
-            return
+            return None
 
     def _emit_autonomy_event(
         self, event: str, definition: "ToolDefinition", agent_class: AgentClass

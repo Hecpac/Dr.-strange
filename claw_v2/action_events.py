@@ -76,6 +76,7 @@ class ActionResult:
     status: ActionStatus
     output_hash: str = ""
     error: str | None = None
+    external_blob_ref: str | None = None
 
     def __post_init__(self) -> None:
         if self.status not in ACTION_STATUSES:
@@ -86,6 +87,7 @@ class ActionResult:
             "status": self.status,
             "output_hash": self.output_hash,
             "error": self.error,
+            "external_blob_ref": self.external_blob_ref,
         }
 
     @classmethod
@@ -94,6 +96,7 @@ class ActionResult:
             status=str(data["status"]),  # type: ignore[arg-type]
             output_hash=str(data.get("output_hash") or ""),
             error=_optional_str(data.get("error")),
+            external_blob_ref=_optional_str(data.get("external_blob_ref")),
         )
 
 
@@ -105,6 +108,7 @@ class ActionEvent:
     goal_id: str
     session_id: str
     goal_revision: int = 1
+    originating_event_id: str | None = None
     proposed_next_action: ProposedAction | None = None
     risk_level: RiskLevel = "low"
     claims: list[str] = field(default_factory=list)
@@ -135,6 +139,7 @@ class ActionEvent:
             "actor": self.actor,
             "goal_id": self.goal_id,
             "goal_revision": self.goal_revision,
+            "originating_event_id": self.originating_event_id,
             "session_id": self.session_id,
             "proposed_next_action": (
                 self.proposed_next_action.to_dict() if self.proposed_next_action is not None else None
@@ -156,6 +161,7 @@ class ActionEvent:
             actor=str(data["actor"]),  # type: ignore[arg-type]
             goal_id=str(data["goal_id"]),
             goal_revision=int(data.get("goal_revision") or 1),
+            originating_event_id=_optional_str(data.get("originating_event_id")),
             session_id=str(data["session_id"]),
             proposed_next_action=ProposedAction.from_dict(proposed) if isinstance(proposed, dict) else None,
             risk_level=str(data.get("risk_level") or "low"),  # type: ignore[arg-type]
@@ -175,6 +181,7 @@ def emit_event(
     goal_id: str,
     session_id: str,
     goal_revision: int | None = None,
+    originating_event_id: str | None = None,
     proposed_next_action: ProposedAction | dict[str, Any] | None = None,
     risk_level: RiskLevel = "low",
     claims: list[str] | None = None,
@@ -188,6 +195,7 @@ def emit_event(
         actor=actor,
         goal_id=goal_id,
         goal_revision=goal_revision or _latest_goal_revision(telemetry_root, goal_id),
+        originating_event_id=originating_event_id,
         session_id=session_id,
         proposed_next_action=_coerce_proposed_action(proposed_next_action),
         risk_level=risk_level,
@@ -207,6 +215,47 @@ def load_events(telemetry_root: Path | str) -> list[ActionEvent]:
     return [ActionEvent.from_dict(row) for row in read_jsonl(_events_path(telemetry_root))]
 
 
+def recover_orphan_actions(telemetry_root: Path | str, *, observe: Any | None = None) -> int:
+    events_path = _events_path(telemetry_root)
+    if not events_path.exists():
+        return 0
+
+    proposed: dict[str, ActionEvent] = {}
+    finalized: set[str] = set()
+    for event in load_events(telemetry_root):
+        if event.event_type == "action_proposed":
+            proposed[event.event_id] = event
+        elif event.event_type in {"action_executed", "action_failed"} and event.originating_event_id:
+            finalized.add(event.originating_event_id)
+
+    count = 0
+    for event_id, event in proposed.items():
+        if event_id in finalized:
+            continue
+        claim_id = _record_restart_risk_signal(telemetry_root, event, observe=observe)
+        emit_event(
+            telemetry_root,
+            event_type="action_failed",
+            actor=event.actor,
+            goal_id=event.goal_id,
+            goal_revision=event.goal_revision,
+            originating_event_id=event.event_id,
+            session_id=event.session_id,
+            proposed_next_action=event.proposed_next_action,
+            risk_level=event.risk_level,
+            claims=[claim_id] if claim_id else [],
+            result=ActionResult(
+                status="failure",
+                output_hash="",
+                error="interrupted_by_restart",
+                external_blob_ref=None,
+            ),
+            observe=observe,
+        )
+        count += 1
+    return count
+
+
 def _events_path(telemetry_root: Path | str) -> Path:
     return Path(telemetry_root).expanduser() / "events.jsonl"
 
@@ -220,6 +269,23 @@ def _latest_goal_revision(telemetry_root: Path | str, goal_id: str) -> int:
     if latest is None:
         return 1
     return int(latest.get("goal_revision") or 1)
+
+
+def _record_restart_risk_signal(telemetry_root: Path | str, event: ActionEvent, *, observe: Any | None) -> str | None:
+    if event.proposed_next_action is None:
+        return None
+    from claw_v2.evidence_ledger import record_claim
+
+    claim = record_claim(
+        telemetry_root,
+        goal_id=event.goal_id,
+        claim_text=f"Action {event.proposed_next_action.tool} interrupted by restart, state unknown",
+        claim_type="risk_signal",
+        verification_status="unverified",
+        confidence=0.0,
+        observe=observe,
+    )
+    return claim.claim_id
 
 
 def _coerce_proposed_action(value: ProposedAction | dict[str, Any] | None) -> ProposedAction | None:

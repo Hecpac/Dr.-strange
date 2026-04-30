@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from claw_v2.a2a import A2AService
+from claw_v2.action_events import recover_orphan_actions
 from claw_v2.adapters.anthropic import create_claude_sdk_executor
 from claw_v2.adapters.base import LLMRequest
 from claw_v2.agent_runtime import AgentRuntime
@@ -1134,6 +1135,9 @@ def build_runtime(
     daemon.scheduler = scheduler
     brain.wiki = wiki
     agent_runtime = AgentRuntime(bot_service=bot, memory=memory, observe=observe)
+    recovered_orphans = recover_orphan_actions(config.telemetry_root, observe=observe)
+    if recovered_orphans:
+        observe.emit("p0_orphan_action_recovery", payload={"recovered_orphans": recovered_orphans})
     resumed_tasks = bot.resume_interrupted_tasks()
     if resumed_tasks:
         observe.emit("autonomous_task_recovery_bootstrap", payload={"resumed_tasks": resumed_tasks})
