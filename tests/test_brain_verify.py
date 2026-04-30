@@ -1008,5 +1008,123 @@ class AggregateVerifierVotesTests(unittest.TestCase):
         self.assertEqual(result["consensus_status"], "unanimous_approve")
 
 
+class TestAggregateVerifierVotes(unittest.TestCase):
+    # Regression for Bug #5: unanimous_approve required len(clean_votes) >= 2,
+    # blocking all critical actions in single-provider deployments.
+
+    def _vote(self, recommendation: str = "approve", risk: str = "low", error: str | None = None) -> dict:
+        v: dict = {"recommendation": recommendation, "risk_level": risk, "confidence": 0.9,
+                   "reasons": [], "blockers": [], "missing_checks": [], "summary": "ok"}
+        if error:
+            v["error"] = error
+        return v
+
+    def test_single_voter_approve_low_risk(self) -> None:
+        from claw_v2.brain import _aggregate_verifier_votes
+        result = _aggregate_verifier_votes([self._vote()])
+        self.assertEqual(result["recommendation"], "approve")
+        self.assertEqual(result["consensus_status"], "single_verifier_approve")
+
+    def test_two_voters_approve_unanimous(self) -> None:
+        from claw_v2.brain import _aggregate_verifier_votes
+        result = _aggregate_verifier_votes([self._vote(), self._vote()])
+        self.assertEqual(result["recommendation"], "approve")
+        self.assertEqual(result["consensus_status"], "unanimous_approve")
+
+    def test_single_voter_high_risk_still_needs_approval(self) -> None:
+        from claw_v2.brain import _aggregate_verifier_votes, _apply_policy_floor
+        result = _aggregate_verifier_votes([self._vote(risk="high")])
+        # high risk: consensus_approve condition fails (highest_risk not in {low,medium})
+        self.assertEqual(result["recommendation"], "needs_approval")
+
+    def test_single_voter_with_blocker_does_not_approve(self) -> None:
+        from claw_v2.brain import _aggregate_verifier_votes
+        v = self._vote()
+        v["blockers"] = ["missing test coverage"]
+        result = _aggregate_verifier_votes([v])
+        self.assertEqual(result["recommendation"], "needs_approval")
+
+
+class TestSessionIdIsolation(unittest.TestCase):
+    # Regression for Bug #3: _last_confidence was a single float shared across
+    # concurrent sessions. Session A's confidence bled into session B's critical action.
+    # Regression for Bug #4: _emit_execution_event hardcoded session_id="brain.critical_action",
+    # making all critical actions untraceable to their originating session.
+
+    def _brain_with_observe(self):
+        from claw_v2.brain import BrainService
+        from claw_v2.memory import MemoryStore
+        import tempfile, os
+        tmpdir = tempfile.mkdtemp()
+        memory = MemoryStore(os.path.join(tmpdir, "mem.db"))
+        observe = ObserveStream(os.path.join(tmpdir, "events.db"))
+        brain = BrainService(
+            router=MagicMock(),
+            memory=memory,
+            system_prompt="test",
+            observe=observe,
+        )
+        return brain, observe
+
+    def test_last_confidence_isolated_per_session(self) -> None:
+        brain, _ = self._brain_with_observe()
+        brain._last_confidence["sess-A"] = 0.9
+        brain._last_confidence["sess-B"] = 0.3
+        self.assertEqual(brain._last_confidence.get("sess-A"), 0.9)
+        self.assertEqual(brain._last_confidence.get("sess-B"), 0.3)
+
+    def test_critical_action_uses_caller_session_id(self) -> None:
+        brain, observe = self._brain_with_observe()
+        brain._last_confidence["sess-123"] = 0.75
+
+        emitted: list[dict] = []
+        original_emit = observe.emit
+        def capture_emit(event_type, **kwargs):
+            emitted.append({"event_type": event_type, **kwargs})
+            return original_emit(event_type, **kwargs)
+        observe.emit = capture_emit  # type: ignore[method-assign]
+
+        with patch(
+            "claw_v2.brain.BrainService.verify_critical_action",
+            return_value=_fake_verification(should_proceed=True, risk="low"),
+        ):
+            brain.execute_critical_action(
+                action="test_action",
+                plan="p", diff="d", test_output="t",
+                executor=lambda: "result",
+                session_id="sess-123",
+            )
+
+        outcome_events = [e for e in emitted if e["event_type"] == "cycle_verification_complete"]
+        self.assertTrue(outcome_events, "cycle_verification_complete must be emitted")
+        payload = outcome_events[0].get("payload", {})
+        self.assertEqual(payload.get("session_id"), "sess-123")
+        self.assertAlmostEqual(payload.get("predicted_confidence"), 0.75)
+
+    def test_critical_action_fallback_session_id(self) -> None:
+        brain, observe = self._brain_with_observe()
+        emitted: list[dict] = []
+        original_emit = observe.emit
+        def capture_emit(event_type, **kwargs):
+            emitted.append({"event_type": event_type, **kwargs})
+            return original_emit(event_type, **kwargs)
+        observe.emit = capture_emit  # type: ignore[method-assign]
+
+        with patch(
+            "claw_v2.brain.BrainService.verify_critical_action",
+            return_value=_fake_verification(should_proceed=True, risk="low"),
+        ):
+            brain.execute_critical_action(
+                action="test_action",
+                plan="p", diff="d", test_output="t",
+                executor=lambda: "result",
+                # no session_id → fallback "brain.critical_action"
+            )
+
+        outcome_events = [e for e in emitted if e["event_type"] == "cycle_verification_complete"]
+        self.assertTrue(outcome_events)
+        self.assertEqual(outcome_events[0]["payload"]["session_id"], "brain.critical_action")
+
+
 if __name__ == "__main__":
     unittest.main()

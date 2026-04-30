@@ -4,7 +4,8 @@ from html import escape
 import json
 import logging
 import re
-from dataclasses import dataclass
+from collections import OrderedDict
+from dataclasses import dataclass, field
 from typing import Any, Callable, TYPE_CHECKING
 
 from claw_v2.adapters.base import AdapterError, UserContentBlock, UserPrompt
@@ -152,7 +153,7 @@ class BrainService:
     wiki: object | None = None  # WikiService, injected after init
     playbooks: PlaybookLoader = None  # type: ignore[assignment]
 
-    _last_confidence: float = 0.0
+    _last_confidence: OrderedDict = field(default_factory=OrderedDict)  # session_id → float
 
     def __post_init__(self) -> None:
         if self.playbooks is None:
@@ -265,7 +266,9 @@ class BrainService:
                 timeout=300.0,
             )
         response = _extract_visible_brain_response(response)
-        self._last_confidence = response.confidence
+        self._last_confidence[session_id] = response.confidence
+        if len(self._last_confidence) > 256:
+            self._last_confidence.popitem(last=False)
         provider_session_artifact = response.artifacts.get("session_id")
         self.memory.store_message(session_id, "user", stored_user_message)
         self.memory.store_message(
@@ -798,6 +801,8 @@ class BrainService:
         autonomy_mode: str = "assisted",
         approval_id: str | None = None,
         pre_check: Callable[[CriticalActionVerification], bool] | None = None,
+        session_id: str | None = None,
+        task_type: str = "critical_action",
     ) -> CriticalActionExecution:
         approval_status: str | None = None
         approval_override = False
@@ -831,6 +836,8 @@ class BrainService:
                 verification=verification,
                 status="aborted_by_pre_check",
                 approval_status=approval_status,
+                session_id=session_id,
+                task_type=task_type,
             )
             return CriticalActionExecution(
                 action=action,
@@ -850,6 +857,8 @@ class BrainService:
                 status="executed_autonomously",
                 approval_status=approval_status,
                 checkpoint_id=ckpt_id,
+                session_id=session_id,
+                task_type=task_type,
             )
             return CriticalActionExecution(
                 action=action,
@@ -870,6 +879,8 @@ class BrainService:
                 status="executed",
                 approval_status=approval_status,
                 checkpoint_id=ckpt_id,
+                session_id=session_id,
+                task_type=task_type,
             )
             return CriticalActionExecution(
                 action=action,
@@ -890,6 +901,8 @@ class BrainService:
                 status="executed_with_approval",
                 approval_status=approval_status,
                 checkpoint_id=ckpt_id,
+                session_id=session_id,
+                task_type=task_type,
             )
             return CriticalActionExecution(
                 action=action,
@@ -910,6 +923,8 @@ class BrainService:
                 verification=verification,
                 status=status,
                 approval_status=approval_status,
+                session_id=session_id,
+                task_type=task_type,
             )
             return CriticalActionExecution(
                 action=action,
@@ -925,6 +940,8 @@ class BrainService:
             verification=verification,
             status="blocked",
             approval_status=approval_status,
+            session_id=session_id,
+            task_type=task_type,
         )
         return CriticalActionExecution(
             action=action,
@@ -955,6 +972,8 @@ class BrainService:
         status: str,
         approval_status: str | None,
         checkpoint_id: str | None = None,
+        session_id: str | None = None,
+        task_type: str = "critical_action",
     ) -> None:
         if self.observe is None or verification.response is None:
             return
@@ -985,14 +1004,17 @@ class BrainService:
         }
         mapped_status = status_map.get(status, status)
         error_snippet = verification.summary if mapped_status == "failed" else None
+        resolved_session_id = session_id or "brain.critical_action"
+        if session_id is None:
+            logger.info("_emit_execution_event: no session_id supplied, using fallback '%s'", resolved_session_id)
         self._emit_verification_outcome(
-            session_id="brain.critical_action",
-            task_type="critical_action",
+            session_id=resolved_session_id,
+            task_type=task_type,
             goal=action,
             action_summary=(verification.summary or verification.recommendation or action),
             verification_status=mapped_status,
             error_snippet=error_snippet,
-            predicted_confidence=self._last_confidence or None,
+            predicted_confidence=self._last_confidence.get(resolved_session_id) or None,
         )
 
 
@@ -1134,6 +1156,9 @@ def _append_reasoning_trace(response: LLMResponse, note: str) -> None:
     response.artifacts["reasoning_trace"] = f"{existing}\n\n{note}" if existing else note
 
 
+_single_verifier_warned: bool = False
+
+
 def _aggregate_verifier_votes(votes: list[dict]) -> dict:
     clean_votes = [vote for vote in votes if not vote.get("error")]
     all_votes = votes or []
@@ -1146,15 +1171,31 @@ def _aggregate_verifier_votes(votes: list[dict]) -> dict:
     recommendations = {vote.get("recommendation") for vote in clean_votes}
     risk_levels = [str(vote.get("risk_level", "medium")) for vote in all_votes]
     highest_risk = max(risk_levels or ["medium"], key=_risk_rank)
-    unanimous_approve = (
-        len(clean_votes) >= 2
-        and len(clean_votes) == len(all_votes)
+    total_voters = len(all_votes)
+    # Single-voter deployments (all Anthropic, no secondary) must still be able to approve.
+    # _apply_policy_floor still applies after this, so high/critical risk will require
+    # human approval regardless.
+    consensus_approve = (
+        len(clean_votes) >= 1
+        and len(clean_votes) == total_voters
         and recommendations == {"approve"}
         and highest_risk in {"low", "medium"}
         and not blockers
         and not missing_checks
     )
-    if unanimous_approve:
+    if consensus_approve:
+        global _single_verifier_warned
+        if total_voters >= 2:
+            consensus_status = "unanimous_approve"
+        else:
+            consensus_status = "single_verifier_approve"
+            if not _single_verifier_warned:
+                logger.warning(
+                    "Critical action approved with a single verifier vote (no secondary provider "
+                    "configured). Policy floors still apply. Set a secondary_verifier_provider "
+                    "for stronger consensus guarantees."
+                )
+                _single_verifier_warned = True
         return {
             "recommendation": "approve",
             "risk_level": highest_risk,
@@ -1163,7 +1204,7 @@ def _aggregate_verifier_votes(votes: list[dict]) -> dict:
             "blockers": [],
             "missing_checks": [],
             "confidence": _average_confidence(clean_votes),
-            "consensus_status": "unanimous_approve",
+            "consensus_status": consensus_status,
         }
     single_clean_approve = (
         len(clean_votes) == 1
@@ -1258,10 +1299,6 @@ def _average_confidence(votes: list[dict]) -> float:
     if not votes:
         return 0.0
     return round(sum(float(vote.get("confidence") or 0.0) for vote in votes) / len(votes), 3)
-
-
-def _risk_rank(value: str) -> int:
-    return {"low": 0, "medium": 1, "high": 2, "critical": 3}.get(value, 1)
 
 
 def _looks_like_knowledge_question(message: str) -> bool:

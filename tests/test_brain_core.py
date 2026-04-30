@@ -12,6 +12,7 @@ from claw_v2.brain import (
     _first_json_object,
     _normalize_recommendation,
     _normalize_risk_level,
+    _risk_rank,
     _strip_trace_tags,
     _try_parse_json_object,
     _validate_schema_keys,
@@ -491,6 +492,24 @@ class ExperienceReplayObserveTests(unittest.TestCase):
         events = self.observe.recent_events(limit=10)
         kinds = [e["event_type"] for e in events]
         self.assertNotIn("experience_replay_retrieved", kinds)
+
+
+class TestRiskRank(unittest.TestCase):
+    # Regression: only one _risk_rank definition should exist (the one that delegates
+    # to _RISK_RANK + _normalize_risk_level). The dead inline version at the old
+    # line 1238 would return default 1 for unnormalized inputs like "HIGH".
+    def test_canonical_ordering(self) -> None:
+        self.assertLess(_risk_rank("low"), _risk_rank("medium"))
+        self.assertLess(_risk_rank("medium"), _risk_rank("high"))
+        self.assertLess(_risk_rank("high"), _risk_rank("critical"))
+
+    def test_normalizes_before_ranking(self) -> None:
+        # Authoritative version normalizes; dead inline version would have returned 1 (medium)
+        self.assertEqual(_risk_rank("HIGH"), _risk_rank("high"))
+        self.assertEqual(_risk_rank("CRITICAL"), _risk_rank("critical"))
+
+    def test_unknown_defaults_to_medium(self) -> None:
+        self.assertEqual(_risk_rank("unknown_level"), _risk_rank("medium"))
 
 
 if __name__ == "__main__":
