@@ -62,6 +62,9 @@ tool calls, file edits, claims y escaladas de riesgo.
 - `rationale_brief` no es chain-of-thought — es una etiqueta corta del por qué de la
   acción ("subir cambios pendientes a origin/main", "verificar puerto Blender MCP").
 - Cada evento referencia el `goal_id` activo al momento.
+- `tier_2_5` se registra como etiqueta explícita para pushes autorizados de rama no
+  protegida; el enforcement actual puede mapearlo internamente a Tier 2 + checks
+  adicionales hasta que exista soporte nativo de subtiers.
 - Eventos de tipo `risk_escalated` o `stop_condition_triggered` activan automáticamente
   un `critic_review_requested` en P2+.
 

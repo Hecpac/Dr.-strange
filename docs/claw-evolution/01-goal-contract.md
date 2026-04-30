@@ -33,7 +33,11 @@ no contra el primer mensaje del usuario.
 - Si el objetivo cambia, se emite un evento `goal_updated` y se actualiza el contrato
   con `updated_at` nuevo. El histórico queda en JSONL.
 - El contrato debe ser breve, legible y machine-parseable.
-- `risk_profile` se mapea a los Tiers existentes en `SOUL.md`.
+- `risk_profile` se mapea a los Tiers definidos en el `SOUL.md` canónico de raíz
+  (`../../SOUL.md`). `claw_v2/SOUL.md` debe mantenerse como espejo operativo.
+- `tier_2_5` es una subpolítica explícita para `git_push_requested_branch`: se trata
+  como Tier 2 para ejecución local, pero exige request explícito de la tarea actual,
+  branch no protegida, no force-push y verificación posterior.
 - `anchor_source` rastrea de dónde nació el goal (NO necesariamente el primer mensaje
   del usuario; puede ser una tarea heredada o un patrón reactivado por recall).
 - `parent_goal_id` permite jerarquía de sub-goals.
