@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from claw_v2.config import AppConfig
-from claw_v2.telemetry import append_jsonl, generate_id, now_iso, read_jsonl
+from claw_v2.telemetry import append_jsonl, generate_id, latest_by_id, now_iso, read_jsonl
 
 
 class GenerateIdTests(unittest.TestCase):
@@ -110,6 +110,17 @@ class JsonlTelemetryTests(unittest.TestCase):
         append_jsonl(path, {"n": 1})
 
         json.loads(path.read_text(encoding="utf-8").strip())
+
+    def test_latest_by_id_returns_highest_goal_revision(self) -> None:
+        path = self.root / "goals.jsonl"
+        append_jsonl(path, {"goal_id": "g_1", "goal_revision": 1, "objective": "old"})
+        append_jsonl(path, {"goal_id": "g_1", "goal_revision": 2, "objective": "new"})
+        append_jsonl(path, {"goal_id": "g_2", "goal_revision": 1, "objective": "other"})
+
+        latest = latest_by_id(path, "goal_id")
+
+        self.assertEqual(latest["g_1"]["objective"], "new")
+        self.assertEqual(latest["g_2"]["objective"], "other")
 
 
 class TelemetryConfigTests(unittest.TestCase):

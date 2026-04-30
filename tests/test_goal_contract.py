@@ -5,7 +5,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from claw_v2.action_events import emit_event, load_events
 from claw_v2.goal_contract import GOAL_SCHEMA_VERSION, create_goal, load_goals, update_goal
+from claw_v2.telemetry import latest_by_id
 
 
 class FakeObserve:
@@ -35,6 +37,7 @@ class GoalContractTests(unittest.TestCase):
         )
 
         self.assertEqual(goal.schema_version, GOAL_SCHEMA_VERSION)
+        self.assertEqual(goal.goal_revision, 1)
         self.assertTrue(goal.goal_id.startswith("g_"))
         loaded = load_goals(self.root)
         self.assertEqual(len(loaded), 1)
@@ -53,8 +56,36 @@ class GoalContractTests(unittest.TestCase):
 
         loaded = load_goals(self.root)
         self.assertEqual([item.goal_id for item in loaded], [goal.goal_id, goal.goal_id])
+        self.assertEqual([item.goal_revision for item in loaded], [1, 2])
         self.assertEqual(updated.objective, "New objective")
         self.assertEqual(loaded[-1].constraints, ["stay local"])
+        latest = latest_by_id(self.root / "goals.jsonl", "goal_id")
+        self.assertEqual(latest[goal.goal_id]["goal_revision"], 2)
+
+    def test_update_goal_emits_typed_goal_updated_event(self) -> None:
+        goal = create_goal(self.root, objective="Old objective")
+
+        update_goal(self.root, goal, constraints=["stay local"], session_id="tg-1")
+
+        events = load_events(self.root)
+        self.assertEqual(events[-1].event_type, "goal_updated")
+        self.assertEqual(events[-1].goal_id, goal.goal_id)
+        self.assertEqual(events[-1].goal_revision, 2)
+        self.assertEqual(events[-1].session_id, "tg-1")
+
+    def test_completed_goal_cannot_be_updated(self) -> None:
+        goal = create_goal(self.root, objective="Close this goal")
+        emit_event(
+            self.root,
+            event_type="goal_completed",
+            actor="claw",
+            goal_id=goal.goal_id,
+            goal_revision=goal.goal_revision,
+            session_id="tg-1",
+        )
+
+        with self.assertRaisesRegex(ValueError, "completed"):
+            update_goal(self.root, goal, objective="Should not update")
 
     def test_invalid_risk_profile_fails(self) -> None:
         with self.assertRaisesRegex(ValueError, "risk_profile"):
