@@ -1,4 +1,5 @@
 .venv/
+.worktrees/
 __pycache__/
 *.py[cod]
 .DS_Store
@@ -48,6 +49,7 @@ claw.db
 chrome_tabs.json
 logs/
 renders/
+generated_images/
 skills-lock.json
 
 # Temp scripts
