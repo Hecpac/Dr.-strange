@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
-import threading
+import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,9 +12,6 @@ from typing import Any
 from claw_v2.redaction import redact_sensitive
 
 logger = logging.getLogger(__name__)
-
-_LOCKS: dict[str, threading.Lock] = {}
-_LOCKS_LOCK = threading.Lock()
 
 
 def generate_id(prefix: str) -> str:
@@ -30,13 +28,27 @@ def now_iso() -> str:
 def append_jsonl(path: Path | str, record: dict[str, Any]) -> None:
     target = Path(path).expanduser()
     redacted = redact_sensitive(dict(record), limit=4000)
-    line = json.dumps(redacted, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    lock = _lock_for(target)
-    with lock:
-        target.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(redacted, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+
+    if len(line.encode("utf-8")) > 1_048_576:
+        raise ValueError(f"jsonl line exceeds 1MB cap: {len(line)} bytes for {target.name}")
+
+    lock_path = target.with_suffix(target.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
         with target.open("a", encoding="utf-8") as handle:
             handle.write(line)
-            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 
 def read_jsonl(path: Path | str) -> list[dict[str, Any]]:
@@ -61,12 +73,18 @@ def read_jsonl(path: Path | str) -> list[dict[str, Any]]:
     return rows
 
 
-def _lock_for(path: Path) -> threading.Lock:
-    key = str(path)
-    with _LOCKS_LOCK:
-        lock = _LOCKS.get(key)
-        if lock is None:
-            lock = threading.Lock()
-            _LOCKS[key] = lock
-        return lock
-
+def latest_by_id(path: Path | str, id_field: str) -> dict[str, dict]:
+    state: dict[str, dict] = {}
+    target = Path(path).expanduser()
+    if not target.exists():
+        return state
+    with target.open(encoding="utf-8") as fh:
+        for line in fh:
+            entry = json.loads(line)
+            key = entry[id_field]
+            existing = state.get(key)
+            current_rev = entry.get("goal_revision", 0)
+            existing_rev = existing.get("goal_revision", 0) if existing else -1
+            if current_rev > existing_rev:
+                state[key] = entry
+    return state

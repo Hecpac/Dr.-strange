@@ -10,7 +10,10 @@ from claw_v2.action_events import (
     ProposedAction,
     emit_event,
     load_events,
+    recover_orphan_actions,
 )
+from claw_v2.evidence_ledger import load_claims
+from claw_v2.goal_contract import create_goal, update_goal
 
 
 class FakeObserve:
@@ -35,6 +38,7 @@ class ActionEventTests(unittest.TestCase):
             event_type="action_executed",
             actor="claw",
             goal_id="g_1",
+            goal_revision=2,
             session_id="tg-1",
             proposed_next_action=ProposedAction(
                 tool="git_push",
@@ -51,9 +55,77 @@ class ActionEventTests(unittest.TestCase):
         self.assertEqual(event.schema_version, ACTION_EVENT_SCHEMA_VERSION)
         loaded = load_events(self.root)
         self.assertEqual(len(loaded), 1)
+        self.assertEqual(loaded[0].goal_revision, 2)
         self.assertEqual(loaded[0].proposed_next_action.tier, "tier_2_5")  # type: ignore[union-attr]
         raw = (self.root / "events.jsonl").read_text(encoding="utf-8")
         self.assertNotIn("secret-token-123456", raw)
+
+    def test_emit_event_uses_latest_goal_revision_when_omitted(self) -> None:
+        goal = create_goal(self.root, objective="Revise me")
+        update_goal(self.root, goal, constraints=["new constraint"])
+
+        event = emit_event(
+            self.root,
+            event_type="action_proposed",
+            actor="claw",
+            goal_id=goal.goal_id,
+            session_id="tg-1",
+            proposed_next_action=ProposedAction(tool="ReadFile"),
+        )
+
+        self.assertEqual(event.goal_revision, 2)
+
+    def test_recover_orphan_actions_marks_proposed_action_failed(self) -> None:
+        goal = create_goal(self.root, objective="Recover orphan")
+        proposed = emit_event(
+            self.root,
+            event_type="action_proposed",
+            actor="claw",
+            goal_id=goal.goal_id,
+            goal_revision=goal.goal_revision,
+            session_id="tg-1",
+            proposed_next_action=ProposedAction(tool="DeployPreview", tier="tier_2"),
+        )
+
+        recovered = recover_orphan_actions(self.root)
+
+        self.assertEqual(recovered, 1)
+        events = load_events(self.root)
+        failed = events[-1]
+        self.assertEqual(failed.event_type, "action_failed")
+        self.assertEqual(failed.originating_event_id, proposed.event_id)
+        self.assertEqual(failed.result.error, "interrupted_by_restart")  # type: ignore[union-attr]
+        claims = load_claims(self.root)
+        self.assertEqual(claims[-1].claim_type, "risk_signal")
+        self.assertEqual(claims[-1].verification_status, "unverified")
+
+    def test_recover_orphan_actions_ignores_finalized_proposed_action(self) -> None:
+        goal = create_goal(self.root, objective="Already finalized")
+        proposed = emit_event(
+            self.root,
+            event_type="action_proposed",
+            actor="claw",
+            goal_id=goal.goal_id,
+            goal_revision=goal.goal_revision,
+            session_id="tg-1",
+            proposed_next_action=ProposedAction(tool="RunTests", tier="tier_2"),
+        )
+        emit_event(
+            self.root,
+            event_type="action_executed",
+            actor="claw",
+            goal_id=goal.goal_id,
+            goal_revision=goal.goal_revision,
+            originating_event_id=proposed.event_id,
+            session_id="tg-1",
+            proposed_next_action=ProposedAction(tool="RunTests", tier="tier_2"),
+            result=ActionResult(status="success", output_hash="sha256:ok"),
+        )
+
+        recovered = recover_orphan_actions(self.root)
+
+        self.assertEqual(recovered, 0)
+        self.assertNotIn("interrupted_by_restart", (self.root / "events.jsonl").read_text(encoding="utf-8"))
 
     def test_invalid_event_type_fails(self) -> None:
         with self.assertRaisesRegex(ValueError, "event_type"):
@@ -83,4 +155,3 @@ class ActionEventTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -41,6 +41,12 @@ class RedactSensitiveTests(unittest.TestCase):
         text = '{"approval_token": "abc123def456"}'
         self.assertNotIn("abc123def456", redact_sensitive(text))
 
+    def test_strips_standalone_telegram_bot_token(self) -> None:
+        text = "Bot 123456789:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+        result = redact_sensitive(text)
+        self.assertNotIn("123456789:ABC", result)
+        self.assertIn("<REDACTED:telegram_token>", result)
+
     def test_truncates_long_text(self) -> None:
         text = "a" * 5000
         result = redact_sensitive(text, limit=100)
@@ -48,7 +54,7 @@ class RedactSensitiveTests(unittest.TestCase):
         self.assertLess(len(result), 200)
 
     def test_handles_none(self) -> None:
-        self.assertEqual(redact_sensitive(None), "")
+        self.assertIsNone(redact_sensitive(None))
 
     def test_passes_through_safe_text(self) -> None:
         text = "Hello, this is a normal log line with nothing sensitive."
@@ -67,6 +73,9 @@ class RecursiveRedactionTests(unittest.TestCase):
         self.assertNotIn("secret-token-xyz", as_text)
         self.assertNotIn("eyJhbGciOi", as_text)
         self.assertIn("[REDACTED]", as_text)
+
+    def test_preserves_none_values_in_dicts(self) -> None:
+        self.assertEqual(redact_sensitive({"parent_goal_id": None}), {"parent_goal_id": None})
 
     def test_field_name_redaction(self) -> None:
         payload = {"approval_token": "abc123def456ghi", "task_id": "task-1"}
