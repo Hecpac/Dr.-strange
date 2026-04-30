@@ -50,6 +50,7 @@ class P0RuntimeWiringTests(unittest.TestCase):
             self.assertEqual(len(load_claims(root / "telemetry")), 1)
             events = load_events(root / "telemetry")
             self.assertEqual([event.event_type for event in events], ["action_proposed", "action_executed"])
+            self.assertEqual(events[1].originating_event_id, events[0].event_id)
 
     def test_tool_registry_records_failed_tool_call(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -77,6 +78,7 @@ class P0RuntimeWiringTests(unittest.TestCase):
 
             events = load_events(root / "telemetry")
             self.assertEqual([event.event_type for event in events], ["action_proposed", "action_failed"])
+            self.assertEqual(events[1].originating_event_id, events[0].event_id)
             self.assertEqual(len(load_claims(root / "telemetry")), 1)
 
     def test_autonomous_task_populates_p0_jsonl(self) -> None:
@@ -116,4 +118,3 @@ class P0RuntimeWiringTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
