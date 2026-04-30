@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import hashlib
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
@@ -10,6 +11,9 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from claw_v2.memory import MemoryStore
+from claw_v2.action_events import ActionResult, ProposedAction, emit_event
+from claw_v2.evidence_ledger import EvidenceRef, record_claim
+from claw_v2.goal_contract import create_goal
 from claw_v2.network_proxy import DomainAllowlistEnforcer
 from claw_v2.sandbox import SandboxPolicy, sandbox_hook
 from claw_v2.sanitizer import extract_structured, sanitize
@@ -115,6 +119,30 @@ DEFAULT_TOOL_TIER = TIER_LOCAL_MUTATION
 def tool_requires_approval(tier: int) -> bool:
     """Return True iff a tool of this tier must go through ApprovalManager."""
     return tier >= TIER_REQUIRES_APPROVAL
+
+
+def _tier_label(tier: int) -> str:
+    if tier >= TIER_REQUIRES_APPROVAL:
+        return "tier_3"
+    if tier >= TIER_LOCAL_MUTATION:
+        return "tier_2"
+    return "tier_1"
+
+
+def _risk_level_for_tier(tier: int) -> str:
+    if tier >= TIER_REQUIRES_APPROVAL:
+        return "critical"
+    if tier >= TIER_LOCAL_MUTATION:
+        return "medium"
+    return "low"
+
+
+def _result_hash(result: object) -> str:
+    try:
+        payload = json.dumps(result, sort_keys=True, default=str)
+    except TypeError:
+        payload = str(result)
+    return f"sha256:{hashlib.sha256(payload.encode('utf-8')).hexdigest()}"
 
 
 SUPPORTED_AGENT_CLASSES: tuple[AgentClass, ...] = ("researcher", "operator", "deployer")
@@ -284,10 +312,13 @@ class ToolRegistry:
         workspace_root: Path | str,
         memory: MemoryStore | None = None,
         observe: object | None = None,
+        telemetry_root: Path | str | None = None,
     ) -> None:
         self.workspace_root = Path(workspace_root)
         self.memory = memory
         self.observe = observe
+        self.telemetry_root = Path(telemetry_root).expanduser() if telemetry_root is not None else None
+        self._runtime_goal_id: str | None = None
         self._definitions: dict[str, ToolDefinition] = {}
 
     def register(self, definition: ToolDefinition) -> None:
@@ -347,6 +378,8 @@ class ToolRegistry:
         policy: SandboxPolicy | None = None,
         network_enforcer: DomainAllowlistEnforcer | None = None,
         approval_gate: ApprovalGate | None = None,
+        goal_id: str | None = None,
+        session_id: str | None = None,
     ) -> dict:
         definition = self.get(name)
         if agent_class not in definition.allowed_agent_classes:
@@ -373,10 +406,140 @@ class ToolRegistry:
             self._emit_autonomy_event("AUTONOMY_APPROVED", definition, agent_class)
         else:
             self._emit_autonomy_event("AUTONOMY_BYPASS", definition, agent_class)
-        result = definition.handler(args)
+        p0_goal_id = goal_id or self._p0_runtime_goal_id()
+        p0_session_id = session_id or "runtime"
+        self._emit_p0_tool_event(
+            event_type="action_proposed",
+            definition=definition,
+            args=args,
+            agent_class=agent_class,
+            goal_id=p0_goal_id,
+            session_id=p0_session_id,
+            result=None,
+            claims=[],
+        )
+        try:
+            result = definition.handler(args)
+        except Exception as exc:
+            claim_id = self._record_p0_tool_claim(
+                definition=definition,
+                goal_id=p0_goal_id,
+                status="failure",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            self._emit_p0_tool_event(
+                event_type="action_failed",
+                definition=definition,
+                args=args,
+                agent_class=agent_class,
+                goal_id=p0_goal_id,
+                session_id=p0_session_id,
+                result=ActionResult(status="failure", output_hash="", error=f"{type(exc).__name__}: {exc}"),
+                claims=[claim_id] if claim_id else [],
+            )
+            raise
+        claim_id = self._record_p0_tool_claim(
+            definition=definition,
+            goal_id=p0_goal_id,
+            status="success",
+        )
+        self._emit_p0_tool_event(
+            event_type="action_executed",
+            definition=definition,
+            args=args,
+            agent_class=agent_class,
+            goal_id=p0_goal_id,
+            session_id=p0_session_id,
+            result=ActionResult(status="success", output_hash=_result_hash(result), error=None),
+            claims=[claim_id] if claim_id else [],
+        )
         if definition.ingests_external_content and isinstance(result, dict):
             return sanitize_tool_output(definition, result, agent_class=agent_class)
         return result
+
+    def _p0_runtime_goal_id(self) -> str:
+        if self._runtime_goal_id is not None:
+            return self._runtime_goal_id
+        if self.telemetry_root is None:
+            return "g_runtime_tool_dispatch"
+        try:
+            goal = create_goal(
+                self.telemetry_root,
+                objective="Observe runtime tool dispatch without changing execution behavior.",
+                allowed_actions=sorted(self._definitions.keys()),
+                success_criteria=["typed action events are append-only and redacted"],
+                risk_profile="tier_1",
+                anchor_source="runtime:tool_registry",
+                observe=self.observe,
+            )
+            self._runtime_goal_id = goal.goal_id
+        except Exception:
+            self._runtime_goal_id = "g_runtime_tool_dispatch"
+        return self._runtime_goal_id
+
+    def _record_p0_tool_claim(
+        self,
+        *,
+        definition: "ToolDefinition",
+        goal_id: str,
+        status: str,
+        error: str = "",
+    ) -> str | None:
+        if self.telemetry_root is None:
+            return None
+        try:
+            claim = record_claim(
+                self.telemetry_root,
+                goal_id=goal_id,
+                claim_text=(
+                    f"Tool {definition.name} executed with status {status}."
+                    if not error
+                    else f"Tool {definition.name} failed with {error[:180]}."
+                ),
+                claim_type="fact",
+                evidence_refs=[EvidenceRef(kind="tool_call", ref=f"tool_registry.execute:{definition.name}:{status}")],
+                verification_status="verified",
+                confidence=1.0,
+                observe=self.observe,
+            )
+            return claim.claim_id
+        except Exception:
+            return None
+
+    def _emit_p0_tool_event(
+        self,
+        *,
+        event_type: str,
+        definition: "ToolDefinition",
+        args: dict,
+        agent_class: AgentClass,
+        goal_id: str,
+        session_id: str,
+        result: ActionResult | None,
+        claims: list[str],
+    ) -> None:
+        if self.telemetry_root is None:
+            return
+        try:
+            emit_event(
+                self.telemetry_root,
+                event_type=event_type,  # type: ignore[arg-type]
+                actor="claw",
+                goal_id=goal_id,
+                session_id=session_id,
+                proposed_next_action=ProposedAction(
+                    tool=definition.name,
+                    args_redacted=args,
+                    tier=_tier_label(definition.tier),
+                    rationale_brief=f"{agent_class} tool dispatch",
+                ),
+                risk_level=_risk_level_for_tier(definition.tier),
+                claims=claims,
+                result=result,
+                observe=self.observe,
+            )
+        except Exception:
+            return
 
     def _emit_autonomy_event(
         self, event: str, definition: "ToolDefinition", agent_class: AgentClass
@@ -406,6 +569,8 @@ class ToolRegistry:
         policy: SandboxPolicy | None = None,
         network_enforcer: DomainAllowlistEnforcer | None = None,
         approval_gate: ApprovalGate | None = None,
+        goal_id: str | None = None,
+        session_id: str | None = None,
     ) -> dict:
         """Async-safe wrapper: offloads blocking handlers to a worker thread.
 
@@ -424,6 +589,8 @@ class ToolRegistry:
             policy=policy,
             network_enforcer=network_enforcer,
             approval_gate=approval_gate,
+            goal_id=goal_id,
+            session_id=session_id,
         )
 
     @classmethod
@@ -435,8 +602,10 @@ class ToolRegistry:
         wiki: object | None = None,
         skill_registry: SkillRegistry | None = None,
         a2a: A2AService | None = None,
+        observe: object | None = None,
+        telemetry_root: Path | str | None = None,
     ) -> "ToolRegistry":
-        registry = cls(workspace_root=workspace_root, memory=memory)
+        registry = cls(workspace_root=workspace_root, memory=memory, observe=observe, telemetry_root=telemetry_root)
         _ws = Path(workspace_root).resolve()
 
         def _safe_path(raw: str | Path) -> Path:

@@ -74,6 +74,12 @@ class RecursiveRedactionTests(unittest.TestCase):
         self.assertEqual(redacted["approval_token"], "[REDACTED]")
         self.assertEqual(redacted["task_id"], "task-1")
 
+    def test_field_name_fragment_redaction(self) -> None:
+        payload = {"telegram_bot_token": "abc123def456ghi", "safe": "hello"}
+        redacted = redact_sensitive(payload)
+        self.assertEqual(redacted["telegram_bot_token"], "[REDACTED]")
+        self.assertEqual(redacted["safe"], "hello")
+
     def test_list_of_dicts(self) -> None:
         import json
         payload = [{"token": "abc-1234567890"}, {"safe": "hello"}]

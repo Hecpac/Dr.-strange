@@ -374,6 +374,7 @@ class BotService:
             update_session_state=brain.memory.update_session_state,
             store_message=self._store_message_from_handler,
             workspace_root=getattr(config, "workspace_root", None),
+            telemetry_root=getattr(config, "telemetry_root", None),
         )
         self._state_handler = StateHandler(
             brain_memory=brain.memory,

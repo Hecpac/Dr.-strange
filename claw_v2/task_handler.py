@@ -17,6 +17,7 @@ from claw_v2.artifacts import (
     new_artifact_id,
     planned_phases_for_mode,
 )
+from claw_v2.action_events import ActionResult, ProposedAction, emit_event
 from claw_v2.bot_helpers import (
     _build_coordinator_tasks,
     _coordinator_checkpoint,
@@ -31,6 +32,8 @@ from claw_v2.bot_helpers import (
     _stable_task_id,
     _task_approval_summary,
 )
+from claw_v2.evidence_ledger import EvidenceRef, record_claim
+from claw_v2.goal_contract import create_goal
 from claw_v2.model_registry import model_overrides_from_state
 
 
@@ -47,6 +50,7 @@ class TaskHandler:
         update_session_state: Callable[..., Any],
         store_message: Callable[[str, str, str], Any] | None = None,
         workspace_root: Path | None = None,
+        telemetry_root: Path | str | None = None,
     ) -> None:
         self.approvals = approvals
         self.coordinator = coordinator
@@ -57,6 +61,7 @@ class TaskHandler:
         self._update_session_state = update_session_state
         self._store_message = store_message
         self._workspace_root = Path(workspace_root) if workspace_root is not None else None
+        self._telemetry_root = Path(telemetry_root).expanduser() if telemetry_root is not None else None
         self._task_threads: dict[str, threading.Thread] = {}
         self._cancelled_tasks: set[str] = set()
         self._task_lock = threading.Lock()
@@ -155,6 +160,19 @@ class TaskHandler:
             "task_id": task_id,
         }
         state = self._get_session_state(session_id)
+        route = active_route = dict(
+            state.get("active_object", {}).get("last_channel_route") or {}
+        ) if isinstance(state.get("active_object"), dict) else {}
+        goal_id = self._p0_create_task_goal(
+            task_id=task_id,
+            session_id=session_id,
+            objective=objective,
+            mode=mode,
+            route=route,
+            anchor_source=f"task_id:{task_id}",
+        )
+        if goal_id:
+            checkpoint["goal_id"] = goal_id
         queue = self.upsert_task_queue_entry(
             state.get("task_queue") or [],
             summary=objective,
@@ -172,6 +190,8 @@ class TaskHandler:
             "status": "running",
             "started_at": time.time(),
         }
+        if goal_id:
+            active_object["active_task"]["goal_id"] = goal_id
         self._update_session_state(
             session_id,
             mode=mode,
@@ -195,14 +215,31 @@ class TaskHandler:
             session_id=session_id,
             objective=objective,
             mode=mode,
-            route=active_object.get("last_channel_route") if isinstance(active_object.get("last_channel_route"), dict) else {},
+            route=active_route,
+            goal_id=goal_id,
+        )
+        claim_id = self._p0_record_task_claim(
+            goal_id=goal_id,
+            task_id=task_id,
+            text=f"Autonomous task {task_id} started in {mode} mode.",
+            status="started",
+        )
+        self._p0_emit_task_event(
+            event_type="action_proposed",
+            goal_id=goal_id,
+            session_id=session_id,
+            task_id=task_id,
+            objective=objective,
+            mode=mode,
+            status=None,
+            claims=[claim_id] if claim_id else [],
         )
         job_id = self._enqueue_autonomous_job(
             task_id=task_id,
             session_id=session_id,
             objective=objective,
             mode=mode,
-            route=active_object.get("last_channel_route") if isinstance(active_object.get("last_channel_route"), dict) else {},
+            route=active_route,
             reason="task_started",
         )
         thread = threading.Thread(
@@ -347,10 +384,28 @@ class TaskHandler:
         job_id: str | None = None,
         resumed: bool = False,
     ) -> None:
+        goal_id = self._p0_goal_id_for_task(task_id, session_id=session_id, objective=objective, mode=mode)
         try:
             if self._is_cancelled(task_id):
                 self._mark_cancelled_task_state(session_id, task_id, objective, reason="cancelled_before_start")
                 self._cancel_autonomous_job(task_id, reason="cancelled_before_start", job_id=job_id)
+                claim_id = self._p0_record_task_claim(
+                    goal_id=goal_id,
+                    task_id=task_id,
+                    text=f"Autonomous task {task_id} was cancelled before start.",
+                    status="cancelled",
+                )
+                self._p0_emit_task_event(
+                    event_type="action_executed",
+                    goal_id=goal_id,
+                    session_id=session_id,
+                    task_id=task_id,
+                    objective=objective,
+                    mode=mode,
+                    status="blocked",
+                    error="cancelled_before_start",
+                    claims=[claim_id] if claim_id else [],
+                )
                 return
             if not self._claim_autonomous_job(
                 task_id=task_id,
@@ -372,6 +427,23 @@ class TaskHandler:
             if self._is_cancelled(task_id):
                 self._mark_cancelled_task_state(session_id, task_id, objective, reason="cancelled_during_run")
                 self._cancel_autonomous_job(task_id, reason="cancelled_during_run", job_id=job_id)
+                claim_id = self._p0_record_task_claim(
+                    goal_id=goal_id,
+                    task_id=task_id,
+                    text=f"Autonomous task {task_id} was cancelled during execution.",
+                    status="cancelled",
+                )
+                self._p0_emit_task_event(
+                    event_type="action_executed",
+                    goal_id=goal_id,
+                    session_id=session_id,
+                    task_id=task_id,
+                    objective=objective,
+                    mode=mode,
+                    status="blocked",
+                    error="cancelled_during_run",
+                    claims=[claim_id] if claim_id else [],
+                )
                 return
             state = self._get_session_state(session_id)
             active_object = dict(state.get("active_object") or {})
@@ -444,6 +516,22 @@ class TaskHandler:
                         verification_status=verification_status,
                         artifacts=artifacts,
                     )
+                claim_id = self._p0_record_task_claim(
+                    goal_id=goal_id,
+                    task_id=task_id,
+                    text=f"Autonomous task {task_id} remains pending with verification status {verification_status}.",
+                    status="pending",
+                )
+                self._p0_emit_task_event(
+                    event_type="action_executed",
+                    goal_id=goal_id,
+                    session_id=session_id,
+                    task_id=task_id,
+                    objective=objective,
+                    mode=mode,
+                    status="pending",
+                    claims=[claim_id] if claim_id else [],
+                )
                 self._emit(
                     "autonomous_task_pending",
                     {
@@ -515,6 +603,23 @@ class TaskHandler:
                     **({"error": checkpoint_error} if terminal_status == "failed" and checkpoint_error else {}),
                 },
             )
+            claim_id = self._p0_record_task_claim(
+                goal_id=goal_id,
+                task_id=task_id,
+                text=f"Autonomous task {task_id} finished with terminal status {terminal_status}.",
+                status=terminal_status,
+            )
+            self._p0_emit_task_event(
+                event_type="action_executed" if terminal_status == "succeeded" else "action_failed",
+                goal_id=goal_id,
+                session_id=session_id,
+                task_id=task_id,
+                objective=objective,
+                mode=mode,
+                status="success" if terminal_status == "succeeded" else "failure",
+                error=checkpoint_error if terminal_status == "failed" else "",
+                claims=[claim_id] if claim_id else [],
+            )
         except Exception as exc:
             from claw_v2.adapters.base import StreamInterruptedError
             if isinstance(exc, StreamInterruptedError):
@@ -578,6 +683,23 @@ class TaskHandler:
                     verification_status="failed",
                     artifacts=artifacts,
                 )
+            claim_id = self._p0_record_task_claim(
+                goal_id=goal_id,
+                task_id=task_id,
+                text=f"Autonomous task {task_id} failed with {error}.",
+                status="failed",
+            )
+            self._p0_emit_task_event(
+                event_type="action_failed",
+                goal_id=goal_id,
+                session_id=session_id,
+                task_id=task_id,
+                objective=objective,
+                mode=mode,
+                status="failure",
+                error=error,
+                claims=[claim_id] if claim_id else [],
+            )
             self._emit(
                 "autonomous_task_failed",
                 {
@@ -709,6 +831,16 @@ class TaskHandler:
         metadata["resume_reason"] = reason
         metadata["resume_count"] = int(metadata.get("resume_count") or 0) + 1
         metadata["last_resumed_at"] = time.time()
+        goal_id = str(metadata.get("goal_id") or "") or self._p0_create_task_goal(
+            task_id=record.task_id,
+            session_id=record.session_id,
+            objective=record.objective,
+            mode=mode,
+            route=record.route,
+            anchor_source=f"task_id:{record.task_id}:resume",
+        )
+        if goal_id:
+            metadata["goal_id"] = goal_id
         if false_success:
             metadata["false_success_reopened_at"] = metadata["last_resumed_at"]
             metadata["false_success_verification_status"] = str(record.verification_status or "unknown")
@@ -760,6 +892,8 @@ class TaskHandler:
             "resumed_at": metadata["last_resumed_at"],
             "resume_reason": reason,
         }
+        if goal_id:
+            active_object["active_task"]["goal_id"] = goal_id
         self._update_session_state(
             record.session_id,
             mode=mode,
@@ -783,6 +917,22 @@ class TaskHandler:
                 "resume_count": metadata["resume_count"],
                 "false_success_reopened": false_success,
             },
+        )
+        claim_id = self._p0_record_task_claim(
+            goal_id=goal_id,
+            task_id=record.task_id,
+            text=f"Autonomous task {record.task_id} was resumed for {reason}.",
+            status="resumed",
+        )
+        self._p0_emit_task_event(
+            event_type="action_proposed",
+            goal_id=goal_id,
+            session_id=record.session_id,
+            task_id=record.task_id,
+            objective=record.objective,
+            mode=mode,
+            status=None,
+            claims=[claim_id] if claim_id else [],
         )
         thread = threading.Thread(
             target=self._run_autonomous_task,
@@ -1118,6 +1268,135 @@ class TaskHandler:
             payload=payload,
         )
 
+    def _p0_create_task_goal(
+        self,
+        *,
+        task_id: str,
+        session_id: str,
+        objective: str,
+        mode: str,
+        route: dict[str, Any] | None,
+        anchor_source: str,
+    ) -> str | None:
+        if self._telemetry_root is None:
+            return None
+        try:
+            goal = create_goal(
+                self._telemetry_root,
+                objective=objective,
+                constraints=[
+                    "preserve user worktree changes",
+                    "do not claim completion without verification evidence",
+                ],
+                assumptions=[],
+                allowed_actions=["coordinator.autonomous_task", "task_ledger.update", "job_service.update"],
+                disallowed_actions=["force_push", "deploy_production_without_review"],
+                success_criteria=["task ledger records terminal or pending state with evidence"],
+                stop_conditions=["Hector asks to pause", "approval policy blocks the next action"],
+                risk_profile="tier_2" if mode == "coding" else "tier_1",
+                anchor_source=anchor_source,
+                observe=self.observe,
+            )
+            return goal.goal_id
+        except Exception:
+            return None
+
+    def _p0_goal_id_for_task(
+        self,
+        task_id: str,
+        *,
+        session_id: str,
+        objective: str,
+        mode: str,
+    ) -> str | None:
+        if self._telemetry_root is None:
+            return None
+        if self.task_ledger is not None:
+            try:
+                record = self.task_ledger.get(task_id)
+                if record is not None:
+                    goal_id = str((record.metadata or {}).get("goal_id") or "")
+                    if goal_id:
+                        return goal_id
+            except Exception:
+                pass
+        return self._p0_create_task_goal(
+            task_id=task_id,
+            session_id=session_id,
+            objective=objective,
+            mode=mode,
+            route={},
+            anchor_source=f"task_id:{task_id}:fallback",
+        )
+
+    def _p0_record_task_claim(
+        self,
+        *,
+        goal_id: str | None,
+        task_id: str,
+        text: str,
+        status: str,
+    ) -> str | None:
+        if self._telemetry_root is None or not goal_id:
+            return None
+        try:
+            claim = record_claim(
+                self._telemetry_root,
+                goal_id=goal_id,
+                claim_text=text,
+                claim_type="fact",
+                evidence_refs=[EvidenceRef(kind="tool_call", ref=f"task_handler:{task_id}:{status}")],
+                verification_status="verified",
+                confidence=1.0,
+                observe=self.observe,
+            )
+            return claim.claim_id
+        except Exception:
+            return None
+
+    def _p0_emit_task_event(
+        self,
+        *,
+        event_type: str,
+        goal_id: str | None,
+        session_id: str,
+        task_id: str,
+        objective: str,
+        mode: str,
+        status: str | None,
+        error: str = "",
+        claims: list[str] | None = None,
+    ) -> None:
+        if self._telemetry_root is None or not goal_id:
+            return
+        try:
+            result = None
+            if status is not None:
+                result = ActionResult(
+                    status=status,  # type: ignore[arg-type]
+                    output_hash="",
+                    error=error or None,
+                )
+            emit_event(
+                self._telemetry_root,
+                event_type=event_type,  # type: ignore[arg-type]
+                actor="claw",
+                goal_id=goal_id,
+                session_id=session_id,
+                proposed_next_action=ProposedAction(
+                    tool="coordinator.autonomous_task",
+                    args_redacted={"task_id": task_id, "mode": mode, "objective": objective[:240]},
+                    tier="tier_2" if mode == "coding" else "tier_1",
+                    rationale_brief="autonomous task lifecycle",
+                ),
+                risk_level="medium" if mode == "coding" else "low",
+                claims=list(claims or []),
+                result=result,
+                observe=self.observe,
+            )
+        except Exception:
+            return
+
     def _record_ledger_task_started(
         self,
         *,
@@ -1126,6 +1405,7 @@ class TaskHandler:
         objective: str,
         mode: str,
         route: dict[str, Any],
+        goal_id: str | None = None,
     ) -> None:
         if self.task_ledger is None:
             return
@@ -1141,7 +1421,7 @@ class TaskHandler:
             model=model,
             status="running",
             route=route,
-            metadata={"autonomous": True},
+            metadata={"autonomous": True, **({"goal_id": goal_id} if goal_id else {})},
             artifacts=self._initial_task_artifacts(
                 task_id=task_id,
                 session_id=session_id,
@@ -1273,6 +1553,7 @@ class TaskHandler:
         job_id: str | None,
         exc: Any,
     ) -> None:
+        goal_id = self._p0_goal_id_for_task(task_id, session_id=session_id, objective=objective, mode=mode)
         partial = str(getattr(exc, "partial_output", "") or "")[:4000]
         reason = str(getattr(exc, "reason", "") or "stream_idle_timeout")
         error_msg = f"stream_interrupted: {reason}"
@@ -1319,6 +1600,23 @@ class TaskHandler:
                 "reason": reason,
                 "partial_output_chars": len(partial),
             },
+        )
+        claim_id = self._p0_record_task_claim(
+            goal_id=goal_id,
+            task_id=task_id,
+            text=f"Autonomous task {task_id} was interrupted and checkpointed for retry.",
+            status="interrupted",
+        )
+        self._p0_emit_task_event(
+            event_type="action_failed",
+            goal_id=goal_id,
+            session_id=session_id,
+            task_id=task_id,
+            objective=objective,
+            mode=mode,
+            status="failure",
+            error=error_msg,
+            claims=[claim_id] if claim_id else [],
         )
 
     def _defer_autonomous_job(

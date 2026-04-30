@@ -4,7 +4,7 @@ import os
 import re
 import secrets
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -334,6 +334,7 @@ class AppConfig:
     morning_brief_calendar_command: str | None
     evening_brief_enabled: bool
     evening_brief_hour: int
+    telemetry_root: Path = field(default_factory=lambda: Path.home() / ".claw" / "telemetry")
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -444,6 +445,7 @@ class AppConfig:
             morning_brief_calendar_command=os.getenv("MORNING_BRIEF_CALENDAR_COMMAND") or None,
             evening_brief_enabled=_env_bool("EVENING_BRIEF_ENABLED", True),
             evening_brief_hour=_env_int("EVENING_BRIEF_HOUR", 21),
+            telemetry_root=Path(os.getenv("TELEMETRY_ROOT", str(home / ".claw" / "telemetry"))),
         )
 
     def ensure_directories(self) -> None:
@@ -453,6 +455,7 @@ class AppConfig:
         self.eval_artifacts_root.mkdir(parents=True, exist_ok=True)
         self.approvals_root.mkdir(parents=True, exist_ok=True)
         self.pipeline_state_root.mkdir(parents=True, exist_ok=True)
+        self.telemetry_root.mkdir(parents=True, exist_ok=True)
 
     def validate(self) -> None:
         if self.brain_provider != "anthropic":
