@@ -349,6 +349,10 @@ class BotTests(unittest.TestCase):
                     "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
                     "APPROVALS_ROOT": str(root / "approvals"),
                     "TELEGRAM_ALLOWED_USER_ID": "123",
+                    # This test exercises the canned task_intent router
+                    # specifically; opt out of the brain-bypass hotfix flag
+                    # that disables it by default in production.
+                    "CLAW_DISABLE_TASK_INTENT_ROUTER": "0",
                 }
                 with patch.dict(os.environ, env, clear=False):
                     runtime = build_runtime(anthropic_executor=fake_anthropic)
@@ -384,6 +388,7 @@ class BotTests(unittest.TestCase):
                 "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
                 "APPROVALS_ROOT": str(root / "approvals"),
                 "TELEGRAM_ALLOWED_USER_ID": "123",
+                "CLAW_DISABLE_TASK_INTENT_ROUTER": "0",
             }
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
@@ -1444,6 +1449,7 @@ class BotTests(unittest.TestCase):
                 "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
                 "APPROVALS_ROOT": str(root / "approvals"),
                 "TELEGRAM_ALLOWED_USER_ID": "123",
+                "CLAW_DISABLE_TASK_INTENT_ROUTER": "0",
             }
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
