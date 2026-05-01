@@ -132,6 +132,7 @@ class WikiService:
         self.schema_path = self.root / "schema.md"
         self._embeddings_path = self.root / "embeddings.json"
         self._graph_path = self.root / "graph.json"
+        self._firecrawl_state_path = self.root / "firecrawl_state.json"
         self.lane = lane
         # Ensure dirs exist
         self.raw_dir.mkdir(parents=True, exist_ok=True)
@@ -140,8 +141,7 @@ class WikiService:
         self._lock = threading.Lock()
         self._embeddings: dict[str, list[float]] = self._load_embeddings()
         self._graph: dict[str, list[dict]] = self._load_graph()
-        self._firecrawl_paused_until = 0.0
-        self._firecrawl_pause_reason = ""
+        self._firecrawl_paused_until, self._firecrawl_pause_reason = self._load_firecrawl_state()
 
     # ------------------------------------------------------------------
     # Ingest (two-step chain-of-thought)
@@ -773,6 +773,7 @@ class WikiService:
     def _pause_firecrawl(self, reason: str, *, seconds: int = 24 * 60 * 60) -> None:
         self._firecrawl_pause_reason = reason
         self._firecrawl_paused_until = time.time() + seconds
+        self._save_firecrawl_state()
         logger.warning("Firecrawl auto-scrape paused: %s", reason)
         self._emit(
             "firecrawl_paused",
@@ -782,6 +783,27 @@ class WikiService:
                 "paused_until": self._firecrawl_paused_until,
             },
         )
+
+    def _load_firecrawl_state(self) -> tuple[float, str]:
+        try:
+            if self._firecrawl_state_path.exists():
+                data = json.loads(self._firecrawl_state_path.read_text(encoding="utf-8"))
+                return float(data.get("paused_until", 0.0)), str(data.get("reason", ""))
+        except Exception:
+            logger.debug("Failed to load firecrawl state", exc_info=True)
+        return 0.0, ""
+
+    def _save_firecrawl_state(self) -> None:
+        try:
+            self._firecrawl_state_path.write_text(
+                json.dumps({
+                    "paused_until": self._firecrawl_paused_until,
+                    "reason": self._firecrawl_pause_reason,
+                }),
+                encoding="utf-8",
+            )
+        except Exception:
+            logger.debug("Failed to save firecrawl state", exc_info=True)
 
     def _emit(self, event_type: str, payload: dict) -> None:
         if self.observe is None:
