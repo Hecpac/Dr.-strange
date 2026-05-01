@@ -888,6 +888,33 @@ class BotService:
             active_object=active_object,
         )
 
+    def _emit_dispatch_decision(
+        self,
+        *,
+        route: str,
+        session_id: str,
+        text: str,
+        captured: bool,
+    ) -> None:
+        # Telemetry for the brain-bypass refactor: emit one event per
+        # pre-brain handler decision so we can audit which route fires
+        # for which message and detect false positives without guessing.
+        if self.observe is None:
+            return
+        try:
+            self.observe.emit(
+                "dispatch_decision",
+                payload={
+                    "session_id": session_id,
+                    "route": route,
+                    "captured": captured,
+                    "text_preview": text[:160],
+                    "text_length": len(text),
+                },
+            )
+        except Exception:
+            logger.exception("failed to emit dispatch_decision route=%s", route)
+
     def _emit_skill_task_event(
         self,
         event_type: str,
@@ -1031,21 +1058,45 @@ class BotService:
         if command_response is not None:
             return command_response
         operational_alert_response = self._maybe_handle_operational_alert(stripped, session_id=session_id)
+        self._emit_dispatch_decision(
+            route="operational_alert",
+            session_id=session_id,
+            text=stripped,
+            captured=operational_alert_response is not None,
+        )
         if operational_alert_response is not None:
             self._store_memory_turn(session_id, stripped, operational_alert_response, assistant_limit=2000)
             self._remember_assistant_turn_state(session_id, stripped, operational_alert_response)
             return operational_alert_response
         task_intent_response = self._maybe_handle_task_intent(stripped, session_id=session_id)
+        self._emit_dispatch_decision(
+            route="task_intent",
+            session_id=session_id,
+            text=stripped,
+            captured=task_intent_response is not None,
+        )
         if task_intent_response is not None:
             self._store_memory_turn(session_id, stripped, task_intent_response, assistant_limit=2000)
             self._remember_assistant_turn_state(session_id, stripped, task_intent_response)
             return task_intent_response
         operational_status_response = self._maybe_handle_operational_status(stripped, session_id=session_id)
+        self._emit_dispatch_decision(
+            route="operational_status",
+            session_id=session_id,
+            text=stripped,
+            captured=operational_status_response is not None,
+        )
         if operational_status_response is not None:
             self._store_memory_turn(session_id, stripped, operational_status_response, assistant_limit=2000)
             self._remember_assistant_turn_state(session_id, stripped, operational_status_response)
             return operational_status_response
         capability_route_response = self._maybe_handle_capability_route(stripped, session_id=session_id)
+        self._emit_dispatch_decision(
+            route="capability_route",
+            session_id=session_id,
+            text=stripped,
+            captured=capability_route_response is not None,
+        )
         if capability_route_response is not None:
             self._store_memory_turn(session_id, stripped, capability_route_response, assistant_limit=2000)
             self._remember_assistant_turn_state(session_id, stripped, capability_route_response)
@@ -1068,6 +1119,12 @@ class BotService:
             self._remember_assistant_turn_state(session_id, stripped, stateful_followup)
             return stateful_followup
         shortcut_response = self._maybe_handle_shortcut(stripped, session_id=session_id)
+        self._emit_dispatch_decision(
+            route="shortcut",
+            session_id=session_id,
+            text=stripped,
+            captured=shortcut_response is not None,
+        )
         if isinstance(shortcut_response, _BrainShortcut):
             return self._brain_text_response(
                 session_id,
@@ -1080,11 +1137,23 @@ class BotService:
             self._remember_assistant_turn_state(session_id, stripped, shortcut_response)
             return shortcut_response
         nlm_response = self._nlm_handler.natural_language_response(session_id, stripped)
+        self._emit_dispatch_decision(
+            route="nlm_natural_language",
+            session_id=session_id,
+            text=stripped,
+            captured=nlm_response is not None,
+        )
         if nlm_response is not None:
             self._store_memory_turn(session_id, stripped, nlm_response, assistant_limit=4000)
             self._remember_assistant_turn_state(session_id, stripped, nlm_response)
             return nlm_response
         coordinated_response = self._task_handler.maybe_run_coordinated_task(session_id, stripped)
+        self._emit_dispatch_decision(
+            route="coordinated_task",
+            session_id=session_id,
+            text=stripped,
+            captured=coordinated_response is not None,
+        )
         if coordinated_response is not None:
             self._store_memory_turn(session_id, stripped, coordinated_response, assistant_limit=4000)
             if "Tarea autónoma iniciada:" not in coordinated_response:
@@ -1094,6 +1163,12 @@ class BotService:
         if command_response is not None:
             return command_response
 
+        self._emit_dispatch_decision(
+            route="brain",
+            session_id=session_id,
+            text=stripped,
+            captured=True,
+        )
         return self._brain_text_response(session_id, stripped)
 
     def _build_pre_state_commands(self) -> list[BotCommand]:
