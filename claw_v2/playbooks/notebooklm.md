@@ -12,9 +12,9 @@ priority: 10
 # NotebookLM — Workflow de Creación de Cuadernos y Podcasts
 
 ## Prerequisitos
-- Chrome CDP corriendo en puerto 9222 (verificar con `lsof -i :9222`)
-- Si no está corriendo: `bash scripts/launch-chrome-cdp.sh`
-- Google login activo en el perfil CDP (`~/.claw-chrome-cdp`)
+- Chrome CDP corriendo (puerto 9222 ó 9250 según launcher; verificar con `curl http://localhost:9250/json/version` o `lsof -i :9222`).
+- Si no está corriendo: `bash scripts/launch-chrome-cdp.sh`.
+- Google login activo en el perfil CDP (`~/.claw-chrome-cdp`).
 
 ## Conexión Playwright
 ```python
@@ -33,13 +33,20 @@ page.goto("https://notebooklm.google.com/", wait_until="domcontentloaded", timeo
 2. Se abre modal de "Agregar fuentes"
 
 ## Activar Deep Research (OBLIGATORIO para contenido de calidad)
-1. Click dropdown "Investigación rápida" para abrir menú
-2. Click "Deep Research" para seleccionarlo
-3. El input de Deep Research es un `textarea` con placeholder "¿Sobre qué te gustaría investigar?"
-4. **Angular forms**: `fill()` NO activa los botones — usar `mouse.click()` en el input + `keyboard.type()` con delay=25
-5. **Botón Enviar**: Buscar `button[aria-label="Enviar"]` más cercano al textarea de Deep Research (NO el del chat)
-6. Deep Research tarda 3-8 minutos. Monitorear buscando "finalizó" en `page.content()`
-7. Al terminar, click botón "Importar" para cargar fuentes
+
+**Pre-requisito de selectores (verificado 2026-05-01):**
+- El modal "Agregar fuentes" se identifica con `mat-dialog-container` (NO `[role="dialog"]`, que también matchea la paleta de emojis oculta).
+- Si la URL del notebook está abierta sin el modal, forzar reapertura con `?addSource=true`.
+
+1. Dentro del `mat-dialog-container`, click en chip `button:has-text("Fast Research")` (UI actual; el playbook viejo decía "Investigación rápida" pero ya no aparece — el commit `5cd95d8` corrigió el selector en `notebooklm_cdp.py`).
+2. En el popover (fuera del dialog) click `div[role="menu"] >> text="Deep Research"` o fallback `[role="option"]:has-text("Deep Research")`.
+3. **Después del switch a Deep Research el control cambia de input a textarea**:
+   - Modo Fast Research → `input[placeholder*="Buscar fuentes"]`
+   - Modo Deep Research → `textarea[placeholder*="investigar"]` (con placeholder "¿Sobre qué te gustaría investigar?")
+4. **Angular forms**: `fill()` NO activa los botones — usar `click()` en el control + `keyboard.type()` con delay=5-25.
+5. **Botón Enviar**: `button[aria-label="Enviar"]` scoped al `mat-dialog-container` (NO al chat principal). Fallback: `page.keyboard.press("Enter")`.
+6. Deep Research tarda 3-8 minutos. Indicador de progreso visible en sidebar izquierdo: "⏳ Planificando... No salgas de esta página" → "Investigando..." → "Listo".
+7. Al terminar, click botón "Importar" para cargar fuentes.
 
 ## Generar Podcast de Audio
 1. Click "Resumen en audio" o primer botón "Resumen..." en panel Studio (derecha)
@@ -67,8 +74,11 @@ NotebookLM categoriza fuentes automáticamente cuando el cuaderno tiene 5+ fuent
 - **Folders a nivel notebook**: pendientes (roadmap NotebookLM)
 
 ## Gotchas Críticos
-- `DevBrowserService.chrome_navigate()` cierra la conexión al terminar — usar Playwright directo
-- Hay DOS botones "Enviar" — uno para Deep Research, otro para Chat. Seleccionar el correcto por proximidad al textarea
-- Angular forms requieren `keyboard.type(text, delay=25)` para trigger change detection
-- UI en español: "Crear cuaderno nuevo", "Agregar fuentes", "Investigación rápida", "Importar", "Enviar"
-- Título del notebook se auto-genera al importar fuentes
+- `DevBrowserService.chrome_navigate()` cierra la conexión al terminar — usar Playwright directo.
+- `[role="dialog"]` matchea la paleta de emojis oculta — usar `mat-dialog-container` para el modal real.
+- Hay DOS botones "Enviar" — uno para Deep Research, otro para Chat. Scope al `mat-dialog-container` para no caer en el del chat.
+- Angular forms requieren `keyboard.type(text, delay=5-25)` para trigger change detection. `fill()` no funciona.
+- El control del search input cambia de `<input>` (Fast Research) a `<textarea>` (Deep Research) tras el toggle.
+- UI mixta: en algunas builds el chip dice "Fast Research" en inglés aunque el resto del UI esté en español. Tener selectores para ambas variantes.
+- Título del notebook se auto-genera al importar fuentes.
+- En Chrome CDP custom de Claw el puerto puede ser 9250 (no 9222). Verificar con `curl localhost:9250/json/version`.
