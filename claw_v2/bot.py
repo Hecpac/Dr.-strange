@@ -289,6 +289,39 @@ def _looks_like_operational_alert(text: str) -> bool:
     return normalized.startswith("alerta operacional:") or normalized.startswith("operational alert:")
 
 
+# Brain-bypass refactor: a literal task_id is the only natural-language
+# token that may legitimately route to the task handler before the brain.
+# Patterns observed in production: nlm-<16hex>, tg-<digits>:<kind>:<digits>,
+# generic agent-<uuid> shapes, and bare 16+ hex slugs used for notebooks.
+_LITERAL_TASK_ID_RE = re.compile(
+    r"\b("
+    r"nlm-[a-f0-9]{8,}"
+    r"|tg-\d+:[a-z][\w-]*:\d+"
+    r"|agent-[a-f0-9]{8,}"
+    r"|task-[a-f0-9]{8,}"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _has_literal_task_id(text: str) -> bool:
+    return _LITERAL_TASK_ID_RE.search(text) is not None
+
+
+def _is_explicit_command(text: str) -> bool:
+    """An explicit command is the only kind of message a heuristic pre-brain
+    handler is allowed to capture by default. Two shapes qualify:
+    a leading slash command (`/foo`), or a message that contains a literal
+    task identifier the user is referring to. Everything else falls through
+    to the brain so the model can reason about the request."""
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if stripped.startswith("/"):
+        return True
+    return _has_literal_task_id(stripped)
+
+
 def _parse_operational_alert_fields(text: str) -> dict[str, str]:
     fields: dict[str, str] = {}
     for line in text.splitlines()[1:]:
@@ -888,6 +921,19 @@ class BotService:
             active_object=active_object,
         )
 
+    def _semantic_prebrain_routes_enabled(self) -> bool:
+        """Brain-bypass refactor (commit #5): the heuristic semantic routers
+        (task_intent, capability_route, nlm natural-language interception)
+        are off by default. Operators can re-enable them by setting
+        CLAW_ENABLE_SEMANTIC_PREBRAIN_ROUTES=1, e.g. for canary debugging.
+
+        Deterministic routers (operational_alert, operational_status, slash
+        commands, literal-task-id shortcuts) are NOT gated by this flag —
+        they have non-overlapping signal and were not implicated in the
+        brain-bypass false positives.
+        """
+        return os.getenv("CLAW_ENABLE_SEMANTIC_PREBRAIN_ROUTES", "0") == "1"
+
     def _emit_dispatch_decision(
         self,
         *,
@@ -1090,7 +1136,16 @@ class BotService:
             self._store_memory_turn(session_id, stripped, operational_status_response, assistant_limit=2000)
             self._remember_assistant_turn_state(session_id, stripped, operational_status_response)
             return operational_status_response
-        capability_route_response = self._maybe_handle_capability_route(stripped, session_id=session_id)
+        # Brain-bypass refactor (commit #5): semantic capability router
+        # only fires when the global gate is on or the message is an
+        # explicit slash command. Default = brain handles capability
+        # questions through tool selection.
+        if self._semantic_prebrain_routes_enabled() or _is_explicit_command(stripped):
+            capability_route_response = self._maybe_handle_capability_route(
+                stripped, session_id=session_id
+            )
+        else:
+            capability_route_response = None
         self._emit_dispatch_decision(
             route="capability_route",
             session_id=session_id,
@@ -1136,7 +1191,15 @@ class BotService:
             self._store_memory_turn(session_id, stripped, shortcut_response, assistant_limit=2000)
             self._remember_assistant_turn_state(session_id, stripped, shortcut_response)
             return shortcut_response
-        nlm_response = self._nlm_handler.natural_language_response(session_id, stripped)
+        # Brain-bypass refactor (commit #5): NotebookLM natural-language
+        # interception is gated by the master flag too. Operators must opt
+        # in explicitly via CLAW_ENABLE_SEMANTIC_PREBRAIN_ROUTES=1 to
+        # restore the pre-refactor behavior; otherwise the brain decides
+        # whether to use the NotebookLM tools.
+        if self._semantic_prebrain_routes_enabled():
+            nlm_response = self._nlm_handler.natural_language_response(session_id, stripped)
+        else:
+            nlm_response = None
         self._emit_dispatch_decision(
             route="nlm_natural_language",
             session_id=session_id,
@@ -2778,7 +2841,14 @@ class BotService:
         # flag CLAW_DISABLE_TASK_INTENT_ROUTER=1 (default ON until evidence-
         # aware classifier is in place).
         # TODO: replace with explicit task_id / recent-context check.
-        if os.getenv("CLAW_DISABLE_TASK_INTENT_ROUTER", "1") == "1":
+        # Carve-out: if the message contains a literal task_id (e.g.
+        # "estado de la task nlm-abc123"), the router IS allowed to capture
+        # it even when the canned-disable flag is set. The brain-bypass risk
+        # comes from regex over-triggers, not from explicit references.
+        if (
+            os.getenv("CLAW_DISABLE_TASK_INTENT_ROUTER", "1") == "1"
+            and not _has_literal_task_id(text)
+        ):
             return None
 
         intent = self._classify_task_intent(text, session_id=session_id)

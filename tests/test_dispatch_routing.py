@@ -188,3 +188,56 @@ def test_explicit_task_id_classification_recognizes_task(bot, text: str) -> None
         "command",
         "operational_alert",
     }, f"Explicit task-id message routed to unknown intent: {text!r} → {intent!r}"
+
+
+# ---------------------------------------------------------------------------
+# Commit #5 — make brain the default route
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("/status", True),
+        ("/jobs", True),
+        ("estado de la task nlm-5a9c55c8929d", True),
+        ("continúa task tg-574707975:skill:1777581878766883000", True),
+        ("Porque te está costando terminar las tareas?", False),
+        ("Eres claw o sigues siendo Claude code?", False),
+        ("hello world", False),
+    ],
+)
+def test_is_explicit_command_classifier(text: str, expected: bool) -> None:
+    """The brain-bypass refactor allows pre-brain routers to capture only
+    explicit commands (`/foo`) or messages with a literal task_id. Anything
+    else must fall through to the brain."""
+    from claw_v2.bot import _is_explicit_command
+
+    assert _is_explicit_command(text) is expected, f"_is_explicit_command misclassified {text!r}"
+
+
+def test_semantic_prebrain_routes_default_off(bot, monkeypatch) -> None:
+    """Default production behavior: heuristic semantic routers are off.
+    Operators must opt in via CLAW_ENABLE_SEMANTIC_PREBRAIN_ROUTES=1."""
+    monkeypatch.delenv("CLAW_ENABLE_SEMANTIC_PREBRAIN_ROUTES", raising=False)
+    assert bot._semantic_prebrain_routes_enabled() is False
+    monkeypatch.setenv("CLAW_ENABLE_SEMANTIC_PREBRAIN_ROUTES", "0")
+    assert bot._semantic_prebrain_routes_enabled() is False
+    monkeypatch.setenv("CLAW_ENABLE_SEMANTIC_PREBRAIN_ROUTES", "1")
+    assert bot._semantic_prebrain_routes_enabled() is True
+
+
+def test_literal_task_id_bypasses_disable_flag(bot, monkeypatch) -> None:
+    """When the canned task router is disabled (default), an explicit
+    literal task_id should still be eligible for routing through the
+    classifier — the disable is a brain-bypass guard, not a hard kill."""
+    # Disable flag stays at default ("1"); the carve-out should still let
+    # this message pass through to the classifier, which then routes it.
+    monkeypatch.setenv("CLAW_DISABLE_TASK_INTENT_ROUTER", "1")
+    classified = bot._classify_task_intent(
+        "estado de la task nlm-5a9c55c8929d", session_id="t"
+    )
+    assert classified.get("intent") in {
+        "status_question",
+        "resume_previous",
+    }, classified
