@@ -682,10 +682,34 @@ class WikiService:
     # Auto-Scrape Sources
     # ------------------------------------------------------------------
 
-    WATCH_SOURCES = [
+    DEFAULT_WATCH_SOURCES = [
         ("Crescendo AI News", "https://www.crescendo.ai/news/latest-ai-news-and-updates"),
         ("BuildEZ AI Trends", "https://www.buildez.ai/blog/ai-trending-april-2026-biggest-shifts"),
     ]
+
+    @property
+    def WATCH_SOURCES(self) -> list[tuple[str, str]]:
+        """Watch sources for auto-scrape. Loads from sources.json if present, else uses defaults.
+
+        Format: {"sources": [{"name": "...", "url": "..."}, ...]}
+        Path: <wiki_root>/sources.json
+        """
+        sources_path = self.root / "sources.json"
+        if not sources_path.exists():
+            return list(self.DEFAULT_WATCH_SOURCES)
+        try:
+            data = json.loads(sources_path.read_text(encoding="utf-8"))
+            entries = data.get("sources", [])
+            result: list[tuple[str, str]] = []
+            for item in entries:
+                name = item.get("name", "").strip()
+                url = item.get("url", "").strip()
+                if name and url:
+                    result.append((name, url))
+            return result or list(self.DEFAULT_WATCH_SOURCES)
+        except Exception:
+            logger.exception("Failed to load sources.json, falling back to defaults")
+            return list(self.DEFAULT_WATCH_SOURCES)
 
     def auto_scrape_sources(self) -> dict:
         """Scrape watched sources via firecrawl, extract key items, ingest new ones."""
