@@ -101,6 +101,34 @@ class BotTests(unittest.TestCase):
                 self.assertAlmostEqual(payload["total"], 0.12)
                 self.assertEqual(payload["by_lane"], {"brain": 0.12})
 
+    def test_freeze_command_blocks_tool_dispatch_until_unfreeze(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            target = workspace / "note.txt"
+            target.write_text("hello", encoding="utf-8")
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(workspace),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+
+                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/freeze")
+                self.assertIn("Freeze activado", reply)
+                with self.assertRaises(PermissionError):
+                    runtime.tool_registry.execute("Read", {"path": str(target)}, agent_class="researcher")
+
+                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/unfreeze")
+                self.assertIn("Freeze desactivado", reply)
+                result = runtime.tool_registry.execute("Read", {"path": str(target)}, agent_class="researcher")
+                self.assertEqual(result["content"], "hello")
+
     def test_command_router_preserves_terminal_usage_response(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

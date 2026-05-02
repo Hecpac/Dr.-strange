@@ -52,6 +52,7 @@ from claw_v2.llm import LLMRouter
 from claw_v2.memory import MemoryStore
 from claw_v2.metrics import MetricsTracker
 from claw_v2.model_registry import ModelRegistry
+from claw_v2.observation_window import ObservationWindowConfig, ObservationWindowState
 from claw_v2.observe import ObserveStream
 from claw_v2.pipeline import PipelineService
 from claw_v2.skills import SkillRegistry
@@ -132,6 +133,7 @@ class ClawRuntime:
     startup_health: StartupHealthReport | None = None
     tool_registry: object | None = None
     openai_tool_executor: object | None = None
+    observation_window: ObservationWindowState | None = None
 
 
 def _noop_experiment_runner(agent_name: str, experiment_number: int, state: dict) -> object:
@@ -358,6 +360,7 @@ def _setup_llm_stack(
     google_transport: Callable[[LLMRequest], LLMResponse] | None,
     ollama_transport: Callable[[LLMRequest], LLMResponse] | None,
     codex_transport: Callable[[LLMRequest], LLMResponse] | None,
+    observation_window: ObservationWindowState | None,
 ) -> tuple[LLMRouter, LearningLoop, BrainService, "ToolRegistry", Callable[[str, dict], dict]]:
     def audit_sink(event: dict) -> None:
         observe.emit(
@@ -410,6 +413,8 @@ def _setup_llm_stack(
         memory=memory,
         observe=observe,
         telemetry_root=config.telemetry_root,
+        observation_window=observation_window,
+        autoexec_max_tier=config.tier_autoexec_max,
     )
     openai_tool_schemas = tool_registry.openai_tool_schemas()
 
@@ -448,6 +453,7 @@ def _setup_llm_stack(
         post_hooks=post_hooks,
         openai_tool_executor=openai_tool_executor,
         openai_tool_schemas=openai_tool_schemas,
+        observation_window=observation_window,
     )
     learning = LearningLoop(memory=memory, router=router)
     checkpoint = CheckpointService(
@@ -556,6 +562,7 @@ def _setup_operational_services(
     learning: LearningLoop,
     kairos: KairosService,
     startup_health: StartupHealthReport,
+    observation_window: ObservationWindowState | None,
 ) -> tuple[ClawDaemon, BotService, PipelineService, DevBrowserService, BrowserUseService, ComputerUseService]:
     daemon = ClawDaemon(
         scheduler=CronScheduler(),
@@ -599,6 +606,7 @@ def _setup_operational_services(
         task_ledger=task_ledger,
         job_service=job_service,
         model_registry=model_registry,
+        observation_window=observation_window,
     )
     for capability, reason in startup_health.degraded_capabilities().items():
         bot.set_capability_status(capability, available=False, reason=reason)
@@ -1067,6 +1075,15 @@ def build_runtime(
     job_service = JobService(config.db_path, observe=observe)
     model_registry = ModelRegistry.default()
     startup_health = _run_startup_healthchecks(config, observe)
+    observation_window = ObservationWindowState(
+        observe=observe,
+        state_path=config.db_path.parent / "observation_window.json",
+        config=ObservationWindowConfig(
+            cost_per_hour_threshold=config.observation_cost_per_hour_threshold,
+            tool_calls_per_minute_threshold=config.observation_tool_calls_per_minute_threshold,
+            daily_budget_cap=config.daily_cost_limit,
+        ),
+    )
     agent_workspace = AgentWorkspace(config.workspace_root, template_root=Path(__file__).parent)
     workspace_bootstrap = agent_workspace.ensure()
     observe.emit("agent_workspace_bootstrap", payload=workspace_bootstrap.to_dict())
@@ -1083,6 +1100,7 @@ def build_runtime(
         google_transport=google_transport,
         ollama_transport=ollama_transport,
         codex_transport=codex_transport,
+        observation_window=observation_window,
     )
     auto_research, sub_agents, coordinator, task_board, heartbeat, kairos, buddy = _setup_agent_services(
         config=config,
@@ -1114,6 +1132,7 @@ def build_runtime(
         learning=learning,
         kairos=kairos,
         startup_health=startup_health,
+        observation_window=observation_window,
     )
     scheduler, _, wiki, skill_registry, a2a = _setup_scheduler(
         config=config,
@@ -1174,6 +1193,7 @@ def build_runtime(
         startup_health=startup_health,
         tool_registry=tool_registry,
         openai_tool_executor=openai_tool_executor,
+        observation_window=observation_window,
     )
 
 

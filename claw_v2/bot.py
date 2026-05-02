@@ -361,6 +361,7 @@ class BotService:
         task_ledger: object | None = None,
         job_service: JobService | None = None,
         model_registry: ModelRegistry | None = None,
+        observation_window: object | None = None,
     ) -> None:
         self.brain = brain
         self.auto_research = auto_research
@@ -376,6 +377,7 @@ class BotService:
         self.task_ledger = task_ledger
         self.job_service: JobService | None = job_service
         self.model_registry = model_registry or ModelRegistry.default()
+        self.observation_window = observation_window
         self.learning: Any | None = None
         self._wiki_handler = WikiHandler(memory=brain.memory)
         self._nlm_handler = NlmHandler(
@@ -1241,6 +1243,9 @@ class BotService:
             BotCommand("model", self._handle_model_command, exact=("/models", "/model", "/model status"), prefixes=("/model ",)),
             BotCommand("tokens", self._handle_tokens_command, exact=("/tokens",)),
             BotCommand("spending", self._handle_spending_command, exact=("/spending",)),
+            BotCommand("freeze", self._handle_freeze_command, exact=("/freeze",)),
+            BotCommand("unfreeze", self._handle_unfreeze_command, exact=("/unfreeze",)),
+            BotCommand("budget_status", self._handle_budget_status_command, exact=("/budget_status",)),
             BotCommand("quality", self._handle_quality_command, exact=("/quality",)),
             BotCommand("diagnose_task", self._handle_diagnose_task_command, prefixes=("/diagnose_task ",)),
             BotCommand("task_run", self._handle_task_run_command, exact=("/task_run",), prefixes=("/task_run ",)),
@@ -1434,6 +1439,37 @@ class BotService:
 
     def _handle_spending_command(self, context: CommandContext) -> str:
         return self._spending_response()
+
+    def _handle_freeze_command(self, context: CommandContext) -> str:
+        if self.observation_window is None:
+            return "observation window unavailable"
+        self.observation_window.freeze(reason="manual_telegram", actor=f"telegram:{context.user_id}")
+        return "Freeze activado. Autoexec queda pausado; el chat sigue disponible."
+
+    def _handle_unfreeze_command(self, context: CommandContext) -> str:
+        if self.observation_window is None:
+            return "observation window unavailable"
+        self.observation_window.unfreeze(actor=f"telegram:{context.user_id}")
+        return "Freeze desactivado. Autoexec reactivado."
+
+    def _handle_budget_status_command(self, context: CommandContext) -> str:
+        if self.observation_window is None:
+            return "observation window unavailable"
+        payload = self.observation_window.status_payload()
+        return json.dumps(
+            {
+                "frozen": payload["frozen"],
+                "freeze_reason": payload["freeze_reason"],
+                "cost_today": payload["cost_today"],
+                "daily_budget_cap": payload["daily_budget_cap"],
+                "daily_budget_remaining": payload["daily_budget_remaining"],
+                "rolling_cost_per_hour": payload["rolling_cost_per_hour"],
+                "actions_per_minute": payload["actions_per_minute"],
+                "tripped_breakers": payload["tripped_breakers"],
+            },
+            indent=2,
+            sort_keys=True,
+        )
 
     def _handle_quality_command(self, context: CommandContext) -> str:
         return self._quality_response()

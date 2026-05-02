@@ -38,6 +38,32 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _env_tier(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower().removeprefix("tier_").removeprefix("tier")
+    try:
+        parsed = int(float(normalized))
+    except ValueError:
+        return default
+    return max(parsed, 1)
+
+
+def _daily_cost_limit_from_env() -> float | None:
+    if "CLAW_BUDGET_CAP_DAILY" in os.environ:
+        return _env_float("CLAW_BUDGET_CAP_DAILY", 0.0)
+    if "DAILY_COST_LIMIT" in os.environ:
+        return _env_float("DAILY_COST_LIMIT", 0.0)
+    return None
+
+
+def _autonomous_maintenance_from_env() -> bool:
+    if "CLAW_AUTONOMOUS_MAINTENANCE" in os.environ:
+        return _env_bool("CLAW_AUTONOMOUS_MAINTENANCE", True)
+    return _env_bool("CLAW_AUTONOMOUS_MAINTENANCE_ENABLED", True)
+
+
 _SECONDARY_PROVIDER_DEFAULT_MODELS: dict[str, str] = {
     "anthropic": "claude-sonnet-4-6",
     "openai": "gpt-5.4-mini",
@@ -316,6 +342,10 @@ class AppConfig:
     sandbox_capability_profile: str
     sdk_bypass_permissions: bool
     daily_cost_limit: float | None
+    tier_autoexec_max: int
+    observability_telegram_chat_id: str | None
+    observation_cost_per_hour_threshold: float
+    observation_tool_calls_per_minute_threshold: int
     chrome_cdp_enabled: bool
     claw_chrome_port: int
     computer_use_enabled: bool
@@ -384,7 +414,7 @@ class AppConfig:
             eval_artifacts_root=Path(os.getenv("EVAL_ARTIFACTS_ROOT", str(home / ".claw" / "evals"))),
             eval_on_self_improve=_env_bool("EVAL_ON_SELF_IMPROVE", True),
             self_improve_test_timeout_seconds=_env_int("SELF_IMPROVE_TEST_TIMEOUT_SECONDS", 600),
-            autonomous_maintenance_enabled=_env_bool("CLAW_AUTONOMOUS_MAINTENANCE_ENABLED", True),
+            autonomous_maintenance_enabled=_autonomous_maintenance_from_env(),
             use_compaction=_env_bool("USE_COMPACTION", True),
             cache_prefix_ttl=_env_int("CACHE_PREFIX_TTL", 3600),
             allowed_paths=[Path(p) for p in os.getenv("ALLOWED_PATHS", "").split(":") if p],
@@ -422,11 +452,11 @@ class AppConfig:
             browserbase_keep_alive=_env_bool("BROWSERBASE_KEEP_ALIVE", False),
             sandbox_capability_profile=os.getenv("SANDBOX_CAPABILITY_PROFILE", "engineer"),
             sdk_bypass_permissions=_env_bool("SDK_BYPASS_PERMISSIONS", True),
-            daily_cost_limit=(
-                _env_float("DAILY_COST_LIMIT", 0.0)
-                if "DAILY_COST_LIMIT" in os.environ
-                else None
-            ),
+            daily_cost_limit=_daily_cost_limit_from_env(),
+            tier_autoexec_max=_env_tier("CLAW_TIER_AUTOEXEC_MAX", 2),
+            observability_telegram_chat_id=os.getenv("CLAW_OBSERVABILITY_TELEGRAM_CHAT_ID") or None,
+            observation_cost_per_hour_threshold=_env_float("CLAW_OBSERVATION_COST_PER_HOUR", 1.50),
+            observation_tool_calls_per_minute_threshold=_env_int("CLAW_OBSERVATION_TOOL_CALLS_PER_MINUTE", 10),
             chrome_cdp_enabled=_env_bool("CHROME_CDP_ENABLED", True),
             claw_chrome_port=_env_int("CLAW_CHROME_PORT", 9250),
             computer_use_enabled=_env_bool("COMPUTER_USE_ENABLED", True),
@@ -490,6 +520,12 @@ class AppConfig:
             raise ValueError(f"morning_brief_timezone is invalid: {self.morning_brief_timezone}") from exc
         if self.web_chat_port <= 0:
             raise ValueError("web_chat_port must be positive.")
+        if self.tier_autoexec_max <= 0:
+            raise ValueError("tier_autoexec_max must be positive.")
+        if self.observation_cost_per_hour_threshold <= 0:
+            raise ValueError("observation_cost_per_hour_threshold must be positive.")
+        if self.observation_tool_calls_per_minute_threshold <= 0:
+            raise ValueError("observation_tool_calls_per_minute_threshold must be positive.")
         for site in self.monitored_sites:
             if not site.name:
                 raise ValueError("monitored_sites entries must include a name.")

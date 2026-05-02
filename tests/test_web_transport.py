@@ -10,6 +10,8 @@ from urllib.request import Request, urlopen
 
 from claw_v2.bot import BotService
 from claw_v2.chat_api import LocalChatAPI
+from claw_v2.observation_window import ObservationWindowState
+from claw_v2.observability_dashboard import ObservabilityDashboard
 from claw_v2.web_transport import WebTransport
 
 
@@ -89,6 +91,29 @@ class WebTransportTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await transport.stop()
         self.assertFalse(transport.is_serving())
+
+    async def test_serves_observability_dashboard_and_freeze_endpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            window = ObservationWindowState(state_path=Path(tmpdir) / "window.json")
+            transport = WebTransport(
+                chat_api=LocalChatAPI(bot_service=_StubBotService()),
+                observability_dashboard=ObservabilityDashboard(window),
+                host="127.0.0.1",
+                port=0,
+            )
+            await transport.start()
+            try:
+                with urlopen(f"{transport.base_url}/observability") as response:
+                    html = response.read().decode("utf-8")
+                self.assertIn("Claw Observability", html)
+
+                request = Request(f"{transport.base_url}/observability/freeze", method="POST")
+                with urlopen(request) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                self.assertTrue(payload["frozen"])
+                self.assertTrue(window.frozen)
+            finally:
+                await transport.stop()
 
     async def test_serves_traces_api(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

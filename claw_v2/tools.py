@@ -313,11 +313,15 @@ class ToolRegistry:
         memory: MemoryStore | None = None,
         observe: object | None = None,
         telemetry_root: Path | str | None = None,
+        observation_window: object | None = None,
+        autoexec_max_tier: int = TIER_LOCAL_MUTATION,
     ) -> None:
         self.workspace_root = Path(workspace_root)
         self.memory = memory
         self.observe = observe
         self.telemetry_root = Path(telemetry_root).expanduser() if telemetry_root is not None else None
+        self.observation_window = observation_window
+        self.autoexec_max_tier = autoexec_max_tier
         self._runtime_goal_id: str | None = None
         self._definitions: dict[str, ToolDefinition] = {}
 
@@ -384,6 +388,7 @@ class ToolRegistry:
         definition = self.get(name)
         if agent_class not in definition.allowed_agent_classes:
             raise PermissionError(f"Agent class '{agent_class}' cannot use tool '{name}'.")
+        self._observation_before_tool(definition, args, agent_class)
         if policy is not None:
             decision = sandbox_hook(
                 name,
@@ -396,7 +401,7 @@ class ToolRegistry:
                 raise PermissionError(decision.reason or "tool invocation blocked by sandbox")
         # Tier enforcement (HEC-14): bypass approval for Tier 1/2, gate Tier 3.
         # Logged to observe stream for audit. approval_gate may raise to block.
-        if tool_requires_approval(definition.tier):
+        if tool_requires_approval(definition.tier) or definition.tier > self.autoexec_max_tier:
             if approval_gate is None:
                 raise PermissionError(
                     f"Tool '{name}' is Tier {definition.tier} (requires approval) "
@@ -421,6 +426,12 @@ class ToolRegistry:
         try:
             result = definition.handler(args)
         except Exception as exc:
+            self._observation_after_tool(
+                definition,
+                agent_class,
+                status="fail",
+                error=f"{type(exc).__name__}: {exc}",
+            )
             claim_id = self._record_p0_tool_claim(
                 definition=definition,
                 goal_id=p0_goal_id,
@@ -439,6 +450,7 @@ class ToolRegistry:
                 claims=[claim_id] if claim_id else [],
             )
             raise
+        self._observation_after_tool(definition, agent_class, status="ok")
         claim_id = self._record_p0_tool_claim(
             definition=definition,
             goal_id=p0_goal_id,
@@ -565,6 +577,45 @@ class ToolRegistry:
             # Observability is best-effort; never block execution on log failure.
             pass
 
+    def _observation_before_tool(
+        self,
+        definition: "ToolDefinition",
+        args: dict,
+        agent_class: AgentClass,
+    ) -> None:
+        if self.observation_window is None:
+            return
+        before = getattr(self.observation_window, "before_tool_execution", None)
+        if before is None:
+            return
+        before(
+            tool_name=definition.name,
+            args=args,
+            tier=definition.tier,
+            actor=agent_class,
+        )
+
+    def _observation_after_tool(
+        self,
+        definition: "ToolDefinition",
+        agent_class: AgentClass,
+        *,
+        status: str,
+        error: str | None = None,
+    ) -> None:
+        if self.observation_window is None:
+            return
+        after = getattr(self.observation_window, "after_tool_execution", None)
+        if after is None:
+            return
+        after(
+            tool_name=definition.name,
+            tier=definition.tier,
+            actor=agent_class,
+            status=status,
+            error=error,
+        )
+
     async def execute_async(
         self,
         name: str,
@@ -609,8 +660,17 @@ class ToolRegistry:
         a2a: A2AService | None = None,
         observe: object | None = None,
         telemetry_root: Path | str | None = None,
+        observation_window: object | None = None,
+        autoexec_max_tier: int = TIER_LOCAL_MUTATION,
     ) -> "ToolRegistry":
-        registry = cls(workspace_root=workspace_root, memory=memory, observe=observe, telemetry_root=telemetry_root)
+        registry = cls(
+            workspace_root=workspace_root,
+            memory=memory,
+            observe=observe,
+            telemetry_root=telemetry_root,
+            observation_window=observation_window,
+            autoexec_max_tier=autoexec_max_tier,
+        )
         _ws = Path(workspace_root).resolve()
 
         def _safe_path(raw: str | Path) -> Path:
