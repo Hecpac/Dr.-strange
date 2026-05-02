@@ -196,6 +196,62 @@ class StatsTests(unittest.TestCase):
         self.assertEqual(stats["wiki_pages"], 1)
         self.assertEqual(stats["raw_sources"], 1)
 
+    def test_quality_report_measures_retrieval_and_coverage_without_mutating_embeddings(self) -> None:
+        svc, _, tmp = _make_wiki()
+        _write_page(
+            svc.wiki_dir,
+            "ai-tools",
+            "AI Tools",
+            "LLM tools and embeddings.",
+            category="AI & Herramientas",
+            confidence="0.8",
+        )
+        _write_page(
+            svc.wiki_dir,
+            "ops-runbook",
+            "Operations Runbook",
+            "Claw operational procedures.",
+            category="Operaciones Claw",
+            confidence="0.55",
+        )
+        _write_page(
+            svc.wiki_dir,
+            "insurance",
+            "Insurance Notes",
+            "Coverage details.",
+            category="Seguros",
+            confidence="0.2",
+        )
+        _write_page(
+            svc.wiki_dir,
+            "unknown-topic",
+            "Unknown Topic",
+            "A page without calibrated confidence.",
+            category="Unknown Bucket",
+        )
+        svc._embeddings["ops-runbook"] = [0.1] * 128
+        svc._embeddings["stale-page"] = [0.2] * 128
+
+        report = svc.quality_report(search_limit=1)
+
+        self.assertEqual(report["wiki_pages"], 4)
+        self.assertEqual(report["embedding_coverage"]["indexed"], 1)
+        self.assertEqual(report["embedding_coverage"]["total"], 4)
+        self.assertEqual(report["embedding_coverage"]["ratio"], 0.25)
+        self.assertEqual(report["embedding_coverage"]["stale"], 1)
+        self.assertEqual(
+            report["confidence_distribution"],
+            {"high": 1, "medium": 1, "low": 1, "unknown": 1},
+        )
+        self.assertEqual(report["category_coverage"]["covered"], 3)
+        self.assertEqual(report["category_coverage"]["unmapped"], 1)
+        self.assertEqual(report["category_coverage"]["distribution"]["AI & Herramientas"], 1)
+        self.assertEqual(report["category_coverage"]["distribution"]["Operaciones Claw"], 1)
+        self.assertEqual(report["category_coverage"]["distribution"]["Seguros"], 1)
+        self.assertEqual(report["search_self_test"]["sample_size"], 4)
+        self.assertEqual(report["search_self_test"]["hit_rate"], 1.0)
+        self.assertEqual(set(svc._embeddings), {"ops-runbook", "stale-page"})
+
 
 class GraphTests(unittest.TestCase):
     def test_load_empty_graph(self) -> None:
