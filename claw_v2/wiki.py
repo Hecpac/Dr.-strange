@@ -111,6 +111,21 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return dot / (na * nb)
 
 
+def _parse_float(value: str | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _ratio(numerator: int, denominator: int) -> float:
+    if denominator <= 0:
+        return 0.0
+    return round(numerator / denominator, 4)
+
+
 class WikiService:
     """Manages the persistent LLM wiki."""
 
@@ -963,6 +978,86 @@ class WikiService:
             "wiki_root": str(self.root),
         }
 
+    def quality_report(self, *, search_limit: int = 3) -> dict:
+        """Return non-mutating quality metrics for wiki retrieval and coverage."""
+        pages = self._list_wiki_pages()
+        total_pages = len(pages)
+        active_slugs = {page.stem for page in pages}
+        indexed_slugs = {
+            slug for slug, vector in self._embeddings.items()
+            if slug in active_slugs and isinstance(vector, list) and bool(vector)
+        }
+        stale_embeddings = {
+            slug for slug, vector in self._embeddings.items()
+            if slug not in active_slugs and isinstance(vector, list) and bool(vector)
+        }
+
+        confidence_distribution = {"high": 0, "medium": 0, "low": 0, "unknown": 0}
+        category_distribution = {category: 0 for category in VALID_CATEGORIES}
+        uncategorized = 0
+        unmapped_categories = 0
+
+        for page in pages:
+            fields = self._frontmatter_fields(page)
+            confidence = _parse_float(fields.get("confidence"))
+            if confidence is None:
+                confidence_distribution["unknown"] += 1
+            elif confidence >= 0.75:
+                confidence_distribution["high"] += 1
+            elif confidence >= 0.5:
+                confidence_distribution["medium"] += 1
+            else:
+                confidence_distribution["low"] += 1
+
+            raw_category = fields.get("category", "").strip()
+            if not raw_category:
+                uncategorized += 1
+                continue
+            normalized = self._category_match(raw_category)
+            if normalized is None:
+                unmapped_categories += 1
+                continue
+            category_distribution[normalized] += 1
+
+        search_hits = 0
+        search_misses: list[str] = []
+        safe_limit = max(1, int(search_limit))
+        for page in pages:
+            title = self._extract_title(page)
+            query = title if title and title != page.stem else page.stem.replace("-", " ")
+            top_slugs = [item["slug"] for item in self._rank_pages(query, persist_missing_embeddings=False)[:safe_limit]]
+            if page.stem in top_slugs:
+                search_hits += 1
+            else:
+                search_misses.append(page.stem)
+
+        covered_categories = sum(1 for count in category_distribution.values() if count > 0)
+        return {
+            "wiki_pages": total_pages,
+            "embedding_coverage": {
+                "indexed": len(indexed_slugs),
+                "total": total_pages,
+                "ratio": _ratio(len(indexed_slugs), total_pages),
+                "stale": len(stale_embeddings),
+            },
+            "confidence_distribution": confidence_distribution,
+            "category_coverage": {
+                "covered": covered_categories,
+                "total": len(VALID_CATEGORIES),
+                "ratio": _ratio(covered_categories, len(VALID_CATEGORIES)),
+                "distribution": category_distribution,
+                "uncategorized": uncategorized,
+                "unmapped": unmapped_categories,
+            },
+            "search_self_test": {
+                "limit": safe_limit,
+                "sample_size": total_pages,
+                "hits": search_hits,
+                "hit_rate": _ratio(search_hits, total_pages),
+                "misses": search_misses[:10],
+            },
+        }
+
     # ------------------------------------------------------------------
     # Cascade Delete
     # ------------------------------------------------------------------
@@ -1193,7 +1288,7 @@ class WikiService:
             if item["score"] > 0
         ]
 
-    def _rank_pages(self, query: str) -> list[dict]:
+    def _rank_pages(self, query: str, *, persist_missing_embeddings: bool = True) -> list[dict]:
         """Rank pages with BM25-style keyword retrieval plus cosine similarity."""
         pages = self._list_wiki_pages()
         if not pages or not query.strip():
@@ -1215,8 +1310,9 @@ class WikiService:
             page_vec = self._embeddings.get(slug)
             if page_vec is None:
                 page_vec = _embed(search_text[:1500])
-                self._embeddings[slug] = page_vec
-                embeddings_dirty = True
+                if persist_missing_embeddings:
+                    self._embeddings[slug] = page_vec
+                    embeddings_dirty = True
             similarity = max(0.0, _cosine(query_vec, page_vec)) * self._time_decay(page)
             tokens = _tokenize(search_text)
             corpus_tokens.append(tokens)
@@ -1426,6 +1522,30 @@ class WikiService:
     def _clean_source(value: str) -> str:
         return value.strip().strip('"').strip("'")
 
+    def _frontmatter_fields(self, page: Path) -> dict[str, str]:
+        try:
+            text = page.read_text(encoding="utf-8")
+        except Exception:
+            return {}
+        m = _FRONTMATTER_RE.match(text)
+        if not m:
+            return {}
+        fields: dict[str, str] = {}
+        for line in m.group(1).splitlines():
+            if ":" not in line or line[:1].isspace():
+                continue
+            key, value = line.split(":", 1)
+            fields[key.strip().lower()] = value.strip().strip('"').strip("'")
+        return fields
+
+    @staticmethod
+    def _category_match(category: str) -> str | None:
+        cat_lower = category.lower().strip()
+        for valid in VALID_CATEGORIES:
+            if cat_lower == valid.lower() or cat_lower in valid.lower() or valid.lower() in cat_lower:
+                return valid
+        return None
+
     def _has_raw_evidence(self, sources: list[str]) -> bool:
         for source in sources:
             slug = _slugify(source)
@@ -1564,11 +1684,7 @@ class WikiService:
 
     def _normalize_category(self, category: str) -> str:
         """Map LLM-assigned category to the closest valid category."""
-        cat_lower = category.lower().strip()
-        for valid in VALID_CATEGORIES:
-            if cat_lower == valid.lower() or cat_lower in valid.lower() or valid.lower() in cat_lower:
-                return valid
-        return "Research"
+        return self._category_match(category) or "Research"
 
     def rebuild_graph(self) -> dict:
         """Rebuild the knowledge graph from wikilinks in all wiki pages."""

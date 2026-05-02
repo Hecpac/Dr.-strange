@@ -21,6 +21,7 @@ from claw_v2.agents import (
     GitBranchPromotionExecutor,
     GitWorktreeExperimentRunner,
     SubAgentService,
+    wiki_quality_evaluator,
 )
 from claw_v2.approval import ApprovalManager
 from claw_v2.approval_gate import (
@@ -484,6 +485,7 @@ def _setup_agent_services(
             worktree_root=config.agent_state_root / "_worktrees",
             router=router,
             brain=brain,
+            evaluator=wiki_quality_evaluator,
             promotion_executor=GitBranchPromotionExecutor(config.workspace_root),
         )
 

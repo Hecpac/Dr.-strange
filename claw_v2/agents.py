@@ -511,6 +511,28 @@ class DockerSandbox:
         )
 
 
+def wiki_quality_evaluator(worktree_path: Path, state: dict, diff: str) -> ExperimentEvaluation:
+    """Evaluate wiki quality without Docker by calling WikiService.quality_report()."""
+    from claw_v2.wiki import WikiService
+
+    svc = WikiService(router=LLMRouter.__new__(LLMRouter))
+    report = svc.quality_report(search_limit=3)
+    hit_rate = report["search_self_test"]["hit_rate"]
+    embed_ratio = report["embedding_coverage"]["ratio"]
+    category_ratio = report["category_coverage"]["ratio"]
+    metric = round(0.6 * hit_rate + 0.25 * embed_ratio + 0.15 * category_ratio, 4)
+    baseline = float(state.get("last_verified_state", {}).get("metric") or 0.0)
+    if not diff.strip():
+        status = "noop"
+    elif metric > baseline:
+        status = "improved"
+    elif metric < baseline:
+        status = "regressed"
+    else:
+        status = "no_change"
+    return ExperimentEvaluation(metric_value=metric, status=status, output=json.dumps(report, indent=2))
+
+
 class GitWorktreeExperimentRunner:
     def __init__(
         self,
@@ -550,6 +572,7 @@ class GitWorktreeExperimentRunner:
                     "worktree_path": str(worktree_path),
                 },
                 cwd=str(worktree_path),
+                timeout=900.0,
             )
             diff = self._collect_diff(worktree_path, workspace_mode)
             evaluation = self._evaluate(worktree_path, state, diff)
