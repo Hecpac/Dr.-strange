@@ -198,12 +198,14 @@ class TelegramTransport:
         allowed_user_id: str | None = None,
         voice_api_key: str | None = None,
         agent_runtime: object | None = None,
+        xai_api_key: str | None = None,
     ) -> None:
         self._bot_service = bot_service
         self._agent_runtime = agent_runtime
         self._token = token
         self._allowed_user_id = allowed_user_id
         self._voice_api_key = voice_api_key
+        self._xai_api_key = xai_api_key or os.environ.get("XAI_API_KEY")
         self._app = None
         self._rate_limits: dict[str, list[float]] = {}
         self._rate_max = 10  # max requests per window
@@ -444,12 +446,16 @@ class TelegramTransport:
         bot_done_at = time.perf_counter()
         if not response or not response.strip():
             response = "(procesando... intenta de nuevo en unos segundos)"
+        parts = _split_message(response)
         voice_name = self._bot_service.is_voice_mode(session_id)
-        if voice_name and self._voice_api_key:
+        if voice_name and (self._voice_api_key or self._xai_api_key):
             try:
                 await _maybe_send_chat_action(update.message, "record_voice")
                 ogg_path = await synthesize_voice_note(
-                    response, api_key=self._voice_api_key, voice=voice_name,
+                    response,
+                    api_key=self._voice_api_key,
+                    voice=voice_name,
+                    xai_api_key=self._xai_api_key,
                 )
                 try:
                     with open(ogg_path, "rb") as f:
@@ -458,11 +464,9 @@ class TelegramTransport:
                     ogg_path.unlink(missing_ok=True)
             except Exception:
                 logger.warning("TTS failed, falling back to text", exc_info=True)
-                parts = _split_message(response)
                 for part in parts:
                     await update.message.reply_text(part, link_preview_options=_NO_PREVIEW)
         else:
-            parts = _split_message(response)
             for part in parts:
                 await update.message.reply_text(part, link_preview_options=_NO_PREVIEW)
         finished_at = time.perf_counter()
@@ -882,12 +886,16 @@ class TelegramTransport:
             logger.exception("Error handling voice message")
             response = "Error processing your voice message."
         bot_done_at = time.perf_counter()
+        parts = _split_message(response)
         voice_name = self._bot_service.is_voice_mode(session_id)
-        if voice_name and self._voice_api_key:
+        if voice_name and (self._voice_api_key or self._xai_api_key):
             try:
                 await _maybe_send_chat_action(update.message, "record_voice")
                 ogg_path = await synthesize_voice_note(
-                    response, api_key=self._voice_api_key, voice=voice_name,
+                    response,
+                    api_key=self._voice_api_key,
+                    voice=voice_name,
+                    xai_api_key=self._xai_api_key,
                 )
                 try:
                     with open(ogg_path, "rb") as f:
@@ -896,11 +904,9 @@ class TelegramTransport:
                     ogg_path.unlink(missing_ok=True)
             except Exception:
                 logger.warning("TTS failed, falling back to text", exc_info=True)
-                parts = _split_message(response)
                 for part in parts:
                     await update.message.reply_text(part, link_preview_options=_NO_PREVIEW)
         else:
-            parts = _split_message(response)
             for part in parts:
                 await update.message.reply_text(part, link_preview_options=_NO_PREVIEW)
         finished_at = time.perf_counter()

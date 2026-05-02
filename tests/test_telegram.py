@@ -183,6 +183,37 @@ class HandleTextTests(unittest.IsolatedAsyncioTestCase):
             text="hello",
         )
 
+    async def test_voice_mode_can_use_xai_without_openai_key(self) -> None:
+        bot_service = MagicMock()
+        bot_service.handle_text.return_value = "response text"
+        bot_service.is_voice_mode.return_value = "nova"
+        bot_service.observe = MagicMock()
+        transport = TelegramTransport(
+            bot_service=bot_service,
+            token="t",
+            allowed_user_id="123",
+            xai_api_key="xai-key",
+        )
+        update = MagicMock()
+        update.effective_user.id = 123
+        update.effective_chat.id = 1
+        update.message.text = "hello"
+        update.message.reply_text = AsyncMock()
+        update.message.reply_voice = AsyncMock()
+        update.message.chat.send_action = AsyncMock()
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as ogg:
+            ogg.write(b"ogg")
+            ogg_path = Path(ogg.name)
+
+        with patch("claw_v2.telegram.synthesize_voice_note", new=AsyncMock(return_value=ogg_path)) as tts:
+            await transport._handle_text(update, MagicMock())
+
+        update.message.reply_voice.assert_awaited_once()
+        update.message.reply_text.assert_not_awaited()
+        tts.assert_awaited_once()
+        self.assertIsNone(tts.await_args.kwargs["api_key"])
+        self.assertEqual(tts.await_args.kwargs["xai_api_key"], "xai-key")
+
     async def test_send_latest_image_request_bypasses_agent_and_sends_photo(self) -> None:
         db_path = Path(tempfile.mkdtemp()) / "test.db"
         memory = MemoryStore(db_path)

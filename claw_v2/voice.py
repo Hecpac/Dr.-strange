@@ -132,6 +132,42 @@ async def _synthesize_edge(text: str, *, voice: str = "nova") -> Path:
     return Path(tmp.name)
 
 
+XAI_TTS_URL = "https://api.x.ai/v1/tts"
+XAI_DEFAULT_VOICE = "rex"
+XAI_DEFAULT_LANGUAGE = "es-MX"
+
+
+async def _synthesize_xai(
+    text: str,
+    *,
+    api_key: str,
+    voice_id: str = XAI_DEFAULT_VOICE,
+    language: str = XAI_DEFAULT_LANGUAGE,
+) -> Path:
+    """Text → MP3 via xAI Grok TTS. Caller cleans up.
+
+    Endpoint: https://docs.x.ai/developers/model-capabilities/audio/voice
+    """
+    import httpx
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        resp = await client.post(
+            XAI_TTS_URL,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={"text": text, "voice_id": voice_id, "language": language},
+        )
+    resp.raise_for_status()
+    if not resp.content:
+        raise RuntimeError("xAI TTS returned empty body")
+    tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+    tmp.write(resp.content)
+    tmp.close()
+    return Path(tmp.name)
+
+
 async def _mp3_to_ogg(mp3_path: Path) -> Path:
     """Convert MP3 to OGG Opus for Telegram voice notes."""
     ogg_path = mp3_path.with_suffix(".ogg")
@@ -157,14 +193,36 @@ async def synthesize_voice_note(
     *,
     api_key: str | None = None,
     voice: str = "nova",
+    xai_api_key: str | None = None,
+    xai_voice: str = XAI_DEFAULT_VOICE,
+    xai_language: str = XAI_DEFAULT_LANGUAGE,
 ) -> Path:
-    """Text → OGG Opus voice note for Telegram. Tries OpenAI TTS, falls back to Edge-TTS."""
+    """Text → OGG Opus voice note for Telegram.
+
+    Backend priority: xAI Grok TTS (Claw's default voice) → OpenAI TTS → Edge-TTS.
+    xAI is preferred when XAI_API_KEY is available because it supports built-in
+    and custom voice IDs through the same TTS endpoint.
+    """
     truncated = text[:MAX_TTS_CHARS]
     mp3_path: Path | None = None
-    try:
-        mp3_path = await synthesize(truncated, api_key=api_key, voice=voice)
-    except Exception:
-        logger.warning("OpenAI TTS failed, falling back to Edge-TTS", exc_info=True)
+
+    if xai_api_key:
+        try:
+            mp3_path = await _synthesize_xai(
+                truncated,
+                api_key=xai_api_key,
+                voice_id=xai_voice,
+                language=xai_language,
+            )
+        except Exception:
+            logger.warning("xAI TTS failed, falling back to OpenAI/Edge", exc_info=True)
+
+    if mp3_path is None and api_key:
+        try:
+            mp3_path = await synthesize(truncated, api_key=api_key, voice=voice)
+        except Exception:
+            logger.warning("OpenAI TTS failed, falling back to Edge-TTS", exc_info=True)
+
     if mp3_path is None:
         mp3_path = await _synthesize_edge(truncated, voice=voice)
     try:
