@@ -157,6 +157,7 @@ class WikiService:
         self._embeddings: dict[str, list[float]] = self._load_embeddings()
         self._graph: dict[str, list[dict]] = self._load_graph()
         self._firecrawl_paused_until, self._firecrawl_pause_reason = self._load_firecrawl_state()
+        self._watch_sources_override: list[tuple[str, str]] | None = None
 
     # ------------------------------------------------------------------
     # Ingest (two-step chain-of-thought)
@@ -709,6 +710,8 @@ class WikiService:
         Format: {"sources": [{"name": "...", "url": "..."}, ...]}
         Path: <wiki_root>/sources.json
         """
+        if self._watch_sources_override is not None:
+            return list(self._watch_sources_override)
         sources_path = self.root / "sources.json"
         if not sources_path.exists():
             return list(self.DEFAULT_WATCH_SOURCES)
@@ -725,6 +728,10 @@ class WikiService:
         except Exception:
             logger.exception("Failed to load sources.json, falling back to defaults")
             return list(self.DEFAULT_WATCH_SOURCES)
+
+    @WATCH_SOURCES.setter
+    def WATCH_SOURCES(self, sources: list[tuple[str, str]]) -> None:
+        self._watch_sources_override = [(str(name), str(url)) for name, url in sources]
 
     def auto_scrape_sources(self) -> dict:
         """Scrape watched sources via firecrawl, extract key items, ingest new ones."""

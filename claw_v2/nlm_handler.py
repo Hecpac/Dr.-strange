@@ -44,10 +44,9 @@ class NlmHandler:
     def natural_language_response(self, session_id: str, text: str) -> str | None:
         if self.notebooklm is None or not text or text.startswith("/"):
             return None
-        # HOTFIX: NLM intent classifier triggers create_notebook on questions
-        # that mention "tareas/cuaderno" tangentially, then fails downstream
-        # at CDP navigation. Disabled by default. Set to "0" to restore.
-        if os.getenv("CLAW_DISABLE_NLM_NATURAL_LANGUAGE", "1") == "1":
+        # Keep an emergency kill switch for false-positive incidents, but the
+        # classifier below is narrow enough for explicit NotebookLM requests.
+        if os.getenv("CLAW_DISABLE_NLM_NATURAL_LANGUAGE", "0") == "1":
             return None
         intent = self._classify_intent(text)
         if intent is None:
