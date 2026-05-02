@@ -7,6 +7,7 @@ from pathlib import Path
 from claw_v2.adapters.base import AdapterError, AdapterUnavailableError, LLMRequest
 from claw_v2.eval_mocks import StaticAdapter, echo_response
 from claw_v2.llm import LLMRouter
+from claw_v2.observation_window import ObservationWindowConfig, ObservationWindowState
 from claw_v2.retry_policy import ProviderCircuitBreaker
 from claw_v2.types import LLMResponse
 
@@ -471,6 +472,29 @@ class LLMRouterTests(unittest.TestCase):
 
             self.assertEqual(response.provider, "openai")
             self.assertEqual(response.content, "from openai")
+
+    def test_observation_window_receives_llm_audit_events_and_trips_cost_breaker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            window = ObservationWindowState(
+                state_path=Path(tmpdir) / "window.json",
+                config=ObservationWindowConfig(cost_per_hour_threshold=0.005),
+            )
+            audit_log: list[dict] = []
+            router = LLMRouter(
+                config=config,
+                adapters={
+                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=echo_response("anthropic")),
+                },
+                audit_sink=audit_log.append,
+                observation_window=window,
+            )
+
+            router.ask("hola", lane="brain")
+
+            self.assertEqual(audit_log[-1]["action"], "llm_response")
+            self.assertTrue(window.frozen)
+            self.assertEqual(window.freeze_reason, "circuit_breaker:cost_per_hour")
 
 
 if __name__ == "__main__":

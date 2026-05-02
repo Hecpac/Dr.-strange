@@ -14,6 +14,7 @@ from claw_v2.chat_api import LocalChatAPI
 from claw_v2.main import build_runtime
 from claw_v2.morning_brief import MorningBriefService, MorningBriefSettings
 from claw_v2.notebooklm import NotebookLMService
+from claw_v2.observability_dashboard import ObservabilityDashboard
 from claw_v2.operational_alerts import install_operational_alerts
 from claw_v2.telegram import TelegramTransport
 from claw_v2.web_transport import WebTransport
@@ -91,6 +92,7 @@ async def run() -> int:
                 default_user_id=runtime.config.telegram_allowed_user_id,
                 auth_token=runtime.config.web_chat_token,
             ),
+            observability_dashboard=ObservabilityDashboard(runtime.observation_window) if runtime.observation_window is not None else None,
             host=runtime.config.web_chat_host,
             port=runtime.config.web_chat_port,
         )
@@ -114,6 +116,30 @@ async def run() -> int:
                 _loop,
             )
             future.result(timeout=20)
+
+        def _send_observability_telegram_message(message: str) -> None:
+            chat_id_raw = runtime.config.observability_telegram_chat_id or runtime.config.telegram_allowed_user_id
+            if not chat_id_raw or not transport._app:
+                raise RuntimeError("Telegram observability chat is not available")
+            future = asyncio.run_coroutine_threadsafe(
+                transport.send_text(chat_id=int(chat_id_raw), text=message),
+                _loop,
+            )
+            future.result(timeout=20)
+
+        def _send_observability_stream_message(message: str) -> None:
+            chat_id_raw = runtime.config.observability_telegram_chat_id
+            if not chat_id_raw or not transport._app:
+                return
+            future = asyncio.run_coroutine_threadsafe(
+                transport.send_text(chat_id=int(chat_id_raw), text=message),
+                _loop,
+            )
+            future.result(timeout=20)
+
+        if runtime.observation_window is not None:
+            runtime.observation_window.set_alert_notifier(_send_observability_telegram_message)
+            runtime.observation_window.set_stream_notifier(_send_observability_stream_message)
 
         def _send_session_telegram_message(session_id: str, message: str) -> None:
             if not session_id.startswith("tg-") or not transport._app:

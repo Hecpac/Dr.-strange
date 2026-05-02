@@ -1584,6 +1584,9 @@ def _help_response(topic: str | None = None) -> str:
             "/traces [limit] - traces recientes\n"
             "/trace <trace_id> [limit] - replay de una traza\n"
             "/spending - gasto LLM del día por lane/proveedor/modelo\n"
+            "/freeze - pausar autoexec durante observación\n"
+            "/unfreeze - reactivar autoexec\n"
+            "/budget_status - costo, presupuesto y breakers activos\n"
             "/models - listar modelos registrados y su origen/billing\n"
             "/model status - ver modelos efectivos por lane\n"
             "/model set <lane> <provider:model> [effort=...] - override de modelo por sesión\n"
@@ -1631,6 +1634,7 @@ def _help_response(topic: str | None = None) -> str:
             "/help social\n"
             "/help notebooklm\n"
             "/help autonomy\n"
+            "/help observability\n"
             "/help spending"
         )
 
@@ -1664,7 +1668,16 @@ def _help_response(topic: str | None = None) -> str:
         return (
             "Costos:\n"
             "/spending - gasto LLM de hoy desglosado por lane, provider y modelo\n"
+            "/budget_status - costo, presupuesto restante, freeze y circuit breakers\n"
             "/tokens - estimación de uso de contexto de la sesión"
+        )
+    if normalized in {"observability", "observation", "observacion", "observación"}:
+        return (
+            "Observabilidad:\n"
+            "/freeze - pausar autoexec y bloquear tool dispatch\n"
+            "/unfreeze - reactivar autoexec\n"
+            "/budget_status - ver costo, presupuesto restante y breakers\n"
+            "Dashboard local: http://127.0.0.1:8765/observability"
         )
     if normalized in {"agent", "agents"}:
         return (

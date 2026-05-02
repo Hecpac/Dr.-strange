@@ -29,6 +29,7 @@ class LLMRouter:
         pre_hooks: list[PreLLMHook] | None = None,
         post_hooks: list[PostLLMHook] | None = None,
         circuit_breaker: ProviderCircuitBreaker | None = None,
+        observation_window: object | None = None,
     ) -> None:
         self.config = config
         self.adapters = adapters
@@ -36,6 +37,7 @@ class LLMRouter:
         self.pre_hooks: list[PreLLMHook] = list(pre_hooks or [])
         self.post_hooks: list[PostLLMHook] = list(post_hooks or [])
         self.circuit_breaker = circuit_breaker or ProviderCircuitBreaker()
+        self.observation_window = observation_window
 
     def ask(
         self,
@@ -230,49 +232,62 @@ class LLMRouter:
 
     def _audit(self, action: str, response: LLMResponse, metadata: dict, *, request: LLMRequest | None = None) -> None:
         trace = (request.evidence_pack or {}) if request is not None else {}
-        self.audit_sink(
-            {
-                "action": action,
-                "lane": response.lane,
-                "provider": response.provider,
-                "model": response.model,
-                "cost_estimate": response.cost_estimate,
-                "confidence": response.confidence,
-                "degraded_mode": response.degraded_mode,
-                "metadata": {
-                    **metadata,
-                    "trace_id": trace.get("trace_id"),
-                    "root_trace_id": trace.get("root_trace_id"),
-                    "span_id": trace.get("span_id"),
-                    "parent_span_id": trace.get("parent_span_id"),
-                    "job_id": trace.get("job_id"),
-                    "artifact_id": trace.get("artifact_id"),
-                },
-            }
-        )
+        event = {
+            "action": action,
+            "lane": response.lane,
+            "provider": response.provider,
+            "model": response.model,
+            "cost_estimate": response.cost_estimate,
+            "confidence": response.confidence,
+            "degraded_mode": response.degraded_mode,
+            "metadata": {
+                **metadata,
+                "trace_id": trace.get("trace_id"),
+                "root_trace_id": trace.get("root_trace_id"),
+                "span_id": trace.get("span_id"),
+                "parent_span_id": trace.get("parent_span_id"),
+                "job_id": trace.get("job_id"),
+                "artifact_id": trace.get("artifact_id"),
+            },
+        }
+        self.audit_sink(event)
+        self._observation_audit(event)
 
     def _audit_event(self, action: str, *, request: LLMRequest, metadata: dict) -> None:
         trace = request.evidence_pack or {}
-        self.audit_sink(
-            {
-                "action": action,
-                "lane": request.lane,
-                "provider": request.provider,
-                "model": request.model,
-                "cost_estimate": 0.0,
-                "confidence": 0.0,
-                "degraded_mode": False,
-                "metadata": {
-                    **metadata,
-                    "trace_id": trace.get("trace_id"),
-                    "root_trace_id": trace.get("root_trace_id"),
-                    "span_id": trace.get("span_id"),
-                    "parent_span_id": trace.get("parent_span_id"),
-                    "job_id": trace.get("job_id"),
-                    "artifact_id": trace.get("artifact_id"),
-                },
-            }
-        )
+        event = {
+            "action": action,
+            "lane": request.lane,
+            "provider": request.provider,
+            "model": request.model,
+            "cost_estimate": 0.0,
+            "confidence": 0.0,
+            "degraded_mode": False,
+            "metadata": {
+                **metadata,
+                "trace_id": trace.get("trace_id"),
+                "root_trace_id": trace.get("root_trace_id"),
+                "span_id": trace.get("span_id"),
+                "parent_span_id": trace.get("parent_span_id"),
+                "job_id": trace.get("job_id"),
+                "artifact_id": trace.get("artifact_id"),
+            },
+        }
+        self.audit_sink(event)
+        self._observation_audit(event)
+
+    def _observation_audit(self, event: dict) -> None:
+        if self.observation_window is None:
+            return
+        handler = getattr(self.observation_window, "handle_llm_audit_event", None)
+        if handler is None:
+            return
+        try:
+            handler(event)
+        except Exception:
+            # Observation is a safety surface, but audit handler failures must
+            # not corrupt the LLM response path.
+            return
 
     @classmethod
     def default(
@@ -289,6 +304,7 @@ class LLMRouter:
         post_hooks: list[PostLLMHook] | None = None,
         openai_tool_executor: Callable[[str, dict], dict] | None = None,
         openai_tool_schemas: list[dict] | None = None,
+        observation_window: object | None = None,
     ) -> "LLMRouter":
         return cls(
             config=config,
@@ -315,6 +331,7 @@ class LLMRouter:
             audit_sink=audit_sink,
             pre_hooks=pre_hooks,
             post_hooks=post_hooks,
+            observation_window=observation_window,
         )
 
     def _validate_lane_input(

@@ -90,6 +90,9 @@ class TransportStartTests(unittest.IsolatedAsyncioTestCase):
             [
                 "browse",
                 "status",
+                "freeze",
+                "unfreeze",
+                "budget_status",
                 "approvals",
                 "models",
                 "model",

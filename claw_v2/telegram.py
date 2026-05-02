@@ -371,6 +371,9 @@ class TelegramTransport:
         commands = [
             BotCommand("browse", "Abrir y revisar cualquier URL — /browse <url>"),
             BotCommand("status", "Estado del sistema (heartbeat)"),
+            BotCommand("freeze", "Pausar autoexec durante observación"),
+            BotCommand("unfreeze", "Reactivar autoexec"),
+            BotCommand("budget_status", "Costo y presupuesto de observación"),
             BotCommand("approvals", "Ver aprobaciones pendientes"),
             BotCommand("models", "Listar modelos y billing"),
             BotCommand("model", "Ver/cambiar modelo — /model status"),

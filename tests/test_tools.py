@@ -21,6 +21,7 @@ from claw_v2.tools import (
     sanitize_tool_output,
     tool_requires_approval,
 )
+from claw_v2.observation_window import ObservationWindowState
 
 
 class ToolRegistryTests(unittest.TestCase):
@@ -376,6 +377,40 @@ class TierEnforcementTests(unittest.TestCase):
         self.assertFalse(tool_requires_approval(TIER_READ_ONLY))
         self.assertFalse(tool_requires_approval(TIER_LOCAL_MUTATION))
         self.assertTrue(tool_requires_approval(TIER_REQUIRES_APPROVAL))
+
+
+class ObservationWindowToolTests(unittest.TestCase):
+    def test_frozen_observation_window_blocks_tool_registry_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            target = workspace / "note.txt"
+            target.write_text("hello", encoding="utf-8")
+            window = ObservationWindowState(state_path=Path(tmpdir) / "window.json")
+            registry = ToolRegistry.default(workspace_root=workspace, observation_window=window)
+            window.freeze(reason="test_freeze", actor="test")
+
+            with self.assertRaises(PermissionError):
+                registry.execute("Read", {"path": str(target)}, agent_class="researcher")
+
+    def test_hard_denylist_blocks_bash_before_handler(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            registry = ToolRegistry(workspace_root=Path(tmpdir), observation_window=ObservationWindowState(state_path=Path(tmpdir) / "window.json"))
+            executed: list[str] = []
+            registry.register(
+                ToolDefinition(
+                    name="Bash",
+                    description="fake shell",
+                    allowed_agent_classes=("operator",),
+                    handler=lambda args: executed.append(args["command"]) or {"ok": True},
+                    tier=TIER_LOCAL_MUTATION,
+                )
+            )
+
+            with self.assertRaises(PermissionError):
+                registry.execute("Bash", {"command": "git push --force origin main"}, agent_class="operator")
+
+            self.assertEqual(executed, [])
 
 
 if __name__ == "__main__":

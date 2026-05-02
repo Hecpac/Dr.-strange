@@ -14,6 +14,7 @@ from typing import Any, Callable
 from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 
 from claw_v2.chat_api import LocalChatAPI
+from claw_v2.observability_dashboard import ObservabilityDashboard
 
 logger = logging.getLogger(__name__)
 
@@ -60,10 +61,12 @@ class WebTransport:
         self,
         *,
         chat_api: LocalChatAPI,
+        observability_dashboard: ObservabilityDashboard | None = None,
         host: str = "127.0.0.1",
         port: int = 8765,
     ) -> None:
         self._chat_api = chat_api
+        self._observability_dashboard = observability_dashboard
         self._host = host
         self._port = port
         self._server: WSGIServer | None = None
@@ -116,6 +119,18 @@ class WebTransport:
                     ],
                 )
                 return [body]
+            if path == "/observability" or path.startswith("/observability/"):
+                if self._observability_dashboard is None:
+                    body = json.dumps({"error": "observability unavailable"}).encode("utf-8")
+                    start_response(
+                        "503 Service Unavailable",
+                        [
+                            ("Content-Type", "application/json; charset=utf-8"),
+                            ("Content-Length", str(len(body))),
+                        ],
+                    )
+                    return [body]
+                return self._observability_dashboard.wsgi_app(environ, start_response)
             if path.startswith("/api/"):
                 return self._chat_api.wsgi_app(environ, start_response)
             static_path = "chat.html" if path in {"", "/"} else path.lstrip("/")
