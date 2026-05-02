@@ -7,6 +7,8 @@ Target resume date: Monday 2026-05-04
 - P0 telemetry is wired in observability-only mode.
 - `GoalContract`, `EvidenceLedger`, and `TypedActionEvent` JSONL writers are available.
 - `TaskHandler` and `ToolRegistry` emit P0 records to `config.telemetry_root`.
+- Evidence Ledger claims are mirrored into `claim_recorded` action events with
+  `claims[]` and `evidence_refs[]` populated.
 - Critic enforcement is intentionally not connected.
 
 ## Required checks before Step 4
@@ -19,9 +21,12 @@ Target resume date: Monday 2026-05-04
 - Validate every sampled line parses as JSON.
 - Confirm event records include stable IDs:
   - `goal_id`
-  - `action_id`
+  - `event_id`
+  - `originating_event_id` for `action_executed` / `action_failed`
   - `session_id` when available
-  - evidence references when a claim is recorded
+- Confirm `claim_recorded` events include:
+  - the recorded `claim_id` in `claims[]`
+  - evidence references when evidence exists on the claim
 - Confirm autonomous task records cover started, resumed, pending, completed, failed, cancelled, and interrupted states when those states occur.
 - Confirm tool records cover proposed, executed, and failed actions.
 - Confirm redaction removes field-name fragments such as `token`, `secret`, `api_key`, `password`, and `credential`.

@@ -1,8 +1,12 @@
 # Claw Evolution implementation notes
 
-Last revised: 2026-04-30
+Last revised: 2026-05-02
 
 ## P0 claim capture policy
+
+Update 2026-05-02: each recorded claim is also mirrored into the Typed Action
+Events stream as `claim_recorded`, with `claims[]` containing the `claim_id` and
+`evidence_refs[]` containing compact `kind:ref` evidence references.
 
 The current implementation records claims from runtime-observed lifecycle facts only.
 It does not parse arbitrary LLM prose and does not ask the model to self-report claims.
