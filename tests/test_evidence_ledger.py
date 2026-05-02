@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from claw_v2.action_events import load_events
 from claw_v2.evidence_ledger import (
     CLAIM_SCHEMA_VERSION,
     EvidenceRef,
@@ -44,6 +45,10 @@ class EvidenceLedgerTests(unittest.TestCase):
         self.assertEqual(len(loaded), 1)
         self.assertEqual(loaded[0].claim_text, "Tests passed")
         self.assertEqual(loaded[0].evidence_refs[0].kind, "tool_call")
+        events = load_events(self.root)
+        self.assertEqual(events[0].event_type, "claim_recorded")
+        self.assertEqual(events[0].claims, [claim.claim_id])
+        self.assertEqual(events[0].evidence_refs, ["tool_call:pytest -q"])
 
     def test_verified_claim_requires_tool_evidence(self) -> None:
         with self.assertRaisesRegex(ValueError, "verified claims require"):
@@ -84,4 +89,3 @@ class EvidenceLedgerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

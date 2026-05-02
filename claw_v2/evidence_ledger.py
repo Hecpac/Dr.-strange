@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
 from claw_v2.telemetry import append_jsonl, generate_id, now_iso, read_jsonl
+
+logger = logging.getLogger(__name__)
 
 CLAIM_SCHEMA_VERSION = "evidence_ledger.v1"
 ClaimType = Literal["fact", "inference", "assumption", "decision", "risk_signal"]
@@ -102,6 +105,7 @@ def record_claim(
     verification_status: VerificationStatus = "unverified",
     confidence: float = 0.0,
     depends_on: list[str] | None = None,
+    session_id: str = "runtime",
     observe: Any | None = None,
 ) -> Claim:
     claim = Claim(
@@ -116,6 +120,22 @@ def record_claim(
         created_at=now_iso(),
     )
     append_jsonl(_claims_path(telemetry_root), claim.to_dict())
+    try:
+        from claw_v2.action_events import emit_event
+
+        emit_event(
+            telemetry_root,
+            event_type="claim_recorded",
+            actor="claw",
+            goal_id=claim.goal_id,
+            session_id=session_id,
+            claims=[claim.claim_id],
+            evidence_refs=[_event_evidence_ref(ref) for ref in claim.evidence_refs],
+            risk_level="low" if claim.claim_type != "risk_signal" else "medium",
+            observe=None,
+        )
+    except Exception:
+        logger.debug("Could not mirror claim_recorded into action events", exc_info=True)
     if observe is not None:
         observe.emit("claim_recorded", payload=claim.to_dict())
     return claim
@@ -134,3 +154,6 @@ def _coerce_evidence_ref(value: EvidenceRef | dict[str, Any]) -> EvidenceRef:
         return value
     return EvidenceRef.from_dict(value)
 
+
+def _event_evidence_ref(ref: EvidenceRef) -> str:
+    return f"{ref.kind}:{ref.ref}"
