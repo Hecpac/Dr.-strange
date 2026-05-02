@@ -934,6 +934,12 @@ class BotService:
         """
         return os.getenv("CLAW_ENABLE_SEMANTIC_PREBRAIN_ROUTES", "0") == "1"
 
+    def _capability_route_allowed(self, text: str) -> bool:
+        if self._semantic_prebrain_routes_enabled() or _is_explicit_command(text):
+            return True
+        intent = classify_autonomy_intent(text)
+        return intent.task_kind in {"ai_news_brief", "x_trends"}
+
     def _emit_dispatch_decision(
         self,
         *,
@@ -1136,11 +1142,9 @@ class BotService:
             self._store_memory_turn(session_id, stripped, operational_status_response, assistant_limit=2000)
             self._remember_assistant_turn_state(session_id, stripped, operational_status_response)
             return operational_status_response
-        # Brain-bypass refactor (commit #5): semantic capability router
-        # only fires when the global gate is on or the message is an
-        # explicit slash command. Default = brain handles capability
-        # questions through tool selection.
-        if self._semantic_prebrain_routes_enabled() or _is_explicit_command(stripped):
+        # Most semantic pre-brain routes stay gated, but explicit operational
+        # capability requests like AI news and X trends remain deterministic.
+        if self._capability_route_allowed(stripped):
             capability_route_response = self._maybe_handle_capability_route(
                 stripped, session_id=session_id
             )
@@ -1191,15 +1195,9 @@ class BotService:
             self._store_memory_turn(session_id, stripped, shortcut_response, assistant_limit=2000)
             self._remember_assistant_turn_state(session_id, stripped, shortcut_response)
             return shortcut_response
-        # Brain-bypass refactor (commit #5): NotebookLM natural-language
-        # interception is gated by the master flag too. Operators must opt
-        # in explicitly via CLAW_ENABLE_SEMANTIC_PREBRAIN_ROUTES=1 to
-        # restore the pre-refactor behavior; otherwise the brain decides
-        # whether to use the NotebookLM tools.
-        if self._semantic_prebrain_routes_enabled():
-            nlm_response = self._nlm_handler.natural_language_response(session_id, stripped)
-        else:
-            nlm_response = None
+        # NlmHandler owns its own narrow classifier and kill switch; keeping it
+        # here prevents explicit NotebookLM commands from falling into autonomy.
+        nlm_response = self._nlm_handler.natural_language_response(session_id, stripped)
         self._emit_dispatch_decision(
             route="nlm_natural_language",
             session_id=session_id,
