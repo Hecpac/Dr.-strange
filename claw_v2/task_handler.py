@@ -35,6 +35,11 @@ from claw_v2.bot_helpers import (
 from claw_v2.evidence_ledger import EvidenceRef, record_claim
 from claw_v2.goal_contract import create_goal
 from claw_v2.model_registry import model_overrides_from_state
+from claw_v2.verification import (
+    petri_verifier_enabled,
+    strict_verification_required,
+    verify_with_petri,
+)
 
 
 class TaskHandler:
@@ -51,6 +56,8 @@ class TaskHandler:
         store_message: Callable[[str, str, str], Any] | None = None,
         workspace_root: Path | None = None,
         telemetry_root: Path | str | None = None,
+        petri_enabled: bool | None = None,
+        judge_model: str | None = None,
     ) -> None:
         self.approvals = approvals
         self.coordinator = coordinator
@@ -62,6 +69,8 @@ class TaskHandler:
         self._store_message = store_message
         self._workspace_root = Path(workspace_root) if workspace_root is not None else None
         self._telemetry_root = Path(telemetry_root).expanduser() if telemetry_root is not None else None
+        self._petri_enabled = petri_enabled
+        self._judge_model = judge_model
         self._task_threads: dict[str, threading.Thread] = {}
         self._cancelled_tasks: set[str] = set()
         self._task_lock = threading.Lock()
@@ -466,6 +475,39 @@ class TaskHandler:
             )
             checkpoint_error = str(completed_checkpoint.get("error") or "")
             pending_action = str(completed_checkpoint.get("pending_action") or "")
+            petri_result = None
+            if terminal_status == "succeeded":
+                petri_result = self._maybe_run_petri_verification(
+                    task_id=task_id,
+                    session_id=session_id,
+                    objective=objective,
+                    checkpoint=completed_checkpoint,
+                    response_preview=response[:1000],
+                )
+            if petri_result is not None:
+                completed_checkpoint = {
+                    **completed_checkpoint,
+                    "petri_scores": petri_result.petri_scores,
+                    "verification_status": petri_result.verification_status,
+                }
+                if petri_result.passed:
+                    verification_status = "passed"
+                    terminal_status = "succeeded"
+                elif petri_result.verification_status == "judge_unavailable":
+                    verification_status = "judge_unavailable"
+                    terminal_status = ""
+                    pending_action = pending_action or "retry strict Petri verification"
+                    checkpoint_error = checkpoint_error or petri_result.error
+                else:
+                    verification_status = "failed"
+                    terminal_status = "failed"
+                    checkpoint_error = checkpoint_error or petri_result.error or "Petri verification failed"
+                self._update_session_state(
+                    session_id,
+                    verification_status=verification_status,
+                    pending_action=pending_action or None,
+                    last_checkpoint=completed_checkpoint,
+                )
             blocked_reason = ""
             if not terminal_status:
                 blocked_reason = self._blocked_user_input_reason(completed_checkpoint)
@@ -1118,6 +1160,7 @@ class TaskHandler:
             ),
         )
         artifacts["response_preview"] = response_preview
+        self._merge_checkpoint_artifacts(artifacts, checkpoint)
         job_state = "completed" if terminal_status == "succeeded" else "failed"
         return self._with_job_artifact(task_id, session_id, job_state, artifacts)
 
@@ -1143,7 +1186,67 @@ class TaskHandler:
             ),
         )
         artifacts["response_preview"] = response_preview
+        self._merge_checkpoint_artifacts(artifacts, checkpoint)
         return self._with_job_artifact(task_id, session_id, "pending", artifacts)
+
+    @staticmethod
+    def _merge_checkpoint_artifacts(artifacts: dict[str, Any], checkpoint: dict[str, Any]) -> None:
+        coordinator_result = checkpoint.get("coordinator_result")
+        if not isinstance(coordinator_result, dict):
+            coordinator_result = None
+        if coordinator_result is not None:
+            artifacts["coordinator_result"] = coordinator_result
+            if coordinator_result.get("changed_files"):
+                artifacts["changed_files"] = coordinator_result["changed_files"]
+            if coordinator_result.get("evidence"):
+                artifacts["evidence"] = coordinator_result["evidence"]
+            verification = coordinator_result.get("verification")
+            if isinstance(verification, dict) and verification.get("checks"):
+                artifacts["verification_checks"] = verification["checks"]
+        petri_scores = checkpoint.get("petri_scores")
+        if isinstance(petri_scores, dict):
+            lifecycle = artifacts.get("lifecycle")
+            if isinstance(lifecycle, dict) and isinstance(lifecycle.get("verification"), dict):
+                lifecycle["verification"]["petri_scores"] = petri_scores
+                artifacts["lifecycle"] = lifecycle
+            artifacts["petri_scores"] = petri_scores
+
+    def _maybe_run_petri_verification(
+        self,
+        *,
+        task_id: str,
+        session_id: str,
+        objective: str,
+        checkpoint: dict[str, Any],
+        response_preview: str,
+    ) -> Any | None:
+        enabled = bool(self._petri_enabled) if self._petri_enabled is not None else petri_verifier_enabled()
+        if not enabled or self.task_ledger is None:
+            return None
+        record = self.task_ledger.get(task_id)
+        metadata = dict(record.metadata or {}) if record is not None else {}
+        state = self._get_session_state(session_id)
+        active_object = dict(state.get("active_object") or {})
+        active_task = dict(active_object.get("active_task") or {})
+        if active_task.get("task_id") == task_id:
+            for key in ("task_kind", "verify"):
+                if key in active_task and key not in metadata:
+                    metadata[key] = active_task[key]
+        task_kind = str(metadata.get("task_kind") or "")
+        if not strict_verification_required(metadata=metadata, task_kind=task_kind):
+            return None
+        artifacts = self._current_task_artifacts(task_id)
+        self._merge_checkpoint_artifacts(artifacts, checkpoint)
+        artifacts["legacy_verification_status"] = str(
+            checkpoint.get("verification_status") or "passed"
+        )
+        return verify_with_petri(
+            task_id=task_id,
+            objective=objective,
+            artifacts=artifacts,
+            response_preview=response_preview,
+            judge_model=self._judge_model,
+        )
 
     @staticmethod
     def _blocked_user_input_reason(checkpoint: dict[str, Any]) -> str:

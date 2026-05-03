@@ -71,6 +71,64 @@ class ValidateCompletionTests(unittest.TestCase):
         self.assertEqual(decision.verification_status, "passed")
         self.assertEqual(decision.reason, "verified_with_evidence")
 
+    def test_lifecycle_only_is_not_concrete_evidence(self) -> None:
+        decision = validate_completion(
+            {
+                "status": "succeeded",
+                "verification_status": "passed",
+                "summary": "Done.",
+                "artifacts": {"lifecycle": {"verification": {"status": "passed"}}},
+            }
+        )
+        self.assertEqual(decision.final_status, "pending")
+        self.assertEqual(decision.reason, "success_without_evidence")
+
+    def test_response_preview_only_is_not_concrete_evidence(self) -> None:
+        decision = validate_completion(
+            {
+                "status": "succeeded",
+                "verification_status": "passed",
+                "summary": "Done.",
+                "artifacts": {"response_preview": "Verification Status: passed"},
+            }
+        )
+        self.assertEqual(decision.final_status, "pending")
+        self.assertEqual(decision.reason, "success_without_evidence")
+
+    def test_skill_result_only_is_not_concrete_evidence(self) -> None:
+        decision = validate_completion(
+            {
+                "status": "succeeded",
+                "verification_status": "passed",
+                "summary": "Done.",
+                "artifacts": {"skill_result": "I completed the task."},
+            }
+        )
+        self.assertEqual(decision.final_status, "pending")
+        self.assertEqual(decision.reason, "success_without_evidence")
+
+    def test_changed_files_and_test_output_pass(self) -> None:
+        decision = validate_completion(
+            {
+                "status": "succeeded",
+                "verification_status": "passed",
+                "summary": "Patch done.",
+                "artifacts": {"changed_files": ["app.py"], "test_output": "1 passed"},
+            }
+        )
+        self.assertEqual(decision.final_status, "succeeded")
+
+    def test_sources_and_synthesis_pass(self) -> None:
+        decision = validate_completion(
+            {
+                "status": "succeeded",
+                "verification_status": "passed",
+                "summary": "Research done.",
+                "artifacts": {"sources": [{"url": "https://example.com"}], "synthesis": "summary"},
+            }
+        )
+        self.assertEqual(decision.final_status, "succeeded")
+
     def test_running_task_can_persist_without_evidence(self) -> None:
         record = {
             "status": "running",

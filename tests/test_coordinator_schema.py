@@ -103,8 +103,15 @@ class SemanticsTests(unittest.TestCase):
     def test_passed_verification_requires_evidence(self) -> None:
         payload = _valid_payload()
         payload["evidence"] = []
+        payload["verification"]["checks"] = []
         errors = validate_coordinator_semantics(payload)
         self.assertIn("passed_verification_requires_evidence", errors)
+
+    def test_passed_check_evidence_satisfies_verification_evidence(self) -> None:
+        payload = _valid_payload()
+        payload["evidence"] = []
+        errors = validate_coordinator_semantics(payload)
+        self.assertNotIn("passed_verification_requires_evidence", errors)
 
     def test_blockers_force_blocked_or_pending(self) -> None:
         payload = _valid_payload()
@@ -222,6 +229,65 @@ class CheckpointIntegrationTests(unittest.TestCase):
         self.assertEqual(checkpoint["verification_status"], "passed")
         structured = checkpoint["coordinator_result"]
         self.assertEqual(structured["status"], "executed")
+        self.assertTrue(structured["evidence"])
+
+    def test_explicit_evidence_none_degrades_passed_to_pending(self) -> None:
+        from claw_v2.bot_helpers import _coordinator_checkpoint
+        from claw_v2.coordinator import CoordinatorResult, WorkerResult
+
+        result = CoordinatorResult(
+            task_id="task-none",
+            phase_results={
+                "implementation": [
+                    WorkerResult(
+                        task_name="implement_change",
+                        content="## Edits\napp.py: changed\n\n## Build/Verify\ncmd: pytest\nresult: ok\n\n## Evidence\nnone",
+                        duration_seconds=0.1,
+                    )
+                ],
+                "verification": [
+                    WorkerResult(task_name="verify_change", content="Verification Status: passed", duration_seconds=0.1),
+                ],
+            },
+            synthesis="Done",
+        )
+
+        checkpoint = _coordinator_checkpoint(result, objective="implement feature")
+
+        self.assertEqual(checkpoint["verification_status"], "pending")
+        self.assertIn("implementation_declared_no_evidence", checkpoint["coordinator_semantic_errors"])
+
+    def test_sectioned_implementation_evidence_stays_passed(self) -> None:
+        from claw_v2.bot_helpers import _coordinator_checkpoint
+        from claw_v2.coordinator import CoordinatorResult, WorkerResult
+
+        result = CoordinatorResult(
+            task_id="task-sectioned",
+            phase_results={
+                "implementation": [
+                    WorkerResult(
+                        task_name="implement_change",
+                        content=(
+                            "## Edits\napp.py: changed login path\n\n"
+                            "## Build/Verify\ncmd: pytest tests/test_login.py\nresult: ok\n\n"
+                            "## Evidence\nartifact_path: /tmp/pytest-login.txt"
+                        ),
+                        duration_seconds=0.1,
+                    )
+                ],
+                "verification": [
+                    WorkerResult(task_name="verify_change", content="Verification Status: passed", duration_seconds=0.1),
+                ],
+            },
+            synthesis="Done",
+        )
+
+        checkpoint = _coordinator_checkpoint(result, objective="implement feature")
+
+        self.assertEqual(checkpoint["verification_status"], "passed")
+        structured = checkpoint["coordinator_result"]
+        self.assertEqual(structured["changed_files"], ["app.py"])
+        self.assertTrue(structured["verification"]["checks"])
         self.assertTrue(structured["evidence"])
 
 

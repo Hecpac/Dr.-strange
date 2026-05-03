@@ -98,6 +98,7 @@ def make_config(root: Path) -> AppConfig:
         morning_brief_calendar_command=None,
         evening_brief_enabled=True,
         evening_brief_hour=21,
+        petri_verifier_enabled=False,
         telemetry_root=root / "telemetry",
     )
     config.validate()

@@ -410,6 +410,8 @@ class BotService:
             store_message=self._store_message_from_handler,
             workspace_root=getattr(config, "workspace_root", None),
             telemetry_root=getattr(config, "telemetry_root", None),
+            petri_enabled=getattr(config, "petri_verifier_enabled", None),
+            judge_model=getattr(config, "judge_model", None),
         )
         self._state_handler = StateHandler(
             brain_memory=brain.memory,
@@ -798,27 +800,73 @@ class BotService:
         result: str,
         summary: str,
     ) -> None:
-        self._update_skill_active_task(
-            session_id=session_id,
-            task_id=task_id,
-            status="completed",
-            checkpoint_summary=summary,
-            verification_status="passed",
-        )
+        evidence = self._parse_skill_evidence_payload(result)
+        try:
+            from claw_v2.verification_profiles import verify_profile_evidence
+
+            profile_decision = verify_profile_evidence(task_kind=task_kind, evidence=evidence)
+        except Exception:
+            profile_decision = None
         artifacts = {
             "skill": skill,
             "agent": agent,
             "task_kind": task_kind,
             "skill_result": result[:20000],
+            "evidence": evidence,
         }
-        if self.task_ledger is not None:
-            self.task_ledger.mark_terminal(
-                task_id,
-                status="succeeded",
-                summary=summary,
-                verification_status="passed",
+        if profile_decision is not None:
+            artifacts["verification_profile"] = {
+                "task_kind": task_kind,
+                "status": profile_decision.status,
+                "reason": profile_decision.reason,
+                "missing_evidence": list(profile_decision.missing_evidence),
+                "risk_level": profile_decision.risk_level,
+                "requires_human_approval": profile_decision.requires_human_approval,
+            }
+        verification_status = "passed" if getattr(profile_decision, "status", "") == "passed" else "missing_evidence"
+        artifacts["legacy_verification_status"] = verification_status
+        petri_result = None
+        if verification_status == "passed":
+            petri_result = self._maybe_run_skill_petri_verification(
+                task_id=task_id,
+                task_kind=task_kind,
+                user_text=user_text,
                 artifacts=artifacts,
+                response_preview=result[:1000],
             )
+            if petri_result is not None:
+                artifacts["petri_scores"] = petri_result.petri_scores
+                if not petri_result.passed:
+                    verification_status = petri_result.verification_status
+        active_status = "completed" if verification_status == "passed" else "pending"
+        error = "" if verification_status == "passed" else (
+            petri_result.error if petri_result is not None else "skill result lacks required concrete evidence"
+        )
+        self._update_skill_active_task(
+            session_id=session_id,
+            task_id=task_id,
+            status=active_status,
+            checkpoint_summary=summary,
+            verification_status=verification_status,
+            error=error,
+        )
+        if self.task_ledger is not None:
+            if verification_status == "passed":
+                self.task_ledger.mark_terminal(
+                    task_id,
+                    status="succeeded",
+                    summary=summary,
+                    verification_status="passed",
+                    artifacts=artifacts,
+                )
+            else:
+                self.task_ledger.mark_running_checkpoint(
+                    task_id,
+                    summary=summary,
+                    error="skill result lacks required concrete evidence",
+                    verification_status=verification_status,
+                    artifacts=artifacts,
+                )
         self._emit_skill_task_event(
             "sub_agent_skill",
             task_id=task_id,
@@ -830,7 +878,7 @@ class BotService:
             result=result,
         )
         self._emit_skill_task_event(
-            "autonomous_task_completed",
+            "autonomous_task_completed" if verification_status == "passed" else "autonomous_task_pending",
             task_id=task_id,
             session_id=session_id,
             user_text=user_text,
@@ -838,9 +886,108 @@ class BotService:
             skill=skill,
             task_kind=task_kind,
             response=result,
-            verification_status="passed",
-            terminal_status="succeeded",
+            verification_status=verification_status,
+            terminal_status="succeeded" if verification_status == "passed" else "pending",
         )
+
+    def _maybe_run_skill_petri_verification(
+        self,
+        *,
+        task_id: str,
+        task_kind: str,
+        user_text: str,
+        artifacts: dict[str, Any],
+        response_preview: str,
+    ) -> Any | None:
+        try:
+            from claw_v2.verification import (
+                petri_verifier_enabled,
+                strict_verification_required,
+                verify_with_petri,
+            )
+        except Exception:
+            return None
+        if not petri_verifier_enabled(self.config):
+            return None
+        metadata = {"task_kind": task_kind}
+        if not strict_verification_required(metadata=metadata, task_kind=task_kind):
+            return None
+        return verify_with_petri(
+            task_id=task_id,
+            objective=user_text,
+            artifacts=artifacts,
+            response_preview=response_preview,
+            judge_model=getattr(self.config, "judge_model", None),
+        )
+
+    @staticmethod
+    def _parse_skill_evidence_payload(result: str) -> dict[str, Any]:
+        text = (result or "").strip()
+        if not text:
+            return {}
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            return {str(key): value for key, value in parsed.items() if value not in (None, "", [], {})}
+
+        evidence: dict[str, Any] = {}
+        key_map = {
+            "source": "sources",
+            "sources": "sources",
+            "fuente": "sources",
+            "fuentes": "sources",
+            "synthesis": "synthesis",
+            "sintesis": "synthesis",
+            "síntesis": "synthesis",
+            "summary": "synthesis",
+            "claim_map": "claim_map",
+            "claim map": "claim_map",
+            "fetched_at": "fetched_at",
+            "fetched at": "fetched_at",
+            "handler_result": "handler_result",
+            "handler result": "handler_result",
+            "notebook_id": "notebook_id",
+            "notebook id": "notebook_id",
+            "notebook_title": "notebook_title",
+            "notebook title": "notebook_title",
+            "review_summary": "review_summary",
+            "review summary": "review_summary",
+            "changed_files": "changed_files",
+            "changed files": "changed_files",
+            "diff": "diff",
+            "test_output": "test_output",
+            "test output": "test_output",
+            "verification_check": "verification_check",
+            "verification check": "verification_check",
+            "static_check": "static_check",
+            "static check": "static_check",
+            "repro_check": "repro_check",
+            "repro check": "repro_check",
+            "pr_url": "pr_url",
+            "pr url": "pr_url",
+            "approval_id": "approval_id",
+            "approval id": "approval_id",
+        }
+        for raw_line in text.splitlines():
+            if ":" not in raw_line:
+                continue
+            key, value = raw_line.split(":", 1)
+            normalized_key = _normalize_command_text(key).replace("_", " ").strip()
+            mapped = key_map.get(normalized_key) or key_map.get(normalized_key.replace(" ", "_"))
+            if not mapped:
+                continue
+            cleaned = value.strip()
+            if not cleaned:
+                continue
+            if mapped in {"sources", "changed_files"}:
+                existing = evidence.get(mapped)
+                values = [item.strip() for item in re.split(r"[,;]", cleaned) if item.strip()]
+                evidence[mapped] = [*(existing if isinstance(existing, list) else []), *values]
+            else:
+                evidence[mapped] = cleaned
+        return evidence
 
     def _mark_skill_task_failed(
         self,

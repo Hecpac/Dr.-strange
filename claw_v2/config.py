@@ -364,6 +364,7 @@ class AppConfig:
     morning_brief_calendar_command: str | None
     evening_brief_enabled: bool
     evening_brief_hour: int
+    petri_verifier_enabled: bool
     telemetry_root: Path = field(default_factory=lambda: Path.home() / ".claw" / "telemetry")
 
     @classmethod
@@ -475,6 +476,7 @@ class AppConfig:
             morning_brief_calendar_command=os.getenv("MORNING_BRIEF_CALENDAR_COMMAND") or None,
             evening_brief_enabled=_env_bool("EVENING_BRIEF_ENABLED", True),
             evening_brief_hour=_env_int("EVENING_BRIEF_HOUR", 21),
+            petri_verifier_enabled=_env_bool("CLAW_PETRI_VERIFIER_ENABLED", False),
             telemetry_root=Path(os.getenv("TELEMETRY_ROOT", str(home / ".claw" / "telemetry"))),
         )
 
