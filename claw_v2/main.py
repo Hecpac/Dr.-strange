@@ -58,6 +58,7 @@ from claw_v2.pipeline import PipelineService
 from claw_v2.skills import SkillRegistry
 from claw_v2.social import SocialPublisher
 from claw_v2.content import ContentEngine
+from claw_v2.sandbox import SandboxPolicy
 from claw_v2.task_board import TaskBoard
 from claw_v2.task_ledger import TaskLedger
 from claw_v2.terminal_bridge import TerminalBridgeService
@@ -416,6 +417,23 @@ def _setup_llm_stack(
         observation_window=observation_window,
         autoexec_max_tier=config.tier_autoexec_max,
     )
+    tool_sandbox_policy = SandboxPolicy(
+        workspace_root=config.workspace_root,
+        allowed_paths=[
+            *config.allowed_read_paths,
+            *config.extra_workspace_roots,
+            *config.allowed_paths,
+        ],
+        writable_paths=[
+            config.workspace_root,
+            Path("/private/tmp"),
+            Path.home() / ".claw",
+            *config.extra_workspace_roots,
+        ],
+        network_policy="allow",
+        credential_scope="external",
+        capability_profile=config.sandbox_capability_profile,
+    )
     openai_tool_schemas = tool_registry.openai_tool_schemas()
 
     # Paso 4 (HEC-14): wire ApprovalManager into the dispatcher via a gate.
@@ -438,6 +456,7 @@ def _setup_llm_stack(
             registry_tool_name,
             args,
             agent_class="operator",
+            policy=tool_sandbox_policy,
             approval_gate=gate,
         )
 
