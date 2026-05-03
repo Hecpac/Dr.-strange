@@ -182,15 +182,26 @@ def validate_coordinator_semantics(result: dict) -> list[str]:
 
     actions = result.get("actions_taken") or []
     evidence = result.get("evidence") or []
+    changed_files = result.get("changed_files") or []
     blockers = result.get("blockers") or []
     verification = result.get("verification") or {}
     verification_status = verification.get("status")
+    checks = verification.get("checks") if isinstance(verification, dict) else []
     status = result.get("status")
 
     if status == "executed" and not actions:
         errors.append("executed_requires_actions_taken")
 
-    if verification_status == "passed" and not evidence:
+    passed_check_evidence = (
+        isinstance(checks, list)
+        and any(
+            isinstance(check, dict)
+            and check.get("status") == "passed"
+            and bool(str(check.get("evidence") or "").strip())
+            for check in checks
+        )
+    )
+    if verification_status == "passed" and not (evidence or changed_files or passed_check_evidence):
         errors.append("passed_verification_requires_evidence")
 
     if blockers and status not in {"blocked", "pending"}:

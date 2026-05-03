@@ -597,6 +597,8 @@ def _coordinator_checkpoint(result: CoordinatorResult, *, objective: str) -> dic
         implementation_error=implementation_error,
     )
     semantic_errors = _validate_structured_semantics(structured)
+    if _implementation_declares_no_evidence(implementation_results):
+        semantic_errors.append("implementation_declared_no_evidence")
     if semantic_errors:
         checkpoint["coordinator_semantic_errors"] = ";".join(semantic_errors)
         if verification_status == "passed":
@@ -626,6 +628,9 @@ def _coordinator_result_to_structured(
     from claw_v2.coordinator_schema import coerce_unstructured_coordinator_output
 
     actions: list[dict[str, str]] = []
+    evidence: list[dict[str, str]] = []
+    changed_files: list[str] = []
+    verification_checks: list[dict[str, str]] = []
     for phase, items in result.phase_results.items():
         for item in items:
             if item.error:
@@ -638,20 +643,13 @@ def _coordinator_result_to_structured(
                 "tool": str(phase),
                 "result": str(item.content)[:500],
             })
-
-    evidence: list[dict[str, str]] = []
-    if verification_status == "passed" and not implementation_error:
-        # Only implementation phase counts as concrete evidence.
-        # Verification phase output is a check, not the artifact itself —
-        # treat it as a verification check, not evidence.
-        for item in result.phase_results.get("implementation", []):
-            if item.error or not getattr(item, "content", None):
-                continue
-            evidence.append({
-                "type": "implementation",
-                "name": str(getattr(item, "task_name", "implementation")),
-                "value": str(item.content)[:500],
-            })
+            if phase == "implementation":
+                parsed = _parse_implementation_evidence(str(item.content))
+                for path in parsed["changed_files"]:
+                    if path not in changed_files:
+                        changed_files.append(path)
+                evidence.extend(parsed["evidence"])
+                verification_checks.extend(parsed["checks"])
 
     blockers: list[str] = []
     if result.error:
@@ -681,10 +679,10 @@ def _coordinator_result_to_structured(
         "task_kind": "coordinator",
         "actions_taken": actions,
         "evidence": evidence,
-        "changed_files": [],
+        "changed_files": changed_files,
         "verification": {
             "status": verification_status if verification_status in {"passed", "pending", "failed", "blocked"} else "pending",
-            "checks": [],
+            "checks": verification_checks,
         },
         "blockers": blockers,
         "next_user_action": pending_action,
@@ -696,6 +694,213 @@ def _validate_structured_semantics(structured: dict[str, Any]) -> list[str]:
     from claw_v2.coordinator_schema import validate_coordinator_semantics
 
     return validate_coordinator_semantics(structured)
+
+
+_SECTION_HEADING_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
+_FILEISH_RE = re.compile(r"^[A-Za-z0-9_./@+-]+(?:\.[A-Za-z0-9_+-]+)?$")
+
+
+def _parse_implementation_evidence(text: str) -> dict[str, Any]:
+    sections = _markdown_sections(text)
+    edits = sections.get("edits", "")
+    build = sections.get("buildverify", "") or sections.get("build", "") or sections.get("verify", "")
+    evidence_section = sections.get("evidence", "")
+
+    changed_files = _extract_changed_files(edits)
+    evidence = _extract_evidence_entries(evidence_section)
+    checks = _extract_verification_checks(build)
+
+    if not sections:
+        changed_files.extend(_extract_legacy_changed_files(text))
+        checks.extend(_extract_legacy_checks(text))
+
+    if changed_files and not evidence and "evidence" not in sections:
+        evidence.extend(
+            {"type": "changed_file", "name": path, "value": path}
+            for path in changed_files
+        )
+
+    if checks and not evidence and "evidence" not in sections:
+        evidence.extend(
+            {"type": "verification_check", "name": check["name"], "value": check["evidence"]}
+            for check in checks
+            if check.get("status") == "passed" and check.get("evidence")
+        )
+
+    return {
+        "changed_files": changed_files,
+        "evidence": evidence,
+        "checks": checks,
+    }
+
+
+def _markdown_sections(text: str) -> dict[str, str]:
+    matches = list(_SECTION_HEADING_RE.finditer(text))
+    sections: dict[str, str] = {}
+    for index, match in enumerate(matches):
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        key = _section_key(match.group(1))
+        sections[key] = text[start:end].strip()
+    return sections
+
+
+def _section_key(title: str) -> str:
+    normalized = unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^a-z0-9]+", "", normalized.lower())
+
+
+def _section_declares_none(text: str) -> bool:
+    stripped = re.sub(r"^[\s>*-]+", "", text.strip(), flags=re.MULTILINE).strip().lower()
+    stripped = re.sub(r"\s+", " ", stripped)
+    return stripped in {"", "none", "n/a", "na", "no", "no evidence", "sin evidencia"}
+
+
+def _extract_changed_files(text: str) -> list[str]:
+    if _section_declares_none(text):
+        return []
+    files: list[str] = []
+    for raw in text.splitlines():
+        line = raw.strip().lstrip("-* ").strip()
+        if not line:
+            continue
+        lowered = line.lower()
+        if lowered.startswith(("inspections:", "cmd:", "result:")):
+            continue
+        if lowered.startswith(("changed_files:", "changed files:", "patched files:")):
+            tail = line.split(":", 1)[1]
+            files.extend(_split_file_list(tail))
+            continue
+        if ":" in line:
+            candidate = line.split(":", 1)[0].strip("` ")
+            if _looks_like_changed_file(candidate):
+                files.append(candidate)
+    return _dedupe(files)
+
+
+def _extract_legacy_changed_files(text: str) -> list[str]:
+    files: list[str] = []
+    for pattern in (r"patched files?\s*:\s*([^\n]+)", r"changed files?\s*:\s*([^\n]+)"):
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            files.extend(_split_file_list(match.group(1)))
+    return _dedupe(files)
+
+
+def _extract_evidence_entries(text: str) -> list[dict[str, str]]:
+    if _section_declares_none(text):
+        return []
+    entries: list[dict[str, str]] = []
+    for raw in text.splitlines():
+        line = raw.strip().lstrip("-* ").strip()
+        if not line:
+            continue
+        name = "evidence"
+        value = line
+        evidence_type = "artifact"
+        if ":" in line:
+            name, value = [part.strip(" `") for part in line.split(":", 1)]
+            normalized = name.lower().replace(" ", "_")
+            if normalized in {"artifact_path", "screenshot_path", "diff", "test_output", "static_check", "repro_check"}:
+                evidence_type = normalized
+        if not _section_declares_none(value):
+            entries.append({"type": evidence_type, "name": name[:120], "value": value[:500]})
+    return entries
+
+
+def _extract_verification_checks(text: str) -> list[dict[str, str]]:
+    if _section_declares_none(text):
+        return []
+    checks: list[dict[str, str]] = []
+    current: dict[str, str] | None = None
+    for raw in text.splitlines():
+        line = raw.strip().lstrip("-* ").strip()
+        if not line:
+            continue
+        lowered = line.lower()
+        if lowered.startswith("cmd:"):
+            if current is not None:
+                checks.append(_finalize_check(current))
+            current = {"name": line.split(":", 1)[1].strip()[:120], "status": "pending", "evidence": ""}
+            continue
+        if lowered.startswith("result:"):
+            if current is None:
+                current = {"name": "build_verify", "status": "pending", "evidence": ""}
+            result = line.split(":", 1)[1].strip()
+            current["status"] = _check_status_from_text(result)
+            current["evidence"] = result[:500]
+            continue
+        if current is None:
+            current = {"name": "build_verify", "status": _check_status_from_text(line), "evidence": line[:500]}
+        else:
+            current["evidence"] = (current.get("evidence", "") + "\n" + line).strip()[:500]
+            if current.get("status") == "pending":
+                current["status"] = _check_status_from_text(line)
+    if current is not None:
+        checks.append(_finalize_check(current))
+    return checks
+
+
+def _extract_legacy_checks(text: str) -> list[dict[str, str]]:
+    if re.search(r"\b(pytest|test|lint|typecheck|build)\b", text, flags=re.IGNORECASE):
+        return [{"name": "verification_check", "status": _check_status_from_text(text), "evidence": text[:500]}]
+    return []
+
+
+def _finalize_check(check: dict[str, str]) -> dict[str, str]:
+    return {
+        "name": check.get("name") or "build_verify",
+        "status": check.get("status") if check.get("status") in {"passed", "pending", "failed", "blocked"} else "pending",
+        "evidence": check.get("evidence") or check.get("name") or "",
+    }
+
+
+def _check_status_from_text(text: str) -> str:
+    lowered = text.lower()
+    if re.search(r"\b(ok|pass|passed|success|succeeded|0)\b", lowered):
+        return "passed"
+    if re.search(r"\b(fail|failed|error|nonzero|non-zero)\b", lowered):
+        return "failed"
+    if re.search(r"\b(blocked|approval)\b", lowered):
+        return "blocked"
+    return "pending"
+
+
+def _split_file_list(text: str) -> list[str]:
+    files: list[str] = []
+    for part in re.split(r"[,;]\s*|\s+", text.strip()):
+        candidate = part.strip("` ,;")
+        if _looks_like_changed_file(candidate):
+            files.append(candidate)
+    return files
+
+
+def _looks_like_changed_file(value: str) -> bool:
+    if not value or len(value) > 240:
+        return False
+    if value.lower() in {"path", "file", "files", "none", "n/a"}:
+        return False
+    return bool(_FILEISH_RE.match(value))
+
+
+def _dedupe(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result
+
+
+def _implementation_declares_no_evidence(results: list[Any]) -> bool:
+    for item in results:
+        if item.error or not getattr(item, "content", None):
+            continue
+        sections = _markdown_sections(str(item.content))
+        if "evidence" in sections and _section_declares_none(sections["evidence"]):
+            return True
+    return False
 
 
 def _format_worker_results(results: list[Any]) -> str:

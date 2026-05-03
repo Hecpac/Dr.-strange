@@ -6,6 +6,7 @@ guarding, NotebookLM resolver, and approval-required negative controls.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import tempfile
@@ -128,11 +129,44 @@ class AutonomyE2ETests(unittest.TestCase):
                 self.assertIn("dame noticias AI de hoy", calls[0][2])
                 record = runtime.task_ledger.get(task_id)
                 self.assertIsNotNone(record)
+                self.assertEqual(record.status, "running")
+                self.assertEqual(record.verification_status, "missing_evidence")
+                pending = self._events_of(runtime, "autonomous_task_pending")
+                self.assertTrue(pending)
+                self.assertEqual(pending[-1]["payload"]["task_id"], task_id)
+
+    def test_ai_news_skill_route_succeeds_with_profile_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            with patch.dict(os.environ, _runtime(root), clear=False):
+                runtime = build_runtime(anthropic_executor=_stub_llm)
+                self._force_production_env(runtime)
+                runtime.bot._runtime_probe = type(
+                    "P", (), {"is_alive": lambda self: True}
+                )()
+
+                def fake_run_skill(agent: str, skill: str, context: str = "", *, lane: str = "research") -> str:
+                    return json.dumps(
+                        {
+                            "sources": [{"url": "https://example.com/ai"}],
+                            "claim_map": {"headline": "source-1"},
+                            "fetched_at": "2026-05-02T10:00:00Z",
+                        }
+                    )
+
+                runtime.bot.sub_agents.run_skill = fake_run_skill  # type: ignore[method-assign]
+                reply = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="dame noticias AI de hoy",
+                )
+
+                task_id = re.search(r"`([^`]+:skill:\d+)`", reply).group(1)
+                self.assertTrue(runtime.bot.wait_for_skill_task(task_id, timeout=2.0))
+                record = runtime.task_ledger.get(task_id)
                 self.assertEqual(record.status, "succeeded")
                 self.assertEqual(record.verification_status, "passed")
-                completed = self._events_of(runtime, "autonomous_task_completed")
-                self.assertTrue(completed)
-                self.assertEqual(completed[-1]["payload"]["task_id"], task_id)
+                self.assertEqual(record.artifacts["verification_profile"]["status"], "passed")
 
     def test_plain_status_is_local_and_does_not_call_llm(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

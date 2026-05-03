@@ -180,14 +180,19 @@ class TaskLedger:
     ) -> TaskRecord | None:
         if status not in TERMINAL_STATUSES:
             raise ValueError(f"terminal status required, got {status!r}")
+        existing = self.get(task_id)
+        artifact_payload = dict(artifacts or {})
         if status in COMPLETION_CANDIDATES:
             decision = validate_completion(
                 {
                     "status": status,
                     "verification_status": verification_status,
                     "summary": summary,
-                    "artifacts": dict(artifacts or {}),
-                    "evidence": dict((artifacts or {}).get("evidence") or {}),
+                    "runtime": existing.runtime if existing is not None else "",
+                    "mode": existing.mode if existing is not None else "",
+                    "metadata": dict(existing.metadata or {}) if existing is not None else {},
+                    "artifacts": artifact_payload,
+                    "evidence": artifact_payload.get("evidence") if isinstance(artifact_payload.get("evidence"), dict) else {},
                 }
             )
             if decision.final_status != "succeeded":
@@ -206,7 +211,11 @@ class TaskLedger:
                     task_id,
                     summary=summary,
                     error=error or f"completion blocked: {decision.reason}",
-                    verification_status=decision.verification_status or "missing_evidence",
+                    verification_status=(
+                        "missing_evidence"
+                        if decision.reason in {"success_without_evidence", "plan_only_no_execution_evidence"}
+                        else decision.verification_status or "missing_evidence"
+                    ),
                     artifacts=artifacts,
                 )
         now = time.time()
@@ -324,8 +333,15 @@ class TaskLedger:
                         "status": record.status,
                         "verification_status": record.verification_status,
                         "summary": record.summary,
+                        "runtime": record.runtime,
+                        "mode": record.mode,
+                        "metadata": dict(record.metadata or {}),
                         "artifacts": dict(record.artifacts or {}),
-                        "evidence": dict((record.artifacts or {}).get("evidence") or {}),
+                        "evidence": (
+                            (record.artifacts or {}).get("evidence")
+                            if isinstance((record.artifacts or {}).get("evidence"), dict)
+                            else {}
+                        ),
                     }
                 )
                 if decision.final_status == "succeeded":
