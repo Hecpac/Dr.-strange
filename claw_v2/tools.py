@@ -17,6 +17,7 @@ from claw_v2.goal_contract import create_goal
 from claw_v2.network_proxy import DomainAllowlistEnforcer
 from claw_v2.sandbox import SandboxPolicy, sandbox_hook
 from claw_v2.sanitizer import extract_structured, sanitize
+from claw_v2.tool_policy import validate_workspace_path
 from claw_v2.types import AgentClass, SanitizedContent
 
 if TYPE_CHECKING:
@@ -37,6 +38,13 @@ _FIRECRAWL_RATE_LIMIT_PATTERNS = (
     "too many requests",
     "429",
 )
+_IMAGE_MEDIA_BY_SUFFIX = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
 
 
 class FirecrawlUnavailableError(RuntimeError):
@@ -90,6 +98,27 @@ def _read_http_error(exc: HTTPError) -> str:
     if isinstance(raw, bytes):
         return raw.decode("utf-8", errors="replace")
     return str(raw)
+
+
+def _image_media_type_for_path(path: Path) -> str:
+    suffix = path.suffix.lower()
+    media_type = _IMAGE_MEDIA_BY_SUFFIX.get(suffix)
+    if media_type is None:
+        raise ValueError("image_path must point to a supported image file")
+    return media_type
+
+
+def _looks_like_supported_image(raw: bytes, suffix: str) -> bool:
+    normalized = suffix.lower()
+    if normalized == ".png":
+        return raw.startswith(b"\x89PNG\r\n\x1a\n")
+    if normalized in {".jpg", ".jpeg"}:
+        return raw.startswith(b"\xff\xd8\xff")
+    if normalized == ".gif":
+        return raw.startswith((b"GIF87a", b"GIF89a"))
+    if normalized == ".webp":
+        return len(raw) >= 12 and raw[:4] == b"RIFF" and raw[8:12] == b"WEBP"
+    return False
 
 # Autonomy tiers (per SOUL.md). Enforced in code, not prompt.
 #   1 = read-only / local-safe / observation  -> auto-execute, no approval
@@ -679,14 +708,15 @@ class ToolRegistry:
                 raise PermissionError(f"path {raw} is outside workspace root")
             return resolved
 
+        def _readable_path(raw: str | Path) -> Path:
+            return validate_workspace_path(raw, workspace_root=_ws)
+
         def read_file(args: dict) -> dict:
-            path = _safe_path(args["path"])
+            path = _readable_path(args["path"])
             return {"path": str(path), "content": path.read_text(encoding="utf-8")}
 
         def read_workspace_nonsecret(args: dict) -> dict:
-            from claw_v2.tool_policy import validate_workspace_path
-
-            path = validate_workspace_path(args["path"], workspace_root=workspace_root)
+            path = _readable_path(args["path"])
             return {"path": str(path), "content": path.read_text(encoding="utf-8")}
 
         def write_file(args: dict) -> dict:
@@ -713,19 +743,24 @@ class ToolRegistry:
             return {"matches": matches[:200]}
 
         def grep_files(args: dict) -> dict:
-            root = _safe_path(args.get("root", registry.workspace_root))
+            root = _readable_path(args.get("root", registry.workspace_root))
             needle = args.get("query", "")
             matches: list[dict] = []
-            for path in root.rglob("*"):
+            candidates = [root] if root.is_file() else root.rglob("*")
+            for path in candidates:
                 if not path.is_file():
                     continue
                 try:
-                    content = path.read_text(encoding="utf-8")
+                    readable = _readable_path(path)
+                except PermissionError:
+                    continue
+                try:
+                    content = readable.read_text(encoding="utf-8")
                 except UnicodeDecodeError:
                     continue
                 for line_number, line in enumerate(content.splitlines(), start=1):
                     if needle in line:
-                        matches.append({"path": str(path), "line_number": line_number, "line": line})
+                        matches.append({"path": str(readable), "line_number": line_number, "line": line})
                         if len(matches) >= 100:
                             return {"matches": matches}
             return {"matches": matches}
@@ -1133,19 +1168,21 @@ class ToolRegistry:
             question = args.get("question", "Describe this image in detail.")
             if not image_path and not image_url:
                 raise ValueError("image_path or image_url is required")
-            api_key = _openai_api_key()
             content: list[dict] = [{"type": "input_text", "text": question}]
             if image_path:
                 import base64 as _b64
-                p = Path(image_path).resolve()
+                p = _readable_path(image_path)
                 if not p.exists():
                     raise ValueError(f"Image file not found: {image_path}")
-                data = _b64.b64encode(p.read_bytes()).decode()
-                suffix = p.suffix.lower()
-                media = {".png": "image/png", ".gif": "image/gif", ".webp": "image/webp"}.get(suffix, "image/jpeg")
+                media = _image_media_type_for_path(p)
+                raw_image = p.read_bytes()
+                if not _looks_like_supported_image(raw_image, p.suffix.lower()):
+                    raise ValueError("image_path content does not match a supported image format")
+                data = _b64.b64encode(raw_image).decode()
                 content.append({"type": "input_image", "image_url": f"data:{media};base64,{data}"})
             else:
                 content.append({"type": "input_image", "image_url": image_url})
+            api_key = _openai_api_key()
             payload = json.dumps({
                 "model": "gpt-5.4-mini",
                 "input": [{"role": "user", "content": content}],

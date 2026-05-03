@@ -126,6 +126,13 @@ class WorkspacePathValidationTests(unittest.TestCase):
             with self.assertRaises(PermissionError):
                 validate_workspace_path(".env", workspace_root=ws)
 
+    def test_encoded_secret_path_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ws = Path(tmpdir)
+            (ws / ".env").write_text("SECRET=1")
+            with self.assertRaises(PermissionError):
+                validate_workspace_path("%2eenv", workspace_root=ws)
+
 
 class ToolPolicyDataclassTests(unittest.TestCase):
     def test_policy_for_returns_dataclass(self) -> None:
