@@ -209,6 +209,9 @@ class LocalChatAPI:
             return True
         return False
 
+    def is_authorized(self, headers: dict[str, str] | None) -> bool:
+        return self._is_authorized(headers)
+
     @staticmethod
     def _headers_from_environ(environ: dict[str, Any]) -> dict[str, str]:
         headers: dict[str, str] = {}

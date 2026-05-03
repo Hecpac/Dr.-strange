@@ -5,12 +5,11 @@ import errno
 import json
 import logging
 import os
-import signal
-import subprocess
 import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import unquote
 from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 
 from claw_v2.chat_api import LocalChatAPI
@@ -23,6 +22,10 @@ def _static_dir() -> Path:
     return Path(__file__).parent / "static"
 
 
+def _static_root() -> Path:
+    return _static_dir().resolve()
+
+
 def _content_type_for(path: str) -> str:
     if path.endswith(".js"):
         return "application/javascript; charset=utf-8"
@@ -31,20 +34,44 @@ def _content_type_for(path: str) -> str:
     return "text/html; charset=utf-8"
 
 
-def _kill_port_holder(port: int) -> None:
+def _decode_path_info(path_info: str) -> str:
+    value = path_info or "/"
+    for _ in range(3):
+        decoded = unquote(value)
+        if decoded == value:
+            break
+        value = decoded
+    return value
+
+
+def _resolve_static_path(path_info: str) -> Path | None:
+    decoded = _decode_path_info(path_info)
+    relative = decoded.lstrip("/") or "chat.html"
+    root = _static_root()
+    candidate = (root / relative).resolve(strict=False)
     try:
-        result = subprocess.run(
-            ["lsof", "-ti", f"TCP:{port}", "-sTCP:LISTEN"],
-            capture_output=True, text=True, timeout=3,
-        )
-        for pid_str in result.stdout.strip().splitlines():
-            try:
-                os.kill(int(pid_str), signal.SIGTERM)
-                logger.warning("Sent SIGTERM to pid %s holding port %d", pid_str.strip(), port)
-            except (ValueError, ProcessLookupError, PermissionError):
-                pass
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
+        candidate.relative_to(root)
+    except ValueError:
+        return None
+    if not candidate.is_file():
+        return None
+    return candidate
+
+
+def _json_response(
+    start_response: Callable[[str, list[tuple[str, str]]], object],
+    status: str,
+    payload: dict[str, Any],
+) -> list[bytes]:
+    body = json.dumps(payload).encode("utf-8")
+    start_response(
+        status,
+        [
+            ("Content-Type", "application/json; charset=utf-8"),
+            ("Content-Length", str(len(body))),
+        ],
+    )
+    return [body]
 
 
 class _QuietHandler(WSGIRequestHandler):
@@ -120,36 +147,27 @@ class WebTransport:
                 )
                 return [body]
             if path == "/observability" or path.startswith("/observability/"):
+                if not self._chat_api.is_authorized(
+                    LocalChatAPI._headers_from_environ(environ)
+                ):
+                    return _json_response(start_response, "401 Unauthorized", {"error": "unauthorized"})
                 if self._observability_dashboard is None:
-                    body = json.dumps({"error": "observability unavailable"}).encode("utf-8")
-                    start_response(
+                    return _json_response(
+                        start_response,
                         "503 Service Unavailable",
-                        [
-                            ("Content-Type", "application/json; charset=utf-8"),
-                            ("Content-Length", str(len(body))),
-                        ],
+                        {"error": "observability unavailable"},
                     )
-                    return [body]
                 return self._observability_dashboard.wsgi_app(environ, start_response)
             if path.startswith("/api/"):
                 return self._chat_api.wsgi_app(environ, start_response)
-            static_path = "chat.html" if path in {"", "/"} else path.lstrip("/")
-            file_path = _static_dir() / static_path
-            if not file_path.exists() or not file_path.is_file():
-                body = json.dumps({"error": f"not found: {path}"}).encode("utf-8")
-                start_response(
-                    "404 Not Found",
-                    [
-                        ("Content-Type", "application/json; charset=utf-8"),
-                        ("Content-Length", str(len(body))),
-                    ],
-                )
-                return [body]
+            file_path = _resolve_static_path(path)
+            if file_path is None:
+                return _json_response(start_response, "404 Not Found", {"error": f"not found: {path}"})
             body = file_path.read_bytes()
             start_response(
                 "200 OK",
                 [
-                    ("Content-Type", _content_type_for(static_path)),
+                    ("Content-Type", _content_type_for(file_path.name)),
                     ("Content-Length", str(len(body))),
                 ],
             )
@@ -170,8 +188,6 @@ class WebTransport:
                 last_error = exc
                 if exc.errno != errno.EADDRINUSE or self._port == 0:
                     raise
-                if attempt == 0:
-                    _kill_port_holder(self._port)
                 await asyncio.sleep(0.25 * (attempt + 1))
         if self._server is None:
             raise OSError(f"Port {self._host}:{self._port} is still in use after retries") from last_error
