@@ -218,6 +218,54 @@ def _looks_like_pending_tool_approval_grant(text: str) -> bool:
     }
 
 
+def _looks_like_computer_approval_reject(text: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9\s]+", " ", _normalize_command_text(text)).strip()
+    normalized = re.sub(r"\s+", " ", normalized)
+    return any(
+        phrase in normalized
+        for phrase in (
+            "aborta",
+            "abortalo",
+            "abortala",
+            "cancela",
+            "cancelalo",
+            "cancelala",
+            "no autorices",
+            "no autorizo",
+            "no lo hagas",
+            "no la hagas",
+        )
+    )
+
+
+def _looks_like_computer_approval_grant(text: str) -> bool:
+    if _looks_like_computer_approval_reject(text):
+        return False
+    normalized = re.sub(r"[^a-z0-9\s]+", " ", _normalize_command_text(text)).strip()
+    normalized = re.sub(r"\s+", " ", normalized)
+    if _looks_like_pending_tool_approval_grant(normalized):
+        return True
+    return any(
+        phrase in normalized
+        for phrase in (
+            "te autorizo",
+            "lo autorizo",
+            "la autorizo",
+            "autorizo",
+            "te apruebo",
+            "lo apruebo",
+            "la apruebo",
+            "apruebo",
+            "puedes continuar",
+            "puedes hacerlo",
+            "continua",
+            "sigue",
+            "hazlo",
+            "dale",
+        )
+    )
+
+
 def _looks_like_task_completion_question(text: str) -> bool:
     normalized = _normalize_command_text(text)
     if not any(token in normalized for token in ("tarea", "task", "trabajo")):
@@ -438,6 +486,7 @@ class BotService:
             observe=observe,
             capability_check=self._capability_unavailable_message,
             brain_handle_message=lambda *args, **kwargs: self.brain.handle_message(*args, **kwargs),
+            current_url_resolver=self._browse_handler.recent_browse_url,
         )
         self._agent_handler = AgentHandler(
             auto_research=auto_research,
@@ -1111,6 +1160,11 @@ class BotService:
             )
         if command_response is not None:
             return command_response
+        computer_approval_response = self._handle_pending_computer_approval_response(session_id, stripped)
+        if computer_approval_response is not None:
+            self._store_memory_turn(session_id, stripped, computer_approval_response, assistant_limit=2000)
+            self._remember_assistant_turn_state(session_id, stripped, computer_approval_response)
+            return computer_approval_response
         operational_alert_response = self._maybe_handle_operational_alert(stripped, session_id=session_id)
         self._emit_dispatch_decision(
             route="operational_alert",
@@ -2272,6 +2326,42 @@ class BotService:
             result = self._brain_text_response(session_id, original_text, memory_text=original_text)
         return f"Aprobación registrada. Reintenté la acción original.\n\n{result}"
 
+    def _handle_pending_computer_approval_response(self, session_id: str, text: str) -> str | None:
+        pending = self._latest_pending_computer_approval(session_id)
+        if pending is None:
+            return None
+        approval_id = str(pending.get("approval_id") or "")
+        if not approval_id:
+            return None
+        if _looks_like_computer_approval_reject(text):
+            return self._computer_handler.action_abort_response(approval_id)
+        if not _looks_like_computer_approval_grant(text):
+            return None
+        return self._computer_handler.action_approve_internal_response(
+            approval_id,
+            session_id=session_id,
+        )
+
+    def _latest_pending_computer_approval(self, session_id: str) -> dict[str, Any] | None:
+        try:
+            pending_items = self.approvals.list_pending()
+        except Exception:
+            logger.debug("listing pending computer approvals failed", exc_info=True)
+            return None
+        matches: list[dict[str, Any]] = []
+        for item in pending_items:
+            metadata = item.get("metadata")
+            if not isinstance(metadata, dict):
+                continue
+            if metadata.get("kind") != "computer_use":
+                continue
+            if metadata.get("session_id") != session_id:
+                continue
+            matches.append(item)
+        if not matches:
+            return None
+        return max(matches, key=lambda item: float(item.get("created_at") or 0.0))
+
     def _maybe_augment_pre_hook_block(self, content: str) -> str:
         parsed = _parse_pre_hook_block(content)
         if parsed is None or self.observe is None:
@@ -2801,16 +2891,11 @@ class BotService:
     ) -> str | None:
         if not _looks_like_chatgpt_browser_request(normalized):
             return None
-        if _looks_like_chatgpt_interactive_request(normalized) and self.browser_use is not None:
-            degraded = self._capability_unavailable_message(
-                "browser_use",
-                "browser use unavailable",
+        if _looks_like_chatgpt_interactive_request(normalized):
+            return self._computer_handler.action_response(
+                _chatgpt_browser_task_instruction(text),
+                session_id,
             )
-            if degraded is None:
-                return self._computer_handler.action_response(
-                    _chatgpt_browser_task_instruction(text),
-                    session_id,
-                )
         return self._chrome_handler.chatgpt_new_chat_response(session_id=session_id)
 
     def _maybe_handle_task_status_question(self, text: str, *, session_id: str) -> str | None:

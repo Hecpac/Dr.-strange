@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
+import re
 import threading
+import time
+from pathlib import Path
 from typing import Any, Callable
 
 from claw_v2.bot_commands import BotCommand, CommandContext
@@ -13,6 +17,14 @@ from claw_v2.bot_helpers import (
 )
 
 logger = logging.getLogger(__name__)
+
+_URL_RE = re.compile(r"https?://[^\s<>()\[\]\"']+")
+BROWSER_USE_TIMEOUT_SECONDS = 180
+
+
+def _error_message(exc: BaseException) -> str:
+    message = str(exc).strip()
+    return message or exc.__class__.__name__
 
 
 class ComputerHandler:
@@ -30,6 +42,7 @@ class ComputerHandler:
         observe: Any | None = None,
         capability_check: Callable[[str, str], str | None] | None = None,
         brain_handle_message: Callable[..., Any] | None = None,
+        current_url_resolver: Callable[[str], str | None] | None = None,
     ) -> None:
         self.computer = computer
         self.browser_use = browser_use
@@ -42,6 +55,7 @@ class ComputerHandler:
         self.observe = observe
         self._check_capability = capability_check or (lambda name, fallback: None)
         self._brain_handle_message = brain_handle_message
+        self._current_url_resolver = current_url_resolver
         self._state_lock = threading.Lock()
         self._sessions: dict[str, Any] = {}
         self._client: Any | None = None
@@ -128,23 +142,6 @@ class ComputerHandler:
         degraded = self._check_capability("computer_control", "computer use unavailable")
         if degraded is not None:
             return degraded
-        if self.browser_use is not None:
-            try:
-                import asyncio
-                try:
-                    loop = asyncio.get_running_loop()
-                except RuntimeError:
-                    loop = None
-                if loop and loop.is_running():
-                    import concurrent.futures
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                        future = pool.submit(asyncio.run, self.browser_use.run_task(instruction))
-                        result = future.result(timeout=120)
-                else:
-                    result = asyncio.run(asyncio.wait_for(self.browser_use.run_task(instruction), timeout=120))
-                return result
-            except Exception as exc:
-                logger.warning("browser_use fallback failed: %s", exc)
 
         from claw_v2.computer import ComputerSession
 
@@ -152,7 +149,18 @@ class ComputerHandler:
             active = self._sessions.get(session_id)
             if active is not None:
                 active.status = "aborted"
-            session = ComputerSession(task=instruction)
+            current_url = self._resolve_current_url(session_id, instruction)
+            session = ComputerSession(
+                task=instruction,
+                current_url=current_url,
+            )
+            if self._should_use_browser_backend(instruction, current_url=current_url):
+                session.status = "awaiting_approval"
+                session.pending_action = {
+                    "action": "browser_use_task",
+                    "backend": "browser_use",
+                    "task": instruction,
+                }
             self._sessions[session_id] = session
         return self._run_session(session_id)
 
@@ -161,32 +169,46 @@ class ComputerHandler:
         if session is None:
             return "no active computer session"
         try:
-            gate = self._get_gate()
-            client = None if self.computer.codex_backend is not None else self._get_client()
-            result = self.computer.run_agent_loop(
-                session=session,
-                client=client,
-                gate=gate,
-                model=self.computer_model,
-                system_prompt=self.computer_system_prompt,
-            )
+            if self._is_browser_use_session(session):
+                result = self._run_browser_use_session(session)
+            else:
+                if self.computer is None:
+                    return "computer use unavailable"
+                gate = self._get_gate()
+                client = None if self.computer.codex_backend is not None else self._get_client()
+                result = self.computer.run_agent_loop(
+                    session=session,
+                    client=client,
+                    gate=gate,
+                    model=self.computer_model,
+                    system_prompt=self.computer_system_prompt,
+                )
         except Exception as exc:
             self._sessions.pop(session_id, None)
+            message = _error_message(exc)
             logger.exception("computer use failed for %s", session_id)
             if self.observe is not None:
-                self.observe.emit("error", payload={"source": "computer_use", "error": str(exc)[:200]})
-            return f"computer use error: {exc}"
+                self.observe.emit("error", payload={"source": "computer_use", "error": message[:200]})
+            return f"computer use error: {message}"
 
         if session.status == "awaiting_approval":
+            if self.approvals is None:
+                session.status = "aborted"
+                self._sessions.pop(session_id, None)
+                return "computer action requires approval, but approvals are unavailable"
             pending = dict(session.pending_action or {})
+            screenshot_metadata = self._capture_approval_screenshot(session_id, session)
+            summary = _format_computer_pending_summary(session.task, pending)
             pending_approval = self.approvals.create(
-                action=pending.get("action", "computer_action"),
-                summary=_format_computer_pending_summary(session.task, pending),
+                action=str(pending.get("action") or pending.get("type") or "computer_action"),
+                summary=summary,
                 metadata={
                     "kind": "computer_use",
                     "session_id": session_id,
                     "task": session.task,
                     "pending_action": pending,
+                    "current_url": session.current_url,
+                    **screenshot_metadata,
                 },
             )
             session.pending_action = {
@@ -195,9 +217,9 @@ class ComputerHandler:
                 "approval_token": pending_approval.token,
             }
             return (
-                f"{result}\n\n"
-                f"Approve via: `/action_approve {pending_approval.approval_id} {pending_approval.token}`\n"
-                f"Abort via: `/action_abort {pending_approval.approval_id}`"
+                "Necesito tu autorización para continuar con esta acción de escritorio.\n"
+                f"Acción: {summary}\n"
+                "Responde `te autorizo` para ejecutarla o `aborta` para cancelarla."
             )
 
         if session.status in {"done", "aborted"}:
@@ -245,6 +267,29 @@ class ComputerHandler:
             return f"approval {approval_id} not found"
         if not valid:
             return "invalid token"
+        return self._resume_approved_computer_action(approval_id)
+
+    def action_approve_internal_response(self, approval_id: str, *, session_id: str | None = None) -> str:
+        if self.approvals is None:
+            return "approvals unavailable"
+        try:
+            payload = self.approvals.read(approval_id)
+        except FileNotFoundError:
+            return f"approval {approval_id} not found"
+        metadata = payload.get("metadata", {})
+        if metadata.get("kind") == "computer_use" and session_id is not None and metadata.get("session_id") != session_id:
+            return "approval does not belong to this session"
+        status = str(payload.get("status") or "")
+        if status == "pending":
+            if not self.approvals.approve_internal(approval_id):
+                return "approval could not be registered"
+        elif status != "approved":
+            return f"approval {approval_id} is {status}"
+        return self._resume_approved_computer_action(approval_id)
+
+    def _resume_approved_computer_action(self, approval_id: str) -> str:
+        if self.approvals is None:
+            return "approvals unavailable"
         payload = self.approvals.read(approval_id)
         metadata = payload.get("metadata", {})
         if metadata.get("kind") != "computer_use":
@@ -257,6 +302,8 @@ class ComputerHandler:
             return "approved, but the computer session is no longer active"
         if session.pending_action is not None and session.pending_action.get("approval_id") != approval_id:
             return "approved, but no matching pending computer action was found"
+        if session.pending_action is not None:
+            session.pending_action["approved"] = True
         session.status = "running"
         return self._run_session(session_id)
 
@@ -277,3 +324,115 @@ class ComputerHandler:
                     session.status = "aborted"
             return "computer action rejected"
         return "action rejected"
+
+    def _resolve_current_url(self, session_id: str, instruction: str) -> str | None:
+        match = _URL_RE.search(instruction)
+        if match is not None:
+            return match.group(0).rstrip(".,;:!?")
+        if self._current_url_resolver is None:
+            return None
+        try:
+            value = self._current_url_resolver(session_id)
+        except Exception:
+            logger.debug("current_url resolver failed for computer session %s", session_id, exc_info=True)
+            return None
+        return value if isinstance(value, str) and value.strip() else None
+
+    def _should_use_browser_backend(self, instruction: str, *, current_url: str | None) -> bool:
+        if self.browser_use is None:
+            return False
+        normalized = instruction.lower()
+        if any(token in normalized for token in ("chatgpt", "chat.openai.com", "chrome/cdp", "browser")):
+            return True
+        if _URL_RE.search(instruction) is not None:
+            return True
+        return bool(current_url and current_url.startswith(("http://", "https://")))
+
+    @staticmethod
+    def _is_browser_use_session(session: Any) -> bool:
+        pending = session.pending_action if isinstance(session.pending_action, dict) else {}
+        return pending.get("action") == "browser_use_task" or pending.get("backend") == "browser_use"
+
+    def _run_browser_use_session(self, session: Any) -> str:
+        pending = dict(session.pending_action or {})
+        approved = (
+            pending.get("action") == "browser_use_task"
+            and pending.get("approved") is True
+            and isinstance(pending.get("approval_id"), str)
+        )
+        if not approved:
+            session.status = "awaiting_approval"
+            session.pending_action = {
+                "action": "browser_use_task",
+                "backend": "browser_use",
+                "task": session.task,
+            }
+            return "Browser automation needs approval before executing authenticated browser actions."
+        if self.browser_use is None:
+            raise RuntimeError("browser_use unavailable for approved browser automation")
+        result = self._run_browser_use_task(session.task)
+        session.pending_action = None
+        session.status = "done"
+        return result
+
+    def _run_browser_use_task(self, instruction: str) -> str:
+        import asyncio
+
+        async def _run() -> Any:
+            try:
+                return await asyncio.wait_for(
+                    self.browser_use.run_task(instruction),
+                    timeout=BROWSER_USE_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError as exc:
+                raise RuntimeError(
+                    "browser_use timed out after "
+                    f"{BROWSER_USE_TIMEOUT_SECONDS}s while executing approved browser automation"
+                ) from exc
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop and loop.is_running():
+            import concurrent.futures
+
+            pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            future = pool.submit(lambda: asyncio.run(_run()))
+            try:
+                return str(future.result(timeout=BROWSER_USE_TIMEOUT_SECONDS + 10))
+            except concurrent.futures.TimeoutError as exc:
+                future.cancel()
+                raise RuntimeError(
+                    "browser_use timed out after "
+                    f"{BROWSER_USE_TIMEOUT_SECONDS}s while executing approved browser automation"
+                ) from exc
+            finally:
+                pool.shutdown(wait=False, cancel_futures=True)
+        return str(asyncio.run(_run()))
+
+    def _capture_approval_screenshot(self, session_id: str, session: Any) -> dict[str, str]:
+        if self.computer is None or not hasattr(self.computer, "capture_screenshot"):
+            return {}
+        try:
+            screenshot = self.computer.capture_screenshot()
+            encoded = screenshot.get("data", "")
+            media_type = str(screenshot.get("media_type") or "image/png")
+            raw = base64.b64decode(encoded)
+            root = Path(getattr(self.approvals, "root", None) or getattr(self.config, "approvals_root", ""))
+            if not str(root):
+                root = Path.home() / ".claw" / "pending_approvals"
+            target_dir = root / "computer_screenshots"
+            target_dir.mkdir(parents=True, exist_ok=True)
+            safe_session = re.sub(r"[^A-Za-z0-9_.-]+", "_", session_id)[:80] or "session"
+            suffix = ".png" if media_type == "image/png" else ".bin"
+            path = target_dir / f"{safe_session}-{int(time.time() * 1000)}{suffix}"
+            path.write_bytes(raw)
+            session.screenshot_path = str(path)
+            return {
+                "screenshot_path": str(path),
+                "screenshot_media_type": media_type,
+            }
+        except Exception as exc:
+            logger.warning("approval screenshot capture failed for %s: %s", session_id, exc)
+            return {"screenshot_error": str(exc)[:200]}

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -2974,12 +2975,14 @@ class BotTests(unittest.TestCase):
                     page_url_pattern="chatgpt.com",
                 )
 
-    def test_natural_language_chatgpt_image_request_uses_browser_automation(self) -> None:
+    def test_natural_language_chatgpt_image_request_uses_gated_computer_session(self) -> None:
         class StubBrowserUse:
             def __init__(self) -> None:
                 self.instruction = ""
+                self.called = False
 
             async def run_task(self, instruction: str) -> str:
+                self.called = True
                 self.instruction = instruction
                 return "imagen solicitada en ChatGPT"
 
@@ -2997,14 +3000,86 @@ class BotTests(unittest.TestCase):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 browser_use = StubBrowserUse()
                 runtime.bot.browser_use = browser_use
+                runtime.bot.computer = MagicMock()
+                runtime.bot.computer.codex_backend = object()
+                runtime.bot.computer.capture_screenshot.return_value = {
+                    "data": "iVBORw0KGgo=",
+                    "media_type": "image/png",
+                }
+                runtime.bot.computer_client_factory = lambda: object()
+
                 result = runtime.bot.handle_text(
                     user_id="123",
                     session_id="s1",
                     text="Abre chrome y pídele a ChatGPT una imagen que represente mi marca",
                 )
-                self.assertEqual(result, "imagen solicitada en ChatGPT")
+                self.assertIn("Necesito tu autorización", result)
+                self.assertNotIn("/action_approve", result)
+                self.assertFalse(browser_use.called)
+                runtime.bot.computer.run_agent_loop.assert_not_called()
+                pending_session = runtime.bot._computer_handler._sessions["s1"]
+                self.assertEqual(pending_session.pending_action["action"], "browser_use_task")
+                self.assertIn("https://chatgpt.com/", pending_session.pending_action["task"])
+                self.assertIn("imagen que represente mi marca", pending_session.pending_action["task"])
+                self.assertEqual(pending_session.current_url, "https://chatgpt.com/")
+
+                approved = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="Te autorizo",
+                )
+
+                self.assertEqual(approved, "imagen solicitada en ChatGPT")
+                self.assertTrue(browser_use.called)
                 self.assertIn("https://chatgpt.com/", browser_use.instruction)
-                self.assertIn("imagen que represente mi marca", browser_use.instruction)
+                runtime.bot.computer.run_agent_loop.assert_not_called()
+
+    def test_approved_browser_use_timeout_returns_actionable_error(self) -> None:
+        class TimeoutBrowserUse:
+            async def run_task(self, instruction: str) -> str:
+                raise asyncio.TimeoutError()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.browser_use = TimeoutBrowserUse()
+                runtime.bot.computer = MagicMock()
+                runtime.bot.computer.codex_backend = object()
+                runtime.bot.computer.capture_screenshot.return_value = {
+                    "data": "iVBORw0KGgo=",
+                    "media_type": "image/png",
+                }
+
+                prompt = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="Abre ChatGPT y crea una imagen",
+                )
+                self.assertIn("Necesito tu autorización", prompt)
+
+                result = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="Te autorizo",
+                )
+
+                self.assertIn("computer use error: browser_use timed out after 180s", result)
+                error_events = [
+                    event
+                    for event in runtime.observe.recent_events(limit=10)
+                    if event["event_type"] == "error"
+                ]
+                self.assertTrue(error_events)
+                self.assertIn("browser_use timed out after 180s", error_events[0]["payload"]["error"])
 
     def test_brain_prompt_includes_runtime_capability_context(self) -> None:
         captured: dict[str, str] = {}
@@ -3468,6 +3543,10 @@ class BotTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 runtime.bot.computer = MagicMock()
+                runtime.bot.computer.capture_screenshot.return_value = {
+                    "data": "iVBORw0KGgo=",
+                    "media_type": "image/png",
+                }
                 runtime.bot.browser_use = None  # prevent real OpenAI calls
                 runtime.bot.computer_client_factory = lambda: object()
                 runtime.bot.computer_gate = MagicMock()
@@ -3489,7 +3568,8 @@ class BotTests(unittest.TestCase):
                     text="Haz clic en Revisar tu configuración",
                 )
 
-                self.assertIn("/action_approve", result)
+                self.assertIn("Necesito tu autorización", result)
+                self.assertNotIn("/action_approve", result)
                 runtime.bot.computer.run_agent_loop.assert_called_once()
 
     @patch("claw_v2.browse_handler._jina_read")
@@ -3707,6 +3787,10 @@ class BotTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 runtime.bot.computer = MagicMock()
+                runtime.bot.computer.capture_screenshot.return_value = {
+                    "data": "iVBORw0KGgo=",
+                    "media_type": "image/png",
+                }
                 runtime.bot.browser_use = None  # prevent real OpenAI calls
                 runtime.bot.computer_client_factory = lambda: object()
                 runtime.bot.computer_gate = MagicMock()
@@ -3728,12 +3812,16 @@ class BotTests(unittest.TestCase):
                     text="/computer haz click en Revisar tu configuracion",
                 )
 
-                self.assertIn("/action_approve", result)
-                self.assertIn("/action_abort", result)
+                self.assertIn("Necesito tu autorización", result)
+                self.assertNotIn("/action_approve", result)
+                self.assertNotIn("/action_abort", result)
                 pending = runtime.approvals.list_pending()
                 self.assertEqual(len(pending), 1)
                 self.assertEqual(pending[0]["metadata"]["kind"], "computer_use")
                 self.assertEqual(pending[0]["metadata"]["session_id"], "s1")
+                screenshot_path = Path(pending[0]["metadata"]["screenshot_path"])
+                self.assertTrue(screenshot_path.exists())
+                self.assertEqual(pending[0]["metadata"]["screenshot_media_type"], "image/png")
 
     def test_action_approve_resumes_pending_computer_session(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3749,6 +3837,10 @@ class BotTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 runtime.bot.computer = MagicMock()
+                runtime.bot.computer.capture_screenshot.return_value = {
+                    "data": "iVBORw0KGgo=",
+                    "media_type": "image/png",
+                }
                 runtime.bot.browser_use = None  # prevent real OpenAI calls
                 runtime.bot.computer_client_factory = lambda: object()
                 runtime.bot.computer_gate = MagicMock()
@@ -3775,9 +3867,12 @@ class BotTests(unittest.TestCase):
                     session_id="s1",
                     text="/computer haz click en Revisar tu configuracion",
                 )
-                match = re.search(r"/action_approve ([^ ]+) ([^`\n ]+)", first)
-                self.assertIsNotNone(match)
-                approval_id, token = match.group(1), match.group(2)
+                self.assertIn("Necesito tu autorización", first)
+                self.assertNotIn("/action_approve", first)
+                pending = runtime.approvals.list_pending()
+                self.assertEqual(len(pending), 1)
+                approval_id = pending[0]["approval_id"]
+                token = runtime.bot._computer_handler._sessions["s1"].pending_action["approval_token"]
 
                 second = runtime.bot.handle_text(
                     user_id="123",
@@ -3787,6 +3882,62 @@ class BotTests(unittest.TestCase):
 
                 self.assertEqual(second, "Hecho. Ya hice click y revise la nueva pantalla.")
                 self.assertEqual(call_count["value"], 2)
+
+    def test_natural_language_authorization_resumes_pending_computer_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.computer = MagicMock()
+                runtime.bot.computer.capture_screenshot.return_value = {
+                    "data": "iVBORw0KGgo=",
+                    "media_type": "image/png",
+                }
+                runtime.bot.browser_use = None
+                runtime.bot.computer_client_factory = lambda: object()
+                runtime.bot.computer_gate = MagicMock()
+                call_count = {"value": 0}
+
+                def fake_run_agent_loop(*, session, **kwargs):
+                    call_count["value"] += 1
+                    if call_count["value"] == 1:
+                        session.status = "awaiting_approval"
+                        session.pending_action = {
+                            "tool_use_id": "tool-1",
+                            "action": "left_click",
+                            "coordinate": [500, 300],
+                        }
+                        return "Action needs approval: left_click — waiting"
+                    self.assertTrue(session.pending_action["approved"])
+                    session.status = "done"
+                    return "Hecho. ChatGPT quedó abierto y la imagen fue solicitada."
+
+                runtime.bot.computer.run_agent_loop.side_effect = fake_run_agent_loop
+
+                first = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="Abre ChatGPT y crea la imagen del mockup",
+                )
+                self.assertIn("Necesito tu autorización", first)
+
+                second = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="Abre ChatGPT y crea la imagen del mockup. Te autorizo",
+                )
+
+                self.assertEqual(second, "Hecho. ChatGPT quedó abierto y la imagen fue solicitada.")
+                self.assertEqual(call_count["value"], 2)
+                self.assertEqual(runtime.approvals.list_pending(), [])
 
     def test_computer_abort_cancels_active_session(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

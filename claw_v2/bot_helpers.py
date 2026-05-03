@@ -1357,7 +1357,7 @@ def _extract_title_from_url(url: str) -> str:
 
 
 def _format_computer_pending_summary(task: str, pending_action: dict[str, Any]) -> str:
-    action = pending_action.get("action", "unknown")
+    action = pending_action.get("action") or pending_action.get("type") or "unknown"
     if "coordinate" in pending_action:
         return f"{task} — {action} at {pending_action['coordinate']}"
     if "text" in pending_action:

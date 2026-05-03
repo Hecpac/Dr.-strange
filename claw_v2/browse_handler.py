@@ -432,6 +432,9 @@ class BrowseHandler:
                 active_object={"kind": "url", "url": url},
             )
 
+    def recent_browse_url(self, session_id: str) -> str | None:
+        return self._recent_browse_urls.get(session_id)
+
     def recent_tweet_url(self, session_id: str) -> str | None:
         url = self._recent_browse_urls.get(session_id)
         if url and _is_tweet_url(url):

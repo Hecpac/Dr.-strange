@@ -315,13 +315,36 @@ class CodexComputerBackendTests(unittest.TestCase):
                 result = backend.run("open Chrome")
         self.assertEqual(result, "Opened Chrome successfully.")
 
-    def test_computer_use_service_dispatches_to_codex_backend(self) -> None:
+    def test_computer_use_service_pauses_codex_backend_for_approval(self) -> None:
         from claw_v2.computer import CodexComputerBackend, ComputerUseService, ComputerSession
-        backend = CodexComputerBackend(transport=lambda task: f"completed: {task}")
+        calls: list[str] = []
+        backend = CodexComputerBackend(transport=lambda task: calls.append(task) or f"completed: {task}")
         svc = ComputerUseService(display_width=1280, display_height=800, codex_backend=backend)
         session = ComputerSession(task="open Safari")
         result = svc.run_agent_loop(session=session, client=None, gate=None, model="codex-mini-latest")
+        self.assertIn("needs approval", result)
+        self.assertEqual(session.status, "awaiting_approval")
+        self.assertEqual(session.pending_action["action"], "codex_computer_task")
+        self.assertEqual(calls, [])
+
+    def test_computer_use_service_runs_codex_backend_after_approval(self) -> None:
+        from claw_v2.computer import CodexComputerBackend, ComputerUseService, ComputerSession
+        calls: list[str] = []
+        backend = CodexComputerBackend(transport=lambda task: calls.append(task) or f"completed: {task}")
+        svc = ComputerUseService(display_width=1280, display_height=800, codex_backend=backend)
+        session = ComputerSession(
+            task="open Safari",
+            pending_action={
+                "action": "codex_computer_task",
+                "approved": True,
+                "approval_id": "approval-1",
+            },
+        )
+        result = svc.run_agent_loop(session=session, client=None, gate=None, model="codex-mini-latest")
         self.assertEqual(result, "completed: open Safari")
+        self.assertEqual(session.status, "done")
+        self.assertIsNone(session.pending_action)
+        self.assertEqual(calls, ["open Safari"])
 
 
 if __name__ == "__main__":
