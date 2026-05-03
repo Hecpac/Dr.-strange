@@ -1320,10 +1320,10 @@ class BotTests(unittest.TestCase):
                     text="/task_run corrige el bug del login",
                 )
 
-                self.assertIn("Cerré la tarea `s1:123`", reply)
+                self.assertIn("todavía necesita un paso más", reply)
                 runtime.bot.coordinator.run.assert_called_once()
                 state = runtime.memory.get_session_state("s1")
-                self.assertEqual(state["verification_status"], "passed")
+                self.assertEqual(state["verification_status"], "pending")
                 self.assertEqual(state["last_checkpoint"]["summary"], "1. Update the failing path")
                 self.assertEqual(state["task_queue"][0]["priority"], 0)
 
@@ -2123,7 +2123,7 @@ class BotTests(unittest.TestCase):
                     text="/task_run commit los cambios del bug del login",
                 )
 
-                self.assertIn("Cerré la tarea `s1:commit`", reply)
+                self.assertIn("todavía necesita un paso más", reply)
                 runtime.bot.coordinator.run.assert_called_once()
                 self.assertEqual(runtime.approvals.list_pending(), [])
 
@@ -2166,10 +2166,10 @@ class BotTests(unittest.TestCase):
                     text=f"/task_approve {approval_id} {token}",
                 )
 
-                self.assertIn("Cerré la tarea `s1:approved`", second)
+                self.assertIn("todavía necesita un paso más", second)
                 runtime.bot.coordinator.run.assert_called_once()
                 state = runtime.memory.get_session_state("s1")
-                self.assertEqual(state["verification_status"], "passed")
+                self.assertEqual(state["verification_status"], "pending")
 
     def test_proceed_during_task_approval_wait_returns_explicit_instruction(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

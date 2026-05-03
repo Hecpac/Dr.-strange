@@ -46,6 +46,7 @@ class VerificationArtifact:
     status: str
     summary: str
     pending_action: str = ""
+    petri_scores: dict[str, Any] | None = None
     created_at: float = field(default_factory=time.time)
     kind: str = "verification"
 
