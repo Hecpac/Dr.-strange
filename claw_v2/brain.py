@@ -1120,13 +1120,32 @@ def _looks_like_internal_tool_trace(content: str) -> bool:
 def _suppress_internal_tool_trace(response: LLMResponse, content: str) -> str:
     if not _looks_like_internal_tool_trace(content):
         return content
+    # Surgical: drop only lines that contain a trace pattern, keep the rest of
+    # the response. If nothing useful remains, fall back to the generic message.
+    lines = content.split("\n")
+    kept: list[str] = []
+    removed = 0
+    for line in lines:
+        if any(p.search(line) for p in _INTERNAL_TOOL_TRACE_PATTERNS):
+            removed += 1
+            continue
+        kept.append(line)
+    cleaned = "\n".join(kept).strip()
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     response.artifacts["contract_violation"] = "internal_tool_trace"
     response.artifacts["internal_tool_trace_suppressed"] = True
+    response.artifacts["internal_tool_trace_lines_removed"] = removed
+    if not cleaned:
+        _append_reasoning_trace(
+            response,
+            f"Internal tool-call transcript ({removed} lines) suppressed; no usable text remained.",
+        )
+        return INTERNAL_TOOL_TRACE_FALLBACK
     _append_reasoning_trace(
         response,
-        "Internal tool-call transcript suppressed from visible output.",
+        f"Internal tool-call transcript ({removed} lines) stripped from visible output.",
     )
-    return INTERNAL_TOOL_TRACE_FALLBACK
+    return cleaned
 
 
 def _append_reasoning_trace(response: LLMResponse, note: str) -> None:
