@@ -183,16 +183,23 @@ _COMPUTER_READ_TOKENS = (
 )
 _NLM_CREATE_RE = re.compile(
     r"^\s*(?:por favor\s+)?(?:(?:ahora|ya|tambi[eé]n|tb)\s+)?"
-    r"(?:(?:cr[eé]a(?:me)?)|(?:genera(?:me)?)|(?:haz(?:me)?)|quiero|necesito)\s+"
-    r"(?:un\s+)?(?:cuaderno|notebook)(?:\s+(?:en\s+notebooklm))?"
-    r"[,;:]?(?:\s+(?:sobre|de(?:l)?))?[,;:]?\s+(.+?)\s*$",
+    r"(?:(?:cr[eé]a(?:me)?)|(?:genera(?:me)?)|(?:haz(?:me)?)|"
+    r"(?:armame|arma)|(?:prep[aá]rame|prepara)|(?:p[oó]nme|pon)|"
+    r"(?:lanza(?:me)?)|(?:dispara(?:me)?)|"
+    r"quiero|necesito|dame|produce(?:me)?)\s+"
+    r"(?:un\s+|el\s+|otro\s+)?(?:cuaderno|notebook|nb)(?:\s+(?:en\s+notebooklm))?"
+    r"[,;:]?(?:\s+(?:sobre|de(?:l)?|acerca\s+de|para|con))?[,;:]?\s+(.+?)\s*$",
     re.IGNORECASE | re.DOTALL,
 )
 _NLM_VOICE_PREFIX_RE = re.compile(r"^\s*\[\s*nota\s+de\s+voz\s*\]\s*:?\s*", re.IGNORECASE)
 _NLM_ARTIFACT_KINDS = {
     "podcast": "podcast",
+    "audio del cuaderno": "podcast",
+    "audio del notebook": "podcast",
+    "resumen en audio": "podcast",
     "infografia": "infographic",
     "infographic": "infographic",
+    "infografica": "infographic",
 }
 _NLM_ACTION_TOKENS = (
     "crea",
@@ -203,7 +210,56 @@ _NLM_ACTION_TOKENS = (
     "hazme",
     "quiero",
     "necesito",
+    "armame",
+    "arma",
+    "preparame",
+    "prepara",
+    "ponme",
+    "pon",
+    "lanza",
+    "lanzame",
+    "dispara",
+    "disparame",
+    "dame",
+    "produce",
+    "produceme",
 )
+_NLM_META_DISCUSSION_PHRASES = (
+    "cuando te pido",
+    "cuando te diga",
+    "cuando te pida",
+    "como te pido",
+    "como te diga",
+    "si te pido",
+    "si te digo",
+    "no me digas",
+    "no me pidas",
+    "no quiero",
+    "tienes que entender",
+    "tienes que saber",
+    "tenes que entender",
+    "tenes que saber",
+    "deberias entender",
+    "deberias saber",
+    "explica",
+    "explicame",
+    "porque salio",
+    "por que salio",
+    "porque sigues",
+    "por que sigues",
+    "revisa los errores",
+    "revisa el error",
+    "el error",
+    "los errores",
+    "que paso con",
+    "que pasa con",
+    "ampliar el vocabulario",
+    "haz los fixes",
+    "los fixes",
+    "fix permanente",
+    "fixes que sean",
+)
+_NLM_NOTEBOOK_REFS = ("cuaderno", "notebook", "notebooklm", " nb ")
 _SCHEME_URL_RE = re.compile(r"(?P<url>https?://[^\s<>()]+)", re.IGNORECASE)
 _HOST_URL_RE = re.compile(
     r"(?P<url>(?<!@)(?:localhost|(?:\d{1,3}\.){3}\d{1,3}|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,})(?::\d+)?(?:[/?#][^\s<>()]*)?)",
@@ -323,6 +379,8 @@ def _strip_voice_prefix(text: str) -> str:
 
 def _extract_nlm_create_topic(text: str) -> str | None:
     cleaned = _strip_voice_prefix(text).strip()
+    if _looks_like_nlm_meta_discussion(cleaned):
+        return None
     match = _NLM_CREATE_RE.match(cleaned)
     if not match:
         return None
@@ -333,12 +391,41 @@ def _extract_nlm_create_topic(text: str) -> str | None:
 def _extract_nlm_artifact_kind(text: str) -> str | None:
     cleaned = _strip_voice_prefix(text)
     normalized = _normalize_command_text(cleaned)
+    if _looks_like_nlm_meta_discussion(cleaned):
+        return None
     if not any(token in normalized for token in _NLM_ACTION_TOKENS):
+        return None
+    word_count = len(normalized.split())
+    has_notebook_ref = any(ref.strip() in normalized for ref in _NLM_NOTEBOOK_REFS)
+    # Long messages without an explicit notebook reference are almost always
+    # meta-discussion or unrelated content that happens to mention "podcast".
+    if word_count > 30 and not has_notebook_ref:
         return None
     for token, kind in _NLM_ARTIFACT_KINDS.items():
         if token in normalized:
+            idx = normalized.find(token)
+            preceding = normalized[max(0, idx - 40):idx]
+            if any(meta in preceding for meta in (
+                "cuando te pido",
+                "cuando te diga",
+                "cuando te pida",
+                "como te pido",
+                "si te pido",
+                "te pido",
+            )):
+                continue
             return kind
     return None
+
+
+def _looks_like_nlm_meta_discussion(text: str) -> bool:
+    """Reject messages that *talk about* notebook/podcast intents but are not
+    direct requests. Examples: "cuando te pido podcast hazlo asi",
+    "no me digas que no podes crear el cuaderno", "explicame porque sale el
+    error al crear el cuaderno".
+    """
+    normalized = _normalize_command_text(text)
+    return any(phrase in normalized for phrase in _NLM_META_DISCUSSION_PHRASES)
 
 
 def _normalize_command_text(text: str) -> str:
