@@ -16,6 +16,10 @@ logger = logging.getLogger(__name__)
 
 ResearchFallback = Callable[[str], str | dict[str, Any] | None]
 
+class NotebookLMSDKUnavailable(RuntimeError):
+    """Raised when an operation requires the notebooklm SDK but it is not installed."""
+
+
 _NOTEBOOKLM_TIMEOUT_PATTERNS = ("timeout", "timed out", "did not complete", "deadline")
 _NOTEBOOKLM_AUTH_PATTERNS = ("auth", "unauthorized", "forbidden", "permission", "401", "403", "login")
 _NOTEBOOKLM_RATE_LIMIT_PATTERNS = ("rate limit", "too many requests", "quota", "429")
@@ -159,7 +163,13 @@ class NotebookLMService:
 
         @contextlib.asynccontextmanager
         async def _real():
-            from notebooklm import NotebookLMClient
+            try:
+                from notebooklm import NotebookLMClient
+            except ImportError as exc:
+                raise NotebookLMSDKUnavailable(
+                    "El SDK 'notebooklm' no esta instalado. Esta accion requiere "
+                    "instalar el paquete o usar la ruta CDP para esta operacion."
+                ) from exc
             async with await NotebookLMClient.from_storage(timeout=timeout) as client:
                 yield client
 
@@ -178,7 +188,14 @@ class NotebookLMService:
             ]
 
     def list_notebooks(self) -> list[dict]:
-        return self._run_async(self._async_list_notebooks())
+        # Prefer SDK when test factory is injected; otherwise scrape via CDP.
+        if self._use_sdk:
+            return self._run_async(self._async_list_notebooks())
+        try:
+            return notebooklm_cdp.list_notebooks()
+        except Exception as exc:
+            logger.warning("CDP list_notebooks failed: %s", exc)
+            return []
 
     async def _async_create_notebook(self, title: str) -> dict:
         async with self._client_ctx() as client:

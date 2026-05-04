@@ -11,6 +11,7 @@ from typing import Any, Callable, Iterator
 from claw_v2.bot_commands import BotCommand, CommandContext
 from claw_v2.bot_helpers import _extract_nlm_artifact_kind, _extract_nlm_create_topic
 from claw_v2.nlm_context import NotebookContext, resolve_latest_notebook_context
+from claw_v2.notebooklm import NotebookLMSDKUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,16 @@ class NlmHandler:
         with self._record_task(session_id=session_id, objective=text, intent=intent) as recorder:
             try:
                 response = self._dispatch_intent(session_id, text, intent)
+            except NotebookLMSDKUnavailable as exc:
+                logger.info("NLM SDK unavailable, returning friendly degraded reply: %s", exc)
+                response = (
+                    "Esta accion sobre el cuaderno requiere el SDK de NotebookLM, "
+                    "que aun no esta disponible en este entorno. Lo que si puedo hacer "
+                    "ahora: crear un cuaderno nuevo, lanzar Deep Research o generar "
+                    "podcast/infografia (usan la ruta CDP)."
+                )
+                recorder.fail(response)
+                return response
             except ValueError as exc:
                 response = f"Error: {exc}"
                 recorder.fail(response)
