@@ -1145,7 +1145,14 @@ class BotService:
             compact=role == "assistant" and self._memory_compaction_enabled(),
         )
 
-    def handle_text(self, *, user_id: str, session_id: str, text: str) -> str:
+    def handle_text(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        text: str,
+        runtime_channel: str | None = None,
+    ) -> str:
         if self.allowed_user_id is None:
             raise PermissionError("TELEGRAM_ALLOWED_USER_ID must be configured")
         if user_id != self.allowed_user_id:
@@ -1156,7 +1163,10 @@ class BotService:
         command_response = dispatch_commands(self._pre_state_commands, context)
         if isinstance(command_response, _BrainShortcut):
             return self._brain_text_response(
-                session_id, command_response.text, memory_text=command_response.memory_text,
+                session_id,
+                command_response.text,
+                memory_text=command_response.memory_text,
+                runtime_channel=runtime_channel,
             )
         if command_response is not None:
             return command_response
@@ -1176,6 +1186,21 @@ class BotService:
             self._store_memory_turn(session_id, stripped, operational_alert_response, assistant_limit=2000)
             self._remember_assistant_turn_state(session_id, stripped, operational_alert_response)
             return operational_alert_response
+        boot_context_response = self._maybe_handle_boot_context_status(
+            stripped,
+            session_id=session_id,
+            runtime_channel=runtime_channel,
+        )
+        self._emit_dispatch_decision(
+            route="boot_context_status",
+            session_id=session_id,
+            text=stripped,
+            captured=boot_context_response is not None,
+        )
+        if boot_context_response is not None:
+            self._store_memory_turn(session_id, stripped, boot_context_response, assistant_limit=3000)
+            self._remember_assistant_turn_state(session_id, stripped, boot_context_response)
+            return boot_context_response
         task_intent_response = self._maybe_handle_task_intent(stripped, session_id=session_id)
         self._emit_dispatch_decision(
             route="task_intent",
@@ -1228,6 +1253,7 @@ class BotService:
                 session_id,
                 stateful_followup.text,
                 memory_text=stateful_followup.memory_text,
+                runtime_channel=runtime_channel,
             )
         if stateful_followup is not None:
             self._store_memory_turn(session_id, stripped, stateful_followup, assistant_limit=2000)
@@ -1245,6 +1271,7 @@ class BotService:
                 session_id,
                 shortcut_response.text,
                 memory_text=shortcut_response.memory_text,
+                runtime_channel=runtime_channel,
             )
         if shortcut_response is not None:
             # Store the exchange so the brain has context on subsequent messages.
@@ -1286,7 +1313,7 @@ class BotService:
             text=stripped,
             captured=True,
         )
-        return self._brain_text_response(session_id, stripped)
+        return self._brain_text_response(session_id, stripped, runtime_channel=runtime_channel)
 
     def _build_pre_state_commands(self) -> list[BotCommand]:
         return [
@@ -2123,7 +2150,14 @@ class BotService:
     def _help_response(self, topic: str | None = None) -> str:
         return _help_response(topic)
 
-    def _brain_text_response(self, session_id: str, text: str, *, memory_text: str | None = None) -> str:
+    def _brain_text_response(
+        self,
+        session_id: str,
+        text: str,
+        *,
+        memory_text: str | None = None,
+        runtime_channel: str | None = None,
+    ) -> str:
         prompt_text = text
         source_text = memory_text or text
         runtime_capability_question = _looks_like_runtime_capability_question(text)
@@ -2133,7 +2167,7 @@ class BotService:
             prompt_text = _format_tweet_analysis_prompt(text, enriched)
         if runtime_capability_question:
             prompt_text = _format_runtime_capability_prompt(prompt_text)
-        prompt_text = self._with_runtime_capability_context(prompt_text)
+        prompt_text = self._with_runtime_capability_context(prompt_text, runtime_channel=runtime_channel)
         try:
             response = self.brain.handle_message(
                 session_id,
@@ -2193,14 +2227,21 @@ class BotService:
         self._remember_assistant_turn_state(session_id, source_text, content)
         return content
 
-    def _with_runtime_capability_context(self, prompt_text: str) -> str:
-        context = self._runtime_capability_context()
+    def _with_runtime_capability_context(self, prompt_text: str, *, runtime_channel: str | None = None) -> str:
+        context = self._runtime_capability_context(runtime_channel=runtime_channel)
         if not context:
             return prompt_text
         return f"{context}\n\n# User request\n{prompt_text}"
 
-    def _runtime_capability_context(self) -> str:
+    def _runtime_capability_context(self, *, runtime_channel: str | None = None) -> str:
         lines = ["# Runtime capability context", "Use this as current local runtime evidence before claiming a capability is unavailable."]
+        if runtime_channel:
+            normalized_channel = runtime_channel.strip().lower()
+            lines.append(f"- Current inbound channel: {normalized_channel}")
+            lines.append("- Runtime process: daemon/local runtime")
+            lines.append("- CLI channel active: false" if normalized_channel != "cli" else "- CLI channel active: true")
+            lines.append("Rule: Telegram is the Telegram channel; do not describe Telegram as CLI unless the current inbound channel is cli and local evidence confirms it.")
+            lines.append("Rule: contexto interno != respuesta externa; summarize source names/status, never print private boot context wholesale.")
         if self._capability_available("chrome_cdp") and self.browser is not None and self.managed_chrome is not None:
             cdp_url = str(getattr(self.managed_chrome, "cdp_url", "") or "")
             detail = f"available ({cdp_url})" if cdp_url else "available"
@@ -2410,15 +2451,20 @@ class BotService:
         session_id: str,
         content_blocks: list[dict[str, Any]],
         memory_text: str,
+        runtime_channel: str | None = None,
     ) -> str:
         if self.allowed_user_id is None:
             raise PermissionError("TELEGRAM_ALLOWED_USER_ID must be configured")
         if user_id != self.allowed_user_id:
             raise PermissionError("user is not allowed to access this bot")
+        runtime_context = self._runtime_capability_context(runtime_channel=runtime_channel) if runtime_channel else ""
+        prompt_blocks = list(content_blocks)
+        if runtime_context:
+            prompt_blocks = [{"type": "text", "text": runtime_context}, *prompt_blocks]
         try:
             return self.brain.handle_message(
                 session_id,
-                content_blocks,
+                prompt_blocks,
                 memory_text=memory_text,
                 task_type="telegram_message",
             ).content
@@ -3018,6 +3064,59 @@ class BotService:
             f"Tareas activas en esta sesión: {active_count}\n"
             f"Última tarea: {latest_line}\n"
             "Comandos útiles: `/jobs`, `/tasks`, `/quality`, `/restart`."
+        )
+
+    def _maybe_handle_boot_context_status(
+        self,
+        text: str,
+        *,
+        session_id: str,
+        runtime_channel: str | None = None,
+    ) -> str | None:
+        normalized = _normalize_command_text(text).strip()
+        asks_boot = any(term in normalized for term in ("arranque", "arrancar", "boot", "startup"))
+        asks_context = "contexto" in normalized or "fuentes" in normalized or "cargaste" in normalized or "cargado" in normalized
+        if not asks_boot or not asks_context:
+            return None
+        if self.observe is None:
+            return "No encontré observe_stream disponible para verificar el boot actual."
+        try:
+            events = self.observe.recent_events(limit=300)
+        except Exception as exc:
+            return f"No pude leer observe_stream para verificar el boot actual: {type(exc).__name__}."
+        event = next((item for item in events if item.get("event_type") == "agent_startup_context"), None)
+        if event is None:
+            return (
+                "No hay evento `agent_startup_context` en `observe_stream` para este proceso. "
+                "No voy a afirmar que el boot nuevo está cargado sin esa evidencia."
+            )
+        payload = event.get("payload") or {}
+        loaded_files = list(payload.get("loaded_files") or [])
+        daily_files = list(payload.get("daily_memory_files") or [])
+        missing_files = list(payload.get("missing_files") or [])
+        missing_line = ", ".join(missing_files) if missing_files else "none"
+        loaded_line = ", ".join(loaded_files[:12]) if loaded_files else "none"
+        daily_line = ", ".join(daily_files[:8]) if daily_files else "none"
+        channel = runtime_channel or payload.get("channel") or "unknown"
+        return (
+            "Boot observable verificado desde `agent_startup_context`.\n"
+            f"- boot_context_version: `{payload.get('boot_context_version', 'unknown')}`\n"
+            f"- boot_protocol_version: `{payload.get('boot_protocol_version', 'unknown')}`\n"
+            f"- startup_context_used: `{str(payload.get('startup_context_used', False)).lower()}`\n"
+            f"- stable_context_used: `{str(payload.get('stable_context_used', False)).lower()}`\n"
+            f"- boot_protocol_loaded: `{str(payload.get('boot_protocol_loaded', False)).lower()}`\n"
+            f"- task_ledger_loaded: `{str(payload.get('task_ledger_loaded', False)).lower()}`\n"
+            f"- session_state_loaded: `{str(payload.get('session_state_loaded', False)).lower()}`\n"
+            f"- daily_memory_loaded: `{str(payload.get('daily_memory_loaded', False)).lower()}` ({daily_line})\n"
+            f"- context_truncated: `{str(payload.get('context_truncated', False)).lower()}`\n"
+            f"- workspace_root: `{payload.get('workspace_root') or payload.get('root')}`\n"
+            f"- cwd: `{payload.get('cwd', 'unknown')}`\n"
+            f"- pid: `{payload.get('pid', 'unknown')}`\n"
+            f"- code_version: `{payload.get('code_version', 'unknown')}`\n"
+            f"- current_channel: `{channel}`\n"
+            f"- loaded_sources: {loaded_line}\n"
+            f"- missing_sources: {missing_line}\n"
+            "No imprimí contenido privado ni secretos; solo nombres de fuentes y estado de carga."
         )
 
     def _task_status_question_response(self, session_id: str) -> str:

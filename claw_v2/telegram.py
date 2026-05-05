@@ -329,7 +329,7 @@ class TelegramTransport:
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             await self._app.bot.send_message(
                 chat_id=int(self._allowed_user_id),
-                text=f"Claw online. {now}",
+                text=f"Dr. Strange online. {now}",
             )
         except Exception:
             logger.warning("Could not send startup notification", exc_info=True)

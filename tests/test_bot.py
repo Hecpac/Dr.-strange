@@ -3118,6 +3118,82 @@ class BotTests(unittest.TestCase):
                 self.assertIn("Browser automation: available", captured["prompt"])
                 self.assertIn("do not say 'no tengo acceso", captured["prompt"])
 
+    def test_agent_runtime_marks_telegram_channel_not_cli_in_prompt(self) -> None:
+        captured: dict[str, str] = {}
+
+        def capture_prompt(request: LLMRequest) -> LLMResponse:
+            captured["prompt"] = str(request.prompt)
+            return LLMResponse(
+                content="<response>ok</response>",
+                lane=request.lane,
+                provider="anthropic",
+                model=request.model,
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=capture_prompt)
+
+                result = runtime.agent_runtime.handle_text(
+                    channel="telegram",
+                    external_user_id="123",
+                    external_session_id="abc",
+                    text="responde prueba",
+                )
+
+                self.assertEqual(result.text, "ok")
+                self.assertIn("Current inbound channel: telegram", captured["prompt"])
+                self.assertIn("CLI channel active: false", captured["prompt"])
+                self.assertIn("do not describe Telegram as CLI", captured["prompt"])
+                self.assertNotIn("corro en este CLI", captured["prompt"])
+                self.assertNotIn("Current inbound channel: cli", captured["prompt"])
+
+    def test_boot_context_question_returns_observed_startup_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+
+                result = runtime.agent_runtime.handle_text(
+                    channel="telegram",
+                    external_user_id="123",
+                    external_session_id="abc",
+                    text="Test de arranque 4 repetido: ¿qué fuentes de contexto cargaste al arrancar esta sesión?",
+                )
+
+                self.assertIn("agent_startup_context", result.text)
+                self.assertIn("boot_context_version: `startup_context_v2`", result.text)
+                self.assertIn("startup_context_used: `true`", result.text)
+                self.assertIn("stable_context_used: `false`", result.text)
+                self.assertIn("BOOT_PROTOCOL.md", result.text)
+                self.assertIn("MEMORY.md", result.text)
+                self.assertIn("USER.md", result.text)
+                self.assertIn("IDENTITY.md", result.text)
+                self.assertIn("SOUL.md", result.text)
+                self.assertIn("task_ledger_loaded: `true`", result.text)
+                self.assertIn("current_channel: `telegram`", result.text)
+                self.assertNotIn("BOOT_PROTOCOL.md no existe", result.text)
+                self.assertNotIn("backlog", result.text)
+                self.assertNotIn("corro en este CLI", result.text)
+                self.assertNotIn("solo stable_context", result.text)
+
     def test_blocks_false_capability_denial_when_browser_available(self) -> None:
         def false_denial(request: LLMRequest) -> LLMResponse:
             return LLMResponse(

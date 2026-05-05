@@ -1057,7 +1057,7 @@ def _setup_scheduler(
 
 
 def build_runtime(
-    system_prompt: str = "You are Claw.",
+    system_prompt: str = "You are Dr. Strange, the autonomous personal agent for Hector Pachano.",
     *,
     anthropic_executor: Callable[[LLMRequest], LLMResponse] | None = None,
     openai_transport: Callable[[LLMRequest], LLMResponse] | None = None,
@@ -1087,7 +1087,34 @@ def build_runtime(
     agent_workspace = AgentWorkspace(config.workspace_root, template_root=Path(__file__).parent)
     workspace_bootstrap = agent_workspace.ensure()
     observe.emit("agent_workspace_bootstrap", payload=workspace_bootstrap.to_dict())
-    system_prompt = agent_workspace.system_prompt(fallback=system_prompt)
+    startup_context, startup_context_report = agent_workspace.startup_context(
+        config=config,
+        memory=memory,
+        task_ledger=task_ledger,
+        channel="daemon",
+    )
+    observe.emit("agent_startup_context", payload=startup_context_report.to_dict())
+    cleared_provider_sessions = memory.clear_provider_sessions()
+    observe.emit(
+        "provider_sessions_cleared_for_startup_context",
+        payload={
+            "cleared_count": cleared_provider_sessions,
+            "boot_context_version": startup_context_report.boot_context_version,
+            "reason": "force fresh provider sessions after startup context load",
+        },
+    )
+    if not startup_context_report.boot_protocol_loaded:
+        logger.warning(
+            "startup context boot protocol not loaded; missing=%s",
+            startup_context_report.missing_files,
+        )
+    if startup_context_report.context_truncated:
+        logger.warning(
+            "startup context truncated at %s chars; truncated_files=%s",
+            startup_context_report.context_chars,
+            startup_context_report.truncated_files,
+        )
+    system_prompt = startup_context or agent_workspace.system_prompt(fallback=system_prompt)
     router, learning, brain, tool_registry, openai_tool_executor = _setup_llm_stack(
         config=config,
         memory=memory,

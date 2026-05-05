@@ -53,7 +53,7 @@ class LoadSoulTests(unittest.TestCase):
 
     def test_fallback_when_no_file(self) -> None:
         prompt = load_soul(Path("/nonexistent/SOUL.md"))
-        self.assertEqual(prompt, "You are Claw.")
+        self.assertEqual(prompt, "You are Dr. Strange, the autonomous personal agent for Hector Pachano.")
 
 
 class FitnessReminderTests(unittest.TestCase):

@@ -12,6 +12,7 @@ from claw_v2.jobs import JobService
 from claw_v2.main import build_runtime
 from claw_v2.task_ledger import TaskLedger
 from claw_v2.types import LLMResponse
+from claw_v2.workspace import AgentWorkspace
 
 
 def fake_anthropic(request: LLMRequest) -> LLMResponse:
@@ -118,15 +119,28 @@ class RuntimeTests(unittest.TestCase):
                 "PIPELINE_STATE_ROOT": str(root / "pipeline"),
             }
             with patch.dict(os.environ, env, clear=False):
-                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                with patch.object(AgentWorkspace, "stable_context", side_effect=AssertionError("stable_context is not the boot path")):
+                    runtime = build_runtime(anthropic_executor=fake_anthropic)
 
                 self.assertEqual(runtime.agent_workspace.root, root / "workspace")
                 for name in runtime.agent_workspace.REQUIRED_FILES:
                     self.assertTrue((root / "workspace" / name).exists(), name)
                 self.assertTrue((root / "workspace" / "memory").is_dir())
                 self.assertIn("# Agent Workspace Context", runtime.brain.system_prompt)
-                events = runtime.observe.recent_events(limit=5)
+                self.assertIn("startup_context_used=true", runtime.brain.system_prompt)
+                self.assertIn("stable_context_used=false", runtime.brain.system_prompt)
+                events = runtime.observe.recent_events(limit=50)
                 self.assertTrue(any(event["event_type"] == "agent_workspace_bootstrap" for event in events))
+                self.assertTrue(any(event["event_type"] == "provider_sessions_cleared_for_startup_context" for event in events))
+                startup_events = [event for event in events if event["event_type"] == "agent_startup_context"]
+                self.assertTrue(startup_events)
+                payload = startup_events[0]["payload"]
+                self.assertEqual(payload["boot_context_version"], "startup_context_v2")
+                self.assertTrue(payload["startup_context_used"])
+                self.assertFalse(payload["stable_context_used"])
+                self.assertTrue(payload["boot_protocol_loaded"])
+                self.assertEqual(payload["workspace_root"], str(root / "workspace"))
+                self.assertIn("pid", payload)
 
     def test_runtime_registry_writes_to_agent_state_not_tracked_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
