@@ -20,6 +20,13 @@ from claw_v2.verification.judge import (
     render_target_transcript,
     run_judge,
 )
+from claw_v2.verification.runner import (
+    PETRI_VERIFIER_ENV_FLAG,
+    PetriRunOutcome,
+    petri_verifier_enabled,
+    run_petri_judge_for_task,
+    should_use_petri_verifier,
+)
 from claw_v2.verification.transcript import (
     TRANSCRIPT_SCHEMA_VERSION,
     TranscriptStream,
@@ -32,21 +39,26 @@ from claw_v2.verification.transcript import (
 )
 
 __all__ = [
+    "PETRI_VERIFIER_ENV_FLAG",
     "TRANSCRIPT_SCHEMA_VERSION",
     "DimensionRawResponse",
     "DimensionScore",
     "JudgeDimension",
     "JudgeReport",
+    "PetriRunOutcome",
     "TranscriptStream",
     "build_dimension_prompt",
     "harness_stream_path",
     "load_dimensions",
     "parse_judge_response",
+    "petri_verifier_enabled",
     "read_harness_stream",
     "read_target_stream",
     "record_harness_event",
     "record_target_event",
     "render_target_transcript",
     "run_judge",
+    "run_petri_judge_for_task",
+    "should_use_petri_verifier",
     "target_stream_path",
 ]
