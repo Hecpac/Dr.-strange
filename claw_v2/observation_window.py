@@ -22,7 +22,7 @@ class ObservationWindowBlocked(PermissionError):
 
 @dataclass(slots=True)
 class ObservationWindowConfig:
-    cost_per_hour_threshold: float = 1.50
+    cost_per_hour_threshold: float = 10.00
     tool_calls_per_minute_threshold: int = 10
     daily_budget_cap: float | None = None
 
@@ -341,6 +341,10 @@ def _format_stream_line(*, tool: str, tier: str, actor: str, cost: float, status
 
 
 def _diagnostic_only_freeze_reason(reason: str) -> bool:
+    # cost_per_hour is a budget alarm — it must reach the operator (Telegram).
+    # All other circuit_breaker:* reasons (provider, sdk, etc.) stay diagnostic.
+    if reason == "circuit_breaker:cost_per_hour":
+        return False
     return reason.startswith("circuit_breaker:")
 
 

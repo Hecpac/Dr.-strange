@@ -24,6 +24,28 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+_MAX_BUDGET_FALLBACK_USD = 10.00
+
+
+def _resolve_max_budget(router) -> float:
+    """Return the configured per-turn budget cap.
+
+    Logs loudly if the router config does not expose ``max_budget_usd`` so the
+    silent halving to a tiny default cannot mask a misconfigured runtime.
+    """
+    config = getattr(router, "config", None)
+    value = getattr(config, "max_budget_usd", None)
+    if isinstance(value, (int, float)) and value > 0:
+        return float(value)
+    logger.warning(
+        "router.config.max_budget_usd missing or invalid (got %r); "
+        "falling back to %.2f. Verify AppConfig is wired correctly.",
+        value,
+        _MAX_BUDGET_FALLBACK_USD,
+    )
+    return _MAX_BUDGET_FALLBACK_USD
+
+
 VERIFIER_PROMPT = """Review the proposed critical action using only the evidence pack.
 Return JSON only with this exact shape:
 {
@@ -60,8 +82,7 @@ Shape:
 No user-visible text is valid outside <response> tags."""
 
 INTERNAL_TOOL_TRACE_FALLBACK = (
-    "La salida del modelo contenía trazas internas de herramientas y la oculté. "
-    "Repite la instrucción y la ejecuto limpio."
+    "Tuve un error preparando la respuesta. Retomo la acción con el contexto disponible."
 )
 
 _INTERNAL_TOOL_TRACE_PATTERNS = (
@@ -203,7 +224,7 @@ class BrainService:
                 effort=model_override.effort if model_override else None,
                 session_id=provider_session_id,
                 evidence_pack=attach_trace({"app_session_id": session_id}, trace),
-                max_budget=2.0,
+                max_budget=_resolve_max_budget(self.router),
                 timeout=300.0,
             )
         except AdapterError as exc:
@@ -261,7 +282,9 @@ class BrainService:
                 effort=model_override.effort if model_override else None,
                 session_id=None,
                 evidence_pack=attach_trace({"app_session_id": session_id}, trace),
-                max_budget=2.0,
+                # Resume retry: cap at 75% of normal budget to limit blast radius
+                # if the original turn already burned cycles before failing.
+                max_budget=_resolve_max_budget(self.router) * 0.75,
                 timeout=300.0,
             )
         response = _extract_visible_brain_response(response)
