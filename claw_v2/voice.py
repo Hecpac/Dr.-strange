@@ -136,6 +136,98 @@ XAI_TTS_URL = "https://api.x.ai/v1/tts"
 XAI_DEFAULT_VOICE = "rex"
 XAI_DEFAULT_LANGUAGE = "es-MX"
 
+REALTIME_WS_URL = "wss://api.openai.com/v1/realtime"
+REALTIME_DEFAULT_MODEL = "gpt-realtime"
+REALTIME_DEFAULT_VOICE = "alloy"
+REALTIME_INSTRUCTIONS = (
+    "Eres Dr. Strange, agente personal masculino de Hector Pachano. "
+    "Hablas español neutro, directo, cercano. Voz firme, segura. "
+    "Sin disclaimers, sin saludos largos."
+)
+
+
+async def _synthesize_realtime(
+    text: str,
+    *,
+    api_key: str,
+    voice: str = REALTIME_DEFAULT_VOICE,
+    model: str = REALTIME_DEFAULT_MODEL,
+    timeout: float = 30.0,
+) -> Path:
+    """Text → WAV (PCM16 24kHz) via OpenAI Realtime API WebSocket. Caller cleans up.
+
+    Uses the same WS path validated in the smoke test: session.update with the
+    requested voice, then a single user message + response.create. Captures all
+    response.audio.delta frames and writes a WAV.
+    """
+    import base64
+    import json
+    import wave
+
+    import websockets
+
+    url = f"{REALTIME_WS_URL}?model={model}"
+    headers = [("Authorization", f"Bearer {api_key}"), ("OpenAI-Beta", "realtime=v1")]
+    chunks: list[bytes] = []
+    async with websockets.connect(url, additional_headers=headers, max_size=20_000_000) as ws:
+        await ws.send(json.dumps({
+            "type": "session.update",
+            "session": {
+                "modalities": ["text", "audio"],
+                "voice": voice,
+                "output_audio_format": "pcm16",
+                "instructions": REALTIME_INSTRUCTIONS,
+            },
+        }))
+        await ws.send(json.dumps({
+            "type": "conversation.item.create",
+            "item": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": text}],
+            },
+        }))
+        await ws.send(json.dumps({"type": "response.create"}))
+        while True:
+            evt = json.loads(await asyncio.wait_for(ws.recv(), timeout=timeout))
+            etype = evt.get("type")
+            if etype == "response.audio.delta":
+                chunks.append(base64.b64decode(evt["delta"]))
+            elif etype == "response.done":
+                break
+            elif etype == "error":
+                raise RuntimeError(f"realtime error: {evt.get('error', {}).get('message', 'unknown')}")
+    if not chunks:
+        raise RuntimeError("realtime returned no audio")
+    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    tmp.close()
+    with wave.open(tmp.name, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(24000)
+        wf.writeframes(b"".join(chunks))
+    return Path(tmp.name)
+
+
+async def _wav_to_ogg(wav_path: Path) -> Path:
+    """Convert WAV PCM16 to OGG Opus for Telegram voice notes."""
+    ogg_path = wav_path.with_suffix(".ogg")
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg", "-y", "-i", str(wav_path),
+        "-acodec", "libopus", "-b:a", "48k", str(ogg_path),
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=30)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise RuntimeError("ffmpeg WAV→OGG conversion timed out")
+    if proc.returncode != 0 or not ogg_path.exists():
+        raise RuntimeError("ffmpeg WAV→OGG conversion failed")
+    return ogg_path
+
 
 async def _synthesize_xai(
     text: str,
@@ -196,15 +288,38 @@ async def synthesize_voice_note(
     xai_api_key: str | None = None,
     xai_voice: str = XAI_DEFAULT_VOICE,
     xai_language: str = XAI_DEFAULT_LANGUAGE,
+    prefer_realtime: bool = False,
+    realtime_voice: str = REALTIME_DEFAULT_VOICE,
+    realtime_model: str = REALTIME_DEFAULT_MODEL,
 ) -> Path:
     """Text → OGG Opus voice note for Telegram.
 
-    Backend priority: xAI Grok TTS (Claw's default voice) → OpenAI TTS → Edge-TTS.
-    xAI is preferred when XAI_API_KEY is available because it supports built-in
-    and custom voice IDs through the same TTS endpoint.
+    Backend priority when prefer_realtime=False:
+        xAI Grok TTS → OpenAI TTS-1 → Edge-TTS
+    Backend priority when prefer_realtime=True:
+        OpenAI Realtime (gpt-realtime, voice alloy) → xAI → OpenAI TTS-1 → Edge-TTS
     """
     truncated = text[:MAX_TTS_CHARS]
     mp3_path: Path | None = None
+    wav_path: Path | None = None
+
+    if prefer_realtime and api_key:
+        try:
+            wav_path = await _synthesize_realtime(
+                truncated,
+                api_key=api_key,
+                voice=realtime_voice,
+                model=realtime_model,
+            )
+        except Exception:
+            logger.warning("Realtime TTS failed, falling back to batch chain", exc_info=True)
+
+    if wav_path is not None:
+        try:
+            ogg_path = await _wav_to_ogg(wav_path)
+        finally:
+            wav_path.unlink(missing_ok=True)
+        return ogg_path
 
     if xai_api_key:
         try:

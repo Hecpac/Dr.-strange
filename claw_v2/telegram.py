@@ -585,7 +585,7 @@ class TelegramTransport:
             return
         finally:
             tmp_path.unlink(missing_ok=True)
-        await self._handle_text_content(update, f"[Nota de voz]: {text}")
+        await self._handle_text_content(update, f"[Nota de voz]: {text}", force_voice_reply=True)
 
     async def _handle_audio(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_authorized(update):
@@ -909,7 +909,13 @@ class TelegramTransport:
             except _NONFATAL_SEND_ERRORS as exc:
                 _log_nonfatal_send_error("send_text", exc)
 
-    async def _handle_text_content(self, update: Update, text: str) -> None:
+    async def _handle_text_content(
+        self,
+        update: Update,
+        text: str,
+        *,
+        force_voice_reply: bool = False,
+    ) -> None:
         user_id = str(update.effective_user.id)
         session_id = f"tg-{update.effective_chat.id}"
         started_at = time.perf_counter()
@@ -922,14 +928,16 @@ class TelegramTransport:
         response = self._sanitize_outbound_response(session_id, response)
         parts = _split_message(response)
         voice_name = self._bot_service.is_voice_mode(session_id)
-        if voice_name and (self._voice_api_key or self._xai_api_key):
+        reply_as_voice = force_voice_reply or bool(voice_name)
+        if reply_as_voice and (self._voice_api_key or self._xai_api_key):
             try:
                 await _maybe_send_chat_action(update.message, "record_voice")
                 ogg_path = await synthesize_voice_note(
                     response,
                     api_key=self._voice_api_key,
-                    voice=voice_name,
+                    voice=voice_name or "alloy",
                     xai_api_key=self._xai_api_key,
+                    prefer_realtime=force_voice_reply and bool(self._voice_api_key),
                 )
                 try:
                     with open(ogg_path, "rb") as f:
