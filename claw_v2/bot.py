@@ -154,12 +154,20 @@ def _chatgpt_browser_task_instruction(text: str) -> str:
     )
 
 
+_CAPABILITY_DENIAL_SENTENCE_SPLIT = re.compile(r"[.!?\n]+")
+_CAPABILITY_DENIAL_MAX_LEN = 600
+
+
 def _looks_like_unverified_capability_denial(text: str) -> bool:
     normalized = _normalize_command_text(text)
-    return (
-        any(term in normalized for term in _CAPABILITY_DENIAL_TERMS)
-        and any(term in normalized for term in _CAPABILITY_SURFACE_TERMS)
-    )
+    if len(normalized) > _CAPABILITY_DENIAL_MAX_LEN:
+        return False
+    for sentence in _CAPABILITY_DENIAL_SENTENCE_SPLIT.split(normalized):
+        if any(term in sentence for term in _CAPABILITY_DENIAL_TERMS) and any(
+            term in sentence for term in _CAPABILITY_SURFACE_TERMS
+        ):
+            return True
+    return False
 PRE_HOOK_BLOCK_REPEATED_THRESHOLD = 5
 PRE_HOOK_BLOCK_REPEATED_WINDOW_MINUTES = 10
 

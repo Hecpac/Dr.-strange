@@ -1010,6 +1010,57 @@ class BotTests(unittest.TestCase):
                 events = [event["event_type"] for event in runtime.observe.recent_events(limit=10)]
                 self.assertIn("internal_message_suppressed_from_chat", events)
 
+    def test_pending_tasks_status_is_not_misclassified_as_capability_denial(self) -> None:
+        """Regression: a long status reply mentioning 'no puedo' (gated on user) and
+        'Chrome' in different sentences must not be replaced by the capability-denial
+        fallback. Only same-sentence co-occurrence in a short denial reply counts."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+
+            substantive_reply = (
+                "Reviso el ledger y la memoria. Lo que tengo abierto:\n\n"
+                "Gated en ti (no puedo avanzar solo):\n"
+                "- AI Lead Gen Fase 3 — los 20 parcelas Tarrant en label.html "
+                "esperando que termines el labeling en Chrome y exportes labels.json. "
+                "Sin eso no corre el threshold sweep.\n"
+                "- Cowork Día 4 — instalar plugin Cowork con cuenta Max.\n\n"
+                "Autónomo (puedo arrancar ahora): el brain-bypass refactor — quedan "
+                "smoke test + commits 3-8. Es código puro, despacho al worker.\n\n"
+                "Voy con el brain-bypass."
+            )
+
+            def status_executor(request: LLMRequest) -> LLMResponse:
+                return LLMResponse(
+                    content=substantive_reply,
+                    lane=request.lane,
+                    provider="anthropic",
+                    model=request.model,
+                )
+
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=status_executor)
+                runtime.bot.terminal_bridge = object()
+
+                reply = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="volvamos a las tareas pendientes",
+                )
+
+                self.assertIn("AI Lead Gen Fase 3", reply)
+                self.assertIn("brain-bypass", reply)
+                self.assertNotIn("No cierro esto como falta de acceso", reply)
+                events = [event["event_type"] for event in runtime.observe.recent_events(limit=10)]
+                self.assertNotIn("internal_message_suppressed_from_chat", events)
+
     def test_internal_tool_trace_suppression_retries_clean_without_visible_meta(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
