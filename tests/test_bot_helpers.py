@@ -68,6 +68,23 @@ class BotHelperRegressionTests(unittest.TestCase):
         self.assertFalse(_chat_response_has_internal_leak(sanitized))
         self.assertNotIn("to=functions", sanitized)
 
+    def test_loopback_endpoint_mention_is_inlined_not_nuked(self) -> None:
+        text = (
+            "Para que hablemos en tiempo real podemos abrir un endpoint local "
+            "tipo 127.0.0.1:8765/voice o equivalente con localhost:8765/voice. "
+            "Cuando termine reportamos qué quedó verificado."
+        )
+        sanitized = _sanitize_chat_response(text)
+
+        self.assertNotIn(
+            "Tuve un error preparando la respuesta", sanitized,
+            "loopback host/IP should be inlined, not bump the whole reply to the error template",
+        )
+        self.assertNotIn("127.0.0.1", sanitized)
+        self.assertNotIn("localhost", sanitized.lower())
+        self.assertIn("Para que hablemos en tiempo real", sanitized)
+        self.assertIn("Cuando termine reportamos", sanitized)
+
     def test_visible_chat_response_replaces_prompt_echo_and_role_echo(self) -> None:
         samples = [
             "# Telegram message\nReply ONLY to that latest message.",

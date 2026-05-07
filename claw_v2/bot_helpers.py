@@ -554,6 +554,12 @@ _INTERNAL_LEAK_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"/Users/hector/"),
 )
 
+# Indices in _INTERNAL_LEAK_PATTERNS that should bump the whole reply to the error
+# template. Loopback host/IP (indices 7, 8) are intentionally excluded — they are
+# already redacted inline by _sanitize_chat_response, so nuking the whole reply
+# when the agent legitimately discusses the local web chat endpoint is wrong.
+_NUKE_PATTERN_INDICES: tuple[int, ...] = (0, 1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13)
+
 
 def _chat_response_has_internal_leak(text: str) -> bool:
     return any(pattern.search(text) for pattern in _INTERNAL_LEAK_PATTERNS)
@@ -582,7 +588,7 @@ def _sanitize_chat_response(text: str) -> str:
         or "contradice las capacidades" in lowered
         or "no voy a asumir falta de acceso sin evidencia" in lowered
         or re.match(r"^\s*(?:user|assistant|system)\s*:\s*\S", text, flags=re.IGNORECASE)
-        or any(pattern.search(text) for pattern in _INTERNAL_LEAK_PATTERNS[:14])
+        or any(_INTERNAL_LEAK_PATTERNS[i].search(text) for i in _NUKE_PATTERN_INDICES)
     ):
         return (
             "Tuve un error preparando la respuesta. "
