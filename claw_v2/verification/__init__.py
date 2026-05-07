@@ -27,6 +27,12 @@ from claw_v2.verification.runner import (
     run_petri_judge_for_task,
     should_use_petri_verifier,
 )
+from claw_v2.verification.soak_monitor import (
+    THRESHOLDS_DOC,
+    DimensionSummary,
+    SoakSummary,
+    summarize_petri_scores,
+)
 from claw_v2.verification.transcript import (
     TRANSCRIPT_SCHEMA_VERSION,
     TranscriptStream,
@@ -45,7 +51,10 @@ __all__ = [
     "DimensionScore",
     "JudgeDimension",
     "JudgeReport",
+    "DimensionSummary",
     "PetriRunOutcome",
+    "SoakSummary",
+    "THRESHOLDS_DOC",
     "TranscriptStream",
     "build_dimension_prompt",
     "harness_stream_path",
@@ -60,5 +69,6 @@ __all__ = [
     "run_judge",
     "run_petri_judge_for_task",
     "should_use_petri_verifier",
+    "summarize_petri_scores",
     "target_stream_path",
 ]
