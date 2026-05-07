@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -114,6 +115,23 @@ class AgentWorkspaceTests(unittest.TestCase):
             self.assertIn("BOOT_PROTOCOL.md", report.loaded_files)
             self.assertIn("2026-05-04.md", report.daily_memory_files)
             self.assertNotIn("corro en este CLI", context)
+
+    def test_startup_context_reports_dirty_git_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True, text=True)
+            workspace = AgentWorkspace(root)
+            workspace.ensure()
+
+            context, report = workspace.startup_context()
+
+            self.assertTrue(report.git_dirty)
+            self.assertGreater(len(report.git_status_summary), 0)
+            self.assertIn("git_dirty=true", context)
+            self.assertIn("git_status_entries=", context)
+            payload = report.to_dict()
+            self.assertTrue(payload["git_dirty"])
+            self.assertGreater(len(payload["git_status_summary"]), 0)
 
     def test_startup_context_reports_missing_boot_protocol(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

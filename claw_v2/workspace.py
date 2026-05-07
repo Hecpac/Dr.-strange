@@ -132,6 +132,8 @@ class StartupContextReport:
     pid: int = 0
     timestamp: str = ""
     code_version: str = ""
+    git_dirty: bool = False
+    git_status_summary: list[str] = field(default_factory=list)
     boot_context_version: str = BOOT_CONTEXT_VERSION
     boot_protocol_version: str = ""
     startup_context_used: bool = True
@@ -164,6 +166,8 @@ class StartupContextReport:
             "pid": self.pid,
             "timestamp": self.timestamp,
             "code_version": self.code_version,
+            "git_dirty": self.git_dirty,
+            "git_status_summary": list(self.git_status_summary),
             "boot_context_version": self.boot_context_version,
             "boot_protocol_version": self.boot_protocol_version,
             "startup_context_used": self.startup_context_used,
@@ -267,6 +271,8 @@ class AgentWorkspace:
         report.pid = os.getpid()
         report.timestamp = today.isoformat()
         report.code_version = _git_code_version(self.root)
+        report.git_status_summary = _git_status_summary(self.root)
+        report.git_dirty = bool(report.git_status_summary)
         report.stable_context_used = stable_context_used
         sections.extend(
             [
@@ -281,6 +287,8 @@ class AgentWorkspace:
                 f"cwd={report.cwd}",
                 f"pid={report.pid}",
                 f"code_version={report.code_version or 'unknown'}",
+                f"git_dirty={str(report.git_dirty).lower()}",
+                f"git_status_entries={len(report.git_status_summary)}",
                 "boot_protocol_loaded=pending",
                 "boot_protocol_version=pending",
                 "memoria persistente=required",
@@ -291,6 +299,13 @@ class AgentWorkspace:
                 "regla: Telegram es canal Telegram cuando current_channel=telegram; no describir Telegram como canal CLI salvo evidencia real de canal CLI.",
             ]
         )
+        if report.git_status_summary:
+            sections.append(
+                "## Git Worktree\n"
+                "git_dirty=true\n"
+                "git_status_sample:\n"
+                + "\n".join(f"- {item}" for item in report.git_status_summary)
+            )
         for name in self.STABLE_CONTEXT_FILES:
             content, status = self._read_context_source(
                 name,
@@ -655,6 +670,24 @@ def _git_code_version(root: Path) -> str:
     if completed.returncode != 0:
         return "unknown"
     return _safe_startup_text(completed.stdout.strip(), limit=80) or "unknown"
+
+
+def _git_status_summary(root: Path, *, limit: int = 20) -> list[str]:
+    try:
+        completed = subprocess.run(
+            ["git", "status", "--short"],
+            cwd=root,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except Exception:
+        return []
+    if completed.returncode != 0:
+        return []
+    lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+    return [_safe_startup_text(line, limit=160) for line in lines[:limit]]
 
 
 def _recent_session_states(memory: Any, *, limit: int = 5) -> list[dict[str, Any]]:

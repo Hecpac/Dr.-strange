@@ -55,6 +55,7 @@ __all__ = [
     "_extract_numbered_options",
     "_extract_option_reference",
     "_extract_pending_action_from_reply",
+    "_extract_ratio_context_from_text",
     "_extract_title_from_url",
     "_extract_url_candidate",
     "_extract_verification_status",
@@ -82,6 +83,7 @@ __all__ = [
     "_looks_like_autonomy_grant",
     "_looks_like_computer_read_request",
     "_looks_like_proceed_request",
+    "_looks_like_ratio_reference_request",
     "_looks_like_raw_markup",
     "_looks_like_runtime_capability_question",
     "_looks_like_standalone_url",
@@ -102,6 +104,8 @@ __all__ = [
     "_run_summary",
     "_select_navigation_strategy",
     "_select_next_task_queue_item",
+    "_sanitize_chat_response",
+    "_chat_response_has_internal_leak",
     "_stable_task_id",
     "_strip_url_punctuation",
     "_summarize_prefetched_link_content",
@@ -278,6 +282,10 @@ _LINK_ANALYSIS_SECTION_TITLES = (
 _AUTONOMY_MODES = ("manual", "assisted", "autonomous")
 _PROCEED_TOKENS = (
     "procede",
+    "proceder",
+    "ejecuta",
+    "ejecutalo",
+    "ejecutala",
     "continue",
     "continua",
     "continuar",
@@ -285,6 +293,19 @@ _PROCEED_TOKENS = (
     "seguir",
     "dale",
     "hazlo",
+    "haz la prueba",
+    "haz prueba",
+    "haz esa prueba",
+    "haz esa",
+    "hazlo ya",
+    "hagamoslo",
+    "hagamoslo con",
+    "hagamos eso",
+    "ok",
+    "okay",
+    "si",
+    "sí",
+    "yes",
     "asi",
 )
 _OPTION_ORDINALS = {
@@ -444,11 +465,19 @@ def _extract_option_reference(text: str) -> int | None:
     match = re.fullmatch(r"(?:opcion|option)\s+(\d+)", normalized)
     if match:
         return int(match.group(1))
+    match = re.fullmatch(r"(?:vamos|vete|ve|dale|procede|continua|sigue)\s+con\s+(?:la\s+)?(?:opcion\s+)?(\d+)", normalized)
+    if match:
+        return int(match.group(1))
+    match = re.fullmatch(r"(?:vamos|vete|ve|dale|procede|continua|sigue)\s+con\s+la\s+(\w+)", normalized)
+    if match:
+        return _OPTION_ORDINALS.get(match.group(1))
     match = re.fullmatch(r"(\d+)", normalized)
     if match:
         return int(match.group(1))
     match = re.fullmatch(r"la\s+(\w+)", normalized)
     if match:
+        if match.group(1).isdigit():
+            return int(match.group(1))
         return _OPTION_ORDINALS.get(match.group(1))
     return _OPTION_ORDINALS.get(normalized)
 
@@ -459,7 +488,132 @@ def _looks_like_proceed_request(text: str) -> bool:
         return False
     if normalized in _PROCEED_TOKENS:
         return True
-    return any(normalized.startswith(f"{token} ") for token in _PROCEED_TOKENS)
+    return any(
+        " " in token and normalized.startswith(f"{token} ")
+        for token in _PROCEED_TOKENS
+    )
+
+
+def _looks_like_ratio_reference_request(text: str) -> bool:
+    normalized = _normalize_command_text(text)
+    if "ratio" not in normalized:
+        return False
+    if not any(token in normalized for token in ("dame", "manda", "mandame", "envia", "enviame", "pasame", "tira", "tirame")):
+        return False
+    return bool(
+        re.search(r"\b(?:los\s+)?2\b", normalized)
+        or "dos ratios" in normalized
+        or "ambos ratios" in normalized
+        or "los dos ratios" in normalized
+    )
+
+
+def _extract_ratio_context_from_text(text: str) -> list[str]:
+    normalized = _normalize_command_text(text)
+    ratios: list[str] = []
+    for pattern, label in (
+        (r"\b9\s*[:x]\s*16\b|\b9x16\b|\bvertical\b", "9:16 vertical"),
+        (r"\b1\s*[:x]\s*1\b|\b1x1\b|\bcuadrad[oa]\b", "1:1 cuadrado"),
+        (r"\b16\s*[:x]\s*9\b|\b16x9\b|\bhorizontal\b", "16:9 horizontal"),
+    ):
+        if re.search(pattern, normalized) and label not in ratios:
+            ratios.append(label)
+    return ratios
+
+
+_INTERNAL_LEAK_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bmessage[_ -]?id\b", re.IGNORECASE),
+    re.compile(r"\bchat[_ -]?id\b", re.IGNORECASE),
+    re.compile(r"\btg-[A-Za-z0-9_-]+\b"),
+    re.compile(r"\bnlm-[A-Za-z0-9_-]+\b"),
+    re.compile(r"(?<!\w)to=(?:functions|multi_tool_use|web|image_gen|tool_search)\.", re.IGNORECASE),
+    re.compile(r'"recipient_name"\s*:\s*"(?:functions|multi_tool_use|web|image_gen|tool_search)\.', re.IGNORECASE),
+    re.compile(r'"tool_uses"\s*:\s*\[', re.IGNORECASE),
+    re.compile(r"\blocalhost(?::\d+)?\b", re.IGNORECASE),
+    re.compile(r"\b127\.0\.0\.1(?::\d+)?\b"),
+    re.compile(r"\bterminal bridge\b", re.IGNORECASE),
+    re.compile(r"\bblocked model response\b", re.IGNORECASE),
+    re.compile(r"\brespuesta del modelo fue bloqueada\b", re.IGNORECASE),
+    re.compile(r"\bsalida del modelo\b", re.IGNORECASE),
+    re.compile(r"\btrazas internas\b", re.IGNORECASE),
+    re.compile(r"\bherramientas internas\b", re.IGNORECASE),
+    re.compile(r"\bla ocult[eé]\b", re.IGNORECASE),
+    re.compile(r"\brespuesta bloqueada\b", re.IGNORECASE),
+    re.compile(r"\bsanitizer\b", re.IGNORECASE),
+    re.compile(r"\btool traces\b", re.IGNORECASE),
+    re.compile(r"\brepite la instrucci[oó]n\b", re.IGNORECASE),
+    re.compile(r"^\s*#\s*Telegram message\b", re.IGNORECASE),
+    re.compile(r"\bReply ONLY to (?:that|the) latest message\b", re.IGNORECASE),
+    re.compile(r"\bTelegram-friendly Markdown\b", re.IGNORECASE),
+    re.compile(r"\bDo not include internal trace\b", re.IGNORECASE),
+    re.compile(r"\bNo user-visible text is valid outside <response> tags\b", re.IGNORECASE),
+    re.compile(r"^\s*(?:user|assistant|system)\s*:\s*\S", re.IGNORECASE),
+    re.compile(r"\bcontradice las capacidades\b", re.IGNORECASE),
+    re.compile(r"\bcircuit breaker\b", re.IGNORECASE),
+    re.compile(r"\bPID\s*[:#]?\s*\d+\b", re.IGNORECASE),
+    re.compile(r"/Users/hector/"),
+)
+
+
+def _chat_response_has_internal_leak(text: str) -> bool:
+    return any(pattern.search(text) for pattern in _INTERNAL_LEAK_PATTERNS)
+
+
+def _sanitize_chat_response(text: str) -> str:
+    if not text:
+        return text
+    lowered = _normalize_command_text(text)
+    if (
+        "respuesta del modelo fue bloqueada" in lowered
+        or "salida del modelo" in lowered
+        or "trazas internas" in lowered
+        or "herramientas internas" in lowered
+        or "la oculte" in lowered
+        or "respuesta bloqueada" in lowered
+        or "sanitizer" in lowered
+        or "tool traces" in lowered
+        or "repite la instruccion" in lowered
+        or "telegram message" in lowered
+        or "reply only to" in lowered
+        or "telegram-friendly markdown" in lowered
+        or "do not include internal trace" in lowered
+        or "no user-visible text is valid outside" in lowered
+        or "blocked model response" in lowered
+        or "contradice las capacidades" in lowered
+        or "no voy a asumir falta de acceso sin evidencia" in lowered
+        or re.match(r"^\s*(?:user|assistant|system)\s*:\s*\S", text, flags=re.IGNORECASE)
+        or any(pattern.search(text) for pattern in _INTERNAL_LEAK_PATTERNS[:14])
+    ):
+        return (
+            "Tuve un error preparando la respuesta. "
+            "Retomo la acción con el contexto disponible o te diré el bloqueo verificado."
+        )
+
+    sanitized = text
+    sanitized = re.sub(r"\bMessage ID\s+\d+\b", "Mensaje enviado", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bmessage_id\s*[:#]?\s*\d+\b", "mensaje enviado", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bchat_id\s*[:#]?\s*-?\d+\b", "chat", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\btg-[A-Za-z0-9_-]+\b", "[id interno omitido]", sanitized)
+    sanitized = re.sub(r"\bnlm-[A-Za-z0-9_-]+\b", "[id interno omitido]", sanitized)
+    sanitized = re.sub(r"\bPID\s*[:#]?\s*\d+\b", "proceso local", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\blocalhost(?::\d+)?\b", "[endpoint local interno]", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\b127\.0\.0\.1(?::\d+)?\b", "[endpoint local interno]", sanitized)
+    sanitized = re.sub(r"\bpuerto\s+\d{2,5}\b", "puerto interno", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\ben\s+:\d{2,5}\b", "en un puerto interno", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bterminal bridge\b", "herramienta local", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bblocked model response\b", "respuesta interna suprimida", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\brespuesta del modelo fue bloqueada\b", "respuesta interna suprimida", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bCircuit breaker\b", "bloqueo operacional interno", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"`sendVideo`|`sendDocument`|sendVideo|sendDocument", "envío de Telegram", sanitized)
+
+    def _redact_backticked_path(match: re.Match[str]) -> str:
+        raw_path = match.group(1)
+        basename = raw_path.rstrip("/").split("/")[-1] or "archivo"
+        return f"`[ruta local omitida]/{basename}`"
+
+    sanitized = re.sub(r"`(/Users/hector/[^`]+)`", _redact_backticked_path, sanitized)
+    sanitized = re.sub(r"(?<!`)/Users/hector/[^\n`]+", "[ruta local omitida]", sanitized)
+    return sanitized
 
 
 def _looks_like_autonomy_grant(text: str) -> bool:
@@ -504,7 +658,7 @@ def _compact_summary(text: str, *, limit: int = 240) -> str | None:
 
 def _extract_pending_action_from_reply(text: str) -> str | None:
     for line in text.splitlines():
-        match = re.match(r"^\s*(?:siguiente paso|next step|pendiente)\s*:\s*(.+?)\s*$", line, re.IGNORECASE)
+        match = re.match(r"^\s*(?:siguiente paso|next step|pendiente|retomo la acci[oó]n)\s*:\s*(.+?)\s*$", line, re.IGNORECASE)
         if match:
             return match.group(1).strip()
     return None

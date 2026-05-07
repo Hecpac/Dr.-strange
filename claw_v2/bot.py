@@ -432,6 +432,7 @@ class BotService:
             update_session_state=brain.memory.update_session_state,
             task_ledger=task_ledger,
             get_session_state=brain.memory.get_session_state,
+            get_recent_messages=brain.memory.get_recent_messages,
         )
         self._capability_status: dict[str, dict[str, Any]] = {}
         self._runtime_probe: RuntimeAliveProbe | None = None
@@ -462,6 +463,7 @@ class BotService:
         self._state_handler = StateHandler(
             brain_memory=brain.memory,
             task_handler=self._task_handler,
+            observe=observe,
         )
         self._chrome_handler = ChromeHandler(
             capability_check=self._capability_unavailable_message,
@@ -717,7 +719,7 @@ class BotService:
             session_id,
             mode="research",
             verification_status="running",
-            pending_action=None,
+            pending_action="",
             last_checkpoint={
                 "summary": f"Skill task started: {skill_name}",
                 "verification_status": "running",
@@ -962,7 +964,7 @@ class BotService:
         self.brain.memory.update_session_state(
             session_id,
             verification_status=verification_status,
-            pending_action=None,
+            pending_action="",
             last_checkpoint={
                 "summary": checkpoint_summary,
                 "verification_status": verification_status,
@@ -998,25 +1000,54 @@ class BotService:
         session_id: str,
         text: str,
         captured: bool,
+        handler: str | None = None,
+        reason: str | None = None,
     ) -> None:
         # Telemetry for the brain-bypass refactor: emit one event per
         # pre-brain handler decision so we can audit which route fires
         # for which message and detect false positives without guessing.
+        #
+        # Schema (commit #4 of the brain-bypass refactor):
+        #   handler:     name of the pre-brain handler that ran
+        #   route:       "intercepted" | "fall_through" | "explicit_command"
+        #                (legacy callers pre-#4 still pass the handler name as
+        #                `route` plus a `captured` bool; we preserve those
+        #                fields for back-compat and synthesize the new ones.)
+        #   reason:      short tag explaining the decision
+        #   text_len:    full length of the message (uncapped)
+        #   text_preview: first 80 chars only — never the full message
         if self.observe is None:
             return
+        # Back-compat: when callers still use the legacy positional shape
+        # (route=<handler_name>, captured=bool), promote it to the new schema
+        # so the audit stream is uniform.
+        legacy_route_values = {"intercepted", "fall_through", "explicit_command"}
+        if handler is None and route not in legacy_route_values:
+            handler = route
+            route = "intercepted" if captured else "fall_through"
+        if reason is None:
+            reason = f"{handler or 'unknown'}_{'matched' if captured else 'fall_through'}"
         try:
             self.observe.emit(
                 "dispatch_decision",
                 payload={
                     "session_id": session_id,
+                    "handler": handler,
                     "route": route,
+                    "reason": reason,
                     "captured": captured,
-                    "text_preview": text[:160],
+                    "text_preview": text[:80],
+                    "text_len": len(text),
+                    # legacy alias kept so existing dashboards keep parsing
                     "text_length": len(text),
                 },
             )
         except Exception:
-            logger.exception("failed to emit dispatch_decision route=%s", route)
+            logger.exception(
+                "failed to emit dispatch_decision handler=%s route=%s",
+                handler,
+                route,
+            )
 
     def _emit_skill_task_event(
         self,
@@ -1145,6 +1176,365 @@ class BotService:
             compact=role == "assistant" and self._memory_compaction_enabled(),
         )
 
+    def _emit_internal_chat_suppressed(self, session_id: str, *, reason: str, original: str, sanitized: str) -> None:
+        if self.observe is None:
+            return
+        try:
+            self.observe.emit(
+                "internal_message_suppressed_from_chat",
+                payload={
+                    "session_id": session_id,
+                    "reason": reason,
+                    "original_length": len(original),
+                    "sanitized_length": len(sanitized),
+                },
+            )
+        except Exception:
+            logger.debug("failed to emit internal_message_suppressed_from_chat", exc_info=True)
+
+    def _sanitize_visible_chat_response(self, session_id: str, content: str) -> str:
+        sanitized = _sanitize_chat_response(content)
+        if sanitized != content:
+            self._emit_internal_chat_suppressed(
+                session_id,
+                reason="internal_runtime_detail",
+                original=content,
+                sanitized=sanitized,
+            )
+        return sanitized
+
+    def _emit_sanitizer_recovery_event(self, event_type: str, session_id: str, **payload: Any) -> None:
+        if self.observe is None:
+            return
+        safe_payload = {"session_id": session_id, **payload}
+        try:
+            self.observe.emit(event_type, payload=safe_payload)
+        except Exception:
+            logger.debug("failed to emit %s", event_type, exc_info=True)
+
+    def _response_has_internal_trace_suppressed(self, response: Any) -> bool:
+        artifacts = getattr(response, "artifacts", {}) or {}
+        contract_violation = artifacts.get("contract_violation")
+        return bool(
+            artifacts.get("internal_response_suppressed")
+            or artifacts.get("internal_tool_trace_suppressed")
+            or artifacts.get("internal_prompt_echo_suppressed")
+            or contract_violation in {"internal_tool_trace", "internal_prompt_echo"}
+        )
+
+    def _suppressed_response_reason(self, response: Any) -> str:
+        artifacts = getattr(response, "artifacts", {}) or {}
+        reason = str(artifacts.get("contract_violation") or "").strip()
+        if reason in {"internal_tool_trace", "internal_prompt_echo"}:
+            return reason
+        if artifacts.get("internal_prompt_echo_suppressed"):
+            return "internal_prompt_echo"
+        return "internal_tool_trace"
+
+    def _pending_action_for_sanitizer_recovery(self, session_id: str) -> str | None:
+        try:
+            state = self.brain.memory.get_session_state(session_id)
+        except Exception:
+            return None
+        pending_action = state.get("pending_action")
+        if isinstance(pending_action, str) and pending_action.strip():
+            return pending_action.strip()
+        task_queue = state.get("task_queue") or []
+        if isinstance(task_queue, list):
+            for status in ("in_progress", "pending"):
+                for item in task_queue:
+                    if not isinstance(item, dict) or item.get("status") != status:
+                        continue
+                    summary = item.get("summary")
+                    if isinstance(summary, str) and summary.strip():
+                        return summary.strip()
+        return None
+
+    def _internal_trace_recovery_prompt(self, *, source_text: str, pending_action: str | None) -> str:
+        lines = [
+            "Reintenta la respuesta para Telegram usando el mismo pedido del usuario.",
+            "No hagas metacomentarios ni pidas que Hector repita la instrucción.",
+            "Continúa con el siguiente paso concreto. Si falta un dato real, pregunta solo ese dato.",
+            f"Mensaje actual de Hector: {source_text}",
+        ]
+        if pending_action:
+            lines.append(f"Acción pendiente a retomar: {pending_action}")
+        if "datos en vivo" in _normalize_command_text(source_text):
+            lines.append(
+                "Preferencia actual: usar datos en vivo. Si necesitas elegir fuente, pide solo la fuente o preferencia faltante."
+            )
+        return "\n".join(lines)
+
+    def _internal_trace_recovery_fallback(self, *, source_text: str, pending_action: str | None) -> str:
+        next_step = pending_action or source_text
+        next_step = _compact_summary(next_step, limit=160) or "continuar con el siguiente paso disponible"
+        if "datos en vivo" in _normalize_command_text(source_text) and "datos en vivo" not in _normalize_command_text(next_step):
+            next_step = f"{next_step} con datos en vivo"
+        return f"Tuve un error preparando la respuesta. Retomo la acción: {next_step}."
+
+    def _looks_like_recoverable_action_text(self, text: str) -> bool:
+        normalized = _normalize_command_text(text).strip()
+        if len(normalized) < 8:
+            return False
+        if normalized in {"estatus", "status", "modo brujula", "procede", "ok", "si", "sí"}:
+            return False
+        action_markers = (
+            "arregla",
+            "corrige",
+            "completa",
+            "haz ",
+            "hacer ",
+            "manda ",
+            "manda al worker",
+            "sube",
+            "subelo",
+            "reinicia",
+            "corre",
+            "ejecuta",
+            "revisa",
+            "lee ",
+            "crea",
+            "fix",
+            "fixes",
+        )
+        return any(marker in normalized for marker in action_markers)
+
+    def _persist_sanitizer_recovery_action(
+        self,
+        session_id: str,
+        *,
+        source_text: str,
+        pending_action: str | None,
+    ) -> None:
+        action = (pending_action or "").strip()
+        if not action and self._looks_like_recoverable_action_text(source_text):
+            action = _compact_summary(source_text, limit=220) or ""
+        if not action:
+            return
+        try:
+            state = self.brain.memory.get_session_state(session_id)
+            task_queue = state.get("task_queue") or []
+            depends_on = self._task_handler.derive_task_dependencies(task_queue, summary=action)
+            task_queue = self._task_handler.upsert_task_queue_entry(
+                task_queue,
+                summary=action,
+                mode=_infer_session_mode(action),
+                status="pending",
+                source="sanitizer_recovery",
+                priority=1,
+                depends_on=depends_on,
+            )
+            self.brain.memory.update_session_state(
+                session_id,
+                pending_action=action,
+                task_queue=task_queue,
+                verification_status="pending",
+            )
+            self._emit_sanitizer_recovery_event(
+                "pending_action_persisted_after_suppression",
+                session_id,
+                pending_action_preview=action[:160],
+            )
+        except Exception:
+            logger.debug("failed to persist sanitizer recovery action", exc_info=True)
+
+    def _prepare_visible_brain_content(
+        self,
+        session_id: str,
+        source_text: str,
+        raw_content: str,
+        *,
+        runtime_capability_question: bool,
+        link_analysis_context: dict[str, Any] | None,
+    ) -> str:
+        content = raw_content.strip()
+        if not content or content == "(no result)":
+            content = "Recibido. ¿Qué quieres que haga con esto?"
+        elif _looks_like_pre_hook_block(content):
+            content = self._maybe_augment_pre_hook_block(content)
+        elif _looks_like_unverified_capability_denial(content):
+            corrected = self._correct_unverified_capability_denial(content)
+            if corrected is not None:
+                self._emit_internal_chat_suppressed(
+                    session_id,
+                    reason="unverified_capability_denial",
+                    original=content,
+                    sanitized=corrected,
+                )
+                content = corrected
+        elif runtime_capability_question:
+            content = _enforce_runtime_capability_sections(content)
+        elif link_analysis_context is not None:
+            content = _enforce_link_analysis_sections(
+                content,
+                url=link_analysis_context["url"],
+                fetched_content=link_analysis_context["fetched_content"],
+            )
+        return self._sanitize_visible_chat_response(session_id, content)
+
+    def _recover_internal_trace_suppression(
+        self,
+        *,
+        session_id: str,
+        source_text: str,
+        response: Any,
+        runtime_capability_question: bool,
+        link_analysis_context: dict[str, Any] | None,
+        runtime_channel: str | None,
+    ) -> str:
+        suppression_reason = self._suppressed_response_reason(response)
+        pending_action = self._pending_action_for_sanitizer_recovery(session_id)
+        self._emit_sanitizer_recovery_event(
+            "internal_trace_detected",
+            session_id,
+            reason=suppression_reason,
+            response_length=len(str(getattr(response, "content", "") or "")),
+        )
+        self._emit_sanitizer_recovery_event(
+            "internal_trace_suppressed_from_chat",
+            session_id,
+            reason=suppression_reason,
+            has_pending_action=bool(pending_action),
+        )
+        self._emit_internal_chat_suppressed(
+            session_id,
+            reason=suppression_reason,
+            original=str(getattr(response, "content", "") or ""),
+            sanitized="",
+        )
+        try:
+            self.brain.memory.delete_last_messages(session_id, count=2)
+            provider = str(getattr(response, "provider", "") or "")
+            if provider:
+                self.brain.memory.clear_provider_session(session_id, provider)
+        except Exception:
+            logger.debug("failed to remove suppressed brain turn before retry", exc_info=True)
+        if pending_action:
+            self._emit_sanitizer_recovery_event(
+                "pending_action_resumed_after_suppression",
+                session_id,
+                pending_action_preview=pending_action[:160],
+            )
+        retry_prompt = self._with_runtime_capability_context(
+            self._internal_trace_recovery_prompt(source_text=source_text, pending_action=pending_action),
+            runtime_channel=runtime_channel,
+        )
+        self._emit_sanitizer_recovery_event(
+            "clean_retry_started",
+            session_id,
+            has_pending_action=bool(pending_action),
+        )
+        try:
+            retry_response = self.brain.handle_message(
+                session_id,
+                retry_prompt,
+                memory_text=source_text,
+                task_type="telegram_message",
+            )
+        except ApprovalPending as exc:
+            self._record_pending_tool_approval(
+                session_id=session_id,
+                user_text=source_text,
+                exc=exc,
+            )
+            reply = _format_approval_pending(exc)
+            self._emit_sanitizer_recovery_event(
+                "clean_retry_completed",
+                session_id,
+                outcome="approval_pending",
+            )
+            return self._sanitize_visible_chat_response(session_id, reply)
+        except Exception as exc:
+            logger.exception("clean retry after internal trace suppression failed")
+            fallback = self._sanitize_visible_chat_response(
+                session_id,
+                self._internal_trace_recovery_fallback(source_text=source_text, pending_action=pending_action),
+            )
+            self._emit_sanitizer_recovery_event(
+                "clean_retry_failed",
+                session_id,
+                reason=type(exc).__name__,
+            )
+            self._persist_sanitizer_recovery_action(
+                session_id,
+                source_text=source_text,
+                pending_action=pending_action,
+            )
+            self._store_memory_turn(session_id, source_text, fallback, assistant_limit=2000)
+            return fallback
+
+        if self._response_has_internal_trace_suppressed(retry_response):
+            self._emit_sanitizer_recovery_event(
+                "clean_retry_failed",
+                session_id,
+                reason="internal_trace_repeated",
+            )
+            try:
+                self.brain.memory.delete_last_messages(session_id, count=2)
+                provider = str(getattr(retry_response, "provider", "") or "")
+                if provider:
+                    self.brain.memory.clear_provider_session(session_id, provider)
+            except Exception:
+                logger.debug("failed to remove failed clean retry turn", exc_info=True)
+            fallback = self._sanitize_visible_chat_response(
+                session_id,
+                self._internal_trace_recovery_fallback(source_text=source_text, pending_action=pending_action),
+            )
+            self._persist_sanitizer_recovery_action(
+                session_id,
+                source_text=source_text,
+                pending_action=pending_action,
+            )
+            self._store_memory_turn(session_id, source_text, fallback, assistant_limit=2000)
+            return fallback
+
+        raw_retry_content = getattr(retry_response, "content", "") or ""
+        content = self._prepare_visible_brain_content(
+            session_id,
+            source_text,
+            raw_retry_content,
+            runtime_capability_question=runtime_capability_question,
+            link_analysis_context=link_analysis_context,
+        )
+        if content != raw_retry_content:
+            self.brain.memory.replace_latest_assistant_message(session_id, raw_retry_content, content)
+        self._emit_sanitizer_recovery_event(
+            "clean_retry_completed",
+            session_id,
+            response_length=len(content),
+        )
+        return content
+
+    def _remember_inbound_context(self, session_id: str, metadata: dict[str, Any] | None) -> None:
+        if not isinstance(metadata, dict):
+            return
+        reply_context = metadata.get("reply_context")
+        if not isinstance(reply_context, dict):
+            return
+        text = str(reply_context.get("text") or "").strip()
+        if not text:
+            return
+        state = self.brain.memory.get_session_state(session_id)
+        active_object = dict(state.get("active_object") or {})
+        active_object["reply_context"] = {
+            "source": "telegram_reply",
+            "text": text[:2000],
+            "created_at": time.time(),
+        }
+        self.brain.memory.update_session_state(session_id, active_object=active_object)
+        if self.observe is not None:
+            try:
+                self.observe.emit(
+                    "reply_context_loaded",
+                    payload={
+                        "session_id": session_id,
+                        "source": "telegram_reply",
+                        "text_length": len(text),
+                    },
+                )
+            except Exception:
+                logger.debug("failed to emit reply_context_loaded", exc_info=True)
+
     def handle_text(
         self,
         *,
@@ -1152,12 +1542,14 @@ class BotService:
         session_id: str,
         text: str,
         runtime_channel: str | None = None,
+        context_metadata: dict[str, Any] | None = None,
     ) -> str:
         if self.allowed_user_id is None:
             raise PermissionError("TELEGRAM_ALLOWED_USER_ID must be configured")
         if user_id != self.allowed_user_id:
             raise PermissionError("user is not allowed to access this bot")
         self._ensure_default_autonomy(session_id)
+        self._remember_inbound_context(session_id, context_metadata)
         stripped = text.strip()
         context = CommandContext(user_id=user_id, session_id=session_id, text=text, stripped=stripped)
         command_response = dispatch_commands(self._pre_state_commands, context)
@@ -1175,9 +1567,32 @@ class BotService:
             self._store_memory_turn(session_id, stripped, computer_approval_response, assistant_limit=2000)
             self._remember_assistant_turn_state(session_id, stripped, computer_approval_response)
             return computer_approval_response
+        # Marker event at the dispatch boundary: when the message qualifies
+        # as an explicit command (slash prefix or literal task_id), emit a
+        # single `explicit_command` route record so the audit stream can
+        # distinguish "user typed a command" from "heuristic captured it".
+        if _is_explicit_command(stripped):
+            self._emit_dispatch_decision(
+                handler="explicit_command",
+                route="explicit_command",
+                reason=(
+                    "slash_prefix"
+                    if stripped.startswith("/")
+                    else "literal_task_id_match"
+                ),
+                session_id=session_id,
+                text=stripped,
+                captured=True,
+            )
         operational_alert_response = self._maybe_handle_operational_alert(stripped, session_id=session_id)
         self._emit_dispatch_decision(
-            route="operational_alert",
+            handler="operational_alert",
+            route="intercepted" if operational_alert_response is not None else "fall_through",
+            reason=(
+                "operational_alert_matched"
+                if operational_alert_response is not None
+                else "operational_alert_no_match"
+            ),
             session_id=session_id,
             text=stripped,
             captured=operational_alert_response is not None,
@@ -1192,7 +1607,13 @@ class BotService:
             runtime_channel=runtime_channel,
         )
         self._emit_dispatch_decision(
-            route="boot_context_status",
+            handler="boot_context_status",
+            route="intercepted" if boot_context_response is not None else "fall_through",
+            reason=(
+                "boot_context_status_matched"
+                if boot_context_response is not None
+                else "boot_context_status_no_match"
+            ),
             session_id=session_id,
             text=stripped,
             captured=boot_context_response is not None,
@@ -1202,8 +1623,22 @@ class BotService:
             self._remember_assistant_turn_state(session_id, stripped, boot_context_response)
             return boot_context_response
         task_intent_response = self._maybe_handle_task_intent(stripped, session_id=session_id)
+        # The task intent router is gated by CLAW_DISABLE_TASK_INTENT_ROUTER
+        # (default ON); a fall_through can be either "disabled by flag" or
+        # "classifier returned unknown". Distinguish them so audits show why.
+        if task_intent_response is not None:
+            task_intent_reason = "task_intent_classifier_matched"
+        elif (
+            os.getenv("CLAW_DISABLE_TASK_INTENT_ROUTER", "1") == "1"
+            and not _has_literal_task_id(stripped)
+        ):
+            task_intent_reason = "disabled_by_flag"
+        else:
+            task_intent_reason = "task_intent_no_match"
         self._emit_dispatch_decision(
-            route="task_intent",
+            handler="task_intent",
+            route="intercepted" if task_intent_response is not None else "fall_through",
+            reason=task_intent_reason,
             session_id=session_id,
             text=stripped,
             captured=task_intent_response is not None,
@@ -1214,7 +1649,13 @@ class BotService:
             return task_intent_response
         operational_status_response = self._maybe_handle_operational_status(stripped, session_id=session_id)
         self._emit_dispatch_decision(
-            route="operational_status",
+            handler="operational_status",
+            route="intercepted" if operational_status_response is not None else "fall_through",
+            reason=(
+                "operational_status_matched"
+                if operational_status_response is not None
+                else "operational_status_no_match"
+            ),
             session_id=session_id,
             text=stripped,
             captured=operational_status_response is not None,
@@ -1225,14 +1666,23 @@ class BotService:
             return operational_status_response
         # Most semantic pre-brain routes stay gated, but explicit operational
         # capability requests like AI news and X trends remain deterministic.
-        if self._capability_route_allowed(stripped):
+        capability_route_allowed = self._capability_route_allowed(stripped)
+        if capability_route_allowed:
             capability_route_response = self._maybe_handle_capability_route(
                 stripped, session_id=session_id
             )
         else:
             capability_route_response = None
+        if capability_route_response is not None:
+            capability_reason = "capability_route_matched"
+        elif not capability_route_allowed:
+            capability_reason = "disabled_by_flag"
+        else:
+            capability_reason = "capability_route_no_match"
         self._emit_dispatch_decision(
-            route="capability_route",
+            handler="capability_route",
+            route="intercepted" if capability_route_response is not None else "fall_through",
+            reason=capability_reason,
             session_id=session_id,
             text=stripped,
             captured=capability_route_response is not None,
@@ -1249,19 +1699,38 @@ class BotService:
             return self._handle_autonomy_grant_response(session_id, stripped)
         stateful_followup = self._maybe_resolve_stateful_followup(stripped, session_id=session_id)
         if isinstance(stateful_followup, _BrainShortcut):
-            return self._brain_text_response(
+            is_pending_execution = (
+                stateful_followup.text.startswith("Continúa con esta acción pendiente:")
+                or stateful_followup.text.startswith("Continúa con este siguiente paso")
+            )
+            result = self._brain_text_response(
                 session_id,
                 stateful_followup.text,
                 memory_text=stateful_followup.memory_text,
                 runtime_channel=runtime_channel,
             )
+            if is_pending_execution and self.observe is not None:
+                try:
+                    self.observe.emit(
+                        "pending_action_execution_completed",
+                        payload={"session_id": session_id, "response_length": len(result)},
+                    )
+                except Exception:
+                    logger.debug("failed to emit pending_action_execution_completed", exc_info=True)
+            return result
         if stateful_followup is not None:
             self._store_memory_turn(session_id, stripped, stateful_followup, assistant_limit=2000)
             self._remember_assistant_turn_state(session_id, stripped, stateful_followup)
             return stateful_followup
         shortcut_response = self._maybe_handle_shortcut(stripped, session_id=session_id)
         self._emit_dispatch_decision(
-            route="shortcut",
+            handler="shortcut",
+            route="intercepted" if shortcut_response is not None else "fall_through",
+            reason=(
+                "shortcut_matched"
+                if shortcut_response is not None
+                else "shortcut_no_match"
+            ),
             session_id=session_id,
             text=stripped,
             captured=shortcut_response is not None,
@@ -1281,8 +1750,16 @@ class BotService:
         # NlmHandler owns its own narrow classifier and kill switch; keeping it
         # here prevents explicit NotebookLM commands from falling into autonomy.
         nlm_response = self._nlm_handler.natural_language_response(session_id, stripped)
+        if nlm_response is not None:
+            nlm_reason = "nlm_intent_classifier_matched"
+        elif os.getenv("CLAW_DISABLE_NLM_NATURAL_LANGUAGE", "0") == "1":
+            nlm_reason = "disabled_by_flag"
+        else:
+            nlm_reason = "nlm_intent_no_match"
         self._emit_dispatch_decision(
-            route="nlm_natural_language",
+            handler="nlm_natural_language",
+            route="intercepted" if nlm_response is not None else "fall_through",
+            reason=nlm_reason,
             session_id=session_id,
             text=stripped,
             captured=nlm_response is not None,
@@ -1293,7 +1770,13 @@ class BotService:
             return nlm_response
         coordinated_response = self._task_handler.maybe_run_coordinated_task(session_id, stripped)
         self._emit_dispatch_decision(
-            route="coordinated_task",
+            handler="coordinated_task",
+            route="intercepted" if coordinated_response is not None else "fall_through",
+            reason=(
+                "coordinated_task_matched"
+                if coordinated_response is not None
+                else "coordinated_task_no_match"
+            ),
             session_id=session_id,
             text=stripped,
             captured=coordinated_response is not None,
@@ -1307,12 +1790,10 @@ class BotService:
         if command_response is not None:
             return command_response
 
-        self._emit_dispatch_decision(
-            route="brain",
-            session_id=session_id,
-            text=stripped,
-            captured=True,
-        )
+        # No dispatch_decision emit here — the spec is "pre-brain decision
+        # boundary only". By construction, reaching this line means every
+        # pre-brain handler emitted route="fall_through", and the brain's
+        # own observability covers what happens next.
         return self._brain_text_response(session_id, stripped, runtime_channel=runtime_channel)
 
     def _build_pre_state_commands(self) -> list[BotCommand]:
@@ -2184,23 +2665,24 @@ class BotService:
             return _format_approval_pending(exc)
 
         raw_content = response.content or ""
-        content = raw_content.strip()
-        if not content or content == "(no result)":
-            content = "Recibido. ¿Qué quieres que haga con esto?"
-        elif _looks_like_pre_hook_block(content):
-            content = self._maybe_augment_pre_hook_block(content)
-        elif _looks_like_unverified_capability_denial(content):
-            corrected = self._correct_unverified_capability_denial(content)
-            if corrected is not None:
-                content = corrected
-        elif runtime_capability_question:
-            content = _enforce_runtime_capability_sections(content)
-        elif link_analysis_context is not None:
-            content = _enforce_link_analysis_sections(
-                content,
-                url=link_analysis_context["url"],
-                fetched_content=link_analysis_context["fetched_content"],
+        if self._response_has_internal_trace_suppressed(response):
+            content = self._recover_internal_trace_suppression(
+                session_id=session_id,
+                source_text=source_text,
+                response=response,
+                runtime_capability_question=runtime_capability_question,
+                link_analysis_context=link_analysis_context,
+                runtime_channel=runtime_channel,
             )
+            self._remember_assistant_turn_state(session_id, source_text, content)
+            return content
+        content = self._prepare_visible_brain_content(
+            session_id,
+            source_text,
+            raw_content,
+            runtime_capability_question=runtime_capability_question,
+            link_analysis_context=link_analysis_context,
+        )
         if content != raw_content:
             self.brain.memory.replace_latest_assistant_message(session_id, raw_content, content)
         if content == "Recibido. ¿Qué quieres que haga con esto?":
@@ -2287,9 +2769,8 @@ class BotService:
         if not available:
             return None
         return (
-            "No voy a asumir falta de acceso sin evidencia: en este runtime aparecen disponibles "
-            f"{', '.join(available)}. La respuesta del modelo fue bloqueada porque contradice las "
-            "capacidades actuales; voy a usar una ruta determinística o verificar la capacidad concreta antes de decir que no puedo."
+            "No cierro esto como falta de acceso sin una verificación real. "
+            "Intentaré la acción concreta o te diré el bloqueo verificado."
         )
 
     def _record_pending_tool_approval(
@@ -2329,7 +2810,7 @@ class BotService:
             active_object.pop("pending_tool_approval", None)
             self.brain.memory.update_session_state(
                 session_id,
-                pending_action=None,
+                pending_action="",
                 verification_status="unknown",
                 active_object=active_object,
             )

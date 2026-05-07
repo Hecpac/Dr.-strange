@@ -907,6 +907,368 @@ class BotTests(unittest.TestCase):
                 state = runtime.memory.get_session_state("s1")
                 self.assertEqual(state["task_queue"][0]["status"], "in_progress")
 
+    def test_haz_la_prueba_with_pending_action_calls_executor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            prompts: list[str] = []
+
+            def scripted_executor(request: LLMRequest) -> LLMResponse:
+                prompt_text = request.prompt if isinstance(request.prompt, str) else json.dumps(request.prompt)
+                prompts.append(prompt_text)
+                return LLMResponse(
+                    content="prueba ejecutada",
+                    lane=request.lane,
+                    provider="anthropic",
+                    model=request.model,
+                )
+
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=scripted_executor)
+                runtime.memory.update_session_state(
+                    "s1",
+                    mode="coding",
+                    pending_action="correr prueba local simple",
+                    task_queue=[
+                        {
+                            "task_id": "coding:assistant:correr-prueba-local-simple",
+                            "summary": "correr prueba local simple",
+                            "mode": "coding",
+                            "status": "pending",
+                            "source": "assistant",
+                            "priority": 1,
+                        }
+                    ],
+                )
+
+                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="Haz la prueba")
+
+                self.assertEqual(reply, "prueba ejecutada")
+                self.assertIn("Continúa con esta acción pendiente: correr prueba local simple", prompts[-1])
+                events = [event["event_type"] for event in runtime.observe.recent_events(limit=20)]
+                self.assertIn("approval_detected", events)
+                self.assertIn("pending_action_execution_started", events)
+                self.assertIn("pending_action_execution_completed", events)
+
+    def test_haz_la_prueba_without_pending_action_asks_for_precision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+
+                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="Haz la prueba")
+
+                self.assertIn("Qué acción concreta", reply)
+
+    def test_unverified_capability_denial_is_suppressed_from_chat(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+
+            def denial_executor(request: LLMRequest) -> LLMResponse:
+                return LLMResponse(
+                    content="No puedo usar el navegador ni terminal bridge; la respuesta del modelo fue bloqueada.",
+                    lane=request.lane,
+                    provider="anthropic",
+                    model=request.model,
+                )
+
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=denial_executor)
+                runtime.bot.terminal_bridge = object()
+
+                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="abre Chrome")
+
+                lowered = reply.lower()
+                self.assertNotIn("terminal bridge", lowered)
+                self.assertNotIn("localhost", lowered)
+                self.assertNotIn("message_id", lowered)
+                self.assertNotIn("chat_id", lowered)
+                self.assertNotIn("respuesta del modelo fue bloqueada", lowered)
+                events = [event["event_type"] for event in runtime.observe.recent_events(limit=10)]
+                self.assertIn("internal_message_suppressed_from_chat", events)
+
+    def test_internal_tool_trace_suppression_retries_clean_without_visible_meta(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            prompts: list[str] = []
+
+            def scripted_executor(request: LLMRequest) -> LLMResponse:
+                prompt_text = request.prompt if isinstance(request.prompt, str) else json.dumps(request.prompt)
+                prompts.append(prompt_text)
+                if len(prompts) == 1:
+                    return LLMResponse(
+                        content='to=functions.exec_command {"cmd":"pwd"}',
+                        lane=request.lane,
+                        provider="anthropic",
+                        model=request.model,
+                    )
+                return LLMResponse(
+                    content="<response>Conecto la fuente de datos en vivo y sigo con la prueba.</response>",
+                    lane=request.lane,
+                    provider="anthropic",
+                    model=request.model,
+                )
+
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=scripted_executor)
+                runtime.memory.update_session_state(
+                    "s1",
+                    pending_action="hacer la prueba con datos en vivo",
+                )
+
+                reply = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="Hagámoslo con datos en vivo",
+                )
+
+                lowered = reply.lower()
+                self.assertEqual(reply, "Conecto la fuente de datos en vivo y sigo con la prueba.")
+                self.assertNotIn("salida del modelo", lowered)
+                self.assertNotIn("trazas internas", lowered)
+                self.assertNotIn("herramientas internas", lowered)
+                self.assertNotIn("la oculté", lowered)
+                self.assertNotIn("respuesta bloqueada", lowered)
+                self.assertNotIn("sanitizer", lowered)
+                self.assertNotIn("blocked model response", lowered)
+                self.assertNotIn("repite la instrucción", lowered)
+                self.assertGreaterEqual(len(prompts), 2)
+                self.assertIn("Hagámoslo con datos en vivo", prompts[-1])
+                events = [event["event_type"] for event in runtime.observe.recent_events(limit=50)]
+                self.assertIn("internal_trace_detected", events)
+                self.assertIn("internal_trace_suppressed_from_chat", events)
+                self.assertIn("clean_retry_started", events)
+                self.assertIn("clean_retry_completed", events)
+
+    def test_prompt_echo_suppression_retries_clean_without_visible_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            prompts: list[str] = []
+
+            def scripted_executor(request: LLMRequest) -> LLMResponse:
+                prompt_text = request.prompt if isinstance(request.prompt, str) else json.dumps(request.prompt)
+                prompts.append(prompt_text)
+                if len(prompts) == 1:
+                    return LLMResponse(
+                        content=(
+                            "# Telegram message\n"
+                            "Reply ONLY to that latest message.\n"
+                            "Telegram-friendly Markdown."
+                        ),
+                        lane=request.lane,
+                        provider="anthropic",
+                        model=request.model,
+                    )
+                return LLMResponse(
+                    content="<response>Reinicio y verifico que el daemon quede vivo.</response>",
+                    lane=request.lane,
+                    provider="anthropic",
+                    model=request.model,
+                )
+
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=scripted_executor)
+
+                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="Ya reinicia")
+
+                lowered = reply.lower()
+                self.assertEqual(reply, "Reinicio y verifico que el daemon quede vivo.")
+                self.assertNotIn("telegram message", lowered)
+                self.assertNotIn("reply only", lowered)
+                self.assertNotIn("telegram-friendly markdown", lowered)
+                self.assertIn("Ya reinicia", prompts[-1])
+                events = [event["event_type"] for event in runtime.observe.recent_events(limit=50)]
+                self.assertIn("internal_trace_detected", events)
+                self.assertIn("internal_trace_suppressed_from_chat", events)
+                self.assertIn("clean_retry_started", events)
+                self.assertIn("clean_retry_completed", events)
+
+    def test_repeated_prompt_echo_persists_recoverable_action(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+
+            def prompt_echo_executor(request: LLMRequest) -> LLMResponse:
+                return LLMResponse(
+                    content="user: Olvidate del budget y completa Los fixes",
+                    lane=request.lane,
+                    provider="anthropic",
+                    model=request.model,
+                )
+
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=prompt_echo_executor)
+
+                reply = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="Olvidate del budget y completa Los fixes",
+                )
+
+                lowered = reply.lower()
+                self.assertIn("Tuve un error preparando la respuesta", reply)
+                self.assertNotIn("user:", lowered)
+                state = runtime.memory.get_session_state("s1")
+                self.assertEqual(state["pending_action"], "Olvidate del budget y completa Los fixes")
+                self.assertEqual(state["task_queue"][0]["summary"], "Olvidate del budget y completa Los fixes")
+                self.assertEqual(state["task_queue"][0]["source"], "sanitizer_recovery")
+                events = [event["event_type"] for event in runtime.observe.recent_events(limit=80)]
+                self.assertIn("pending_action_persisted_after_suppression", events)
+
+    def test_pending_action_resumes_after_internal_trace_suppression(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            prompts: list[str] = []
+
+            def scripted_executor(request: LLMRequest) -> LLMResponse:
+                prompt_text = request.prompt if isinstance(request.prompt, str) else json.dumps(request.prompt)
+                prompts.append(prompt_text)
+                if len(prompts) == 1:
+                    return LLMResponse(
+                        content='to=functions.exec_command {"cmd":"run-live"}',
+                        lane=request.lane,
+                        provider="anthropic",
+                        model=request.model,
+                    )
+                return LLMResponse(
+                    content="<response>Retomo la prueba con datos en vivo.</response>",
+                    lane=request.lane,
+                    provider="anthropic",
+                    model=request.model,
+                )
+
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=scripted_executor)
+                runtime.memory.update_session_state(
+                    "s1",
+                    pending_action="correr la prueba usando datos actuales",
+                    task_queue=[
+                        {
+                            "task_id": "research:assistant:correr-prueba-datos-actuales",
+                            "summary": "correr la prueba usando datos actuales",
+                            "mode": "research",
+                            "status": "pending",
+                            "source": "assistant",
+                            "priority": 1,
+                        }
+                    ],
+                )
+
+                reply = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="Hagámoslo con datos en vivo",
+                )
+
+                self.assertEqual(reply, "Retomo la prueba con datos en vivo.")
+                self.assertIn("Acción pendiente a retomar: correr la prueba usando datos actuales", prompts[-1])
+                self.assertIn("Mensaje actual de Hector: Hagámoslo con datos en vivo", prompts[-1])
+                events = [event["event_type"] for event in runtime.observe.recent_events(limit=80)]
+                self.assertIn("pending_action_resumed_after_suppression", events)
+                self.assertIn("clean_retry_completed", events)
+
+    def test_internal_tool_trace_recovery_failure_returns_user_error_with_next_step(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+
+            def trace_executor(request: LLMRequest) -> LLMResponse:
+                return LLMResponse(
+                    content='to=functions.exec_command {"cmd":"still-bad"}',
+                    lane=request.lane,
+                    provider="anthropic",
+                    model=request.model,
+                )
+
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=trace_executor)
+                runtime.memory.update_session_state(
+                    "s1",
+                    pending_action="conectar una fuente de datos en vivo",
+                )
+
+                reply = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="Hagámoslo con datos en vivo",
+                )
+
+                lowered = reply.lower()
+                self.assertIn("Tuve un error preparando la respuesta", reply)
+                self.assertIn("Retomo la acción:", reply)
+                self.assertIn("datos en vivo", lowered)
+                self.assertNotIn("salida del modelo", lowered)
+                self.assertNotIn("trazas internas", lowered)
+                self.assertNotIn("herramientas internas", lowered)
+                self.assertNotIn("la oculté", lowered)
+                self.assertNotIn("respuesta bloqueada", lowered)
+                self.assertNotIn("sanitizer", lowered)
+                self.assertNotIn("blocked model response", lowered)
+                self.assertNotIn("repite la instrucción", lowered)
+                events = [event["event_type"] for event in runtime.observe.recent_events(limit=80)]
+                self.assertIn("clean_retry_failed", events)
+
     def test_task_loop_tracks_budget_and_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -3222,8 +3584,9 @@ class BotTests(unittest.TestCase):
 
                 result = runtime.bot.handle_text(user_id="123", session_id="s1", text="responde prueba")
 
-                self.assertIn("No voy a asumir falta de acceso", result)
-                self.assertIn("Chrome/CDP", result)
+                self.assertIn("No cierro esto como falta de acceso", result)
+                self.assertNotIn("Chrome/CDP", result)
+                self.assertNotIn("terminal bridge", result)
                 self.assertNotIn("Habilita el browser bridge", result)
 
     @patch("claw_v2.browse_handler._jina_read")

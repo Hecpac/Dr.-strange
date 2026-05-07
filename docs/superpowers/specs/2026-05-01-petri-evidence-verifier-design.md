@@ -150,7 +150,19 @@ The two custom dimensions exist because of the ARC Prize Foundation analysis pub
 
 The fourth component (Exploration) is not directly covered — it is implicitly addressed by `stuck_in_loops`. If we observe Exploration failures that the existing dimensions miss, add a `wandering_without_progress` dimension in a follow-up.
 
-### 4.4 Verification flow
+### 4.4 Grader context isolation (hard requirement)
+
+The judge call MUST run in a context window that does not share scratchpad, system prompt, memory, or in-flight tool-call state with the target agent. Specifically:
+
+- Spawn the judge with a fresh Claude API session (no continuation token, no shared cache key, no inherited system-prompt fragments).
+- Pass only the `target.jsonl` transcript plus the dimension rubric. Do not pass `harness.jsonl`, internal Claw planning notes, or memory excerpts.
+- The judge must not be able to call back into Claw tools or read Claw runtime state.
+
+Source: Anthropic's "Outcomes" disclosure (2026-05-06) reports that running the grader in an isolated context separate from the target accounts for material gains (+8 to +10 points on the hardest tasks, +10.1% on pptx in their internal benchmarks). The same paper credits "grader does not share scratchpad with the agent under test" as the structural decision that makes Outcomes work — without it, the judge inherits the target's hallucinations and rationalizations, and verification collapses into self-grading.
+
+This requirement is non-negotiable. If we ever cannot isolate (e.g., a future runtime change makes shared-context cheaper), we must regress the verifier to legacy mode rather than ship a self-grading judge.
+
+### 4.5 Verification flow
 
 ```
 task closed by agent
@@ -179,7 +191,7 @@ any score ≥ failure_threshold? ── yes ──► verification_status=failed
 verification_status=passed
 ```
 
-### 4.5 Cost / latency budget
+### 4.6 Cost / latency budget
 
 Per verification (target stream of ~5K input tokens, judge call against 7 dimensions, Sonnet 4.6 at $3/MTok input / $15/MTok output):
 
@@ -257,6 +269,7 @@ Total estimate: 4 sessions across ~2 weeks. Commits #6 and #7 can land back-to-b
 ## 10. References
 
 - Petri blog: https://www.anthropic.com/research/petri-open-source-auditing
+- Anthropic Outcomes (2026-05-06): grader-context-isolation methodology and +8 to +10 point gains on hardest tasks. Cited in §4.4 as the source for the hard-requirement framing.
 - Petri code (Meridian Labs v3): https://github.com/safety-research/petri (redirects to `meridianlabs-ai/inspect_petri`)
 - Auditing Hidden Objectives paper: https://arxiv.org/abs/2503.10965
 - Persona Vectors paper: https://www.anthropic.com/research/persona-vectors

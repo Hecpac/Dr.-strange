@@ -156,6 +156,40 @@ class HandleTextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["response_parts"], 1)
         self.assertGreaterEqual(payload["total_ms"], 0.0)
 
+    async def test_outbound_text_sanitizes_internal_trace_fallback(self) -> None:
+        bot_service = MagicMock()
+        bot_service.handle_text.return_value = (
+            "La salida del modelo contenía trazas internas de herramientas y la oculté. "
+            "Repite la instrucción y la ejecuto limpio."
+        )
+        bot_service.observe = MagicMock()
+        transport = TelegramTransport(
+            bot_service=bot_service, token="t", allowed_user_id="123",
+        )
+        update = MagicMock()
+        update.effective_user.id = 123
+        update.effective_chat.id = 1
+        update.message.text = "hello"
+        update.message.reply_text = AsyncMock()
+        update.message.chat.send_action = AsyncMock()
+
+        with patch("claw_v2.telegram.asyncio") as mock_asyncio:
+            mock_asyncio.to_thread = AsyncMock(return_value=bot_service.handle_text.return_value)
+            await transport._handle_text(update, MagicMock())
+
+        visible = update.message.reply_text.await_args.args[0]
+        lowered = visible.lower()
+        self.assertNotIn("salida del modelo", lowered)
+        self.assertNotIn("trazas internas", lowered)
+        self.assertNotIn("herramientas internas", lowered)
+        self.assertNotIn("la oculté", lowered)
+        self.assertNotIn("respuesta bloqueada", lowered)
+        self.assertNotIn("sanitizer", lowered)
+        self.assertNotIn("blocked model response", lowered)
+        self.assertNotIn("repite la instrucción", lowered)
+        event_names = [call.args[0] for call in bot_service.observe.emit.call_args_list]
+        self.assertIn("internal_message_suppressed_from_chat", event_names)
+
     async def test_authorized_text_uses_agent_runtime_when_available(self) -> None:
         bot_service = MagicMock()
         bot_service.observe = MagicMock()
@@ -184,6 +218,35 @@ class HandleTextTests(unittest.IsolatedAsyncioTestCase):
             external_session_id="1",
             session_id="tg-1",
             text="hello",
+        )
+
+    async def test_reply_to_text_is_passed_as_context_metadata(self) -> None:
+        bot_service = MagicMock()
+        bot_service.observe = MagicMock()
+        agent_runtime = MagicMock()
+        agent_runtime.handle_text.return_value = SimpleNamespace(text="runtime response", session_id="tg-1")
+        transport = TelegramTransport(
+            bot_service=bot_service,
+            agent_runtime=agent_runtime,
+            token="t",
+            allowed_user_id="123",
+        )
+        update = MagicMock()
+        update.effective_user.id = 123
+        update.effective_chat.id = 1
+        update.message.text = "Dame los 2"
+        update.message.reply_to_message.text = "Pendientes: 9:16 vertical y 1:1 cuadrado."
+        update.message.reply_to_message.caption = None
+        update.message.reply_text = AsyncMock()
+        update.message.chat.send_action = AsyncMock()
+
+        await transport._handle_text(update, MagicMock())
+
+        agent_runtime.handle_text.assert_called_once()
+        metadata = agent_runtime.handle_text.call_args.kwargs["metadata"]
+        self.assertEqual(
+            metadata["reply_context"]["text"],
+            "Pendientes: 9:16 vertical y 1:1 cuadrado.",
         )
 
     async def test_voice_mode_can_use_xai_without_openai_key(self) -> None:

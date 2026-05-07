@@ -8,6 +8,7 @@ from claw_v2.observation_window import (
     ObservationWindowBlocked,
     ObservationWindowConfig,
     ObservationWindowState,
+    _diagnostic_only_freeze_reason,
     hard_denylist_reason,
 )
 
@@ -104,8 +105,19 @@ class ObservationWindowTests(unittest.TestCase):
             self.assertTrue(window.frozen)
             breaker_events = [payload for name, payload in observe.events if name == "circuit_breaker_tripped"]
             self.assertEqual(breaker_events[0]["payload"]["breaker"], "cost_per_hour")
-            self.assertEqual(alerts, [])
+            # cost_per_hour is a budget alarm — operator must be notified.
+            self.assertTrue(
+                any("circuit_breaker:cost_per_hour" in alert for alert in alerts),
+                f"expected cost_per_hour alert to reach notifier, got: {alerts!r}",
+            )
             self.assertTrue(any("circuit_breaker=cost_per_hour" in line for line in diagnostic_stream))
+
+    def test_cost_per_hour_is_not_diagnostic_only(self) -> None:
+        # Regression: budget breaker must escape the diagnostic-silence path so it
+        # reaches Telegram. Other circuit_breaker:* reasons stay silent.
+        self.assertFalse(_diagnostic_only_freeze_reason("circuit_breaker:cost_per_hour"))
+        self.assertTrue(_diagnostic_only_freeze_reason("circuit_breaker:tool_calls_per_minute"))
+        self.assertTrue(_diagnostic_only_freeze_reason("circuit_breaker:provider_failure"))
 
     def test_critical_action_alert_can_notify_with_safe_brief_message(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -205,6 +205,44 @@ class HandleMessageTests(unittest.TestCase):
         self.assertIn("Default to Spanish when Hector writes in Spanish", prompt)
         self.assertIn("Avoid robotic labels", prompt)
 
+    def test_handle_message_uses_config_max_budget_not_hardcoded(self) -> None:
+        # Regression: brain.handle_message must read max_budget from config,
+        # not pass a hardcoded literal that overrides operator-set caps.
+        self.router.config.max_budget_usd = 0.42
+        self.router.ask.return_value = LLMResponse(
+            content="<response>ok</response>", lane="brain", provider="anthropic", model="test",
+        )
+        self.brain.handle_message("s1", "input")
+        call_kwargs = self.router.ask.call_args.kwargs
+        self.assertEqual(call_kwargs["max_budget"], 0.42)
+
+    def test_handle_message_resume_retry_caps_at_75pct_of_budget(self) -> None:
+        # Resume retry path: when the first ask raises AdapterError, brain
+        # retries with a fresh session at 75% of the configured budget cap.
+        from claw_v2.llm import AdapterError
+
+        self.router.config.max_budget_usd = 1.00
+        # Pre-link a provider session so the retry branch is taken.
+        self.memory.link_provider_session("s1", "anthropic", "stale-sdk-session")
+        responses = [
+            AdapterError("session corrupt"),
+            LLMResponse(
+                content="<response>fresh</response>",
+                lane="brain",
+                provider="anthropic",
+                model="test",
+            ),
+        ]
+        self.router.ask.side_effect = responses
+
+        self.brain.handle_message("s1", "input")
+
+        self.assertEqual(self.router.ask.call_count, 2)
+        first_call = self.router.ask.call_args_list[0].kwargs
+        retry_call = self.router.ask.call_args_list[1].kwargs
+        self.assertEqual(first_call["max_budget"], 1.00)
+        self.assertAlmostEqual(retry_call["max_budget"], 0.75)
+
     def test_returns_llm_response(self) -> None:
         expected = LLMResponse(
             content="<response>response</response>", lane="brain", provider="anthropic", model="test",
@@ -239,6 +277,42 @@ class HandleMessageTests(unittest.TestCase):
         msgs = self.memory.get_recent_messages("s1")
         self.assertEqual(msgs[-1]["content"], "I checked the files and fixed it.")
 
+    def test_suppresses_unwrapped_prompt_echo(self) -> None:
+        self.router.ask.return_value = LLMResponse(
+            content=(
+                "# Telegram message\n"
+                "Reply ONLY to that latest message.\n"
+                "Do not include internal trace."
+            ),
+            lane="brain",
+            provider="anthropic",
+            model="test",
+        )
+
+        result = self.brain.handle_message("s1", "Ya reinicia")
+
+        lowered = result.content.lower()
+        self.assertIn("Tuve un error preparando la respuesta", result.content)
+        self.assertNotIn("telegram message", lowered)
+        self.assertNotIn("reply only", lowered)
+        self.assertEqual(result.artifacts["contract_violation"], "internal_prompt_echo")
+        self.assertTrue(result.artifacts["internal_prompt_echo_suppressed"])
+        self.assertTrue(result.artifacts["internal_response_suppressed"])
+
+    def test_suppresses_role_echo_as_internal_response(self) -> None:
+        self.router.ask.return_value = LLMResponse(
+            content="user: Estatus",
+            lane="brain",
+            provider="anthropic",
+            model="test",
+        )
+
+        result = self.brain.handle_message("s1", "Estatus")
+
+        self.assertNotEqual(result.content, "user: Estatus")
+        self.assertEqual(result.artifacts["contract_violation"], "internal_prompt_echo")
+        self.assertTrue(result.artifacts["internal_prompt_echo_suppressed"])
+
     def test_suppresses_unwrapped_internal_tool_trace(self) -> None:
         self.router.ask.return_value = LLMResponse(
             content=(
@@ -252,7 +326,9 @@ class HandleMessageTests(unittest.TestCase):
 
         result = self.brain.handle_message("s1", "ponla aqui")
 
-        self.assertIn("trazas internas", result.content)
+        self.assertIn("Tuve un error preparando la respuesta", result.content)
+        self.assertNotIn("trazas internas", result.content.lower())
+        self.assertNotIn("repite la instrucción", result.content.lower())
         self.assertNotIn("to=functions", result.content)
         self.assertEqual(result.artifacts["contract_violation"], "internal_tool_trace")
         self.assertTrue(result.artifacts["internal_tool_trace_suppressed"])
@@ -269,7 +345,9 @@ class HandleMessageTests(unittest.TestCase):
 
         result = self.brain.handle_message("s1", "genera imagen")
 
-        self.assertIn("trazas internas", result.content)
+        self.assertIn("Tuve un error preparando la respuesta", result.content)
+        self.assertNotIn("trazas internas", result.content.lower())
+        self.assertNotIn("repite la instrucción", result.content.lower())
         self.assertNotIn("to=GPTImage", result.content)
         self.assertEqual(result.artifacts["raw_response"], "[suppressed_internal_tool_trace]")
         self.assertIn("suppressed", result.artifacts["reasoning_trace"])

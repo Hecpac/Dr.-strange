@@ -139,6 +139,8 @@ class AgentRuntime:
                 }
                 if _accepts_runtime_channel(self.bot_service.handle_text):
                     text_kwargs["runtime_channel"] = event.route.channel
+                if _accepts_context_metadata(self.bot_service.handle_text) and event.route.metadata:
+                    text_kwargs["context_metadata"] = dict(event.route.metadata)
                 text = self.bot_service.handle_text(**text_kwargs)
             elif event.kind == "multimodal":
                 multimodal_kwargs = {
@@ -232,3 +234,11 @@ def _accepts_runtime_channel(handler: Any) -> bool:
     except (TypeError, ValueError):
         return False
     return "runtime_channel" in signature.parameters
+
+
+def _accepts_context_metadata(handler: Any) -> bool:
+    try:
+        signature = inspect.signature(handler)
+    except (TypeError, ValueError):
+        return False
+    return "context_metadata" in signature.parameters

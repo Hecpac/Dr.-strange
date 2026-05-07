@@ -211,7 +211,7 @@ class StatsTests(unittest.TestCase):
             "ops-runbook",
             "Operations Runbook",
             "Claw operational procedures.",
-            category="Operaciones Claw",
+            category="Operaciones Dr. Strange",
             confidence="0.55",
         )
         _write_page(
@@ -246,7 +246,7 @@ class StatsTests(unittest.TestCase):
         self.assertEqual(report["category_coverage"]["covered"], 3)
         self.assertEqual(report["category_coverage"]["unmapped"], 1)
         self.assertEqual(report["category_coverage"]["distribution"]["AI & Herramientas"], 1)
-        self.assertEqual(report["category_coverage"]["distribution"]["Operaciones Claw"], 1)
+        self.assertEqual(report["category_coverage"]["distribution"]["Operaciones Dr. Strange"], 1)
         self.assertEqual(report["category_coverage"]["distribution"]["Seguros"], 1)
         self.assertEqual(report["search_self_test"]["sample_size"], 4)
         self.assertEqual(report["search_self_test"]["hit_rate"], 1.0)

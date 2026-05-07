@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from claw_v2.adapters.anthropic import (
     ClaudeSDKExecutor,
+    IDENTITY_OVERRIDE,
     SILENCE_DIRECTIVE,
     create_claude_sdk_executor,
 )
@@ -230,6 +231,15 @@ class AnthropicExecutorTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("You are Claw.", system_prompt["append"])
             self.assertIn("headless engine", system_prompt["append"])
             self.assertIn(SILENCE_DIRECTIVE.strip(), system_prompt["append"])
+            # Identity-override block must be prepended so Dr. Strange persona
+            # wins over the Claude Code preset's default "I am Claude" identity.
+            self.assertIn("Dr. Strange", system_prompt["append"])
+            self.assertIn(IDENTITY_OVERRIDE.strip().splitlines()[0], system_prompt["append"])
+            self.assertLess(
+                system_prompt["append"].index("Dr. Strange"),
+                system_prompt["append"].index("You are Claw."),
+                "IDENTITY_OVERRIDE must come before the persona system prompt",
+            )
             self.assertEqual(options.kwargs["setting_sources"], [])
             self.assertEqual(options.kwargs["extra_args"], {"disable-slash-commands": None})
 

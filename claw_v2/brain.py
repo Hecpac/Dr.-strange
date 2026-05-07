@@ -91,6 +91,14 @@ _INTERNAL_TOOL_TRACE_PATTERNS = (
     re.compile(r'"recipient_name"\s*:\s*"(?:functions|multi_tool_use|web|image_gen|tool_search)\.', re.IGNORECASE),
     re.compile(r'"tool_uses"\s*:\s*\[', re.IGNORECASE),
 )
+_INTERNAL_PROMPT_ECHO_PATTERNS = (
+    re.compile(r"^\s*#\s*Telegram message\b", re.IGNORECASE),
+    re.compile(r"\bReply ONLY to (?:that|the) latest message\b", re.IGNORECASE),
+    re.compile(r"\bTelegram-friendly Markdown\b", re.IGNORECASE),
+    re.compile(r"\bDo not include internal trace\b", re.IGNORECASE),
+    re.compile(r"\bNo user-visible text is valid outside <response> tags\b", re.IGNORECASE),
+    re.compile(r"^\s*(?:user|assistant|system)\s*:\s*\S", re.IGNORECASE),
+)
 
 SELF_HEALING_LOOP_CONTRACT = """# Self-healing loop
 When a tool returns an error:
@@ -1093,7 +1101,10 @@ def _extract_visible_brain_response(response: LLMResponse) -> LLMResponse:
             if _looks_like_internal_tool_trace(content)
             else content
         )
-        response.content = _suppress_internal_tool_trace(response, visible)
+        if _looks_like_internal_prompt_echo(visible):
+            response.content = _suppress_internal_prompt_echo(response, visible)
+        else:
+            response.content = _suppress_internal_tool_trace(response, visible)
     elif content.strip():
         stripped = content.strip()
         if _looks_like_runtime_preamble(stripped):
@@ -1106,6 +1117,8 @@ def _extract_visible_brain_response(response: LLMResponse) -> LLMResponse:
                 "Unwrapped SDK output contained an internal tool-call transcript and was suppressed."
             )
             response.content = INTERNAL_TOOL_TRACE_FALLBACK
+        elif _looks_like_internal_prompt_echo(stripped):
+            response.content = _suppress_internal_prompt_echo(response, stripped)
         else:
             response.artifacts["reasoning_trace"] = f"Unwrapped SDK output: {stripped}"
             response.artifacts["contract_violation"] = "missing_response_tags"
@@ -1136,8 +1149,23 @@ def _looks_like_runtime_preamble(content: str) -> bool:
     )
 
 
+def _looks_like_internal_prompt_echo(content: str) -> bool:
+    return any(pattern.search(content) for pattern in _INTERNAL_PROMPT_ECHO_PATTERNS)
+
+
 def _looks_like_internal_tool_trace(content: str) -> bool:
     return any(pattern.search(content) for pattern in _INTERNAL_TOOL_TRACE_PATTERNS)
+
+
+def _suppress_internal_prompt_echo(response: LLMResponse, content: str) -> str:
+    response.artifacts["contract_violation"] = "internal_prompt_echo"
+    response.artifacts["internal_prompt_echo_suppressed"] = True
+    response.artifacts["internal_response_suppressed"] = True
+    response.artifacts["reasoning_trace"] = (
+        "Unwrapped SDK output contained an internal prompt or role echo and was suppressed."
+    )
+    response.artifacts["raw_response"] = "[suppressed_internal_prompt_echo]"
+    return INTERNAL_TOOL_TRACE_FALLBACK
 
 
 def _suppress_internal_tool_trace(response: LLMResponse, content: str) -> str:
@@ -1157,6 +1185,7 @@ def _suppress_internal_tool_trace(response: LLMResponse, content: str) -> str:
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     response.artifacts["contract_violation"] = "internal_tool_trace"
     response.artifacts["internal_tool_trace_suppressed"] = True
+    response.artifacts["internal_response_suppressed"] = True
     response.artifacts["internal_tool_trace_lines_removed"] = removed
     if not cleaned:
         _append_reasoning_trace(

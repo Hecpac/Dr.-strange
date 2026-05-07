@@ -489,7 +489,7 @@ def _env_int(name: str, default: int) -> int:
 def format_text(report: dict[str, Any]) -> str:
     checks = report["checks"]
     lines = [
-        f"Claw diagnostics: {checks['status']}",
+        f"Dr. Strange diagnostics: {checks['status']}",
         f"label={report['label']} port={report['port']} db={report['db_path']}",
         "",
         "Checks:",
@@ -532,7 +532,7 @@ def format_text(report: dict[str, Any]) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Collect local Claw runtime diagnostics.")
+    parser = argparse.ArgumentParser(description="Collect local Dr. Strange runtime diagnostics.")
     parser.add_argument("--db", default=os.getenv("DB_PATH", str(DEFAULT_DB_PATH)))
     parser.add_argument("--port", type=int, default=_env_int("WEB_CHAT_PORT", DEFAULT_PORT))
     parser.add_argument("--label", default=os.getenv("CLAW_LAUNCHD_LABEL", DEFAULT_LABEL))

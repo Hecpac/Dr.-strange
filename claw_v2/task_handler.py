@@ -108,7 +108,7 @@ class TaskHandler:
             self._remove_pending_task_approval(session_id, approval_id)
             self._update_session_state(
                 session_id,
-                pending_action=None,
+                pending_action="",
                 verification_status="blocked",
                 last_checkpoint={
                     "summary": "Coordinated task rejected before approval.",
@@ -142,7 +142,7 @@ class TaskHandler:
                     "reason": policy["reason"],
                 },
                 verification_status="blocked",
-                pending_action=None,
+                pending_action="",
             )
             return _format_autonomy_policy_block(policy)
         if mode not in {"coding", "research"}:
@@ -195,7 +195,7 @@ class TaskHandler:
         self._update_session_state(
             session_id,
             mode=mode,
-            pending_action=None,
+            pending_action="",
             task_queue=queue,
             verification_status="running",
             last_checkpoint=checkpoint,
@@ -328,7 +328,7 @@ class TaskHandler:
                     "reason": policy["reason"],
                 },
                 verification_status="blocked",
-                pending_action=None,
+                pending_action="",
             )
             return _format_autonomy_policy_block(policy)
         task_id = f"{session_id}:{time.time_ns()}"
@@ -662,7 +662,7 @@ class TaskHandler:
             self._update_session_state(
                 session_id,
                 verification_status="failed",
-                pending_action=None,
+                pending_action="",
                 last_checkpoint=checkpoint,
                 active_object=active_object,
             )
@@ -903,7 +903,7 @@ class TaskHandler:
         self._update_session_state(
             record.session_id,
             mode=mode,
-            pending_action=None,
+            pending_action="",
             verification_status="running",
             last_checkpoint={
                 "summary": f"Autonomous task resumed: {record.objective[:180]}",
@@ -983,7 +983,7 @@ class TaskHandler:
         self._update_session_state(
             session_id,
             verification_status="cancelled",
-            pending_action=None,
+            pending_action="",
             last_checkpoint={
                 "summary": f"Autonomous task cancelled: {objective[:180]}",
                 "verification_status": "cancelled",

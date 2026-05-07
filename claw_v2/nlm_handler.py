@@ -6,6 +6,7 @@ import logging
 import unicodedata
 import uuid
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Any, Callable, Iterator
 
 from claw_v2.bot_commands import BotCommand, CommandContext
@@ -23,12 +24,14 @@ class NlmHandler:
         *,
         task_ledger: Any | None = None,
         get_session_state: Callable[[str], dict[str, Any]] | None = None,
+        get_recent_messages: Callable[[str, int], list[dict[str, Any]]] | None = None,
     ) -> None:
         self.notebooklm: Any | None = None
         self._active_notebooks: dict[str, dict[str, str]] = {}
         self._update_session_state = update_session_state or (lambda *a, **kw: None)
         self._task_ledger = task_ledger
         self._get_session_state = get_session_state
+        self._get_recent_messages = get_recent_messages
 
     def commands(self) -> list[BotCommand]:
         return [
@@ -77,7 +80,7 @@ class NlmHandler:
             if response is None:
                 recorder.skip()
                 return None
-            if response.startswith("Error"):
+            if response.startswith("Error") or response.startswith("No hay cuaderno activo") or response.startswith("¿De qué tema") or response.startswith("¿De cuál tema"):
                 recorder.fail(response)
             else:
                 recorder.succeed(response, evidence=self._evidence_for_intent(session_id, intent, response))
@@ -97,6 +100,8 @@ class NlmHandler:
     def _classify_intent(self, text: str) -> str | None:
         if _looks_like_recent_notebook_review(text):
             return "review_latest"
+        if _looks_like_contextual_notebook_topic_request(text):
+            return "create_contextual_notebook"
         if _extract_nlm_create_topic(text):
             return "create_notebook"
         if _extract_nlm_artifact_kind(text):
@@ -111,6 +116,19 @@ class NlmHandler:
             if topic is None:
                 return None
             return self._create_response(session_id, topic)
+        if intent == "create_contextual_notebook":
+            resolved = self._resolve_contextual_topic(session_id, text)
+            if resolved.status == "ambiguous":
+                options = " o ".join(resolved.candidates[:2]) if resolved.candidates else "qué tema"
+                return f"¿De cuál tema quieres el cuaderno: {options}?"
+            if resolved.topic is None:
+                return "¿De qué tema quieres que cree el cuaderno?"
+            response = self._create_response(session_id, resolved.topic)
+            if _extract_nlm_artifact_kind(text) == "podcast":
+                target = self._active_notebook_id(session_id)
+                if target is not None:
+                    response = f"{response}\n{self.notebooklm.start_podcast(target)}"
+            return response
         if intent == "start_artifact":
             kind = _extract_nlm_artifact_kind(text)
             if kind is None:
@@ -353,11 +371,161 @@ class NlmHandler:
             notebooklm_backend=self.notebooklm,
         )
 
+    def _resolve_contextual_topic(self, session_id: str, text: str) -> "_ResolvedTopic":
+        state = self._safe_session_state(session_id)
+        active = state.get("active_object") or {}
+        if isinstance(active, dict):
+            recent_topics = active.get("recent_topics")
+            if isinstance(recent_topics, list):
+                candidates = [str(item).strip() for item in recent_topics if str(item).strip()]
+                unique = _unique_topics(candidates)
+                if len(unique) > 1:
+                    return _ResolvedTopic(status="ambiguous", candidates=unique[:3])
+                if unique:
+                    return _ResolvedTopic(status="resolved", topic=unique[0], candidates=unique)
+            for key in ("topic", "title", "summary"):
+                value = str(active.get(key) or "").strip()
+                if value and active.get("kind") not in {"channel_route"}:
+                    return _ResolvedTopic(status="resolved", topic=_clean_topic(value), candidates=[value])
+        messages = self._safe_recent_messages(session_id)
+        candidates = []
+        for message in reversed(messages):
+            content = str(message.get("content") or "").strip()
+            if not content or content.strip() == text.strip():
+                continue
+            candidate = _topic_candidate_from_message(content)
+            if candidate:
+                candidates.append(candidate)
+            if len(candidates) >= 3:
+                break
+        unique_candidates = _unique_topics(candidates)
+        if unique_candidates:
+            return _ResolvedTopic(status="resolved", topic=unique_candidates[0], candidates=unique_candidates)
+        current_goal = str(state.get("current_goal") or "").strip()
+        if current_goal and not _contains_contextual_topic_reference(current_goal):
+            return _ResolvedTopic(status="resolved", topic=_clean_topic(current_goal), candidates=[current_goal])
+        return _ResolvedTopic(status="missing")
+
+    def _safe_session_state(self, session_id: str) -> dict[str, Any]:
+        if self._get_session_state is None:
+            return {}
+        try:
+            return self._get_session_state(session_id) or {}
+        except Exception:
+            return {}
+
+    def _safe_recent_messages(self, session_id: str) -> list[dict[str, Any]]:
+        if self._get_recent_messages is None:
+            return []
+        try:
+            return list(self._get_recent_messages(session_id, 10) or [])
+        except Exception:
+            return []
+
 
 _NLM_INTENT_TO_TASK_KIND: dict[str, str] = {
     "create_notebook": "notebooklm_create",
+    "create_contextual_notebook": "notebooklm_create",
     "review_latest": "notebooklm_review",
 }
+
+
+@dataclass(slots=True)
+class _ResolvedTopic:
+    status: str
+    topic: str | None = None
+    candidates: list[str] | None = None
+
+
+def _looks_like_contextual_notebook_topic_request(text: str) -> bool:
+    normalized = _normalize_nlm_text(text)
+    if _looks_like_nlm_meta_discussion_local(normalized):
+        return False
+    if not any(token in normalized for token in ("notebooklm", "notebook lm", "notebook.lm", "cuaderno", "notebook")):
+        return False
+    if not any(token in normalized for token in ("deep research", "research", "podcast", "cuaderno", "notebook")):
+        return False
+    return _contains_contextual_topic_reference(normalized)
+
+
+def _contains_contextual_topic_reference(text: str) -> bool:
+    normalized = _normalize_nlm_text(text)
+    return any(
+        phrase in normalized
+        for phrase in (
+            "del tema",
+            "de ese tema",
+            "de este tema",
+            "de eso",
+            "sobre eso",
+            "sobre este tema",
+            "sobre ese tema",
+            "del trio",
+            "del trío",
+            "del asunto",
+        )
+    )
+
+
+def _looks_like_nlm_meta_discussion_local(normalized: str) -> bool:
+    return any(
+        phrase in normalized
+        for phrase in (
+            "cuando te pido",
+            "cuando te diga",
+            "cuando te pida",
+            "no me digas",
+            "no me pidas",
+            "haz los fixes",
+            "revisa los errores",
+            "el error",
+        )
+    )
+
+
+def _normalize_nlm_text(text: str) -> str:
+    folded = unicodedata.normalize("NFKD", text)
+    return "".join(ch for ch in folded if not unicodedata.combining(ch)).lower()
+
+
+def _topic_candidate_from_message(content: str) -> str | None:
+    normalized = _normalize_nlm_text(content)
+    if _looks_like_nlm_meta_discussion_local(normalized):
+        return None
+    if "no hay cuaderno activo" in normalized:
+        return None
+    lines = [line.strip(" -#*`") for line in content.splitlines() if line.strip()]
+    for line in lines[:5]:
+        cleaned = _clean_topic(line)
+        if 12 <= len(cleaned) <= 180:
+            return cleaned
+    collapsed = " ".join(content.split())
+    if 12 <= len(collapsed) <= 180:
+        return _clean_topic(collapsed)
+    return None
+
+
+def _clean_topic(value: str) -> str:
+    cleaned = value.strip()
+    cleaned = cleaned.removeprefix("[Nota de voz]:").strip()
+    cleaned = cleaned.strip(" -#*`")
+    cleaned = cleaned.replace("**", "")
+    if cleaned.lower().startswith("fuente"):
+        cleaned = cleaned.split(None, 1)[1] if " " in cleaned else cleaned
+    return cleaned[:180].strip()
+
+
+def _unique_topics(candidates: list[str]) -> list[str]:
+    unique: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        cleaned = _clean_topic(candidate)
+        key = _normalize_nlm_text(cleaned)
+        if not cleaned or key in seen:
+            continue
+        seen.add(key)
+        unique.append(cleaned)
+    return unique
 
 
 class _NlmTaskRecorder:

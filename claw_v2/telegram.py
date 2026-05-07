@@ -17,6 +17,7 @@ from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filte
 _NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 from claw_v2.bot import BotService
+from claw_v2.bot_helpers import _sanitize_chat_response
 from claw_v2.voice import VoiceUnavailableError, extract_audio, synthesize_voice_note, transcribe
 
 logger = logging.getLogger(__name__)
@@ -77,6 +78,27 @@ def _latest_existing_image_path(messages: list[dict[str, Any]]) -> Path | None:
 
 def _log_nonfatal_send_error(operation: str, exc: BaseException) -> None:
     logger.warning("%s failed with non-fatal stream error: %s", operation, exc)
+
+
+def _reply_context_metadata(update: Update) -> dict[str, Any] | None:
+    message = getattr(update, "message", None)
+    reply = getattr(message, "reply_to_message", None)
+    if reply is None:
+        return None
+    raw_text = getattr(reply, "text", None)
+    raw_caption = getattr(reply, "caption", None)
+    text = raw_text if isinstance(raw_text, str) else ""
+    if not text and isinstance(raw_caption, str):
+        text = raw_caption
+    text = str(text).strip()
+    if not text:
+        return None
+    return {
+        "reply_context": {
+            "source": "telegram_reply",
+            "text": text[:2000],
+        }
+    }
 
 
 def _env_int(name: str, default: int) -> int:
@@ -423,7 +445,12 @@ class TelegramTransport:
             if direct_response is not None:
                 response = direct_response
             else:
-                response = await self._handle_agent_text(user_id=user_id, session_id=session_id, text=text)
+                response = await self._handle_agent_text(
+                    user_id=user_id,
+                    session_id=session_id,
+                    text=text,
+                    context_metadata=_reply_context_metadata(update),
+                )
         except Exception as exc:
             logger.exception("Error handling message")
             err_str = str(exc)
@@ -449,6 +476,7 @@ class TelegramTransport:
         bot_done_at = time.perf_counter()
         if not response or not response.strip():
             response = "(procesando... intenta de nuevo en unos segundos)"
+        response = self._sanitize_outbound_response(session_id, response)
         parts = _split_message(response)
         voice_name = self._bot_service.is_voice_mode(session_id)
         if voice_name and (self._voice_api_key or self._xai_api_key):
@@ -509,7 +537,7 @@ class TelegramTransport:
         sent = await self.send_photo(
             chat_id=chat_id,
             photo_path=str(image_path),
-            caption="Imagen generada por Claw",
+            caption="Imagen generada por Dr. Strange",
         )
         if not sent:
             return f"Encontré la imagen, pero Telegram bloqueó el envío desde `{image_path}`."
@@ -758,6 +786,7 @@ class TelegramTransport:
         bot_done_at = time.perf_counter()
         if not response or not response.strip():
             response = "(procesando... intenta de nuevo en unos segundos)"
+        response = self._sanitize_outbound_response(session_id, response)
         parts = _split_message(response)
         for part in parts:
             await update.message.reply_text(part, link_preview_options=_NO_PREVIEW)
@@ -822,6 +851,7 @@ class TelegramTransport:
         bot_done_at = time.perf_counter()
         if not response or not response.strip():
             response = "(procesando... intenta de nuevo en unos segundos)"
+        response = self._sanitize_outbound_response(session_id, response)
         parts = _split_message(response)
         for part in parts:
             await update.message.reply_text(part, link_preview_options=_NO_PREVIEW)
@@ -889,6 +919,7 @@ class TelegramTransport:
             logger.exception("Error handling voice message")
             response = "Error processing your voice message."
         bot_done_at = time.perf_counter()
+        response = self._sanitize_outbound_response(session_id, response)
         parts = _split_message(response)
         voice_name = self._bot_service.is_voice_mode(session_id)
         if voice_name and (self._voice_api_key or self._xai_api_key):
@@ -925,20 +956,59 @@ class TelegramTransport:
             response_chars=len(response),
         )
 
-    async def _handle_agent_text(self, *, user_id: str, session_id: str, text: str) -> str:
-        return await asyncio.to_thread(self._handle_agent_text_sync, user_id, session_id, text)
+    def _sanitize_outbound_response(self, session_id: str, response: str) -> str:
+        sanitized = _sanitize_chat_response(response)
+        if sanitized != response:
+            self._emit_transport_event(
+                "internal_message_suppressed_from_chat",
+                payload={
+                    "session_id": session_id,
+                    "reason": "telegram_outbound_sanitizer",
+                    "original_length": len(response),
+                    "sanitized_length": len(sanitized),
+                },
+            )
+        return sanitized
 
-    def _handle_agent_text_sync(self, user_id: str, session_id: str, text: str) -> str:
-        if self._agent_runtime is None:
-            return self._bot_service.handle_text(user_id=user_id, session_id=session_id, text=text)
-        external_session_id = session_id.removeprefix("tg-")
-        response = self._agent_runtime.handle_text(
-            channel="telegram",
-            external_user_id=user_id,
-            external_session_id=external_session_id,
-            session_id=session_id,
-            text=text,
+    async def _handle_agent_text(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        text: str,
+        context_metadata: dict[str, Any] | None = None,
+    ) -> str:
+        return await asyncio.to_thread(
+            self._handle_agent_text_sync,
+            user_id,
+            session_id,
+            text,
+            context_metadata,
         )
+
+    def _handle_agent_text_sync(
+        self,
+        user_id: str,
+        session_id: str,
+        text: str,
+        context_metadata: dict[str, Any] | None = None,
+    ) -> str:
+        if self._agent_runtime is None:
+            kwargs = {"user_id": user_id, "session_id": session_id, "text": text}
+            if context_metadata is not None:
+                kwargs["context_metadata"] = context_metadata
+            return self._bot_service.handle_text(**kwargs)
+        external_session_id = session_id.removeprefix("tg-")
+        kwargs = {
+            "channel": "telegram",
+            "external_user_id": user_id,
+            "external_session_id": external_session_id,
+            "session_id": session_id,
+            "text": text,
+        }
+        if context_metadata is not None:
+            kwargs["metadata"] = context_metadata
+        response = self._agent_runtime.handle_text(**kwargs)
         return response.text
 
     def _handle_agent_multimodal_sync(

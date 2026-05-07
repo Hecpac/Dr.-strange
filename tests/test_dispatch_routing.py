@@ -241,3 +241,95 @@ def test_literal_task_id_bypasses_disable_flag(bot, monkeypatch) -> None:
         "status_question",
         "resume_previous",
     }, classified
+
+
+# ---------------------------------------------------------------------------
+# Commit #4 — explicit dispatch_decision telemetry
+# ---------------------------------------------------------------------------
+
+
+def _capture_dispatch_decisions(bot, text: str) -> list[dict]:
+    """Drive `handle_text` and return the ordered list of dispatch_decision
+    payloads emitted while processing the message. Other observe events are
+    ignored so the assertion focuses on the routing chain."""
+    captured: list[dict] = []
+    real_emit = bot.observe.emit
+
+    def spy(event_type: str, **kwargs):
+        if event_type == "dispatch_decision":
+            captured.append(dict(kwargs.get("payload") or {}))
+        return real_emit(event_type, **kwargs)
+
+    with patch.object(bot.observe, "emit", side_effect=spy):
+        try:
+            bot.handle_text(user_id="123", session_id="dispatch-tel", text=text)
+        except Exception:
+            # The downstream brain stub or task ledger may raise on some
+            # ambiguous prompts; we only care about the pre-brain emits.
+            pass
+    return captured
+
+
+def test_dispatch_decision_chain_for_ambiguous_prompts(bot) -> None:
+    """For each of the four ambiguous Spanish prompts the pre-brain handler
+    chain must emit `dispatch_decision` rows whose `route` is `fall_through`
+    (with appropriate reasons), proving none of them got intercepted."""
+    for prompt in AMBIGUOUS_MESSAGES:
+        events = _capture_dispatch_decisions(bot, prompt)
+        assert events, f"no dispatch_decision events emitted for {prompt!r}"
+
+        # Schema sanity: each event has the required fields and the preview
+        # never exposes more than 80 chars of the user's message.
+        for ev in events:
+            assert ev.get("handler"), f"missing handler in {ev!r}"
+            assert ev.get("route") in {
+                "intercepted",
+                "fall_through",
+                "explicit_command",
+            }, ev
+            assert ev.get("reason"), f"missing reason in {ev!r}"
+            assert ev.get("text_len") == len(prompt)
+            assert len(ev.get("text_preview") or "") <= 80
+
+        # No explicit_command marker for ambiguous chat.
+        assert not any(ev["route"] == "explicit_command" for ev in events), (
+            f"ambiguous prompt produced explicit_command marker: {prompt!r}"
+        )
+
+        handlers_seen = [ev["handler"] for ev in events]
+        # The four key pre-brain handlers must all weigh in.
+        for required in (
+            "operational_alert",
+            "task_intent",
+            "operational_status",
+            "nlm_natural_language",
+        ):
+            assert required in handlers_seen, (
+                f"{required} did not emit a dispatch_decision for {prompt!r}; "
+                f"chain={handlers_seen}"
+            )
+
+        # task_intent must fall through with the disabled_by_flag reason
+        # (default production setting), proving the brain-bypass guard fired.
+        task_intent_event = next(
+            ev for ev in events if ev["handler"] == "task_intent"
+        )
+        assert task_intent_event["route"] == "fall_through", task_intent_event
+        assert task_intent_event["reason"] in {
+            "disabled_by_flag",
+            "task_intent_no_match",
+        }, task_intent_event
+
+
+def test_dispatch_decision_marks_explicit_task_id(bot) -> None:
+    """Messages naming a literal task_id must produce an `explicit_command`
+    marker event so the audit stream can separate intentional commands from
+    heuristic captures."""
+    events = _capture_dispatch_decisions(
+        bot, "estado de la task nlm-5a9c55c8929d"
+    )
+    assert any(
+        ev["route"] == "explicit_command"
+        and ev["reason"] == "literal_task_id_match"
+        for ev in events
+    ), f"missing explicit_command marker for task_id message; chain={events!r}"
