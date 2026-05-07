@@ -9,6 +9,17 @@ and the default-on flip (commit #9) land in subsequent commits.
 """
 from __future__ import annotations
 
+from claw_v2.verification.judge import (
+    DimensionRawResponse,
+    DimensionScore,
+    JudgeDimension,
+    JudgeReport,
+    build_dimension_prompt,
+    load_dimensions,
+    parse_judge_response,
+    render_target_transcript,
+    run_judge,
+)
 from claw_v2.verification.transcript import (
     TRANSCRIPT_SCHEMA_VERSION,
     TranscriptStream,
@@ -22,11 +33,20 @@ from claw_v2.verification.transcript import (
 
 __all__ = [
     "TRANSCRIPT_SCHEMA_VERSION",
+    "DimensionRawResponse",
+    "DimensionScore",
+    "JudgeDimension",
+    "JudgeReport",
     "TranscriptStream",
+    "build_dimension_prompt",
     "harness_stream_path",
+    "load_dimensions",
+    "parse_judge_response",
     "read_harness_stream",
     "read_target_stream",
     "record_harness_event",
     "record_target_event",
+    "render_target_transcript",
+    "run_judge",
     "target_stream_path",
 ]
