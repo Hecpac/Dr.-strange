@@ -3696,11 +3696,22 @@ class BotService:
         if latest is None:
             return "No encontré una tarea anterior para reanudar."
         status = str(getattr(latest, "status", "unknown"))
+        verification = str(getattr(latest, "verification_status", "unknown") or "unknown")
         task_id = str(getattr(latest, "task_id", "") or "")
         if status in {"succeeded", "completed", "done", "closed"}:
+            # Brain-bypass refactor commit #6: a terminal status alone is not
+            # proof of completion. Only claim "completada" when the verifier
+            # actually marked the evidence as passed; otherwise surface the
+            # missing-evidence state so the user can reopen the task.
+            if verification == "passed":
+                return (
+                    "La tarea más reciente ya cerró como completada y verificada; no necesita reanudarse.\n"
+                    f"Task: `{task_id}`"
+                )
             return (
-                "La tarea más reciente ya cerró como completada; no necesita reanudarse.\n"
-                f"Task: `{task_id}`"
+                f"La tarea más reciente cerró como `{status}` pero su verificación quedó en `{verification}`; falta evidencia para considerarla completada.\n"
+                f"Task: `{task_id}`\n"
+                f"Para reabrirla: `/task_resume {task_id}`"
             )
         if status == "cancelled":
             return (

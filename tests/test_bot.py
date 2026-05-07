@@ -2242,6 +2242,57 @@ class BotTests(unittest.TestCase):
                 self.assertEqual(resumed_job.resume_key, "coordinator:s1:false-success")
                 self.assertEqual(runtime.job_service.get(old_job.job_id).status, "completed")
 
+    def test_task_resume_previous_response_requires_verified_evidence(self) -> None:
+        """Brain-bypass refactor commit #6: a terminal status without
+        verification_status='passed' must NOT be reported as 'completada'.
+
+        The storage-layer guard (validate_completion) prevents most false-
+        success writes, but legacy records and externally-set statuses may
+        still arrive here, so the resume-response logic must double-check
+        verification_status before claiming completion."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+
+                stub_task = MagicMock(
+                    task_id="s1:closed-no-evidence",
+                    status="succeeded",
+                    verification_status="missing_evidence",
+                )
+                with patch.object(
+                    runtime.bot,
+                    "_latest_relevant_task",
+                    return_value=stub_task,
+                ):
+                    reply = runtime.bot._task_resume_previous_response("s1")
+                self.assertNotIn("ya cerró como completada", reply)
+                self.assertIn("falta evidencia", reply)
+                self.assertIn("missing_evidence", reply)
+                self.assertIn("/task_resume s1:closed-no-evidence", reply)
+
+                stub_verified = MagicMock(
+                    task_id="s1:verified-closed",
+                    status="succeeded",
+                    verification_status="passed",
+                )
+                with patch.object(
+                    runtime.bot,
+                    "_latest_relevant_task",
+                    return_value=stub_verified,
+                ):
+                    verified_reply = runtime.bot._task_resume_previous_response("s1")
+                self.assertIn("completada y verificada", verified_reply)
+                self.assertNotIn("falta evidencia", verified_reply)
+
     def test_task_resume_keeps_verified_success_terminal(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
