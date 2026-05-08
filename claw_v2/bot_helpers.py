@@ -554,11 +554,12 @@ _INTERNAL_LEAK_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"/Users/hector/"),
 )
 
-# Indices in _INTERNAL_LEAK_PATTERNS that should bump the whole reply to the error
-# template. Loopback host/IP (indices 7, 8) are intentionally excluded — they are
-# already redacted inline by _sanitize_chat_response, so nuking the whole reply
-# when the agent legitimately discusses the local web chat endpoint is wrong.
-_NUKE_PATTERN_INDICES: tuple[int, ...] = (0, 1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13)
+# Indices in _INTERNAL_LEAK_PATTERNS that bump the entire reply to the error
+# template. Only true internal scaffolding belongs here: tool-call blobs and
+# verbatim prompt echoes. Soft phrases ("respuesta bloqueada", "trazas internas",
+# "circuit breaker", etc.) are inline-redacted further below so legitimate
+# technical references do not nuke an otherwise valid reply.
+_NUKE_PATTERN_INDICES: tuple[int, ...] = (4, 5, 6, 20, 21, 22, 23, 24, 25)
 
 
 def _chat_response_has_internal_leak(text: str) -> bool:
@@ -568,28 +569,7 @@ def _chat_response_has_internal_leak(text: str) -> bool:
 def _sanitize_chat_response(text: str) -> str:
     if not text:
         return text
-    lowered = _normalize_command_text(text)
-    if (
-        "respuesta del modelo fue bloqueada" in lowered
-        or "salida del modelo" in lowered
-        or "trazas internas" in lowered
-        or "herramientas internas" in lowered
-        or "la oculte" in lowered
-        or "respuesta bloqueada" in lowered
-        or "sanitizer" in lowered
-        or "tool traces" in lowered
-        or "repite la instruccion" in lowered
-        or "telegram message" in lowered
-        or "reply only to" in lowered
-        or "telegram-friendly markdown" in lowered
-        or "do not include internal trace" in lowered
-        or "no user-visible text is valid outside" in lowered
-        or "blocked model response" in lowered
-        or "contradice las capacidades" in lowered
-        or "no voy a asumir falta de acceso sin evidencia" in lowered
-        or re.match(r"^\s*(?:user|assistant|system)\s*:\s*\S", text, flags=re.IGNORECASE)
-        or any(_INTERNAL_LEAK_PATTERNS[i].search(text) for i in _NUKE_PATTERN_INDICES)
-    ):
+    if any(_INTERNAL_LEAK_PATTERNS[i].search(text) for i in _NUKE_PATTERN_INDICES):
         return (
             "Tuve un error preparando la respuesta. "
             "Retomo la acción con el contexto disponible o te diré el bloqueo verificado."
@@ -609,6 +589,15 @@ def _sanitize_chat_response(text: str) -> str:
     sanitized = re.sub(r"\bterminal bridge\b", "herramienta local", sanitized, flags=re.IGNORECASE)
     sanitized = re.sub(r"\bblocked model response\b", "respuesta interna suprimida", sanitized, flags=re.IGNORECASE)
     sanitized = re.sub(r"\brespuesta del modelo fue bloqueada\b", "respuesta interna suprimida", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\brespuesta bloqueada\b", "respuesta interna suprimida", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bsalida del modelo\b", "salida interna", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\btrazas internas\b", "detalles internos", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bherramientas internas\b", "herramientas locales", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bla ocult[eé]\b", "se omitió", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\btool traces\b", "trazas locales", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bsanitizer\b", "filtro defensivo", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\brepite la instrucci[oó]n\b", "indícame el siguiente paso", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bcontradice las capacidades\b", "contradice el contexto operacional", sanitized, flags=re.IGNORECASE)
     sanitized = re.sub(r"\bCircuit breaker\b", "bloqueo operacional interno", sanitized, flags=re.IGNORECASE)
     sanitized = re.sub(r"`sendVideo`|`sendDocument`|sendVideo|sendDocument", "envío de Telegram", sanitized)
 

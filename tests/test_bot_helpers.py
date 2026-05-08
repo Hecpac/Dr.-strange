@@ -100,6 +100,38 @@ class BotHelperRegressionTests(unittest.TestCase):
                 self.assertNotIn("reply only", lowered)
                 self.assertNotIn("user:", lowered)
 
+    def test_legit_technical_reference_is_inlined_not_nuked(self) -> None:
+        """Discussing the runtime by name should redact phrases inline, not
+        nuke the whole reply with the generic error fallback. This is the
+        bug Hector hit when asking about the cost-breaker fallback loop:
+        the diagnosis text contained 'circuit breaker', 'respuesta bloqueada',
+        and 'sanitizer' as legitimate technical references and got nuked.
+        """
+        text = (
+            "El bug viene del filtro defensivo del bot. Cuando el circuit "
+            "breaker se dispara por el costo por hora, el brain emite un "
+            "texto que el sanitizer interpreta como 'respuesta bloqueada' o "
+            "'blocked model response' y borra todo. La salida del modelo "
+            "queda con trazas internas que herramientas internas dejaron, "
+            "y la oculté en el reply. Hay que arreglar las tool traces."
+        )
+        sanitized = _sanitize_chat_response(text)
+        lowered = sanitized.lower()
+
+        self.assertNotIn(
+            "Tuve un error preparando la respuesta", sanitized,
+            "legit technical references should be inlined, not bumped to error template",
+        )
+        self.assertIn("filtro defensivo", lowered)
+        self.assertIn("bloqueo operacional interno", lowered)
+        self.assertNotIn("circuit breaker", lowered)
+        self.assertNotIn("respuesta bloqueada", lowered)
+        self.assertNotIn("blocked model response", lowered)
+        self.assertNotIn("trazas internas", lowered)
+        self.assertNotIn("herramientas internas", lowered)
+        self.assertNotIn("la oculté", lowered)
+        self.assertNotIn("tool traces", lowered)
+
 
 if __name__ == "__main__":
     unittest.main()
