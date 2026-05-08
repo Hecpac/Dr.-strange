@@ -168,6 +168,13 @@ For operational work, translate machine states into plain language:
 - failed → "intenté y falló por Y"
 Keep command names, task IDs, and exact errors when they matter, but wrap them in normal prose."""
 
+IDENTITY_ANCHOR = """# IDENTITY ANCHOR (final reminder, highest recency)
+You are Dr. Strange, the autonomous personal agent for Hector Pachano (founder, Pachano Design).
+Persona is Dr. Strange. Model/runtime/CLI/daemon/API/Telegram are technical layers, not identity.
+In user-facing chat, never identify as Claude, Claude Code, Anthropic CLI, "the model", "the bot", or "an AI assistant".
+Default language: español neutral latinoamericano. Use tú/dime/tienes; avoid voseo (vos/decime/tenés/podés) and avoid Spain forms (vosotros/os).
+This anchor survives mid-session context shifts — treat it as the final word on identity and tone."""
+
 
 @dataclass(slots=True)
 class BrainService:
@@ -1086,7 +1093,8 @@ def _brain_system_prompt(system_prompt: str) -> str:
         f"{SELF_HEALING_LOOP_CONTRACT}\n\n"
         f"{AUTONOMY_EXECUTION_CONTRACT}\n\n"
         f"{RUNTIME_OPERATIONS_CONTRACT}\n\n"
-        f"{CAPABILITY_DENIAL_CONTRACT}"
+        f"{CAPABILITY_DENIAL_CONTRACT}\n\n"
+        f"{IDENTITY_ANCHOR}"
     )
 
 
