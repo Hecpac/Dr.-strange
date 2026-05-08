@@ -48,6 +48,7 @@ from claw_v2.content import ContentEngine
 from claw_v2.redaction import redact_sensitive
 from claw_v2.github import GitHubPullRequestService
 from claw_v2.heartbeat import HeartbeatService
+from claw_v2.stop_notifier import StopNotifier
 from claw_v2.model_registry import (
     ModelRegistry,
     ModelOverride,
@@ -418,11 +419,14 @@ class BotService:
         job_service: JobService | None = None,
         model_registry: ModelRegistry | None = None,
         observation_window: object | None = None,
+        stop_notifier: StopNotifier | None = None,
     ) -> None:
         self.brain = brain
         self.auto_research = auto_research
         self.heartbeat = heartbeat
         self.approvals = approvals
+        self._stop_notifier = stop_notifier
+        self._task_started_at: dict[str, float] = {}
         self.allowed_user_id = allowed_user_id
         self.pipeline = pipeline
         self.content_engine = content_engine
@@ -710,6 +714,7 @@ class BotService:
             return f"Skill `{skill_name}` no disponible en `{agent_name}`."
 
         task_id = f"{session_id}:skill:{time.time_ns()}"
+        self._task_started_at[task_id] = time.time()
         lane = self._scheduled_skill_lane(skill_name)
         state = self.brain.memory.get_session_state(session_id)
         active_object = dict(state.get("active_object") or {})
@@ -900,6 +905,12 @@ class BotService:
             verification_status="passed",
             terminal_status="succeeded",
         )
+        self._notify_stop(
+            task_id=task_id,
+            kind=task_kind or skill or "autonomous_task",
+            status="succeeded",
+            summary=summary,
+        )
 
     def _mark_skill_task_failed(
         self,
@@ -947,6 +958,44 @@ class BotService:
             error=error,
             verification_status=verification_status,
         )
+        self._notify_stop(
+            task_id=task_id,
+            kind=task_kind or skill or "autonomous_task",
+            status="failed",
+            summary=error,
+        )
+
+    def _notify_stop(
+        self,
+        *,
+        task_id: str,
+        kind: str,
+        status: str,
+        summary: str,
+    ) -> None:
+        """Push a one-line stop notification to Telegram for autonomous tasks.
+
+        No-op when stop_notifier is unconfigured. Computes duration from
+        _task_started_at; falls back to force=True when start time is unknown
+        so autonomous tasks always notify even if we did not capture start.
+        Errors are swallowed by the notifier itself.
+        """
+        notifier = self._stop_notifier
+        if notifier is None:
+            return
+        started = self._task_started_at.pop(task_id, None)
+        duration = (time.time() - started) if started else None
+        try:
+            notifier.notify_completion(
+                task_id=task_id,
+                kind=kind,
+                status=status,
+                summary=summary,
+                duration_sec=duration,
+                force=duration is None,
+            )
+        except Exception:
+            logger.exception("stop_notifier dispatch failed task_id=%s", task_id)
 
     def _update_skill_active_task(
         self,

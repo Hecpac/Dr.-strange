@@ -589,6 +589,8 @@ def _setup_operational_services(
         codex_backend=codex_computer_backend,
     )
     browser_use = BrowserUseService(cdp_url=f"http://localhost:{config.claw_chrome_port}")
+    from claw_v2.stop_notifier import build_stop_notifier
+    stop_notifier = build_stop_notifier(config=config)
     bot = BotService(
         brain=brain,
         auto_research=auto_research,
@@ -607,6 +609,7 @@ def _setup_operational_services(
         job_service=job_service,
         model_registry=model_registry,
         observation_window=observation_window,
+        stop_notifier=stop_notifier,
     )
     for capability, reason in startup_health.degraded_capabilities().items():
         bot.set_capability_status(capability, available=False, reason=reason)
