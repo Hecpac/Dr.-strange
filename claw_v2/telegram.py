@@ -474,6 +474,20 @@ class TelegramTransport:
                 short = err_str[:300] if len(err_str) > 300 else err_str
                 response = f"Error procesando tu mensaje: {short}"
         bot_done_at = time.perf_counter()
+        if response is None:
+            finished_at = time.perf_counter()
+            self._emit_latency(
+                session_id=session_id,
+                user_id=user_id,
+                message_kind="text",
+                status="no_reply",
+                bot_ms=(bot_done_at - started_at) * 1000,
+                reply_ms=(finished_at - bot_done_at) * 1000,
+                total_ms=(finished_at - started_at) * 1000,
+                response_parts=0,
+                response_chars=0,
+            )
+            return
         if not response or not response.strip():
             response = "(procesando... intenta de nuevo en unos segundos)"
         response = self._sanitize_outbound_response(session_id, response)
@@ -985,7 +999,7 @@ class TelegramTransport:
         session_id: str,
         text: str,
         context_metadata: dict[str, Any] | None = None,
-    ) -> str:
+    ) -> str | None:
         return await asyncio.to_thread(
             self._handle_agent_text_sync,
             user_id,
@@ -1000,9 +1014,14 @@ class TelegramTransport:
         session_id: str,
         text: str,
         context_metadata: dict[str, Any] | None = None,
-    ) -> str:
+    ) -> str | None:
         if self._agent_runtime is None:
-            kwargs = {"user_id": user_id, "session_id": session_id, "text": text}
+            kwargs = {
+                "user_id": user_id,
+                "session_id": session_id,
+                "text": text,
+                "runtime_channel": "telegram",
+            }
             if context_metadata is not None:
                 kwargs["context_metadata"] = context_metadata
             return self._bot_service.handle_text(**kwargs)

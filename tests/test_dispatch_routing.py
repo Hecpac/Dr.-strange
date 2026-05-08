@@ -53,6 +53,7 @@ def bot():
             "AGENT_STATE_ROOT": str(root / "agents"),
             "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
             "APPROVALS_ROOT": str(root / "approvals"),
+            "TELEMETRY_ROOT": str(root / "telemetry"),
             "PIPELINE_STATE_ROOT": str(root / "pipeline"),
             "TELEGRAM_ALLOWED_USER_ID": "123",
         }

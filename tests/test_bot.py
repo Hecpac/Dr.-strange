@@ -32,9 +32,14 @@ class BotTests(unittest.TestCase):
     def setUp(self) -> None:
         self._pipeline_state_tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._pipeline_state_tmp.cleanup)
+        self._telemetry_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._telemetry_tmp.cleanup)
         patcher = patch.dict(
             os.environ,
-            {"PIPELINE_STATE_ROOT": str(Path(self._pipeline_state_tmp.name) / "pipeline")},
+            {
+                "PIPELINE_STATE_ROOT": str(Path(self._pipeline_state_tmp.name) / "pipeline"),
+                "TELEMETRY_ROOT": str(Path(self._telemetry_tmp.name) / "telemetry"),
+            },
             clear=False,
         )
         patcher.start()
@@ -1917,6 +1922,206 @@ class BotTests(unittest.TestCase):
                 self.assertIn("running", reply.lower())
                 runtime.bot.coordinator.run.assert_not_called()
                 self.assertEqual(runtime.task_ledger.summary(session_id="s1"), {"running": 1})
+
+    def test_change_status_phrase_reports_status_without_starting_autonomous_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEMETRY_ROOT": str(root / "telemetry"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+                "CLAW_DISABLE_TASK_INTENT_ROUTER": "1",
+                "CLAW_ENABLE_SEMANTIC_PREBRAIN_ROUTES": "0",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.task_ledger.create(
+                    task_id="s1:running-fixes",
+                    session_id="s1",
+                    objective="corrige los fixes pendientes",
+                    mode="coding",
+                    runtime="coordinator",
+                    status="running",
+                    metadata={"autonomous": True},
+                )
+                runtime.bot.coordinator = MagicMock()
+                runtime.memory.update_session_state("s1", autonomy_mode="autonomous")
+
+                for text in (
+                    "Estatus de los fixes",
+                    "status de los fixes",
+                    "estado de los cambios",
+                ):
+                    with self.subTest(text=text):
+                        reply = runtime.bot.handle_text(
+                            user_id="123",
+                            session_id="s1",
+                            text=text,
+                        )
+
+                        self.assertIn("s1:running-fixes", reply)
+                        self.assertIn("running", reply.lower())
+
+                runtime.bot.coordinator.run.assert_not_called()
+                self.assertEqual(runtime.task_ledger.summary(session_id="s1"), {"running": 1})
+                self.assertTrue(
+                    any(
+                        event["event_type"] == "dispatch_decision"
+                        and event["payload"]["handler"] == "change_status_question"
+                        and event["payload"]["route"] == "intercepted"
+                        for event in runtime.observe.recent_events(limit=30)
+                    )
+                )
+
+    def test_change_status_ignores_status_query_task_and_reports_closed_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEMETRY_ROOT": str(root / "telemetry"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+                "CLAW_DISABLE_TASK_INTENT_ROUTER": "1",
+                "CLAW_ENABLE_SEMANTIC_PREBRAIN_ROUTES": "0",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.task_ledger.create(
+                    task_id="s1:closed-fix",
+                    session_id="s1",
+                    objective="arreglar handler de estatus de cambios",
+                    mode="coding",
+                    runtime="coordinator",
+                    status="running",
+                    metadata={"autonomous": True},
+                )
+                runtime.task_ledger.mark_terminal(
+                    "s1:closed-fix",
+                    status="succeeded",
+                    summary="handler de estatus de cambios aplicado",
+                    verification_status="passed",
+                    artifacts={"evidence": {"tests": "passed"}},
+                )
+                runtime.task_ledger.create(
+                    task_id="s1:status-query",
+                    session_id="s1",
+                    objective="Estatus de los fixes",
+                    mode="coding",
+                    runtime="coordinator",
+                    status="running",
+                    metadata={"autonomous": True},
+                )
+                runtime.bot.coordinator = MagicMock()
+                runtime.memory.update_session_state("s1", autonomy_mode="autonomous")
+
+                reply = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="Estatus de los fixes",
+                )
+
+                self.assertIn("Tareas cerradas relevantes:", reply)
+                self.assertIn("s1:closed-fix", reply)
+                self.assertIn("Ignoré 1 consulta de estatus abierta", reply)
+                self.assertNotIn("s1:status-query", reply)
+                self.assertNotIn("Todavía no. La tarea más reciente sigue activa.", reply)
+                runtime.bot.coordinator.run.assert_not_called()
+
+    def test_action_fix_phrase_still_starts_autonomous_coding_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEMETRY_ROOT": str(root / "telemetry"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+                "CLAW_DISABLE_TASK_INTENT_ROUTER": "1",
+                "CLAW_ENABLE_SEMANTIC_PREBRAIN_ROUTES": "0",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.coordinator = MagicMock()
+                runtime.bot.coordinator.run.return_value = CoordinatorResult(
+                    task_id="s1:fixes",
+                    phase_results={
+                        "research": [WorkerResult(task_name="scope_and_risks", content="ok", duration_seconds=0.1)],
+                        "implementation": [WorkerResult(task_name="implement_change", content="fixed", duration_seconds=0.1)],
+                        "verification": [WorkerResult(task_name="verify_change", content="Verification Status: passed", duration_seconds=0.1)],
+                    },
+                    synthesis="fixes applied",
+                )
+
+                runtime.bot.handle_text(user_id="123", session_id="s1", text="/autonomy autonomous")
+                reply = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="haz los fixes",
+                )
+
+                self.assertIn("Tarea autónoma iniciada", reply)
+                task_id = re.search(r"`([^`]+)`", reply).group(1)
+                self.assertTrue(runtime.bot._task_handler.wait_for_task(task_id, timeout=2))
+                runtime.bot.coordinator.run.assert_called_once()
+                record = runtime.task_ledger.get(task_id)
+                self.assertEqual(record.mode, "coding")
+                self.assertEqual(record.objective, "haz los fixes")
+
+    def test_telegram_autonomous_task_start_ack_is_suppressed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEMETRY_ROOT": str(root / "telemetry"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+                "CLAW_DISABLE_TASK_INTENT_ROUTER": "1",
+                "CLAW_ENABLE_SEMANTIC_PREBRAIN_ROUTES": "0",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.coordinator = MagicMock()
+                runtime.bot.coordinator.run.return_value = CoordinatorResult(
+                    task_id="s1:fixes",
+                    phase_results={
+                        "research": [WorkerResult(task_name="scope_and_risks", content="ok", duration_seconds=0.1)],
+                        "implementation": [WorkerResult(task_name="implement_change", content="fixed", duration_seconds=0.1)],
+                        "verification": [WorkerResult(task_name="verify_change", content="Verification Status: passed", duration_seconds=0.1)],
+                    },
+                    synthesis="fixes applied",
+                )
+
+                runtime.bot.handle_text(user_id="123", session_id="s1", text="/autonomy autonomous")
+                reply = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="haz los fixes",
+                    runtime_channel="telegram",
+                )
+
+                self.assertIsNone(reply)
+                records = runtime.task_ledger.list(session_id="s1", limit=1)
+                self.assertEqual(len(records), 1)
+                task_id = records[0].task_id
+                self.assertTrue(runtime.bot._task_handler.wait_for_task(task_id, timeout=2))
+                runtime.bot.coordinator.run.assert_called_once()
+                messages = runtime.memory.get_recent_messages("s1", limit=10)
+                self.assertIn("haz los fixes", [message["content"] for message in messages])
+                self.assertFalse(
+                    any("Tarea autónoma iniciada" in message["content"] for message in messages)
+                )
 
     def test_operational_alert_message_does_not_start_autonomous_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

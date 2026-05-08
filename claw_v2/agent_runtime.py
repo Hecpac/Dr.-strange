@@ -47,7 +47,7 @@ class AgentEvent:
 class AgentResponse:
     session_id: str
     route: ChannelRoute
-    text: str
+    text: str | None
     status: str = "ok"
     event_id: str | None = None
     duration_ms: float = 0.0

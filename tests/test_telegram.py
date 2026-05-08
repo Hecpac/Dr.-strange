@@ -156,6 +156,31 @@ class HandleTextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["response_parts"], 1)
         self.assertGreaterEqual(payload["total_ms"], 0.0)
 
+    async def test_authorized_user_gets_no_reply_when_bot_returns_none(self) -> None:
+        bot_service = MagicMock()
+        bot_service.handle_text.return_value = None
+        bot_service.observe = MagicMock()
+        transport = TelegramTransport(
+            bot_service=bot_service, token="t", allowed_user_id="123",
+        )
+        update = MagicMock()
+        update.effective_user.id = 123
+        update.effective_chat.id = 1
+        update.message.text = "haz los fixes"
+        update.message.reply_text = AsyncMock()
+        update.message.chat.send_action = AsyncMock()
+
+        await transport._handle_text(update, MagicMock())
+
+        update.message.reply_text.assert_not_awaited()
+        bot_service.handle_text.assert_called_once()
+        self.assertEqual(bot_service.handle_text.call_args.kwargs["runtime_channel"], "telegram")
+        bot_service.observe.emit.assert_called_once()
+        payload = bot_service.observe.emit.call_args.kwargs["payload"]
+        self.assertEqual(payload["message_kind"], "text")
+        self.assertEqual(payload["status"], "no_reply")
+        self.assertEqual(payload["response_parts"], 0)
+
     async def test_outbound_text_sanitizes_internal_trace_fallback(self) -> None:
         bot_service = MagicMock()
         bot_service.handle_text.return_value = (

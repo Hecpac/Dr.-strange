@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import signal
+import subprocess
 import threading
 import time
 from dataclasses import asdict
@@ -295,6 +296,21 @@ def _looks_like_task_completion_question(text: str) -> bool:
             "estado",
         )
     )
+
+
+_STATUS_CHANGE_PHRASE_RE = re.compile(
+    r"(?:estatus|status|estado)\s+de\s+(?:los\s+)?(?:fixes|cambios)"
+)
+
+
+def _looks_like_change_status_question(text: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9\s]+", " ", _normalize_command_text(text)).strip()
+    normalized = re.sub(r"\s+", " ", normalized)
+    return _STATUS_CHANGE_PHRASE_RE.fullmatch(normalized) is not None
+
+
+def _is_autonomous_task_start_ack(text: str) -> bool:
+    return "Tarea autónoma iniciada:" in text
 
 
 _TASK_TERMS = (
@@ -1600,7 +1616,7 @@ class BotService:
         text: str,
         runtime_channel: str | None = None,
         context_metadata: dict[str, Any] | None = None,
-    ) -> str:
+    ) -> str | None:
         if self.allowed_user_id is None:
             raise PermissionError("TELEGRAM_ALLOWED_USER_ID must be configured")
         if user_id != self.allowed_user_id:
@@ -1721,6 +1737,23 @@ class BotService:
             self._store_memory_turn(session_id, stripped, operational_status_response, assistant_limit=2000)
             self._remember_assistant_turn_state(session_id, stripped, operational_status_response)
             return operational_status_response
+        change_status_response = self._maybe_handle_change_status_question(stripped, session_id=session_id)
+        self._emit_dispatch_decision(
+            handler="change_status_question",
+            route="intercepted" if change_status_response is not None else "fall_through",
+            reason=(
+                "change_status_phrase_matched"
+                if change_status_response is not None
+                else "change_status_phrase_no_match"
+            ),
+            session_id=session_id,
+            text=stripped,
+            captured=change_status_response is not None,
+        )
+        if change_status_response is not None:
+            self._store_memory_turn(session_id, stripped, change_status_response, assistant_limit=2000)
+            self._remember_assistant_turn_state(session_id, stripped, change_status_response)
+            return change_status_response
         # Most semantic pre-brain routes stay gated, but explicit operational
         # capability requests like AI news and X trends remain deterministic.
         capability_route_allowed = self._capability_route_allowed(stripped)
@@ -1839,8 +1872,12 @@ class BotService:
             captured=coordinated_response is not None,
         )
         if coordinated_response is not None:
+            is_start_ack = _is_autonomous_task_start_ack(coordinated_response)
+            if is_start_ack and (runtime_channel or "").strip().lower() == "telegram":
+                self.brain.memory.store_message(session_id, "user", stripped)
+                return None
             self._store_memory_turn(session_id, stripped, coordinated_response, assistant_limit=4000)
-            if "Tarea autónoma iniciada:" not in coordinated_response:
+            if not is_start_ack:
                 self._remember_assistant_turn_state(session_id, stripped, coordinated_response)
             return coordinated_response
         command_response = dispatch_commands(self._post_shortcut_commands, context)
@@ -3487,6 +3524,11 @@ class BotService:
             return None
         return self._task_status_question_response(session_id)
 
+    def _maybe_handle_change_status_question(self, text: str, *, session_id: str) -> str | None:
+        if not _looks_like_change_status_question(text):
+            return None
+        return self._change_status_question_response(session_id)
+
     def _maybe_handle_operational_alert(self, text: str, *, session_id: str) -> str | None:
         if not _looks_like_operational_alert(text):
             return None
@@ -3707,6 +3749,84 @@ class BotService:
                 f"Objetivo: {active_task.get('objective', 'sin objetivo')}"
             )
         return "No tengo tareas registradas para esta conversación."
+
+    def _change_status_question_response(self, session_id: str) -> str:
+        records = self.task_ledger.list(session_id=session_id, limit=20) if self.task_ledger is not None else []
+        relevant = [record for record in records if not _looks_like_change_status_question(str(getattr(record, "objective", "") or ""))]
+        terminal = [
+            record for record in relevant
+            if getattr(record, "status", "") in {"succeeded", "failed", "timed_out", "cancelled", "lost"}
+            and self._is_change_status_relevant_record(record)
+        ][:5]
+        active = [
+            record for record in relevant
+            if getattr(record, "status", "") in {"queued", "running"}
+            and self._is_change_status_relevant_record(record)
+        ][:3]
+        ignored_status_queries = len(records) - len(relevant)
+        commits = self._recent_workspace_commits(limit=5)
+
+        lines = ["Estatus de cambios:"]
+        if commits:
+            lines.append("Commits recientes en HEAD:")
+            lines.extend(f"- `{sha}` — {subject}" for sha, subject in commits)
+        if terminal:
+            lines.append("Tareas cerradas relevantes:")
+            lines.extend(self._format_task_status_line(record) for record in terminal)
+        if active:
+            lines.append("Tareas abiertas relevantes:")
+            lines.extend(self._format_task_status_line(record) for record in active)
+        if ignored_status_queries:
+            plural = "s" if ignored_status_queries != 1 else ""
+            lines.append(f"Ignoré {ignored_status_queries} consulta{plural} de estatus abierta{plural}; eso no cuenta como cambio pendiente.")
+        if len(lines) == 1:
+            return "No encontré commits ni tareas cerradas recientes para los fixes/cambios de esta sesión."
+        return "\n".join(lines)
+
+    def _is_change_status_relevant_record(self, record: Any) -> bool:
+        text = " ".join(
+            str(value or "")
+            for value in (
+                getattr(record, "objective", ""),
+                getattr(record, "summary", ""),
+                getattr(record, "error", ""),
+                getattr(record, "mode", ""),
+            )
+        )
+        normalized = _normalize_command_text(text)
+        return any(token in normalized for token in ("fix", "fixes", "cambio", "cambios", "bug", "codigo", "código", "handler"))
+
+    def _format_task_status_line(self, record: Any) -> str:
+        status = str(getattr(record, "status", "unknown") or "unknown")
+        verification = str(getattr(record, "verification_status", "unknown") or "unknown")
+        task_id = str(getattr(record, "task_id", "unknown") or "unknown")
+        detail = str(getattr(record, "summary", "") or getattr(record, "objective", "") or "sin resumen").strip()
+        return f"- `{task_id}` — {status} / {verification}: {detail[:220]}"
+
+    def _recent_workspace_commits(self, *, limit: int = 5) -> list[tuple[str, str]]:
+        workspace_root = Path(getattr(self.config, "workspace_root", None) or Path.cwd())
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(workspace_root), "log", f"-n{max(1, min(int(limit), 20))}", "--pretty=format:%h%x00%s"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+        except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+            return []
+        if result.returncode != 0:
+            return []
+        commits: list[tuple[str, str]] = []
+        for line in result.stdout.splitlines():
+            if "\x00" not in line:
+                continue
+            sha, subject = line.split("\x00", 1)
+            sha = sha.strip()
+            subject = subject.strip()
+            if sha and subject:
+                commits.append((sha, subject))
+        return commits
 
     def _latest_relevant_task(self, session_id: str) -> Any | None:
         if self.task_ledger is None:
