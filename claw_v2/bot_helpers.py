@@ -55,6 +55,7 @@ __all__ = [
     "_extract_numbered_options",
     "_extract_option_reference",
     "_extract_pending_action_from_reply",
+    "_extract_ratio_context_from_text",
     "_extract_title_from_url",
     "_extract_url_candidate",
     "_extract_verification_status",
@@ -82,6 +83,7 @@ __all__ = [
     "_looks_like_autonomy_grant",
     "_looks_like_computer_read_request",
     "_looks_like_proceed_request",
+    "_looks_like_ratio_reference_request",
     "_looks_like_raw_markup",
     "_looks_like_runtime_capability_question",
     "_looks_like_standalone_url",
@@ -102,6 +104,8 @@ __all__ = [
     "_run_summary",
     "_select_navigation_strategy",
     "_select_next_task_queue_item",
+    "_sanitize_chat_response",
+    "_chat_response_has_internal_leak",
     "_stable_task_id",
     "_strip_url_punctuation",
     "_summarize_prefetched_link_content",
@@ -183,16 +187,23 @@ _COMPUTER_READ_TOKENS = (
 )
 _NLM_CREATE_RE = re.compile(
     r"^\s*(?:por favor\s+)?(?:(?:ahora|ya|tambi[eé]n|tb)\s+)?"
-    r"(?:(?:cr[eé]a(?:me)?)|(?:genera(?:me)?)|(?:haz(?:me)?)|quiero|necesito)\s+"
-    r"(?:un\s+)?(?:cuaderno|notebook)(?:\s+(?:en\s+notebooklm))?"
-    r"[,;:]?(?:\s+(?:sobre|de(?:l)?))?[,;:]?\s+(.+?)\s*$",
+    r"(?:(?:cr[eé]a(?:me)?)|(?:genera(?:me)?)|(?:haz(?:me)?)|"
+    r"(?:armame|arma)|(?:prep[aá]rame|prepara)|(?:p[oó]nme|pon)|"
+    r"(?:lanza(?:me)?)|(?:dispara(?:me)?)|"
+    r"quiero|necesito|dame|produce(?:me)?)\s+"
+    r"(?:un\s+|el\s+|otro\s+)?(?:cuaderno|notebook|nb)(?:\s+(?:en\s+notebooklm))?"
+    r"[,;:]?(?:\s+(?:sobre|de(?:l)?|acerca\s+de|para|con))?[,;:]?\s+(.+?)\s*$",
     re.IGNORECASE | re.DOTALL,
 )
 _NLM_VOICE_PREFIX_RE = re.compile(r"^\s*\[\s*nota\s+de\s+voz\s*\]\s*:?\s*", re.IGNORECASE)
 _NLM_ARTIFACT_KINDS = {
     "podcast": "podcast",
+    "audio del cuaderno": "podcast",
+    "audio del notebook": "podcast",
+    "resumen en audio": "podcast",
     "infografia": "infographic",
     "infographic": "infographic",
+    "infografica": "infographic",
 }
 _NLM_ACTION_TOKENS = (
     "crea",
@@ -203,7 +214,56 @@ _NLM_ACTION_TOKENS = (
     "hazme",
     "quiero",
     "necesito",
+    "armame",
+    "arma",
+    "preparame",
+    "prepara",
+    "ponme",
+    "pon",
+    "lanza",
+    "lanzame",
+    "dispara",
+    "disparame",
+    "dame",
+    "produce",
+    "produceme",
 )
+_NLM_META_DISCUSSION_PHRASES = (
+    "cuando te pido",
+    "cuando te diga",
+    "cuando te pida",
+    "como te pido",
+    "como te diga",
+    "si te pido",
+    "si te digo",
+    "no me digas",
+    "no me pidas",
+    "no quiero",
+    "tienes que entender",
+    "tienes que saber",
+    "tenes que entender",
+    "tenes que saber",
+    "deberias entender",
+    "deberias saber",
+    "explica",
+    "explicame",
+    "porque salio",
+    "por que salio",
+    "porque sigues",
+    "por que sigues",
+    "revisa los errores",
+    "revisa el error",
+    "el error",
+    "los errores",
+    "que paso con",
+    "que pasa con",
+    "ampliar el vocabulario",
+    "haz los fixes",
+    "los fixes",
+    "fix permanente",
+    "fixes que sean",
+)
+_NLM_NOTEBOOK_REFS = ("cuaderno", "notebook", "notebooklm", " nb ")
 _SCHEME_URL_RE = re.compile(r"(?P<url>https?://[^\s<>()]+)", re.IGNORECASE)
 _HOST_URL_RE = re.compile(
     r"(?P<url>(?<!@)(?:localhost|(?:\d{1,3}\.){3}\d{1,3}|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,})(?::\d+)?(?:[/?#][^\s<>()]*)?)",
@@ -222,6 +282,10 @@ _LINK_ANALYSIS_SECTION_TITLES = (
 _AUTONOMY_MODES = ("manual", "assisted", "autonomous")
 _PROCEED_TOKENS = (
     "procede",
+    "proceder",
+    "ejecuta",
+    "ejecutalo",
+    "ejecutala",
     "continue",
     "continua",
     "continuar",
@@ -229,7 +293,23 @@ _PROCEED_TOKENS = (
     "seguir",
     "dale",
     "hazlo",
+    "haz la prueba",
+    "haz prueba",
+    "haz esa prueba",
+    "haz esa",
+    "hazlo ya",
+    "hagamoslo",
+    "hagamoslo con",
+    "hagamos eso",
+    "ok",
+    "okay",
+    "si",
+    "sí",
+    "yes",
     "asi",
+    "vale",
+    "avanza",
+    "adelante",
 )
 _OPTION_ORDINALS = {
     "primera": 1,
@@ -323,6 +403,8 @@ def _strip_voice_prefix(text: str) -> str:
 
 def _extract_nlm_create_topic(text: str) -> str | None:
     cleaned = _strip_voice_prefix(text).strip()
+    if _looks_like_nlm_meta_discussion(cleaned):
+        return None
     match = _NLM_CREATE_RE.match(cleaned)
     if not match:
         return None
@@ -333,12 +415,41 @@ def _extract_nlm_create_topic(text: str) -> str | None:
 def _extract_nlm_artifact_kind(text: str) -> str | None:
     cleaned = _strip_voice_prefix(text)
     normalized = _normalize_command_text(cleaned)
+    if _looks_like_nlm_meta_discussion(cleaned):
+        return None
     if not any(token in normalized for token in _NLM_ACTION_TOKENS):
+        return None
+    word_count = len(normalized.split())
+    has_notebook_ref = any(ref.strip() in normalized for ref in _NLM_NOTEBOOK_REFS)
+    # Long messages without an explicit notebook reference are almost always
+    # meta-discussion or unrelated content that happens to mention "podcast".
+    if word_count > 30 and not has_notebook_ref:
         return None
     for token, kind in _NLM_ARTIFACT_KINDS.items():
         if token in normalized:
+            idx = normalized.find(token)
+            preceding = normalized[max(0, idx - 40):idx]
+            if any(meta in preceding for meta in (
+                "cuando te pido",
+                "cuando te diga",
+                "cuando te pida",
+                "como te pido",
+                "si te pido",
+                "te pido",
+            )):
+                continue
             return kind
     return None
+
+
+def _looks_like_nlm_meta_discussion(text: str) -> bool:
+    """Reject messages that *talk about* notebook/podcast intents but are not
+    direct requests. Examples: "cuando te pido podcast hazlo asi",
+    "no me digas que no podes crear el cuaderno", "explicame porque sale el
+    error al crear el cuaderno".
+    """
+    normalized = _normalize_command_text(text)
+    return any(phrase in normalized for phrase in _NLM_META_DISCUSSION_PHRASES)
 
 
 def _normalize_command_text(text: str) -> str:
@@ -357,11 +468,19 @@ def _extract_option_reference(text: str) -> int | None:
     match = re.fullmatch(r"(?:opcion|option)\s+(\d+)", normalized)
     if match:
         return int(match.group(1))
+    match = re.fullmatch(r"(?:vamos|vete|ve|dale|procede|continua|sigue)\s+con\s+(?:la\s+)?(?:opcion\s+)?(\d+)", normalized)
+    if match:
+        return int(match.group(1))
+    match = re.fullmatch(r"(?:vamos|vete|ve|dale|procede|continua|sigue)\s+con\s+la\s+(\w+)", normalized)
+    if match:
+        return _OPTION_ORDINALS.get(match.group(1))
     match = re.fullmatch(r"(\d+)", normalized)
     if match:
         return int(match.group(1))
     match = re.fullmatch(r"la\s+(\w+)", normalized)
     if match:
+        if match.group(1).isdigit():
+            return int(match.group(1))
         return _OPTION_ORDINALS.get(match.group(1))
     return _OPTION_ORDINALS.get(normalized)
 
@@ -370,9 +489,136 @@ def _looks_like_proceed_request(text: str) -> bool:
     normalized = _normalize_command_text(text).strip()
     if not normalized:
         return False
+    # Strip surrounding punctuation/whitespace so "PROCEDE.", "Dale!", "ok..."
+    # all collapse to their bare token form before lookup.
+    stripped = normalized.strip(" \t\n\r.,;:!?\"'`")
+    if stripped in _PROCEED_TOKENS:
+        return True
     if normalized in _PROCEED_TOKENS:
         return True
-    return any(normalized.startswith(f"{token} ") for token in _PROCEED_TOKENS)
+    return any(
+        " " in token and (
+            normalized.startswith(f"{token} ") or stripped.startswith(f"{token} ")
+        )
+        for token in _PROCEED_TOKENS
+    )
+
+
+def _looks_like_ratio_reference_request(text: str) -> bool:
+    normalized = _normalize_command_text(text)
+    if "ratio" not in normalized:
+        return False
+    if not any(token in normalized for token in ("dame", "manda", "mandame", "envia", "enviame", "pasame", "tira", "tirame")):
+        return False
+    return bool(
+        re.search(r"\b(?:los\s+)?2\b", normalized)
+        or "dos ratios" in normalized
+        or "ambos ratios" in normalized
+        or "los dos ratios" in normalized
+    )
+
+
+def _extract_ratio_context_from_text(text: str) -> list[str]:
+    normalized = _normalize_command_text(text)
+    ratios: list[str] = []
+    for pattern, label in (
+        (r"\b9\s*[:x]\s*16\b|\b9x16\b|\bvertical\b", "9:16 vertical"),
+        (r"\b1\s*[:x]\s*1\b|\b1x1\b|\bcuadrad[oa]\b", "1:1 cuadrado"),
+        (r"\b16\s*[:x]\s*9\b|\b16x9\b|\bhorizontal\b", "16:9 horizontal"),
+    ):
+        if re.search(pattern, normalized) and label not in ratios:
+            ratios.append(label)
+    return ratios
+
+
+_INTERNAL_LEAK_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bmessage[_ -]?id\b", re.IGNORECASE),
+    re.compile(r"\bchat[_ -]?id\b", re.IGNORECASE),
+    re.compile(r"\btg-[A-Za-z0-9_-]+\b"),
+    re.compile(r"\bnlm-[A-Za-z0-9_-]+\b"),
+    re.compile(r"(?<!\w)to=(?:functions|multi_tool_use|web|image_gen|tool_search)\.", re.IGNORECASE),
+    re.compile(r'"recipient_name"\s*:\s*"(?:functions|multi_tool_use|web|image_gen|tool_search)\.', re.IGNORECASE),
+    re.compile(r'"tool_uses"\s*:\s*\[', re.IGNORECASE),
+    re.compile(r"\blocalhost(?::\d+)?\b", re.IGNORECASE),
+    re.compile(r"\b127\.0\.0\.1(?::\d+)?\b"),
+    re.compile(r"\bterminal bridge\b", re.IGNORECASE),
+    re.compile(r"\bblocked model response\b", re.IGNORECASE),
+    re.compile(r"\brespuesta del modelo fue bloqueada\b", re.IGNORECASE),
+    re.compile(r"\bsalida del modelo\b", re.IGNORECASE),
+    re.compile(r"\btrazas internas\b", re.IGNORECASE),
+    re.compile(r"\bherramientas internas\b", re.IGNORECASE),
+    re.compile(r"\bla ocult[eé]\b", re.IGNORECASE),
+    re.compile(r"\brespuesta bloqueada\b", re.IGNORECASE),
+    re.compile(r"\bsanitizer\b", re.IGNORECASE),
+    re.compile(r"\btool traces\b", re.IGNORECASE),
+    re.compile(r"\brepite la instrucci[oó]n\b", re.IGNORECASE),
+    re.compile(r"^\s*#\s*Telegram message\b", re.IGNORECASE),
+    re.compile(r"\bReply ONLY to (?:that|the) latest message\b", re.IGNORECASE),
+    re.compile(r"\bTelegram-friendly Markdown\b", re.IGNORECASE),
+    re.compile(r"\bDo not include internal trace\b", re.IGNORECASE),
+    re.compile(r"\bNo user-visible text is valid outside <response> tags\b", re.IGNORECASE),
+    re.compile(r"^\s*(?:user|assistant|system)\s*:\s*\S", re.IGNORECASE),
+    re.compile(r"\bcontradice las capacidades\b", re.IGNORECASE),
+    re.compile(r"\bcircuit breaker\b", re.IGNORECASE),
+    re.compile(r"\bPID\s*[:#]?\s*\d+\b", re.IGNORECASE),
+    re.compile(r"/Users/hector/"),
+)
+
+# Indices in _INTERNAL_LEAK_PATTERNS that bump the entire reply to the error
+# template. Only true internal scaffolding belongs here: tool-call blobs and
+# verbatim prompt echoes. Soft phrases ("respuesta bloqueada", "trazas internas",
+# "circuit breaker", etc.) are inline-redacted further below so legitimate
+# technical references do not nuke an otherwise valid reply.
+_NUKE_PATTERN_INDICES: tuple[int, ...] = (4, 5, 6, 20, 21, 22, 23, 24, 25)
+
+
+def _chat_response_has_internal_leak(text: str) -> bool:
+    return any(pattern.search(text) for pattern in _INTERNAL_LEAK_PATTERNS)
+
+
+def _sanitize_chat_response(text: str) -> str:
+    if not text:
+        return text
+    if any(_INTERNAL_LEAK_PATTERNS[i].search(text) for i in _NUKE_PATTERN_INDICES):
+        return (
+            "Tuve un error preparando la respuesta. "
+            "Retomo la acción con el contexto disponible o te diré el bloqueo verificado."
+        )
+
+    sanitized = text
+    sanitized = re.sub(r"\bMessage ID\s+\d+\b", "Mensaje enviado", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bmessage_id\s*[:#]?\s*\d+\b", "mensaje enviado", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bchat_id\s*[:#]?\s*-?\d+\b", "chat", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\btg-[A-Za-z0-9_-]+\b", "[id interno omitido]", sanitized)
+    sanitized = re.sub(r"\bnlm-[A-Za-z0-9_-]+\b", "[id interno omitido]", sanitized)
+    sanitized = re.sub(r"\bPID\s*[:#]?\s*\d+\b", "proceso local", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\blocalhost(?::\d+)?\b", "[endpoint local interno]", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\b127\.0\.0\.1(?::\d+)?\b", "[endpoint local interno]", sanitized)
+    sanitized = re.sub(r"\bpuerto\s+\d{2,5}\b", "puerto interno", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\ben\s+:\d{2,5}\b", "en un puerto interno", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bterminal bridge\b", "herramienta local", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bblocked model response\b", "respuesta interna suprimida", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\brespuesta del modelo fue bloqueada\b", "respuesta interna suprimida", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\brespuesta bloqueada\b", "respuesta interna suprimida", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bsalida del modelo\b", "salida interna", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\btrazas internas\b", "detalles internos", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bherramientas internas\b", "herramientas locales", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bla ocult[eé]\b", "se omitió", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\btool traces\b", "trazas locales", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bsanitizer\b", "filtro defensivo", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\brepite la instrucci[oó]n\b", "indícame el siguiente paso", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bcontradice las capacidades\b", "contradice el contexto operacional", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bCircuit breaker\b", "bloqueo operacional interno", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"`sendVideo`|`sendDocument`|sendVideo|sendDocument", "envío de Telegram", sanitized)
+
+    def _redact_backticked_path(match: re.Match[str]) -> str:
+        raw_path = match.group(1)
+        basename = raw_path.rstrip("/").split("/")[-1] or "archivo"
+        return f"`[ruta local omitida]/{basename}`"
+
+    sanitized = re.sub(r"`(/Users/hector/[^`]+)`", _redact_backticked_path, sanitized)
+    sanitized = re.sub(r"(?<!`)/Users/hector/[^\n`]+", "[ruta local omitida]", sanitized)
+    return sanitized
 
 
 def _looks_like_autonomy_grant(text: str) -> bool:
@@ -417,7 +663,7 @@ def _compact_summary(text: str, *, limit: int = 240) -> str | None:
 
 def _extract_pending_action_from_reply(text: str) -> str | None:
     for line in text.splitlines():
-        match = re.match(r"^\s*(?:siguiente paso|next step|pendiente)\s*:\s*(.+?)\s*$", line, re.IGNORECASE)
+        match = re.match(r"^\s*(?:siguiente paso|next step|pendiente|retomo la acci[oó]n)\s*:\s*(.+?)\s*$", line, re.IGNORECASE)
         if match:
             return match.group(1).strip()
     return None
@@ -1357,7 +1603,7 @@ def _extract_title_from_url(url: str) -> str:
 
 
 def _format_computer_pending_summary(task: str, pending_action: dict[str, Any]) -> str:
-    action = pending_action.get("action", "unknown")
+    action = pending_action.get("action") or pending_action.get("type") or "unknown"
     if "coordinate" in pending_action:
         return f"{task} — {action} at {pending_action['coordinate']}"
     if "text" in pending_action:

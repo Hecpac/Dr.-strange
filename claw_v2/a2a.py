@@ -33,8 +33,8 @@ _DEFAULT_A2A_ROOT = Path.home() / ".claw" / "a2a"
 @dataclass(slots=True)
 class AgentCard:
     """Agent Card — public identity and capabilities advertisement."""
-    name: str = "Claw"
-    description: str = "Autonomous AI assistant by Pachano Design"
+    name: str = "Dr. Strange"
+    description: str = "Autonomous personal agent for Hector Pachano (Pachano Design)"
     version: str = "2.0"
     capabilities: list[str] = field(default_factory=lambda: [
         "wiki_search", "web_research", "code_analysis", "site_monitoring",

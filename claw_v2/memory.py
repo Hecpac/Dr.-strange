@@ -571,6 +571,15 @@ class MemoryStore:
             self._conn.commit()
             return len(ids)
 
+    def delete_messages_after(self, session_id: str, after_id: int) -> int:
+        with self._lock:
+            cursor = self._conn.execute(
+                "DELETE FROM messages WHERE session_id = ? AND id > ?",
+                (session_id, int(after_id)),
+            )
+            self._conn.commit()
+            return int(cursor.rowcount or 0)
+
     def get_messages_since(self, session_id: str, after_id: int, limit: int | None = None) -> list[dict]:
         sql = [
             """
@@ -672,6 +681,41 @@ class MemoryStore:
             "last_checkpoint": _loads_json_object(row["last_checkpoint_json"], default={}),
             "rolling_summary": row["rolling_summary"],
         }
+
+    def list_session_states(self, *, limit: int = 5) -> list[dict]:
+        rows = self._conn.execute(
+            """
+            SELECT session_id, autonomy_mode, mode, current_goal, pending_action,
+                   verification_status, active_object_json, task_queue_json,
+                   pending_approvals_json, last_checkpoint_json, rolling_summary,
+                   updated_at
+            FROM session_state
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            (max(1, min(int(limit), 50)),),
+        ).fetchall()
+        result: list[dict] = []
+        for row in rows:
+            active_object = _loads_json_object(row["active_object_json"], default={})
+            result.append(
+                {
+                    "session_id": row["session_id"],
+                    "autonomy_mode": row["autonomy_mode"] or "assisted",
+                    "mode": row["mode"] or "chat",
+                    "current_goal": row["current_goal"],
+                    "pending_action": row["pending_action"],
+                    "verification_status": row["verification_status"] or "unknown",
+                    "active_object": active_object,
+                    "active_object_keys": sorted(active_object.keys()) if isinstance(active_object, dict) else [],
+                    "task_queue": _loads_json_object(row["task_queue_json"], default=[]),
+                    "pending_approvals": _loads_json_object(row["pending_approvals_json"], default=[]),
+                    "last_checkpoint": _loads_json_object(row["last_checkpoint_json"], default={}),
+                    "rolling_summary": row["rolling_summary"],
+                    "updated_at": row["updated_at"],
+                }
+            )
+        return result
 
     def update_session_state(
         self,
@@ -1038,6 +1082,13 @@ class MemoryStore:
                 (app_session_id, provider),
             )
             self._conn.commit()
+
+    def clear_provider_sessions(self) -> int:
+        """Drop provider-side conversation handles without deleting local memory."""
+        with self._lock:
+            cursor = self._conn.execute("DELETE FROM provider_sessions")
+            self._conn.commit()
+            return int(cursor.rowcount)
 
     # --- Cron state ---
 

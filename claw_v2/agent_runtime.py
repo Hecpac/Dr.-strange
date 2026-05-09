@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import inspect
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Any
@@ -46,7 +47,7 @@ class AgentEvent:
 class AgentResponse:
     session_id: str
     route: ChannelRoute
-    text: str
+    text: str | None
     status: str = "ok"
     event_id: str | None = None
     duration_ms: float = 0.0
@@ -131,18 +132,26 @@ class AgentRuntime:
         )
         try:
             if event.kind == "text":
-                text = self.bot_service.handle_text(
-                    user_id=event.route.external_user_id,
-                    session_id=session_id,
-                    text=event.text or "",
-                )
+                text_kwargs = {
+                    "user_id": event.route.external_user_id,
+                    "session_id": session_id,
+                    "text": event.text or "",
+                }
+                if _accepts_runtime_channel(self.bot_service.handle_text):
+                    text_kwargs["runtime_channel"] = event.route.channel
+                if _accepts_context_metadata(self.bot_service.handle_text) and event.route.metadata:
+                    text_kwargs["context_metadata"] = dict(event.route.metadata)
+                text = self.bot_service.handle_text(**text_kwargs)
             elif event.kind == "multimodal":
-                text = self.bot_service.handle_multimodal(
-                    user_id=event.route.external_user_id,
-                    session_id=session_id,
-                    content_blocks=list(event.content_blocks or []),
-                    memory_text=event.memory_text or "",
-                )
+                multimodal_kwargs = {
+                    "user_id": event.route.external_user_id,
+                    "session_id": session_id,
+                    "content_blocks": list(event.content_blocks or []),
+                    "memory_text": event.memory_text or "",
+                }
+                if _accepts_runtime_channel(self.bot_service.handle_multimodal):
+                    multimodal_kwargs["runtime_channel"] = event.route.channel
+                text = self.bot_service.handle_multimodal(**multimodal_kwargs)
             else:
                 raise ValueError(f"unsupported agent event kind: {event.kind}")
         except Exception as exc:
@@ -217,3 +226,19 @@ class AgentRuntime:
         if self.observe is None:
             return
         self.observe.emit(event_type, lane="agent_runtime", payload=payload)
+
+
+def _accepts_runtime_channel(handler: Any) -> bool:
+    try:
+        signature = inspect.signature(handler)
+    except (TypeError, ValueError):
+        return False
+    return "runtime_channel" in signature.parameters
+
+
+def _accepts_context_metadata(handler: Any) -> bool:
+    try:
+        signature = inspect.signature(handler)
+    except (TypeError, ValueError):
+        return False
+    return "context_metadata" in signature.parameters

@@ -28,6 +28,7 @@ class AnthropicAuthModeTests(unittest.TestCase):
             request.cwd = None
             request.effort = "high"
             request.evidence_pack = {}
+            request.thinking_tokens = 0
             with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}, clear=False):
                 executor._build_options(fake_sdk, request)
                 env = fake_sdk.ClaudeAgentOptions.call_args[1].get("env", {})
@@ -50,6 +51,7 @@ class AnthropicAuthModeTests(unittest.TestCase):
             request.cwd = None
             request.effort = "high"
             request.evidence_pack = {}
+            request.thinking_tokens = 0
             with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}, clear=False):
                 opts = executor._build_options(fake_sdk, request)
                 env = fake_sdk.ClaudeAgentOptions.call_args[1].get("env", {})
@@ -72,6 +74,7 @@ class AnthropicAuthModeTests(unittest.TestCase):
             request.cwd = None
             request.effort = "high"
             request.evidence_pack = {}
+            request.thinking_tokens = 0
             with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}, clear=False):
                 executor._build_options(fake_sdk, request)
                 self.assertEqual(os.environ["ANTHROPIC_API_KEY"], "test-key")

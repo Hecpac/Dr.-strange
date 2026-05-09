@@ -6,7 +6,17 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from claw_v2.adapters.base import AdapterError
-from claw_v2.agents import AgentDefinition, AutoResearchAgentService, ExperimentRecord, FileAgentStore, StagnationDetector, SubAgentService
+from claw_v2.agents import (
+    AgentDefinition,
+    ArtifactEvidence,
+    AutoResearchAgentService,
+    ExperimentRecord,
+    FileAgentStore,
+    StagnationDetector,
+    SubAgentDefinition,
+    SubAgentResult,
+    SubAgentService,
+)
 from claw_v2.eval_mocks import build_test_router, scripted_experiment_runner
 
 from tests.helpers import make_config
@@ -228,6 +238,81 @@ class SubAgentServiceTests(unittest.TestCase):
         self.assertEqual(
             SubAgentService._parse_model_from_soul(soul), ("openai", "gpt-5.5")
         )
+
+    def _make_typed_dispatch_service(self) -> SubAgentService:
+        defn = SubAgentDefinition(
+            name="alma",
+            display_name="Alma",
+            provider="anthropic",
+            model="claude-sonnet-4-6",
+            soul="- **Name:** Alma\n",
+            heartbeat_config="",
+            user_context="",
+        )
+        router = MagicMock()
+        response = MagicMock()
+        response.content = "task complete"
+        response.provider = "anthropic"
+        response.model = "claude-sonnet-4-6"
+        router.ask.return_value = response
+        store = MagicMock()
+        service = SubAgentService(definitions_root=Path("/tmp"), router=router, store=store)
+        service._agents["alma"] = defn
+        return service
+
+    def test_dispatch_typed_returns_structured_result(self) -> None:
+        """Brain-bypass refactor commit #8: structured SubAgentResult."""
+        service = self._make_typed_dispatch_service()
+
+        result = service.dispatch_typed("alma", "do thing")
+
+        self.assertIsInstance(result, SubAgentResult)
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(result.summary, "task complete")
+        self.assertEqual(len(result.evidence), 1)
+        self.assertIsInstance(result.evidence[0], ArtifactEvidence)
+        self.assertEqual(result.evidence[0].kind, "model_response")
+        self.assertEqual(result.evidence[0].ref, "anthropic:claude-sonnet-4-6")
+        self.assertEqual(result.failures, ())
+
+    def test_dispatch_legacy_string_still_returns_summary(self) -> None:
+        """Backwards compat: legacy callers receive the bare content string."""
+        service = self._make_typed_dispatch_service()
+
+        reply = service.dispatch("alma", "do thing")
+
+        self.assertEqual(reply, "task complete")
+
+    def test_dispatch_typed_records_provider_fallback_in_failures(self) -> None:
+        defn = SubAgentDefinition(
+            name="alma",
+            display_name="Alma",
+            provider="anthropic",
+            model="claude-sonnet-4-6",
+            soul="- **Name:** Alma\n",
+            heartbeat_config="",
+            user_context="",
+        )
+        router = MagicMock()
+        fallback_response = MagicMock()
+        fallback_response.content = "ok via fallback"
+        fallback_response.provider = "openai"
+        fallback_response.model = "gpt-5.4"
+        router.ask.side_effect = [
+            AdapterError("primary unavailable"),
+            fallback_response,
+        ]
+        store = MagicMock()
+        service = SubAgentService(definitions_root=Path("/tmp"), router=router, store=store)
+        service._agents["alma"] = defn
+
+        result = service.dispatch_typed("alma", "do thing")
+
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(result.summary, "ok via fallback")
+        self.assertEqual(len(result.failures), 1)
+        self.assertTrue(result.failures[0].startswith("preferred_provider_unavailable:"))
+        self.assertIn("AdapterError", result.failures[0])
 
 
 if __name__ == "__main__":

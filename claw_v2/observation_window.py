@@ -22,7 +22,7 @@ class ObservationWindowBlocked(PermissionError):
 
 @dataclass(slots=True)
 class ObservationWindowConfig:
-    cost_per_hour_threshold: float = 1.50
+    cost_per_hour_threshold: float = 10.00
     tool_calls_per_minute_threshold: int = 10
     daily_budget_cap: float | None = None
 
@@ -99,7 +99,8 @@ class ObservationWindowState:
                 "observation_window_freeze_set",
                 {"reason": reason, "actor": actor},
             )
-            self._notify_alert(f"Observation window frozen: {reason}")
+            if not _diagnostic_only_freeze_reason(reason):
+                self._notify_alert(f"Observation window frozen: {reason}")
 
     def unfreeze(self, *, actor: str = "system") -> None:
         with self._lock:
@@ -212,7 +213,17 @@ class ObservationWindowState:
         self._emit("circuit_breaker_tripped", payload)
         self.freeze(reason=f"circuit_breaker:{name}", actor=actor)
         if first_trip:
-            self._notify_alert(f"Circuit breaker tripped: {name} value={value:.3f} threshold={threshold:.3f}")
+            logger.warning(
+                "Circuit breaker tripped: %s value=%.3f threshold=%.3f actor=%s",
+                name,
+                value,
+                threshold,
+                actor,
+            )
+            self._notify_stream(
+                f"[diagnostic] circuit_breaker={name} value={value:.3f} "
+                f"threshold={threshold:.3f} frozen=true"
+            )
 
     def status_payload(self) -> dict[str, Any]:
         now = self._clock()
@@ -327,6 +338,14 @@ class ObservationWindowState:
 def _format_stream_line(*, tool: str, tier: str, actor: str, cost: float, status: str) -> str:
     hhmm = datetime.now().strftime("%H:%M")
     return f"[{hhmm}] tool={tool} tier={tier} actor={actor} cost=${cost:.4f} status={status}"
+
+
+def _diagnostic_only_freeze_reason(reason: str) -> bool:
+    # cost_per_hour is a budget alarm — it must reach the operator (Telegram).
+    # All other circuit_breaker:* reasons (provider, sdk, etc.) stay diagnostic.
+    if reason == "circuit_breaker:cost_per_hour":
+        return False
+    return reason.startswith("circuit_breaker:")
 
 
 def _shell_tokens(command: str) -> list[str]:

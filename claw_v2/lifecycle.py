@@ -29,7 +29,7 @@ def load_soul(soul_path: Path | None = None) -> str:
         soul_path = Path(__file__).parent / "SOUL.md"
     if soul_path.exists():
         return soul_path.read_text(encoding="utf-8")
-    return "You are Claw."
+    return "You are Dr. Strange, the autonomous personal agent for Hector Pachano."
 
 
 def should_send_fitness_reminder(now: datetime, stamp_path: Path) -> bool:

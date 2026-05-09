@@ -84,6 +84,64 @@ def _extract_notebook_id(url: str) -> str | None:
     return match.group(1) if match else None
 
 
+def list_notebooks(*, cdp_url: str = DEFAULT_CDP_URL, limit: int = 60) -> list[dict]:
+    """Enumerate notebooks visible on the NotebookLM home grid.
+
+    Returns a list of {id, title, created_at} dicts, ordered most-recent first
+    when NotebookLM exposes that ordering (the default home view does).
+    Each card on the home page is a link to /notebook/<id> with a visible
+    title and a relative date label like "May 4, 2026".
+    """
+    pw, browser = _connect(cdp_url)
+    try:
+        page = _open_nlm_page(browser)
+        if "/notebook/" in page.url:
+            try:
+                page.goto(NLM_HOME, wait_until="domcontentloaded", timeout=20_000)
+            except Exception:
+                pass
+        # Wait a moment for the grid to hydrate.
+        time.sleep(1.5)
+        cards = page.locator('a[href*="/notebook/"]')
+        count = min(cards.count(), limit)
+        seen: set[str] = set()
+        notebooks: list[dict] = []
+        for i in range(count):
+            try:
+                href = cards.nth(i).get_attribute("href") or ""
+            except Exception:
+                continue
+            nb_id = _extract_notebook_id(href)
+            if not nb_id or nb_id in _TRANSIENT_NOTEBOOK_IDS or nb_id in seen:
+                continue
+            seen.add(nb_id)
+            try:
+                text = (cards.nth(i).inner_text(timeout=1500) or "").strip()
+            except Exception:
+                text = ""
+            title = text.split("\n")[0].strip() if text else nb_id[:8]
+            created_at = ""
+            for line in text.split("\n")[1:]:
+                line = line.strip()
+                if not line:
+                    continue
+                if "fuente" in line.lower() or "source" in line.lower():
+                    continue
+                created_at = line
+                break
+            notebooks.append({"id": nb_id, "title": title, "created_at": created_at})
+        return notebooks
+    finally:
+        try:
+            browser.close()
+        except Exception:
+            pass
+        try:
+            pw.stop()
+        except Exception:
+            pass
+
+
 def create_notebook(title: str, *, cdp_url: str = DEFAULT_CDP_URL) -> dict:
     """Create a new NotebookLM notebook via CDP and return {id, title}.
 

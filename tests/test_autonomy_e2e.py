@@ -34,6 +34,7 @@ def _runtime(tmp_root: Path):
         "AGENT_STATE_ROOT": str(tmp_root / "agents"),
         "EVAL_ARTIFACTS_ROOT": str(tmp_root / "evals"),
         "APPROVALS_ROOT": str(tmp_root / "approvals"),
+        "TELEMETRY_ROOT": str(tmp_root / "telemetry"),
         "TELEGRAM_ALLOWED_USER_ID": "123",
     }
     return env

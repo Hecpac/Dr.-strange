@@ -24,6 +24,28 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+_MAX_BUDGET_FALLBACK_USD = 10.00
+
+
+def _resolve_max_budget(router) -> float:
+    """Return the configured per-turn budget cap.
+
+    Logs loudly if the router config does not expose ``max_budget_usd`` so the
+    silent halving to a tiny default cannot mask a misconfigured runtime.
+    """
+    config = getattr(router, "config", None)
+    value = getattr(config, "max_budget_usd", None)
+    if isinstance(value, (int, float)) and value > 0:
+        return float(value)
+    logger.warning(
+        "router.config.max_budget_usd missing or invalid (got %r); "
+        "falling back to %.2f. Verify AppConfig is wired correctly.",
+        value,
+        _MAX_BUDGET_FALLBACK_USD,
+    )
+    return _MAX_BUDGET_FALLBACK_USD
+
+
 VERIFIER_PROMPT = """Review the proposed critical action using only the evidence pack.
 Return JSON only with this exact shape:
 {
@@ -60,8 +82,7 @@ Shape:
 No user-visible text is valid outside <response> tags."""
 
 INTERNAL_TOOL_TRACE_FALLBACK = (
-    "La salida del modelo contenía trazas internas de herramientas y la oculté. "
-    "Repite la instrucción y la ejecuto limpio."
+    "Tuve un error preparando la respuesta. Retomo la acción con el contexto disponible."
 )
 
 _INTERNAL_TOOL_TRACE_PATTERNS = (
@@ -69,6 +90,18 @@ _INTERNAL_TOOL_TRACE_PATTERNS = (
     re.compile(r"(?<!\w)to=[A-Z][A-Za-z0-9_]*(?=\s|[\{\(\[]|$)"),
     re.compile(r'"recipient_name"\s*:\s*"(?:functions|multi_tool_use|web|image_gen|tool_search)\.', re.IGNORECASE),
     re.compile(r'"tool_uses"\s*:\s*\[', re.IGNORECASE),
+)
+_INTERNAL_PROMPT_ECHO_PATTERNS = (
+    re.compile(r"^\s*#\s*Telegram message\b", re.IGNORECASE),
+    re.compile(r"\bReply ONLY to (?:that|the) latest message\b", re.IGNORECASE),
+    re.compile(r"\bTelegram-friendly Markdown\b", re.IGNORECASE),
+    re.compile(r"\bDo not include internal trace\b", re.IGNORECASE),
+    re.compile(r"\bNo user-visible text is valid outside <response> tags\b", re.IGNORECASE),
+    re.compile(r"^\s*(?:user|assistant|system)\s*:\s*\S", re.IGNORECASE),
+    re.compile(r"^\s*#+\s*Critical\s+instructions?\b", re.IGNORECASE),
+    re.compile(r"^\s*#+\s*(?:Instructions?|Rules|Directives|Guardrails)\s*$", re.IGNORECASE | re.MULTILINE),
+    re.compile(r"\bDo NOT identify as Claude\b", re.IGNORECASE),
+    re.compile(r"\byou are Dr\.?\s*Strange\b(?=[\s\S]{0,200}\bDo NOT\b)", re.IGNORECASE),
 )
 
 SELF_HEALING_LOOP_CONTRACT = """# Self-healing loop
@@ -139,6 +172,13 @@ For operational work, translate machine states into plain language:
 - failed → "intenté y falló por Y"
 Keep command names, task IDs, and exact errors when they matter, but wrap them in normal prose."""
 
+IDENTITY_ANCHOR = """# IDENTITY ANCHOR (final reminder, highest recency)
+You are Dr. Strange, the autonomous personal agent for Hector Pachano (founder, Pachano Design).
+Persona is Dr. Strange. Model/runtime/CLI/daemon/API/Telegram are technical layers, not identity.
+In user-facing chat, never identify as Claude, Claude Code, Anthropic CLI, "the model", "the bot", or "an AI assistant".
+Default language: español neutral latinoamericano. Use tú/dime/tienes; avoid voseo (vos/decime/tenés/podés) and avoid Spain forms (vosotros/os).
+This anchor survives mid-session context shifts — treat it as the final word on identity and tone."""
+
 
 @dataclass(slots=True)
 class BrainService:
@@ -203,7 +243,7 @@ class BrainService:
                 effort=model_override.effort if model_override else None,
                 session_id=provider_session_id,
                 evidence_pack=attach_trace({"app_session_id": session_id}, trace),
-                max_budget=2.0,
+                max_budget=_resolve_max_budget(self.router),
                 timeout=300.0,
             )
         except AdapterError as exc:
@@ -261,7 +301,9 @@ class BrainService:
                 effort=model_override.effort if model_override else None,
                 session_id=None,
                 evidence_pack=attach_trace({"app_session_id": session_id}, trace),
-                max_budget=2.0,
+                # Resume retry: cap at 75% of normal budget to limit blast radius
+                # if the original turn already burned cycles before failing.
+                max_budget=_resolve_max_budget(self.router) * 0.75,
                 timeout=300.0,
             )
         response = _extract_visible_brain_response(response)
@@ -1055,7 +1097,8 @@ def _brain_system_prompt(system_prompt: str) -> str:
         f"{SELF_HEALING_LOOP_CONTRACT}\n\n"
         f"{AUTONOMY_EXECUTION_CONTRACT}\n\n"
         f"{RUNTIME_OPERATIONS_CONTRACT}\n\n"
-        f"{CAPABILITY_DENIAL_CONTRACT}"
+        f"{CAPABILITY_DENIAL_CONTRACT}\n\n"
+        f"{IDENTITY_ANCHOR}"
     )
 
 
@@ -1070,7 +1113,10 @@ def _extract_visible_brain_response(response: LLMResponse) -> LLMResponse:
             if _looks_like_internal_tool_trace(content)
             else content
         )
-        response.content = _suppress_internal_tool_trace(response, visible)
+        if _looks_like_internal_prompt_echo(visible):
+            response.content = _suppress_internal_prompt_echo(response, visible)
+        else:
+            response.content = _suppress_internal_tool_trace(response, visible)
     elif content.strip():
         stripped = content.strip()
         if _looks_like_runtime_preamble(stripped):
@@ -1083,6 +1129,8 @@ def _extract_visible_brain_response(response: LLMResponse) -> LLMResponse:
                 "Unwrapped SDK output contained an internal tool-call transcript and was suppressed."
             )
             response.content = INTERNAL_TOOL_TRACE_FALLBACK
+        elif _looks_like_internal_prompt_echo(stripped):
+            response.content = _suppress_internal_prompt_echo(response, stripped)
         else:
             response.artifacts["reasoning_trace"] = f"Unwrapped SDK output: {stripped}"
             response.artifacts["contract_violation"] = "missing_response_tags"
@@ -1113,20 +1161,55 @@ def _looks_like_runtime_preamble(content: str) -> bool:
     )
 
 
+def _looks_like_internal_prompt_echo(content: str) -> bool:
+    return any(pattern.search(content) for pattern in _INTERNAL_PROMPT_ECHO_PATTERNS)
+
+
 def _looks_like_internal_tool_trace(content: str) -> bool:
     return any(pattern.search(content) for pattern in _INTERNAL_TOOL_TRACE_PATTERNS)
+
+
+def _suppress_internal_prompt_echo(response: LLMResponse, content: str) -> str:
+    response.artifacts["contract_violation"] = "internal_prompt_echo"
+    response.artifacts["internal_prompt_echo_suppressed"] = True
+    response.artifacts["internal_response_suppressed"] = True
+    response.artifacts["reasoning_trace"] = (
+        "Unwrapped SDK output contained an internal prompt or role echo and was suppressed."
+    )
+    response.artifacts["raw_response"] = "[suppressed_internal_prompt_echo]"
+    return INTERNAL_TOOL_TRACE_FALLBACK
 
 
 def _suppress_internal_tool_trace(response: LLMResponse, content: str) -> str:
     if not _looks_like_internal_tool_trace(content):
         return content
+    # Surgical: drop only lines that contain a trace pattern, keep the rest of
+    # the response. If nothing useful remains, fall back to the generic message.
+    lines = content.split("\n")
+    kept: list[str] = []
+    removed = 0
+    for line in lines:
+        if any(p.search(line) for p in _INTERNAL_TOOL_TRACE_PATTERNS):
+            removed += 1
+            continue
+        kept.append(line)
+    cleaned = "\n".join(kept).strip()
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     response.artifacts["contract_violation"] = "internal_tool_trace"
     response.artifacts["internal_tool_trace_suppressed"] = True
+    response.artifacts["internal_response_suppressed"] = True
+    response.artifacts["internal_tool_trace_lines_removed"] = removed
+    if not cleaned:
+        _append_reasoning_trace(
+            response,
+            f"Internal tool-call transcript ({removed} lines) suppressed; no usable text remained.",
+        )
+        return INTERNAL_TOOL_TRACE_FALLBACK
     _append_reasoning_trace(
         response,
-        "Internal tool-call transcript suppressed from visible output.",
+        f"Internal tool-call transcript ({removed} lines) stripped from visible output.",
     )
-    return INTERNAL_TOOL_TRACE_FALLBACK
+    return cleaned
 
 
 def _append_reasoning_trace(response: LLMResponse, note: str) -> None:
