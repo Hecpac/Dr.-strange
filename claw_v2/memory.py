@@ -571,6 +571,15 @@ class MemoryStore:
             self._conn.commit()
             return len(ids)
 
+    def delete_messages_after(self, session_id: str, after_id: int) -> int:
+        with self._lock:
+            cursor = self._conn.execute(
+                "DELETE FROM messages WHERE session_id = ? AND id > ?",
+                (session_id, int(after_id)),
+            )
+            self._conn.commit()
+            return int(cursor.rowcount or 0)
+
     def get_messages_since(self, session_id: str, after_id: int, limit: int | None = None) -> list[dict]:
         sql = [
             """

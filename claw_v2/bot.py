@@ -1454,6 +1454,7 @@ class BotService:
         runtime_capability_question: bool,
         link_analysis_context: dict[str, Any] | None,
         runtime_channel: str | None,
+        pre_turn_message_id: int,
     ) -> str:
         suppression_reason = self._suppressed_response_reason(response)
         pending_action = self._pending_action_for_sanitizer_recovery(session_id)
@@ -1476,7 +1477,7 @@ class BotService:
             sanitized="",
         )
         try:
-            self.brain.memory.delete_last_messages(session_id, count=2)
+            self.brain.memory.delete_messages_after(session_id, after_id=pre_turn_message_id)
             provider = str(getattr(response, "provider", "") or "")
             if provider:
                 self.brain.memory.clear_provider_session(session_id, provider)
@@ -2743,6 +2744,7 @@ class BotService:
         if runtime_capability_question:
             prompt_text = _format_runtime_capability_prompt(prompt_text)
         prompt_text = self._with_runtime_capability_context(prompt_text, runtime_channel=runtime_channel)
+        pre_turn_message_id = self.brain.memory.last_message_id(session_id)
         try:
             response = self.brain.handle_message(
                 session_id,
@@ -2767,6 +2769,7 @@ class BotService:
                 runtime_capability_question=runtime_capability_question,
                 link_analysis_context=link_analysis_context,
                 runtime_channel=runtime_channel,
+                pre_turn_message_id=pre_turn_message_id,
             )
             self._remember_assistant_turn_state(session_id, source_text, content)
             return content
