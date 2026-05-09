@@ -98,6 +98,10 @@ _INTERNAL_PROMPT_ECHO_PATTERNS = (
     re.compile(r"\bDo not include internal trace\b", re.IGNORECASE),
     re.compile(r"\bNo user-visible text is valid outside <response> tags\b", re.IGNORECASE),
     re.compile(r"^\s*(?:user|assistant|system)\s*:\s*\S", re.IGNORECASE),
+    re.compile(r"^\s*#+\s*Critical\s+instructions?\b", re.IGNORECASE),
+    re.compile(r"^\s*#+\s*(?:Instructions?|Rules|Directives|Guardrails)\s*$", re.IGNORECASE | re.MULTILINE),
+    re.compile(r"\bDo NOT identify as Claude\b", re.IGNORECASE),
+    re.compile(r"\byou are Dr\.?\s*Strange\b(?=[\s\S]{0,200}\bDo NOT\b)", re.IGNORECASE),
 )
 
 SELF_HEALING_LOOP_CONTRACT = """# Self-healing loop

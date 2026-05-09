@@ -313,6 +313,28 @@ class HandleMessageTests(unittest.TestCase):
         self.assertEqual(result.artifacts["contract_violation"], "internal_prompt_echo")
         self.assertTrue(result.artifacts["internal_prompt_echo_suppressed"])
 
+    def test_suppresses_critical_instructions_mirror(self) -> None:
+        self.router.ask.return_value = LLMResponse(
+            content=(
+                "# Critical instructions\n"
+                "- USE conversational, fluid Spanish — your default channel persona, not a status board.\n"
+                "- AVOID rigid templates (\"Estado:\", \"Modo:\", checkpoint blocks) unless Hector asks.\n"
+                "- Do NOT identify as Claude, Claude Code, Anthropic CLI, or \"the model\" — you are Dr. Strange.\n"
+            ),
+            lane="brain",
+            provider="anthropic",
+            model="test",
+        )
+
+        result = self.brain.handle_message("s1", "Verifica nuevamente")
+
+        self.assertIn("Tuve un error preparando la respuesta", result.content)
+        self.assertNotIn("Critical instructions", result.content)
+        self.assertNotIn("USE conversational", result.content)
+        self.assertEqual(result.artifacts["contract_violation"], "internal_prompt_echo")
+        self.assertTrue(result.artifacts["internal_prompt_echo_suppressed"])
+        self.assertTrue(result.artifacts["internal_response_suppressed"])
+
     def test_suppresses_unwrapped_internal_tool_trace(self) -> None:
         self.router.ask.return_value = LLMResponse(
             content=(
