@@ -68,6 +68,7 @@ class LLMRequest:
     timeout: float
     cwd: str | None = None
     cache_ttl: int | None = None
+    thinking_tokens: int = 0
 
     def validate(self) -> None:
         """Fail fast on malformed cross-provider requests before adapter calls."""

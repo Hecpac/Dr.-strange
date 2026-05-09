@@ -281,6 +281,12 @@ class ClaudeSDKExecutor:
             can_use_tool=can_use_tool,
             effort=request.effort,
         )
+        if request.thinking_tokens > 0:
+            options_kwargs["thinking"] = {
+                "type": "enabled",
+                "budget_tokens": int(request.thinking_tokens),
+            }
+            options_kwargs["max_thinking_tokens"] = int(request.thinking_tokens)
         return sdk.ClaudeAgentOptions(**options_kwargs)
 
     def _build_agents(self, sdk: Any, request: LLMRequest) -> dict[str, Any] | None:

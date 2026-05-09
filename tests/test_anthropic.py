@@ -337,5 +337,63 @@ class AnthropicExecutorTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("partial output", event["payload"]["partial_text_preview"])
 
 
+class ExtendedThinkingWiringTests(unittest.IsolatedAsyncioTestCase):
+    """Per-lane thinking budget must flow into ClaudeAgentOptions."""
+
+    def _make_request(self, *, lane: str, thinking_tokens: int) -> LLMRequest:
+        return LLMRequest(
+            prompt="hello",
+            system_prompt=None,
+            lane=lane,
+            provider="anthropic",
+            model="claude-opus-4-7",
+            effort="high",
+            session_id=None,
+            max_budget=0.5,
+            evidence_pack={"app_session_id": "tg-1"},
+            allowed_tools=None,
+            agents=None,
+            hooks=None,
+            timeout=30.0,
+            thinking_tokens=thinking_tokens,
+        )
+
+    def _fake_sdk(self):
+        class FakeHookMatcher:
+            def __init__(self, *, hooks) -> None:
+                self.hooks = hooks
+
+        class FakeClaudeAgentOptions:
+            def __init__(self, **kwargs) -> None:
+                self.kwargs = kwargs
+
+        return SimpleNamespace(
+            ClaudeAgentOptions=FakeClaudeAgentOptions,
+            HookMatcher=FakeHookMatcher,
+            AgentDefinition=lambda **kwargs: kwargs,
+        )
+
+    async def test_thinking_tokens_zero_omits_thinking_options(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            executor = ClaudeSDKExecutor(config)
+            request = self._make_request(lane="brain", thinking_tokens=0)
+            options = executor._build_options(self._fake_sdk(), request)
+            self.assertNotIn("thinking", options.kwargs)
+            self.assertNotIn("max_thinking_tokens", options.kwargs)
+
+    async def test_thinking_tokens_positive_sets_enabled_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            executor = ClaudeSDKExecutor(config)
+            request = self._make_request(lane="verifier", thinking_tokens=4096)
+            options = executor._build_options(self._fake_sdk(), request)
+            self.assertEqual(
+                options.kwargs["thinking"],
+                {"type": "enabled", "budget_tokens": 4096},
+            )
+            self.assertEqual(options.kwargs["max_thinking_tokens"], 4096)
+
+
 if __name__ == "__main__":
     unittest.main()
