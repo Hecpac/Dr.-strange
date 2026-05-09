@@ -56,11 +56,17 @@ class LLMRouter:
         hooks: dict | None = None,
         cwd: str | None = None,
         timeout: float = 300.0,
+        thinking_tokens: int | None = None,
     ) -> LLMResponse:
         self._validate_lane_input(lane, evidence_pack, allowed_tools, agents, hooks)
         selected_provider = provider or self.config.provider_for_lane(lane)
         selected_model = model or self.config.model_for_lane(lane)
         selected_effort = effort or self.config.effort_for_lane(lane)
+        selected_thinking = (
+            thinking_tokens
+            if thinking_tokens is not None
+            else self.config.thinking_tokens_for_lane(lane)
+        )
         budget = max_budget if max_budget is not None else self.config.max_budget_usd
         request = LLMRequest(
             prompt=prompt,
@@ -78,6 +84,7 @@ class LLMRouter:
             timeout=timeout,
             cwd=cwd,
             cache_ttl=self.config.cache_prefix_ttl if self.config.cache_prefix_ttl > 0 else None,
+            thinking_tokens=max(0, int(selected_thinking)),
         )
         request.evidence_pack = {
             **(request.evidence_pack or {}),

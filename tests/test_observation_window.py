@@ -8,6 +8,7 @@ from claw_v2.observation_window import (
     ObservationWindowBlocked,
     ObservationWindowConfig,
     ObservationWindowState,
+    _diagnostic_only_freeze_reason,
     hard_denylist_reason,
 )
 
@@ -37,10 +38,12 @@ class ObservationWindowTests(unittest.TestCase):
     def test_freeze_blocks_tool_execution_and_unfreeze_reopens(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             observe = _RecordingObserve()
+            alerts: list[str] = []
             window = ObservationWindowState(
                 observe=observe,
                 state_path=Path(tmpdir) / "window.json",
             )
+            window.set_alert_notifier(alerts.append)
             window.freeze(reason="manual_test", actor="test")
 
             with self.assertRaises(ObservationWindowBlocked):
@@ -53,6 +56,7 @@ class ObservationWindowTests(unittest.TestCase):
             self.assertIn("observation_window_freeze_set", event_names)
             self.assertIn("tool_blocked_by_freeze", event_names)
             self.assertIn("observation_window_freeze_cleared", event_names)
+            self.assertIn("Observation window frozen: manual_test", alerts)
 
     def test_tool_calls_per_minute_breaker_freezes_and_blocks_current_call(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -76,11 +80,15 @@ class ObservationWindowTests(unittest.TestCase):
     def test_llm_cost_per_hour_breaker_freezes(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             observe = _RecordingObserve()
+            alerts: list[str] = []
+            diagnostic_stream: list[str] = []
             window = ObservationWindowState(
                 observe=observe,
                 state_path=Path(tmpdir) / "window.json",
                 config=ObservationWindowConfig(cost_per_hour_threshold=0.05),
             )
+            window.set_alert_notifier(alerts.append)
+            window.set_stream_notifier(diagnostic_stream.append)
 
             window.handle_llm_audit_event(
                 {
@@ -97,6 +105,42 @@ class ObservationWindowTests(unittest.TestCase):
             self.assertTrue(window.frozen)
             breaker_events = [payload for name, payload in observe.events if name == "circuit_breaker_tripped"]
             self.assertEqual(breaker_events[0]["payload"]["breaker"], "cost_per_hour")
+            # cost_per_hour is a budget alarm — operator must be notified.
+            self.assertTrue(
+                any("circuit_breaker:cost_per_hour" in alert for alert in alerts),
+                f"expected cost_per_hour alert to reach notifier, got: {alerts!r}",
+            )
+            self.assertTrue(any("circuit_breaker=cost_per_hour" in line for line in diagnostic_stream))
+
+    def test_cost_per_hour_is_not_diagnostic_only(self) -> None:
+        # Regression: budget breaker must escape the diagnostic-silence path so it
+        # reaches Telegram. Other circuit_breaker:* reasons stay silent.
+        self.assertFalse(_diagnostic_only_freeze_reason("circuit_breaker:cost_per_hour"))
+        self.assertTrue(_diagnostic_only_freeze_reason("circuit_breaker:tool_calls_per_minute"))
+        self.assertTrue(_diagnostic_only_freeze_reason("circuit_breaker:provider_failure"))
+
+    def test_critical_action_alert_can_notify_with_safe_brief_message(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = _RecordingObserve()
+            alerts: list[str] = []
+            window = ObservationWindowState(
+                observe=observe,
+                state_path=Path(tmpdir) / "window.json",
+            )
+            window.set_alert_notifier(alerts.append)
+
+            with self.assertRaises(ObservationWindowBlocked):
+                window.before_tool_execution(
+                    tool_name="Bash",
+                    args={"command": "git push --force origin main"},
+                    tier=3,
+                    actor="operator",
+                )
+
+            self.assertEqual(len(alerts), 1)
+            self.assertIn("Blocked hard-denylisted tool", alerts[0])
+            self.assertNotIn("Circuit breaker tripped", alerts[0])
+            self.assertTrue(any(name == "tool_hard_denylist_blocked" for name, _ in observe.events))
 
 
 if __name__ == "__main__":

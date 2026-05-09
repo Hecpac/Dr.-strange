@@ -23,6 +23,35 @@ _ERROR_SNIPPET_CHARS = 500
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True, slots=True)
+class ArtifactEvidence:
+    """Brain-bypass refactor commit #8: a typed pointer to a piece of evidence
+    a sub-agent produced (commit hash, file path, screenshot, URL, model
+    response, etc.). Free-form ``summary`` is capped to keep the dispatcher
+    payload bounded; the canonical reference lives in ``ref``."""
+
+    kind: str
+    ref: str
+    summary: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class SubAgentResult:
+    """Brain-bypass refactor commit #8: structured sub-agent return value.
+
+    Replaces free-form strings so the dispatcher and verifier can inspect
+    completion status, attached evidence, and failure breadcrumbs without
+    fragile parsing. Legacy callers keep using ``SubAgentService.dispatch``
+    which extracts ``summary`` for backwards compatibility.
+    """
+
+    status: str
+    summary: str
+    evidence: tuple[ArtifactEvidence, ...] = ()
+    failures: tuple[str, ...] = ()
+    next_attempt: str | None = None
+
+
 @dataclass(slots=True)
 class AgentDefinition:
     name: str
@@ -1123,16 +1152,30 @@ class SubAgentService:
     # -- dispatch ---------------------------------------------------------
 
     def dispatch(self, agent_name: str, instruction: str, *, lane: str = "research") -> str:
-        """Send an instruction to a sub-agent and return its response.
+        """Send an instruction to a sub-agent and return its response content.
 
-        Uses ``lane="research"`` by default (no tools required).  Pass
-        ``lane="worker"`` or ``lane="brain"`` when the sub-agent needs
-        tool access through a capable provider adapter.
+        Thin wrapper around :meth:`dispatch_typed` that yields the raw string
+        for legacy callers. New code should prefer ``dispatch_typed`` so the
+        AgentLoop and downstream verifiers can inspect status, evidence, and
+        failure breadcrumbs directly.
+        """
+        return self.dispatch_typed(agent_name, instruction, lane=lane).summary
+
+    def dispatch_typed(
+        self, agent_name: str, instruction: str, *, lane: str = "research"
+    ) -> SubAgentResult:
+        """Brain-bypass refactor commit #8: structured sub-agent result.
+
+        Returns a :class:`SubAgentResult` with status, summary, optional
+        evidence, and a fallback breadcrumb when the preferred provider was
+        unavailable. The default provider attempt records its trigger in
+        ``failures`` so the dispatcher can audit silent fallbacks.
         """
         defn = self._agents.get(agent_name)
         if defn is None:
             raise KeyError(f"unknown sub-agent: {agent_name}")
         system_prompt = self._build_system_prompt(defn)
+        failures: list[str] = []
         try:
             response = self.router.ask(
                 instruction,
@@ -1142,15 +1185,27 @@ class SubAgentService:
                 model=defn.model,
                 evidence_pack={"sub_agent": defn.name, "display_name": defn.display_name},
             )
-        except (ValueError, Exception):
-            # Fallback to default provider when the preferred one is unavailable.
+        except Exception as exc:  # noqa: BLE001 — provider-agnostic fallback
+            failures.append(f"preferred_provider_unavailable:{type(exc).__name__}")
             response = self.router.ask(
                 instruction,
                 system_prompt=system_prompt,
                 lane=lane,
                 evidence_pack={"sub_agent": defn.name, "display_name": defn.display_name},
             )
-        return response.content
+        evidence = (
+            ArtifactEvidence(
+                kind="model_response",
+                ref=f"{response.provider}:{response.model}",
+                summary=response.content[:200],
+            ),
+        )
+        return SubAgentResult(
+            status="succeeded",
+            summary=response.content,
+            evidence=evidence,
+            failures=tuple(failures),
+        )
 
     def run_skill(self, agent_name: str, skill_name: str, context: str = "", *, lane: str = "research") -> str:
         """Execute a named skill for a sub-agent."""

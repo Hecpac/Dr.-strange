@@ -365,6 +365,13 @@ class AppConfig:
     evening_brief_enabled: bool
     evening_brief_hour: int
     telemetry_root: Path = field(default_factory=lambda: Path.home() / ".claw" / "telemetry")
+    verifier_effort: str | None = None
+    research_effort: str | None = None
+    brain_thinking_tokens: int = 0
+    worker_thinking_tokens: int = 0
+    verifier_thinking_tokens: int = 0
+    research_thinking_tokens: int = 0
+    judge_thinking_tokens: int = 0
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -404,7 +411,14 @@ class AppConfig:
             worker_effort=os.getenv("WORKER_EFFORT", "high"),
             brain_effort=os.getenv("BRAIN_EFFORT", "high"),
             judge_effort=os.getenv("JUDGE_EFFORT", "medium"),
-            max_budget_usd=_env_float("MAX_BUDGET_USD", 0.50),
+            verifier_effort=os.getenv("VERIFIER_EFFORT"),
+            research_effort=os.getenv("RESEARCH_EFFORT"),
+            brain_thinking_tokens=_env_int("BRAIN_THINKING_TOKENS", 0),
+            worker_thinking_tokens=_env_int("WORKER_THINKING_TOKENS", 0),
+            verifier_thinking_tokens=_env_int("VERIFIER_THINKING_TOKENS", 0),
+            research_thinking_tokens=_env_int("RESEARCH_THINKING_TOKENS", 0),
+            judge_thinking_tokens=_env_int("JUDGE_THINKING_TOKENS", 0),
+            max_budget_usd=_env_float("MAX_BUDGET_USD", 10.00),
             db_path=Path(os.getenv("DB_PATH", "data/claw.db")),
             heartbeat_interval=_env_int("HEARTBEAT_INTERVAL", 1800),
             daily_token_budget=_env_float("DAILY_TOKEN_BUDGET", 10.00),
@@ -455,7 +469,7 @@ class AppConfig:
             daily_cost_limit=_daily_cost_limit_from_env(),
             tier_autoexec_max=_env_tier("CLAW_TIER_AUTOEXEC_MAX", 2),
             observability_telegram_chat_id=os.getenv("CLAW_OBSERVABILITY_TELEGRAM_CHAT_ID") or None,
-            observation_cost_per_hour_threshold=_env_float("CLAW_OBSERVATION_COST_PER_HOUR", 1.50),
+            observation_cost_per_hour_threshold=_env_float("CLAW_OBSERVATION_COST_PER_HOUR", 10.00),
             observation_tool_calls_per_minute_threshold=_env_int("CLAW_OBSERVATION_TOOL_CALLS_PER_MINUTE", 10),
             chrome_cdp_enabled=_env_bool("CHROME_CDP_ENABLED", True),
             claw_chrome_port=_env_int("CLAW_CHROME_PORT", 9250),
@@ -605,9 +619,23 @@ class AppConfig:
             return self.brain_effort
         if lane == "worker":
             return self.worker_effort
-        if lane in ("judge", "verifier", "research"):
+        if lane == "verifier":
+            return self.verifier_effort or self.judge_effort
+        if lane == "research":
+            return self.research_effort or self.judge_effort
+        if lane == "judge":
             return self.judge_effort
         return "low"
+
+    def thinking_tokens_for_lane(self, lane: Lane) -> int:
+        mapping = {
+            "brain": self.brain_thinking_tokens,
+            "worker": self.worker_thinking_tokens,
+            "verifier": self.verifier_thinking_tokens,
+            "research": self.research_thinking_tokens,
+            "judge": self.judge_thinking_tokens,
+        }
+        return max(0, int(mapping.get(lane, 0)))
 
     def context_window_for_lane(self, lane: Lane) -> int:
         if lane == "brain":

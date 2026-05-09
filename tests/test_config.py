@@ -227,5 +227,56 @@ class CodexConfigTests(unittest.TestCase):
             self.assertEqual(config.model_for_lane("research"), "claude-sonnet-4-6")
 
 
+class PerLaneThinkingAndEffortTests(unittest.TestCase):
+    """Per-skill verification scaffolding: per-lane effort + thinking budget."""
+
+    def _from_env(self, env: dict[str, str]) -> AppConfig:
+        previous_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.chdir(tmpdir)
+            try:
+                with patch.dict(os.environ, env, clear=True):
+                    return AppConfig.from_env()
+            finally:
+                os.chdir(previous_cwd)
+
+    def test_thinking_tokens_default_to_zero_for_every_lane(self) -> None:
+        config = self._from_env({"HOME": str(Path.home())})
+        for lane in ("brain", "worker", "verifier", "research", "judge"):
+            self.assertEqual(config.thinking_tokens_for_lane(lane), 0, lane)
+
+    def test_thinking_tokens_env_overrides_per_lane(self) -> None:
+        config = self._from_env({
+            "HOME": str(Path.home()),
+            "BRAIN_THINKING_TOKENS": "8000",
+            "VERIFIER_THINKING_TOKENS": "4000",
+        })
+        self.assertEqual(config.thinking_tokens_for_lane("brain"), 8000)
+        self.assertEqual(config.thinking_tokens_for_lane("verifier"), 4000)
+        self.assertEqual(config.thinking_tokens_for_lane("worker"), 0)
+        self.assertEqual(config.thinking_tokens_for_lane("research"), 0)
+        self.assertEqual(config.thinking_tokens_for_lane("judge"), 0)
+
+    def test_verifier_and_research_effort_fall_back_to_judge_effort(self) -> None:
+        config = self._from_env({
+            "HOME": str(Path.home()),
+            "JUDGE_EFFORT": "high",
+        })
+        self.assertEqual(config.effort_for_lane("verifier"), "high")
+        self.assertEqual(config.effort_for_lane("research"), "high")
+        self.assertEqual(config.effort_for_lane("judge"), "high")
+
+    def test_verifier_and_research_effort_take_explicit_overrides(self) -> None:
+        config = self._from_env({
+            "HOME": str(Path.home()),
+            "JUDGE_EFFORT": "medium",
+            "VERIFIER_EFFORT": "high",
+            "RESEARCH_EFFORT": "low",
+        })
+        self.assertEqual(config.effort_for_lane("verifier"), "high")
+        self.assertEqual(config.effort_for_lane("research"), "low")
+        self.assertEqual(config.effort_for_lane("judge"), "medium")
+
+
 if __name__ == "__main__":
     unittest.main()

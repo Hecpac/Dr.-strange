@@ -106,13 +106,13 @@ def format_handoff_message(handoff: RuntimeHandoff) -> str:
     """Single, unambiguous message for the user."""
     if handoff.dispatch_method == "http":
         return (
-            "Despaché la misión a Claw producción.\n"
+            "Despaché la misión a Dr. Strange producción.\n"
             f"handoff_id: {handoff.handoff_id}\n"
             f"target: {handoff.target}\n"
             "Espera el resultado por Telegram."
         )
     return (
-        "No pude contactar Claw producción en 127.0.0.1:8765.\n"
+        "No pude contactar Dr. Strange producción en 127.0.0.1:8765.\n"
         f"Misión guardada en cola: {handoff.queue_path}\n"
         "Ejecuta este único comando para levantar el daemon:\n"
         "    cd ~/Projects/Dr.-strange && ./scripts/restart.sh\n"

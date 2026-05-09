@@ -47,6 +47,34 @@ class MessageTests(unittest.TestCase):
         self.store.store_message("s1", "user", "hi")
         self.assertGreater(self.store.last_message_id("s1"), 0)
 
+    def test_delete_messages_after_removes_only_new_messages(self) -> None:
+        self.store.store_message("s1", "user", "before-1")
+        self.store.store_message("s1", "assistant", "before-2")
+        checkpoint = self.store.last_message_id("s1")
+        self.store.store_message("s1", "user", "tainted-user")
+        self.store.store_message("s1", "assistant", "tainted-assistant")
+
+        deleted = self.store.delete_messages_after("s1", after_id=checkpoint)
+        self.assertEqual(deleted, 2)
+
+        contents = [m["content"] for m in self.store.get_recent_messages("s1", limit=10)]
+        self.assertEqual(contents, ["before-1", "before-2"])
+
+    def test_delete_messages_after_returns_zero_when_no_new_messages(self) -> None:
+        self.store.store_message("s1", "user", "only")
+        checkpoint = self.store.last_message_id("s1")
+        self.assertEqual(self.store.delete_messages_after("s1", after_id=checkpoint), 0)
+
+    def test_delete_messages_after_isolated_per_session(self) -> None:
+        self.store.store_message("s1", "user", "s1-a")
+        checkpoint = self.store.last_message_id("s1")
+        self.store.store_message("s2", "user", "s2-after-checkpoint")
+        self.store.store_message("s1", "assistant", "s1-tainted")
+
+        deleted = self.store.delete_messages_after("s1", after_id=checkpoint)
+        self.assertEqual(deleted, 1)
+        self.assertEqual(len(self.store.get_recent_messages("s2", limit=10)), 1)
+
     def test_compaction_summarizes_oldest_messages_and_preserves_recent(self) -> None:
         for i in range(8):
             self.store.store_message(

@@ -36,7 +36,7 @@ _CHUNK_OVERLAP_CHARS = 160
 VALID_CATEGORIES = [
     "AI & Herramientas",
     "Clientes & Proyectos",
-    "Operaciones Claw",
+    "Operaciones Dr. Strange",
     "Seguros",
     "Diseno & Web",
     "Personas",

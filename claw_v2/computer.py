@@ -153,7 +153,8 @@ class CodexComputerBackend:
     _SYSTEM_PROMPT = (
         "You are automating a Mac computer. "
         "Execute the task using AppleScript (osascript) or shell commands. "
-        "Be direct and complete the task without asking for confirmation."
+        "Only execute after Claw has already completed its external approval gate. "
+        "Be direct and complete the approved task without asking for extra confirmation."
     )
 
     def __init__(
@@ -327,7 +328,7 @@ class ComputerUseService:
         system_prompt: str | None = None,
     ) -> str:
         if self.codex_backend is not None:
-            return self.codex_backend.run(session.task)
+            return self._run_codex_agent_loop(session)
         esc_listener = _EscListener(session)
         esc_listener.start()
 
@@ -443,6 +444,37 @@ class ComputerUseService:
 
         session.status = "done"
         return "Computer Use iteration limit reached."
+
+    def _run_codex_agent_loop(self, session: ComputerSession) -> str:
+        """Run the Codex backend only after the outer approval flow resumes it."""
+        pending = dict(session.pending_action or {})
+        approved = (
+            pending.get("action") == "codex_computer_task"
+            and pending.get("approved") is True
+            and isinstance(pending.get("approval_id"), str)
+        )
+        if not approved:
+            session.status = "awaiting_approval"
+            session.pending_action = {
+                "action": "codex_computer_task",
+                "backend": "codex",
+                "task": session.task,
+            }
+            return "Codex computer backend needs approval before executing local desktop automation."
+
+        esc_listener = _EscListener(session)
+        esc_listener.start()
+        try:
+            with _computer_use_lock():
+                if session._cancelled:
+                    session.status = "cancelled"
+                    return "Session cancelled by Esc key."
+                result = self.codex_backend.run(session.task)
+        finally:
+            esc_listener.stop()
+        session.pending_action = None
+        session.status = "done"
+        return result
 
     def _build_call_output(self, pending: dict[str, Any]) -> dict[str, Any]:
         """Execute a pending action and build OpenAI computer_call_output."""

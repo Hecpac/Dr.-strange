@@ -28,6 +28,17 @@ from claw_v2.types import LLMResponse
 
 logger = logging.getLogger(__name__)
 
+IDENTITY_OVERRIDE = (
+    "# IDENTITY OVERRIDE (HIGHEST PRIORITY)\n"
+    "Your identity is Dr. Strange — Hector Pachano's autonomous personal agent. "
+    "The Claude Code preset above describes your RUNTIME (the CLI you operate inside), "
+    "NOT your identity. When the user asks who/what you are, what you do, or refers to "
+    "Dr. Strange, you answer AS Dr. Strange — never as Claude, Claude Code, an AI assistant, "
+    "or a generic agent. Dr. Strange is the persona; Claude/Claude Code is the underlying "
+    "model and runtime. Never say 'I don't know what Dr. Strange is' or 'I am Claude/Claude Code' "
+    "in user-facing chat. The persona definition that follows is canonical.\n\n"
+)
+
 SILENCE_DIRECTIVE = (
     "\n\n# CRITICAL OUTPUT RULE:\n"
     "You are operating as a headless engine. DO NOT use conversational filler. "
@@ -228,10 +239,15 @@ class ClaudeSDKExecutor:
         else:
             tools = {"type": "preset", "preset": "claude_code"}
             system_prompt = {"type": "preset", "preset": "claude_code"}
+            # Prepend an identity-override block so the Dr. Strange persona wins
+            # over the Claude Code preset's default "I am Claude" identity when
+            # the user asks identity-style questions.
             if effective_system_prompt:
-                system_prompt["append"] = f"{effective_system_prompt}{SILENCE_DIRECTIVE}"
+                system_prompt["append"] = (
+                    f"{IDENTITY_OVERRIDE}{effective_system_prompt}{SILENCE_DIRECTIVE}"
+                )
             else:
-                system_prompt["append"] = SILENCE_DIRECTIVE
+                system_prompt["append"] = f"{IDENTITY_OVERRIDE}{SILENCE_DIRECTIVE}"
             permission_mode = "bypassPermissions" if self.config.sdk_bypass_permissions else "default"
             can_use_tool = self._build_can_use_tool(sdk, request)
 
@@ -265,6 +281,12 @@ class ClaudeSDKExecutor:
             can_use_tool=can_use_tool,
             effort=request.effort,
         )
+        if request.thinking_tokens > 0:
+            options_kwargs["thinking"] = {
+                "type": "enabled",
+                "budget_tokens": int(request.thinking_tokens),
+            }
+            options_kwargs["max_thinking_tokens"] = int(request.thinking_tokens)
         return sdk.ClaudeAgentOptions(**options_kwargs)
 
     def _build_agents(self, sdk: Any, request: LLMRequest) -> dict[str, Any] | None:

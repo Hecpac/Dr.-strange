@@ -108,7 +108,7 @@ class DiagnosticsTests(unittest.TestCase):
             self.assertEqual(report["database"]["tasks"]["active"][0]["task_id"], "task-1")
             self.assertEqual(report["database"]["cron"][0]["job_name"], "rook.health")
             self.assertEqual(report["database"]["observe"]["latest_errors"][0]["payload"]["reason"], "rate_limited")
-            self.assertIn("Claw diagnostics: attention", format_text(report))
+            self.assertIn("Dr. Strange diagnostics: attention", format_text(report))
             self.assertIn("llm_circuit_open", format_text(report))
 
     def test_missing_database_does_not_create_file(self) -> None:

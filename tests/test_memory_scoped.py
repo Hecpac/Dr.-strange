@@ -169,6 +169,17 @@ class ProviderSessionTTLTests(unittest.TestCase):
         self.assertEqual(self.store.get_provider_session("app-1", "anthropic"), "sdk-1")
         self.assertEqual(self.store.get_provider_session_cursor("app-1", "anthropic"), 2)
 
+    def test_clear_provider_sessions_drops_handles_not_local_messages(self) -> None:
+        self.store.store_message("app-1", "user", "hello")
+        self.store.link_provider_session("app-1", "anthropic", "sdk-1")
+        self.store.link_provider_session("app-2", "openai", "resp-1")
+
+        cleared = self.store.clear_provider_sessions()
+
+        self.assertEqual(cleared, 2)
+        self.assertIsNone(self.store.get_provider_session("app-1", "anthropic"))
+        self.assertEqual(self.store.count_messages("app-1"), 1)
+
     def test_get_messages_since_returns_only_unsynced_messages(self) -> None:
         self.store.store_message("app-1", "user", "synced-user")
         self.store.store_message("app-1", "assistant", "synced-assistant")
