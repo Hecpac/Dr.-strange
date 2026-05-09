@@ -939,6 +939,19 @@ class TelegramTransport:
             logger.exception("Error handling voice message")
             response = "Error processing your voice message."
         bot_done_at = time.perf_counter()
+        if response is None:
+            self._emit_latency(
+                session_id=session_id,
+                user_id=user_id,
+                message_kind="transcript",
+                status="suppressed",
+                bot_ms=(bot_done_at - started_at) * 1000,
+                reply_ms=0.0,
+                total_ms=(bot_done_at - started_at) * 1000,
+                response_parts=0,
+                response_chars=0,
+            )
+            return
         response = self._sanitize_outbound_response(session_id, response)
         parts = _split_message(response)
         voice_name = self._bot_service.is_voice_mode(session_id)

@@ -531,6 +531,32 @@ class HandleImageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["status"], "ok")
         self.assertEqual(payload["response_chars"], len("voice response"))
 
+    async def test_handle_text_content_suppresses_when_response_is_none(self) -> None:
+        bot_service = MagicMock()
+        bot_service.observe = MagicMock()
+        bot_service.is_voice_mode = MagicMock(return_value=None)
+        transport = TelegramTransport(
+            bot_service=bot_service, token="t", allowed_user_id="123",
+        )
+        update = MagicMock()
+        update.effective_user.id = 123
+        update.effective_chat.id = 1
+        update.message.reply_text = AsyncMock()
+        update.message.reply_voice = AsyncMock()
+
+        with patch("claw_v2.telegram.asyncio.to_thread", new_callable=AsyncMock, return_value=None):
+            await transport._handle_text_content(update, "arranca research")
+
+        update.message.reply_text.assert_not_awaited()
+        update.message.reply_voice.assert_not_awaited()
+
+        bot_service.observe.emit.assert_called_once()
+        payload = bot_service.observe.emit.call_args.kwargs["payload"]
+        self.assertEqual(payload["message_kind"], "transcript")
+        self.assertEqual(payload["status"], "suppressed")
+        self.assertEqual(payload["response_chars"], 0)
+        self.assertEqual(payload["response_parts"], 0)
+
 
 class SendPhotoTests(unittest.IsolatedAsyncioTestCase):
     async def test_send_screenshot_sends_photo_to_chat(self) -> None:
