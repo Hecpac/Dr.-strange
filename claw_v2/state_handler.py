@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -242,6 +243,38 @@ class StateHandler:
                     ),
                     memory_text=text,
                 )
+            proposal = self._extract_proposal_from_reply_context(state)
+            proposal_source = "reply_context" if proposal else None
+            if not proposal:
+                proposal = self._extract_proposal_from_recent_assistant(session_id)
+                if proposal:
+                    proposal_source = "recent_assistant"
+            if proposal:
+                self._memory.update_session_state(session_id, pending_action=proposal)
+                checkpoint = state.get("last_checkpoint") or {}
+                checkpoint_text = json.dumps(checkpoint, ensure_ascii=True, sort_keys=True) if checkpoint else "{}"
+                self._emit(
+                    "continuation_resolved",
+                    {
+                        "session_id": session_id,
+                        "source": proposal_source,
+                        "proposal_preview": proposal[:160],
+                        "user_text_preview": text[:80],
+                    },
+                )
+                self._emit(
+                    "pending_action_execution_started",
+                    {"session_id": session_id, "pending_action_preview": proposal[:160]},
+                )
+                return _BrainShortcut(
+                    text=(
+                        f"Continúa con esta acción propuesta previamente: {proposal}\n"
+                        f"Mensaje de aprobación del usuario: {text}\n"
+                        f"Origen del contexto: {proposal_source}\n"
+                        f"Checkpoint actual: {checkpoint_text}"
+                    ),
+                    memory_text=text,
+                )
             self._emit(
                 "clarification_requested_after_context_lookup",
                 {"session_id": session_id, "reason": "proceed_without_pending_action"},
@@ -338,6 +371,66 @@ class StateHandler:
         if not isinstance(reply_context, dict):
             return ""
         return str(reply_context.get("text") or "")
+
+    # Proposal/question patterns the assistant uses when offering to execute
+    # something. When Hector replies "Procede"/"Sí"/"Dale" to a message that
+    # ends with one of these, treat it as approval to execute the proposal.
+    _PROPOSAL_QUESTION_RE = re.compile(
+        r"¿\s*(?:lo\s+arranco|lo\s+hago|lo\s+ejecuto|lo\s+lanzo|lo\s+disparo"
+        r"|procedo|continuo|continúo|sigo|avanzo|voy|arranco|"
+        r"lo\s+intento|lo\s+pruebo|lo\s+corro)\s*\??\s*[\?!\.]*\s*$",
+        re.IGNORECASE | re.MULTILINE,
+    )
+
+    def _looks_like_proposal_question(self, text: str) -> bool:
+        if not text:
+            return False
+        # Look at the last non-empty line — proposals typically close with the
+        # question on its own line.
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if not lines:
+            return False
+        tail = lines[-1]
+        if self._PROPOSAL_QUESTION_RE.search(tail):
+            return True
+        # Some proposals close with the question mid-paragraph; scan the
+        # whole tail block too.
+        return bool(self._PROPOSAL_QUESTION_RE.search(text[-400:]))
+
+    def _extract_proposal_from_reply_context(self, state: dict[str, Any]) -> str | None:
+        text = self._reply_context_text(state)
+        if not text:
+            return None
+        if not self._looks_like_proposal_question(text):
+            return None
+        return self._summarize_proposal(text)
+
+    def _extract_proposal_from_recent_assistant(self, session_id: str) -> str | None:
+        get_recent = getattr(self._memory, "get_recent_messages", None)
+        if not callable(get_recent):
+            return None
+        try:
+            messages = get_recent(session_id, limit=8)
+        except Exception:
+            return None
+        for message in reversed(messages):
+            if message.get("role") != "assistant":
+                continue
+            content = str(message.get("content") or "")
+            if self._looks_like_proposal_question(content):
+                return self._summarize_proposal(content)
+        return None
+
+    def _summarize_proposal(self, text: str) -> str:
+        # Strip the closing question, keep the substantive body.
+        cleaned = self._PROPOSAL_QUESTION_RE.sub("", text).strip()
+        if not cleaned:
+            cleaned = text.strip()
+        # Collapse whitespace, cap length so it fits inside a brain hint.
+        compact = " ".join(cleaned.split())
+        if len(compact) > 320:
+            compact = compact[:317] + "..."
+        return compact
 
     def _ratio_context_from_state(self, state: dict[str, Any]) -> list[str]:
         active_object = state.get("active_object") or {}

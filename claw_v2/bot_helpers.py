@@ -307,6 +307,9 @@ _PROCEED_TOKENS = (
     "sí",
     "yes",
     "asi",
+    "vale",
+    "avanza",
+    "adelante",
 )
 _OPTION_ORDINALS = {
     "primera": 1,
@@ -486,10 +489,17 @@ def _looks_like_proceed_request(text: str) -> bool:
     normalized = _normalize_command_text(text).strip()
     if not normalized:
         return False
+    # Strip surrounding punctuation/whitespace so "PROCEDE.", "Dale!", "ok..."
+    # all collapse to their bare token form before lookup.
+    stripped = normalized.strip(" \t\n\r.,;:!?\"'`")
+    if stripped in _PROCEED_TOKENS:
+        return True
     if normalized in _PROCEED_TOKENS:
         return True
     return any(
-        " " in token and normalized.startswith(f"{token} ")
+        " " in token and (
+            normalized.startswith(f"{token} ") or stripped.startswith(f"{token} ")
+        )
         for token in _PROCEED_TOKENS
     )
 
