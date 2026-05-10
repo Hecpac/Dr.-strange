@@ -8,8 +8,8 @@
 ## meta
 
 ```yaml
-describes_commit: 7413b32+kairos-approvals
-doc_version: 1.2
+describes_commit: 1b6e37c+tool-policies-json
+doc_version: 1.3
 last_verified: 2026-05-10
 verification_method: manual + grep cross-check
 anchor_strategy: symbol_only  # path:symbol, no line numbers
@@ -198,13 +198,21 @@ Orthogonal metadata:
 
 ```yaml
 ToolPolicy:
-  risk_level: [low, medium, high]
+  risk_level: [low, medium, high, critical]
   read_only: bool
   allowed_contexts: [telegram, daemon, brain, research, operator]
   requires_human: bool
   allowed_paths: [...]
   blocked_path_patterns: [...]  # SECRET_PATH_PATTERNS covers .env, *.pem, etc.
 ```
+
+**Source of truth**: `claw_v2/config/tool_policies.json`. Loaded at module
+import by `_load_tool_policies_from_config` (`claw_v2/tool_policy.py`),
+fail-fast on schema/validation errors. The sentinel string
+`"SECRET_PATH_PATTERNS"` in `blocked_path_patterns` expands to the
+in-code tuple — secret patterns stay code-owned, not config-owned, so a
+JSON edit cannot weaken the secret denylist. New tools or risk-level
+changes require a JSON edit + tests + INTERNAL_WIRING bump.
 
 ### output sanitization
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fnmatch
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -58,170 +59,76 @@ _DEFAULT_POLICY = ToolPolicy(
 )
 
 
-TOOL_POLICIES: dict[str, ToolPolicy] = {
-    # --- Read-only, low-risk, daemon-safe ---
-    "memory.read": ToolPolicy(
-        name="memory.read",
-        risk_level="low",
-        read_only=True,
-        allowed_contexts=frozenset({"telegram", "daemon", "brain", "research", "operator"}),
-    ),
-    "wiki.search": ToolPolicy(
-        name="wiki.search",
-        risk_level="low",
-        read_only=True,
-        allowed_contexts=frozenset({"telegram", "daemon", "brain", "research", "operator"}),
-    ),
-    "task_ledger.read": ToolPolicy(
-        name="task_ledger.read",
-        risk_level="low",
-        read_only=True,
-        allowed_contexts=frozenset({"telegram", "daemon", "brain", "operator"}),
-    ),
-    "git.status": ToolPolicy(
-        name="git.status",
-        risk_level="low",
-        read_only=True,
-        allowed_contexts=frozenset({"telegram", "daemon", "operator"}),
-    ),
-    "observe.recent_events_redacted": ToolPolicy(
-        name="observe.recent_events_redacted",
-        risk_level="low",
-        read_only=True,
-        allowed_contexts=frozenset({"telegram", "daemon", "brain", "operator"}),
-    ),
-    "file.read_workspace_nonsecret": ToolPolicy(
-        name="file.read_workspace_nonsecret",
-        risk_level="low",
-        read_only=True,
-        allowed_contexts=frozenset({"telegram", "daemon", "operator"}),
-        allowed_paths=("WORKSPACE_ROOT",),
-        blocked_path_patterns=SECRET_PATH_PATTERNS,
-    ),
+_VALID_RISK_LEVELS: frozenset[str] = frozenset({"low", "medium", "high", "critical"})
 
-    # --- Read-only but NOT daemon-safe (may expose secrets/history) ---
-    "Read": ToolPolicy(
-        name="Read",
-        risk_level="medium",
-        read_only=True,
-        allowed_contexts=frozenset({"telegram", "operator", "researcher"}),
-        blocked_path_patterns=SECRET_PATH_PATTERNS,
-    ),
-    "file.read": ToolPolicy(
-        name="file.read",
-        risk_level="medium",
-        read_only=True,
-        allowed_contexts=frozenset({"telegram", "operator"}),
-        blocked_path_patterns=SECRET_PATH_PATTERNS,
-    ),
-    "observe.recent_events": ToolPolicy(
-        name="observe.recent_events",
-        risk_level="medium",
-        read_only=True,
-        allowed_contexts=frozenset({"telegram", "operator"}),
-    ),
+_REQUIRED_FIELDS: tuple[str, ...] = ("risk_level", "read_only", "allowed_contexts")
 
-    # --- Workspace mutations ---
-    "Write": ToolPolicy(
-        name="Write",
-        risk_level="medium",
-        read_only=False,
-        allowed_contexts=frozenset({"telegram", "operator"}),
-        allowed_paths=("WORKSPACE_ROOT",),
-    ),
-    "Edit": ToolPolicy(
-        name="Edit",
-        risk_level="medium",
-        read_only=False,
-        allowed_contexts=frozenset({"telegram", "operator"}),
-        allowed_paths=("WORKSPACE_ROOT",),
-    ),
-    "file.write": ToolPolicy(
-        name="file.write",
-        risk_level="medium",
-        read_only=False,
-        allowed_contexts=frozenset({"telegram", "operator"}),
-        allowed_paths=("WORKSPACE_ROOT",),
-    ),
-    "Bash": ToolPolicy(
-        name="Bash",
-        risk_level="high",
-        read_only=False,
-        allowed_contexts=frozenset({"telegram", "operator"}),
-    ),
 
-    # --- Tier 3 / critical ---
-    "social.publish": ToolPolicy(
-        name="social.publish",
-        risk_level="critical",
-        read_only=False,
-        allowed_contexts=frozenset({"telegram"}),
-        requires_human=True,
-    ),
-    "pipeline.merge": ToolPolicy(
-        name="pipeline.merge",
-        risk_level="high",
-        read_only=False,
-        allowed_contexts=frozenset({"telegram"}),
-        requires_human=True,
-    ),
-    "deploy.production": ToolPolicy(
-        name="deploy.production",
-        risk_level="critical",
-        read_only=False,
-        allowed_contexts=frozenset({"telegram"}),
-        requires_human=True,
-    ),
-    "file.delete": ToolPolicy(
-        name="file.delete",
-        risk_level="high",
-        read_only=False,
-        allowed_contexts=frozenset({"telegram", "operator"}),
-        requires_human=True,
-    ),
-    "git.force_push": ToolPolicy(
-        name="git.force_push",
-        risk_level="critical",
-        read_only=False,
-        allowed_contexts=frozenset({"telegram"}),
-        requires_human=True,
-    ),
-    "WikiDelete": ToolPolicy(
-        name="WikiDelete",
-        risk_level="high",
-        read_only=False,
-        allowed_contexts=frozenset({"telegram", "operator"}),
-        requires_human=True,
-    ),
-    "A2ASend": ToolPolicy(
-        name="A2ASend",
-        risk_level="high",
-        read_only=False,
-        allowed_contexts=frozenset({"telegram", "operator"}),
-        requires_human=True,
-    ),
-    "HeyGenVideo": ToolPolicy(
-        name="HeyGenVideo",
-        risk_level="medium",
-        read_only=False,
-        allowed_contexts=frozenset({"telegram", "operator"}),
-        requires_human=True,
-    ),
-    "GPTImage": ToolPolicy(
-        name="GPTImage",
-        risk_level="medium",
-        read_only=False,
-        allowed_contexts=frozenset({"telegram", "operator"}),
-        requires_human=True,
-    ),
-    "SkillExecute": ToolPolicy(
-        name="SkillExecute",
-        risk_level="high",
-        read_only=False,
-        allowed_contexts=frozenset({"telegram", "operator"}),
-        requires_human=True,
-    ),
-}
+def _config_path() -> Path:
+    return Path(__file__).parent / "config" / "tool_policies.json"
+
+
+def _expand_pattern_sentinel(value: object) -> tuple[str, ...]:
+    """Sentinel "SECRET_PATH_PATTERNS" expands to the in-code tuple. Lists
+    pass through. Anything else is a config error.
+    """
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        if value == "SECRET_PATH_PATTERNS":
+            return SECRET_PATH_PATTERNS
+        raise ValueError(f"unknown pattern sentinel: {value!r}")
+    if isinstance(value, list):
+        return tuple(str(item) for item in value)
+    raise ValueError(f"blocked_path_patterns must be list or sentinel, got {type(value).__name__}")
+
+
+def _build_policy(name: str, raw: dict) -> ToolPolicy:
+    for field_name in _REQUIRED_FIELDS:
+        if field_name not in raw:
+            raise ValueError(f"tool {name!r}: missing required field {field_name!r}")
+    risk_level = raw["risk_level"]
+    if risk_level not in _VALID_RISK_LEVELS:
+        raise ValueError(
+            f"tool {name!r}: unknown risk_level {risk_level!r} "
+            f"(allowed: {sorted(_VALID_RISK_LEVELS)})"
+        )
+    allowed_contexts = raw["allowed_contexts"]
+    if not isinstance(allowed_contexts, list):
+        raise ValueError(f"tool {name!r}: allowed_contexts must be a list")
+    return ToolPolicy(
+        name=name,
+        risk_level=risk_level,
+        read_only=bool(raw["read_only"]),
+        allowed_contexts=frozenset(allowed_contexts),
+        requires_human=bool(raw.get("requires_human", False)),
+        allowed_paths=tuple(raw.get("allowed_paths", ())),
+        blocked_path_patterns=_expand_pattern_sentinel(raw.get("blocked_path_patterns")),
+        allowed_domains=tuple(raw.get("allowed_domains", ())),
+        fallback_tools=tuple(raw.get("fallback_tools", ())),
+    )
+
+
+def _load_tool_policies_from_config(path: Path) -> dict[str, ToolPolicy]:
+    """Load tool policies from a versioned JSON config. Fail-fast on any
+    schema or content error — never silently substitute an empty dict, since
+    that would let unknown tools fall through to the medium-risk default.
+    """
+    if not path.exists():
+        raise FileNotFoundError(f"tool policies config not found: {path}")
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid JSON in {path}: {exc}") from exc
+    if not isinstance(raw, dict) or "tools" not in raw:
+        raise ValueError(f"{path}: top-level object must contain 'tools' key")
+    tools_section = raw["tools"]
+    if not isinstance(tools_section, dict):
+        raise ValueError(f"{path}: 'tools' must be an object mapping name → policy")
+    return {name: _build_policy(name, body) for name, body in tools_section.items()}
+
+
+TOOL_POLICIES: dict[str, ToolPolicy] = _load_tool_policies_from_config(_config_path())
 
 
 DAEMON_AUTO_APPROVE: frozenset[str] = frozenset({

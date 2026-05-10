@@ -1,0 +1,137 @@
+{
+  "version": 1,
+  "tools": {
+    "memory.read": {
+      "risk_level": "low",
+      "read_only": true,
+      "allowed_contexts": ["telegram", "daemon", "brain", "research", "operator"]
+    },
+    "wiki.search": {
+      "risk_level": "low",
+      "read_only": true,
+      "allowed_contexts": ["telegram", "daemon", "brain", "research", "operator"]
+    },
+    "task_ledger.read": {
+      "risk_level": "low",
+      "read_only": true,
+      "allowed_contexts": ["telegram", "daemon", "brain", "operator"]
+    },
+    "git.status": {
+      "risk_level": "low",
+      "read_only": true,
+      "allowed_contexts": ["telegram", "daemon", "operator"]
+    },
+    "observe.recent_events_redacted": {
+      "risk_level": "low",
+      "read_only": true,
+      "allowed_contexts": ["telegram", "daemon", "brain", "operator"]
+    },
+    "file.read_workspace_nonsecret": {
+      "risk_level": "low",
+      "read_only": true,
+      "allowed_contexts": ["telegram", "daemon", "operator"],
+      "allowed_paths": ["WORKSPACE_ROOT"],
+      "blocked_path_patterns": "SECRET_PATH_PATTERNS"
+    },
+    "Read": {
+      "risk_level": "medium",
+      "read_only": true,
+      "allowed_contexts": ["telegram", "operator", "researcher"],
+      "blocked_path_patterns": "SECRET_PATH_PATTERNS"
+    },
+    "file.read": {
+      "risk_level": "medium",
+      "read_only": true,
+      "allowed_contexts": ["telegram", "operator"],
+      "blocked_path_patterns": "SECRET_PATH_PATTERNS"
+    },
+    "observe.recent_events": {
+      "risk_level": "medium",
+      "read_only": true,
+      "allowed_contexts": ["telegram", "operator"]
+    },
+    "Write": {
+      "risk_level": "medium",
+      "read_only": false,
+      "allowed_contexts": ["telegram", "operator"],
+      "allowed_paths": ["WORKSPACE_ROOT"]
+    },
+    "Edit": {
+      "risk_level": "medium",
+      "read_only": false,
+      "allowed_contexts": ["telegram", "operator"],
+      "allowed_paths": ["WORKSPACE_ROOT"]
+    },
+    "file.write": {
+      "risk_level": "medium",
+      "read_only": false,
+      "allowed_contexts": ["telegram", "operator"],
+      "allowed_paths": ["WORKSPACE_ROOT"]
+    },
+    "Bash": {
+      "risk_level": "high",
+      "read_only": false,
+      "allowed_contexts": ["telegram", "operator"]
+    },
+    "social.publish": {
+      "risk_level": "critical",
+      "read_only": false,
+      "allowed_contexts": ["telegram"],
+      "requires_human": true
+    },
+    "pipeline.merge": {
+      "risk_level": "high",
+      "read_only": false,
+      "allowed_contexts": ["telegram"],
+      "requires_human": true
+    },
+    "deploy.production": {
+      "risk_level": "critical",
+      "read_only": false,
+      "allowed_contexts": ["telegram"],
+      "requires_human": true
+    },
+    "file.delete": {
+      "risk_level": "high",
+      "read_only": false,
+      "allowed_contexts": ["telegram", "operator"],
+      "requires_human": true
+    },
+    "git.force_push": {
+      "risk_level": "critical",
+      "read_only": false,
+      "allowed_contexts": ["telegram"],
+      "requires_human": true
+    },
+    "WikiDelete": {
+      "risk_level": "high",
+      "read_only": false,
+      "allowed_contexts": ["telegram", "operator"],
+      "requires_human": true
+    },
+    "A2ASend": {
+      "risk_level": "high",
+      "read_only": false,
+      "allowed_contexts": ["telegram", "operator"],
+      "requires_human": true
+    },
+    "HeyGenVideo": {
+      "risk_level": "medium",
+      "read_only": false,
+      "allowed_contexts": ["telegram", "operator"],
+      "requires_human": true
+    },
+    "GPTImage": {
+      "risk_level": "medium",
+      "read_only": false,
+      "allowed_contexts": ["telegram", "operator"],
+      "requires_human": true
+    },
+    "SkillExecute": {
+      "risk_level": "high",
+      "read_only": false,
+      "allowed_contexts": ["telegram", "operator"],
+      "requires_human": true
+    }
+  }
+}
