@@ -28,6 +28,7 @@ from claw_v2.capability_router import (
     classify_autonomy_intent,
     route_request,
 )
+from claw_v2.capability_preflight import CapabilityPreflightResult, preflight_objective
 from claw_v2.execution_environment import (
     ExecutionEnvironment,
     detect_execution_environment,
@@ -1696,6 +1697,44 @@ class BotService:
             self._store_memory_turn(session_id, stripped, boot_context_response, assistant_limit=3000)
             self._remember_assistant_turn_state(session_id, stripped, boot_context_response)
             return boot_context_response
+        pending_tasks_response = self._maybe_handle_pending_tasks_query(stripped, session_id=session_id)
+        self._emit_dispatch_decision(
+            handler="pending_tasks",
+            route="intercepted" if pending_tasks_response is not None else "fall_through",
+            reason=(
+                "pending_tasks_query_matched"
+                if pending_tasks_response is not None
+                else "pending_tasks_query_no_match"
+            ),
+            session_id=session_id,
+            text=stripped,
+            captured=pending_tasks_response is not None,
+        )
+        if pending_tasks_response is not None:
+            self._store_memory_turn(session_id, stripped, pending_tasks_response, assistant_limit=2000)
+            self._remember_assistant_turn_state(session_id, stripped, pending_tasks_response)
+            return pending_tasks_response
+        actionable_task_response = self._maybe_handle_actionable_task_request(
+            stripped,
+            session_id=session_id,
+            runtime_channel=runtime_channel,
+        )
+        self._emit_dispatch_decision(
+            handler="telegram_actionable_task",
+            route="intercepted" if actionable_task_response is not None else "fall_through",
+            reason=(
+                "telegram_actionable_task_matched"
+                if actionable_task_response is not None
+                else "telegram_actionable_task_no_match"
+            ),
+            session_id=session_id,
+            text=stripped,
+            captured=actionable_task_response is not None,
+        )
+        if actionable_task_response is not None:
+            self._store_memory_turn(session_id, stripped, actionable_task_response, assistant_limit=2000)
+            self._remember_assistant_turn_state(session_id, stripped, actionable_task_response)
+            return actionable_task_response
         task_intent_response = self._maybe_handle_task_intent(stripped, session_id=session_id)
         # The task intent router is gated by CLAW_DISABLE_TASK_INTENT_ROUTER
         # (default ON); a fall_through can be either "disabled by flag" or
@@ -3608,6 +3647,258 @@ class BotService:
         if kind == "resume_previous":
             return self._task_resume_previous_response(session_id)
         return None
+
+    def _maybe_handle_pending_tasks_query(self, text: str, *, session_id: str) -> str | None:
+        normalized = _normalize_command_text(text).strip(" \t\n\r.,;:!?¿¡")
+        compact = re.sub(r"[^a-z0-9]+", "", normalized)
+        if not (
+            ("tareas" in normalized and "pendient" in normalized)
+            or compact in {"pendientes", "tareaspendientes"}
+        ):
+            return None
+        return self._pending_tasks_summary_response(session_id)
+
+    def _pending_tasks_summary_response(self, session_id: str) -> str:
+        lines = ["Tareas pendientes:"]
+        found = False
+        try:
+            approvals = self.approvals.list_pending() if self.approvals is not None else []
+        except Exception:
+            approvals = []
+        if approvals:
+            found = True
+            lines.append(f"Aprobaciones pendientes: {len(approvals)}")
+            for item in approvals[:5]:
+                summary = str(item.get("summary") or item.get("action") or "aprobacion pendiente").strip()
+                lines.append(f"- Aprobacion: {summary[:180]}. Recomendacion: revisar vigencia antes de aprobar.")
+        records = []
+        if self.task_ledger is not None:
+            try:
+                records = self.task_ledger.list(session_id=session_id, limit=20)
+            except Exception:
+                records = []
+        active = [record for record in records if str(getattr(record, "status", "")) in {"queued", "running"}]
+        blocked = [
+            record for record in records
+            if str(getattr(record, "verification_status", "")) in {"blocked", "missing_evidence", "pending"}
+            or str(getattr(record, "status", "")) in {"failed", "timed_out", "lost"}
+        ]
+        if active:
+            found = True
+            lines.append("Tareas activas:")
+            for record in active[:5]:
+                detail = str(getattr(record, "summary", "") or getattr(record, "objective", "") or "sin resumen").strip()
+                verification = str(getattr(record, "verification_status", "unknown") or "unknown")
+                lines.append(f"- Activa / {verification}: {detail[:180]}")
+        if blocked:
+            found = True
+            lines.append("Tareas bloqueadas o incompletas:")
+            for record in blocked[:5]:
+                detail = str(getattr(record, "error", "") or getattr(record, "summary", "") or getattr(record, "objective", "") or "sin detalle").strip()
+                verification = str(getattr(record, "verification_status", "unknown") or "unknown")
+                lines.append(f"- {verification}: {detail[:180]}. Recomendacion: revisar blocker y reintentar solo con tool habilitada.")
+        state = self.brain.memory.get_session_state(session_id)
+        pending_action = str(state.get("pending_action") or "").strip()
+        if pending_action:
+            found = True
+            lines.append(f"Accion pendiente de sesion: {pending_action[:180]}")
+        if not found:
+            lines.append("No veo aprobaciones, tareas activas ni blockers recientes en esta conversacion.")
+        return "\n".join(lines)
+
+    def _maybe_handle_actionable_task_request(
+        self,
+        text: str,
+        *,
+        session_id: str,
+        runtime_channel: str | None,
+    ) -> str | None:
+        if (runtime_channel or "").strip().lower() != "telegram":
+            return None
+        if not text or text.startswith("/"):
+            return None
+        state = self.brain.memory.get_session_state(session_id)
+        objective, source = self._resolve_actionable_task_objective(text, state=state)
+        if objective is None:
+            if self._looks_like_actionable_followup(text):
+                self._emit_safe(
+                    "clarification_requested_after_context_lookup",
+                    {"session_id": session_id, "reason": "actionable_task_context_not_found"},
+                )
+                return "¿Qué acción concreta quieres que ejecute?"
+            return None
+        if os.getenv("CLAW_DISABLE_TELEGRAM_ACTIONABLE_TASK_ROUTER", "0") == "1":
+            self._emit_safe(
+                "actionable_task_router_disabled",
+                {"session_id": session_id, "source": source, "objective_preview": objective[:160]},
+            )
+            return (
+                "El router autonomo de Telegram esta desactivado por configuracion. "
+                "No voy a tratar esto como chat: usa `/task_run <objetivo>` o habilita la ruta controlada."
+            )
+        preflight = self._run_capability_preflight(objective, session_id=session_id)
+        mode = _infer_session_mode(objective)
+        if mode not in {"coding", "research"}:
+            mode = "coding"
+        if preflight.blockers:
+            self._task_handler.record_blocked_task(
+                session_id,
+                objective,
+                source_text=text,
+                mode=mode,
+                task_kind=preflight.task_kind,
+                risk_tier=preflight.risk_tier,
+                plan=preflight.plan,
+                verification_requirement=preflight.verification_requirement,
+                blockers=preflight.blockers,
+                preflight=preflight.to_dict(),
+            )
+            return self._format_preflight_blocked_response(preflight)
+        if getattr(self._task_handler, "coordinator", None) is None:
+            blocker_result = preflight.to_dict()
+            blocker_result["blockers"] = ["coordinator_unavailable"]
+            self._task_handler.record_blocked_task(
+                session_id,
+                objective,
+                source_text=text,
+                mode=mode,
+                task_kind=preflight.task_kind,
+                risk_tier=preflight.risk_tier,
+                plan=preflight.plan,
+                verification_requirement=preflight.verification_requirement,
+                blockers=["coordinator_unavailable"],
+                preflight=blocker_result,
+            )
+            return "Creé la tarea, pero quedó bloqueada porque el coordinador autónomo no está disponible."
+        self._task_handler.start_autonomous_task(
+            session_id,
+            objective,
+            mode=mode,
+            source_text=text,
+            task_kind=preflight.task_kind,
+            risk_tier=preflight.risk_tier,
+            preflight=preflight.to_dict(),
+            plan=preflight.plan,
+            verification_requirement=preflight.verification_requirement,
+        )
+        return "Tomado. Creé una tarea autónoma; voy a ejecutar lo permitido y registrar blockers con evidencia."
+
+    def _resolve_actionable_task_objective(
+        self,
+        text: str,
+        *,
+        state: dict[str, Any],
+    ) -> tuple[str | None, str]:
+        if self._looks_like_direct_actionable_task(text):
+            return text.strip(), "direct_message"
+        if not self._looks_like_actionable_followup(text):
+            return None, "no_match"
+        pending_action = str(state.get("pending_action") or "").strip()
+        if pending_action:
+            return pending_action, "pending_action"
+        checkpoint = state.get("last_checkpoint") or {}
+        if isinstance(checkpoint, dict):
+            checkpoint_action = str(checkpoint.get("pending_action") or "").strip()
+            if checkpoint_action:
+                return checkpoint_action, "last_checkpoint"
+        current_goal = str(state.get("current_goal") or "").strip()
+        if current_goal and not self._looks_like_actionable_followup(current_goal):
+            return current_goal, "current_goal"
+        active_object = state.get("active_object") or {}
+        if isinstance(active_object, dict):
+            active_task = active_object.get("active_task") or {}
+            if isinstance(active_task, dict):
+                objective = str(active_task.get("objective") or "").strip()
+                status = str(active_task.get("status") or "").strip()
+                if objective and status not in {"completed", "succeeded"}:
+                    return objective, "active_task"
+        return None, "missing_context"
+
+    @staticmethod
+    def _looks_like_direct_actionable_task(text: str) -> bool:
+        normalized = _normalize_command_text(text)
+        return (
+            ("actualiza" in normalized and any(token in normalized for token in ("codex", "claude", "codex app")))
+            or ("regenera" in normalized and "lock" in normalized)
+            or ("poetry.lock" in normalized)
+            or ("pyproject" in normalized and "lock" in normalized)
+            or ("pr" in normalized and any(token in normalized for token in ("termina", "completa", "finaliza")))
+        )
+
+    @staticmethod
+    def _looks_like_actionable_followup(text: str) -> bool:
+        normalized = _normalize_command_text(text).strip(" \t\n\r.,;:!?¿¡")
+        if _looks_like_proceed_request(text):
+            return True
+        return any(
+            phrase in normalized
+            for phrase in (
+                "debes hacerlo tu",
+                "debes hacerla tu",
+                "debes hacerlas tu",
+                "debes actualizarlas tu",
+                "debes actualizarlos tu",
+                "actualizalas tu",
+                "actualizalos tu",
+                "hazlo tu",
+                "ejecutalo tu",
+                "ejecutala tu",
+            )
+        )
+
+    def _run_capability_preflight(self, objective: str, *, session_id: str) -> CapabilityPreflightResult:
+        self._emit_safe(
+            "capability_preflight_started",
+            {"session_id": session_id, "objective_preview": objective[:160]},
+        )
+        workspace_root = Path(getattr(self.config, "workspace_root", None) or Path.cwd())
+        profile = str(getattr(self.config, "sandbox_capability_profile", "engineer") or "engineer")
+        result = preflight_objective(
+            objective,
+            workspace_root=workspace_root,
+            capability_profile=profile,
+        )
+        payload = result.to_dict()
+        payload["session_id"] = session_id
+        payload["objective_preview"] = objective[:160]
+        self._emit_safe("capability_preflight_result", payload)
+        for blocker in result.blockers:
+            self._emit_safe(
+                "tool_blocker_detected",
+                {
+                    "session_id": session_id,
+                    "task_kind": result.task_kind,
+                    "blocker": blocker[:300],
+                },
+            )
+        return result
+
+    def _format_preflight_blocked_response(self, preflight: CapabilityPreflightResult) -> str:
+        details: list[str] = []
+        for check in preflight.checks:
+            if not check.blocker:
+                continue
+            if check.status == "command_not_found":
+                details.append(f"{check.binary}: no disponible")
+            elif check.status == "policy_blocked":
+                details.append(f"{check.binary}: bloqueado por policy")
+            else:
+                details.append(f"{check.binary}: {check.status}")
+        if not details:
+            details = ["capacidad requerida no disponible"]
+        return (
+            "Creé la tarea, pero quedó bloqueada en preflight antes de ejecutar.\n"
+            + "\n".join(f"- {item}" for item in details[:5])
+            + "\nSiguiente paso: habilitar el comando específico o darme una ruta segura alternativa."
+        )
+
+    def _emit_safe(self, event_type: str, payload: dict[str, Any]) -> None:
+        if self.observe is None:
+            return
+        try:
+            self.observe.emit(event_type, payload=payload)
+        except Exception:
+            logger.debug("failed to emit %s", event_type, exc_info=True)
 
     def _maybe_handle_operational_status(self, text: str, *, session_id: str) -> str | None:
         normalized = _normalize_command_text(text).strip()

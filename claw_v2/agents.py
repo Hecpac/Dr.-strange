@@ -291,7 +291,7 @@ class AutoResearchAgentService:
             self.store.save_state(agent_name, state)
         for experiment_number in range(1, max_experiments + 1):
             try:
-                record = self.experiment_runner(agent_name, experiment_number, state)
+                record = self._run_experiment_with_codex_retry(agent_name, experiment_number, state)
             except AdapterError as exc:
                 return self._record_adapter_failure(
                     agent_name,
@@ -304,6 +304,7 @@ class AutoResearchAgentService:
             history.append(record)
             last_metric = record.metric_value
             state["consecutive_failures"] = 0
+            state.pop("codex_timeout_retry_attempted", None)
             state.pop("pause_reason", None)
             state["experiments_today"] = state.get("experiments_today", 0) + 1
             state["last_verified_state"] = {"metric": record.metric_value}
@@ -337,7 +338,7 @@ class AutoResearchAgentService:
             self.store.save_state(agent_name, state)
         for experiment_number in range(1, max_experiments + 1):
             try:
-                record = self.experiment_runner(agent_name, experiment_number, state)
+                record = self._run_experiment_with_codex_retry(agent_name, experiment_number, state)
             except AdapterError as exc:
                 return self._record_adapter_failure(
                     agent_name,
@@ -350,6 +351,7 @@ class AutoResearchAgentService:
             history.append(record)
             last_metric = record.metric_value
             state["consecutive_failures"] = 0
+            state.pop("codex_timeout_retry_attempted", None)
             state.pop("pause_reason", None)
             state["experiments_today"] = state.get("experiments_today", 0) + 1
             state["last_verified_state"] = {"metric": record.metric_value}
@@ -425,6 +427,16 @@ class AutoResearchAgentService:
         reason = _classify_adapter_error(exc)
         error = str(exc)[:_ERROR_SNIPPET_CHARS]
         failures = int(state.get("consecutive_failures") or 0) + 1
+        checkpoint = {
+            "verification_status": "blocked" if reason == "codex_timeout" else "failed",
+            "reason": reason,
+            "error": error,
+            "next_action": (
+                "retry with narrower scope or switch to local safe execution"
+                if reason == "codex_timeout"
+                else "inspect adapter failure before retry"
+            ),
+        }
         state["paused"] = True
         state["pause_reason"] = reason
         state["consecutive_failures"] = failures
@@ -432,6 +444,7 @@ class AutoResearchAgentService:
         state["last_error_type"] = type(exc).__name__
         state["last_error_at"] = time.time()
         state["last_action"] = f"paused:{reason}"
+        state["last_checkpoint"] = checkpoint
         self.store.save_state(agent_name, state)
         payload = {
             "agent": agent_name,
@@ -439,14 +452,79 @@ class AutoResearchAgentService:
             "error": error,
             "consecutive_failures": failures,
             "experiments_run": experiments_run,
+            "checkpoint": checkpoint,
         }
         if self.observe is not None:
             try:
                 self.observe.emit("auto_research_adapter_error", payload=payload)
+                if reason == "codex_timeout":
+                    self.observe.emit("task_blocked_with_evidence", payload=payload)
             except Exception:
                 logger.exception("auto_research failure event emit failed for %s", agent_name)
         logger.warning("auto_research agent %s paused after adapter failure: %s", agent_name, error)
         return LoopResult(experiments_run, True, reason, last_metric)
+
+    def _run_experiment_with_codex_retry(
+        self,
+        agent_name: str,
+        experiment_number: int,
+        state: dict,
+    ) -> ExperimentRecord:
+        try:
+            return self.experiment_runner(agent_name, experiment_number, state)
+        except AdapterError as exc:
+            if _classify_adapter_error(exc) != "codex_timeout" or state.get("codex_timeout_retry_attempted"):
+                raise
+            error = str(exc)[:_ERROR_SNIPPET_CHARS]
+            checkpoint = {
+                "verification_status": "blocked",
+                "reason": "codex_timeout",
+                "error": error,
+                "retry": "narrow_scope_once",
+                "experiment_number": experiment_number,
+            }
+            state["codex_timeout_retry_attempted"] = True
+            state["last_checkpoint"] = checkpoint
+            state["last_action"] = "retrying:codex_timeout"
+            self.store.save_state(agent_name, state)
+            if self.observe is not None:
+                try:
+                    self.observe.emit(
+                        "codex_timeout_detected",
+                        payload={"agent": agent_name, "error": error, "checkpoint": checkpoint},
+                    )
+                    self.observe.emit(
+                        "codex_retry_started",
+                        payload={"agent": agent_name, "experiment_number": experiment_number, "scope": "narrow"},
+                    )
+                except Exception:
+                    logger.exception("codex timeout retry event emit failed for %s", agent_name)
+            try:
+                return self.experiment_runner(agent_name, experiment_number, state)
+            except AdapterError as retry_exc:
+                retry_reason = _classify_adapter_error(retry_exc)
+                retry_error = str(retry_exc)[:_ERROR_SNIPPET_CHARS]
+                state["last_checkpoint"] = {
+                    **checkpoint,
+                    "retry_failed": True,
+                    "retry_reason": retry_reason,
+                    "retry_error": retry_error,
+                }
+                self.store.save_state(agent_name, state)
+                if self.observe is not None:
+                    try:
+                        self.observe.emit(
+                            "codex_retry_failed",
+                            payload={
+                                "agent": agent_name,
+                                "reason": retry_reason,
+                                "error": retry_error,
+                                "checkpoint": state["last_checkpoint"],
+                            },
+                        )
+                    except Exception:
+                        logger.exception("codex retry failure event emit failed for %s", agent_name)
+                raise retry_exc
 
     def update_controls(
         self,

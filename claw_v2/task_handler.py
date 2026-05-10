@@ -149,7 +149,19 @@ class TaskHandler:
             return None
         return self.start_autonomous_task(session_id, text, mode=mode)
 
-    def start_autonomous_task(self, session_id: str, objective: str, *, mode: str | None = None) -> str:
+    def start_autonomous_task(
+        self,
+        session_id: str,
+        objective: str,
+        *,
+        mode: str | None = None,
+        source_text: str | None = None,
+        task_kind: str | None = None,
+        risk_tier: str | None = None,
+        preflight: dict[str, Any] | None = None,
+        plan: list[str] | None = None,
+        verification_requirement: str | None = None,
+    ) -> str:
         if self.coordinator is None:
             return "coordinator unavailable"
         mode = mode or _infer_session_mode(objective)
@@ -210,6 +222,18 @@ class TaskHandler:
                 "mode": mode,
             },
         )
+        task_contract = {
+            "goal": objective,
+            "source_message": (source_text or objective)[:500],
+            "risk_tier": risk_tier or ("tier_2" if mode == "coding" else "tier_1"),
+            "plan": list(plan or planned_phases_for_mode(mode)),
+            "current_step": "task_started",
+            "verification_requirement": verification_requirement or "task ledger records terminal or pending state with evidence",
+            "blockers": [],
+            "task_kind": task_kind or "coordinator_autonomous_task",
+        }
+        if preflight:
+            task_contract["preflight"] = preflight
         self._record_ledger_task_started(
             task_id=task_id,
             session_id=session_id,
@@ -217,6 +241,7 @@ class TaskHandler:
             mode=mode,
             route=active_route,
             goal_id=goal_id,
+            task_contract=task_contract,
         )
         claim_id = self._p0_record_task_claim(
             goal_id=goal_id,
@@ -263,6 +288,120 @@ class TaskHandler:
             f"Modo: {mode}\n"
             "Para mirar el estado en vivo: `/task_loop`."
         )
+
+    def record_blocked_task(
+        self,
+        session_id: str,
+        objective: str,
+        *,
+        source_text: str,
+        mode: str,
+        task_kind: str,
+        risk_tier: str,
+        plan: list[str],
+        verification_requirement: str,
+        blockers: list[str],
+        preflight: dict[str, Any],
+    ) -> str:
+        task_id = f"{session_id}:blocked:{time.time_ns()}"
+        state = self._get_session_state(session_id)
+        route = dict(
+            state.get("active_object", {}).get("last_channel_route") or {}
+        ) if isinstance(state.get("active_object"), dict) else {}
+        goal_id = self._p0_create_task_goal(
+            task_id=task_id,
+            session_id=session_id,
+            objective=objective,
+            mode=mode,
+            route=route,
+            anchor_source=f"task_id:{task_id}:blocked",
+        )
+        metadata = {
+            "autonomous": True,
+            "goal": objective,
+            "source_message": source_text[:500],
+            "risk_tier": risk_tier,
+            "plan": list(plan),
+            "current_step": "capability_preflight",
+            "verification_requirement": verification_requirement,
+            "blockers": list(blockers),
+            "task_kind": task_kind,
+            **({"goal_id": goal_id} if goal_id else {}),
+        }
+        artifacts = {
+            "preflight": dict(preflight),
+            "blockers": list(blockers),
+            "evidence": {"capability_preflight": dict(preflight)},
+        }
+        if self.task_ledger is not None:
+            self.task_ledger.create(
+                task_id=task_id,
+                session_id=session_id,
+                objective=objective,
+                mode=mode,
+                runtime="telegram_preflight",
+                status="running",
+                route=route,
+                metadata=metadata,
+                artifacts=artifacts,
+            )
+            self.task_ledger.mark_terminal(
+                task_id,
+                status="failed",
+                summary=f"Task blocked during capability preflight: {objective[:180]}",
+                error="; ".join(blockers)[:1000],
+                verification_status="blocked",
+                artifacts=artifacts,
+            )
+        active_object = dict(state.get("active_object") or {})
+        active_object["active_task"] = {
+            "task_id": task_id,
+            "objective": objective,
+            "mode": mode,
+            "status": "blocked",
+            "task_kind": task_kind,
+            "risk_tier": risk_tier,
+            "blockers": list(blockers)[:5],
+            **({"goal_id": goal_id} if goal_id else {}),
+        }
+        queue = self.upsert_task_queue_entry(
+            state.get("task_queue") or [],
+            summary=objective,
+            mode=mode,
+            status="blocked",
+            source="telegram_preflight",
+            priority=0,
+            depends_on=self.derive_task_dependencies(state.get("task_queue") or [], summary=objective),
+        )
+        checkpoint = {
+            "summary": f"Capability preflight blocked task: {objective[:180]}",
+            "verification_status": "blocked",
+            "reason": "capability_preflight_blocked",
+            "task_id": task_id,
+            "blockers": list(blockers)[:10],
+            "preflight": dict(preflight),
+        }
+        self._update_session_state(
+            session_id,
+            mode=mode,
+            pending_action="",
+            task_queue=queue,
+            verification_status="blocked",
+            last_checkpoint=checkpoint,
+            active_object=active_object,
+        )
+        self._emit(
+            "task_blocked_with_evidence",
+            {
+                "session_id": session_id,
+                "task_id": task_id,
+                "objective": objective,
+                "task_kind": task_kind,
+                "blockers": list(blockers),
+                "preflight": dict(preflight),
+            },
+        )
+        return task_id
 
     def coordinated_task_response(
         self,
@@ -1432,6 +1571,7 @@ class TaskHandler:
         mode: str,
         route: dict[str, Any],
         goal_id: str | None = None,
+        task_contract: dict[str, Any] | None = None,
     ) -> None:
         if self.task_ledger is None:
             return
@@ -1447,7 +1587,11 @@ class TaskHandler:
             model=model,
             status="running",
             route=route,
-            metadata={"autonomous": True, **({"goal_id": goal_id} if goal_id else {})},
+            metadata={
+                "autonomous": True,
+                **(task_contract or {}),
+                **({"goal_id": goal_id} if goal_id else {}),
+            },
             artifacts=self._initial_task_artifacts(
                 task_id=task_id,
                 session_id=session_id,

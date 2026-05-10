@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
 from claw_v2.bot_helpers import (
     _chat_response_has_internal_leak,
@@ -9,6 +10,8 @@ from claw_v2.bot_helpers import (
     _looks_like_ratio_reference_request,
     _sanitize_chat_response,
 )
+from claw_v2.capability_preflight import CommandSpec, preflight_command, preflight_objective
+from claw_v2.sandbox import SandboxPolicy
 
 
 class BotHelperRegressionTests(unittest.TestCase):
@@ -134,6 +137,44 @@ class BotHelperRegressionTests(unittest.TestCase):
         self.assertNotIn("herramientas internas", lowered)
         self.assertNotIn("la oculté", lowered)
         self.assertNotIn("tool traces", lowered)
+
+    def test_permission_preflight_distinguishes_allowed_missing_and_policy_blocked(self) -> None:
+        policy = SandboxPolicy(workspace_root=Path("/tmp"), capability_profile="engineer")
+        which = lambda binary: f"/usr/bin/{binary}" if binary in {"python3", "codex"} else None
+
+        allowed = preflight_command(
+            CommandSpec("python3 --version", "python_check"),
+            policy=policy,
+            which=which,
+        )
+        missing = preflight_command(
+            CommandSpec("poetry --version", "poetry_check"),
+            policy=policy,
+            which=which,
+        )
+        blocked = preflight_command(
+            CommandSpec("codex --version", "codex_check"),
+            policy=policy,
+            which=which,
+        )
+
+        self.assertEqual(allowed.status, "allowed")
+        self.assertEqual(missing.status, "command_not_found")
+        self.assertIn("command_not_found:poetry", missing.blocker)
+        self.assertEqual(blocked.status, "policy_blocked")
+        self.assertIn("policy_blocked:codex", blocked.blocker)
+
+    def test_qts_lock_preflight_records_poetry_blocker(self) -> None:
+        result = preflight_objective(
+            "Regenera el lock del PR QTS",
+            workspace_root=Path("/tmp"),
+            capability_profile="engineer",
+            which=lambda binary: f"/usr/bin/{binary}" if binary in {"python3", "git"} else None,
+        )
+
+        self.assertEqual(result.task_kind, "qts_lock_regeneration")
+        self.assertFalse(result.allowed)
+        self.assertTrue(any("poetry" in blocker for blocker in result.blockers))
 
 
 if __name__ == "__main__":
