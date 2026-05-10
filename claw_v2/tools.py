@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 import re
 import subprocess
-import hashlib
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
@@ -18,6 +19,16 @@ from claw_v2.network_proxy import DomainAllowlistEnforcer
 from claw_v2.sandbox import SandboxPolicy, sandbox_hook
 from claw_v2.sanitizer import extract_structured, sanitize
 from claw_v2.types import AgentClass, SanitizedContent
+
+logger = logging.getLogger(__name__)
+
+
+def _is_systemic_block(exc: Exception) -> bool:
+    """A systemic block (cost/rate breaker) blocks every tool, so pivoting
+    to an alternative is wasted retry. Hard-denylist matches and sandbox
+    policy rejections are tool-specific and SHOULD pivot."""
+    msg = str(exc).lower()
+    return "observation window frozen" in msg or "tool_calls_per_minute breaker" in msg
 
 if TYPE_CHECKING:
     from claw_v2.a2a import A2AService
@@ -470,6 +481,82 @@ class ToolRegistry:
         if definition.ingests_external_content and isinstance(result, dict):
             return sanitize_tool_output(definition, result, agent_class=agent_class)
         return result
+
+    def execute_with_pivot(
+        self,
+        name: str,
+        args: dict,
+        *,
+        agent_class: AgentClass,
+        policy: SandboxPolicy | None = None,
+        network_enforcer: DomainAllowlistEnforcer | None = None,
+        approval_gate: ApprovalGate | None = None,
+        goal_id: str | None = None,
+        session_id: str | None = None,
+        alternatives: list[str] | None = None,
+    ) -> dict:
+        """Execute a tool with automatic pivot to alternatives on tool-specific blocks.
+
+        Pivots when the framework refuses the SPECIFIC tool: PermissionError from
+        sandbox, hard denylist matches. Does NOT pivot on systemic blocks
+        (observation window frozen, tool_calls_per_minute breaker) — same window
+        blocks every alternative, so retrying is wasted.
+
+        Alternatives source: explicit `alternatives` param, else
+        `ToolPolicy.fallback_tools` for the primary tool. Same args are passed
+        verbatim — incompatibility just falls through the chain.
+
+        Emits `tool_pivot` per pivot with from_tool / to_tool / reason.
+        """
+        if alternatives is None:
+            try:
+                from claw_v2.tool_policy import TOOL_POLICIES
+
+                policy_entry = TOOL_POLICIES.get(name)
+                alternatives = list(policy_entry.fallback_tools) if policy_entry else []
+            except Exception:
+                alternatives = []
+        chain = [name, *(alternatives or [])]
+        last_error: PermissionError | None = None
+        for idx, candidate in enumerate(chain):
+            try:
+                return self.execute(
+                    candidate,
+                    args,
+                    agent_class=agent_class,
+                    policy=policy,
+                    network_enforcer=network_enforcer,
+                    approval_gate=approval_gate,
+                    goal_id=goal_id,
+                    session_id=session_id,
+                )
+            except PermissionError as exc:
+                last_error = exc
+                if _is_systemic_block(exc):
+                    raise
+                if idx < len(chain) - 1:
+                    next_candidate = chain[idx + 1]
+                    self._emit_tool_pivot(
+                        from_tool=candidate,
+                        to_tool=next_candidate,
+                        reason=f"{type(exc).__name__}: {str(exc)[:160]}",
+                    )
+                    continue
+                raise
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("execute_with_pivot reached unreachable branch")
+
+    def _emit_tool_pivot(self, *, from_tool: str, to_tool: str, reason: str) -> None:
+        if self.observe is None:
+            return
+        try:
+            self.observe.emit(
+                "tool_pivot",
+                payload={"from_tool": from_tool, "to_tool": to_tool, "reason": reason[:300]},
+            )
+        except Exception:
+            logger.debug("tool_pivot emit failed", exc_info=True)
 
     def _p0_runtime_goal_id(self) -> str:
         if self._runtime_goal_id is not None:

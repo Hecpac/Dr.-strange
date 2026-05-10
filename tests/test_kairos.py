@@ -139,6 +139,82 @@ class DecideTests(unittest.TestCase):
         self.assertEqual(emit_calls[0].kwargs["payload"]["error_kind"], "general")
 
 
+class RunAgentLoopHandlerTests(unittest.TestCase):
+    def test_run_agent_loop_invokes_factory_and_emits_outcome_event(self) -> None:
+        from claw_v2.agent_loop import AgentLoopOutcome
+
+        run_calls: list[str] = []
+
+        class _StubLoop:
+            def run(self, goal: str):
+                run_calls.append(goal)
+                return AgentLoopOutcome(
+                    status="passed", final_result=None, history=(), reason="ok"
+                )
+
+        factory_calls: list[tuple] = []
+
+        def factory(goal_id, project_id, milestone_id):
+            factory_calls.append((goal_id, project_id, milestone_id))
+            return _StubLoop()
+
+        svc, _, _, observe = _make_service(agent_loop_factory=factory)
+        decision = TickDecision(
+            action="run_agent_loop",
+            reason="milestone overdue",
+            detail=json.dumps(
+                {
+                    "goal_id": "g_landing",
+                    "project_id": "p_site",
+                    "milestone_id": "m_hero",
+                    "goal_text": "Ship hero copy",
+                }
+            ),
+        )
+        svc._handle_run_agent_loop(decision)
+
+        self.assertEqual(factory_calls, [("g_landing", "p_site", "m_hero")])
+        self.assertEqual(run_calls, ["Ship hero copy"])
+        emit_calls = [
+            call for call in observe.emit.call_args_list
+            if call.args[0] == "kairos_agent_loop_complete"
+        ]
+        self.assertEqual(len(emit_calls), 1)
+        payload = emit_calls[0].kwargs["payload"]
+        self.assertEqual(payload["goal_id"], "g_landing")
+        self.assertEqual(payload["status"], "passed")
+        self.assertEqual(payload["iterations"], 0)
+
+    def test_run_agent_loop_raises_when_factory_not_configured(self) -> None:
+        svc, *_ = _make_service()  # no agent_loop_factory
+        decision = TickDecision(action="run_agent_loop", detail='{"goal_id": "x"}')
+        with self.assertRaises(RuntimeError):
+            svc._handle_run_agent_loop(decision)
+
+    def test_run_agent_loop_requires_goal_id(self) -> None:
+        svc, *_ = _make_service(agent_loop_factory=lambda *a, **kw: None)
+        decision = TickDecision(action="run_agent_loop", detail='{}')
+        with self.assertRaises(ValueError):
+            svc._handle_run_agent_loop(decision)
+
+    def test_run_agent_loop_falls_back_goal_text_to_goal_id(self) -> None:
+        from claw_v2.agent_loop import AgentLoopOutcome
+
+        seen: list[str] = []
+
+        class _StubLoop:
+            def run(self, goal):
+                seen.append(goal)
+                return AgentLoopOutcome("passed", None, (), "ok")
+
+        factory = lambda goal_id, project_id, milestone_id: _StubLoop()
+        svc, *_ = _make_service(agent_loop_factory=factory)
+        svc._handle_run_agent_loop(
+            TickDecision(action="run_agent_loop", detail='{"goal_id": "g_solo"}')
+        )
+        self.assertEqual(seen, ["g_solo"])
+
+
 class ClassifyDecideErrorTests(unittest.TestCase):
     def test_codex_timeout_recognized(self) -> None:
         self.assertEqual(_classify_decide_error("Codex CLI timed out after 300.0s"), "codex_timeout")

@@ -1076,6 +1076,7 @@ class BotService:
         captured: bool,
         handler: str | None = None,
         reason: str | None = None,
+        matched_pattern: str | None = None,
     ) -> None:
         # Telemetry for the brain-bypass refactor: emit one event per
         # pre-brain handler decision so we can audit which route fires
@@ -1101,6 +1102,13 @@ class BotService:
             route = "intercepted" if captured else "fall_through"
         if reason is None:
             reason = f"{handler or 'unknown'}_{'matched' if captured else 'fall_through'}"
+        # matched_pattern: canonical label of the sub-pattern that fired
+        # (e.g. "task_intent.resume_previous_es", "shortcut.url_extract",
+        # "proceed_class.pending_action"). Default: handler name when matched,
+        # None on fall_through. Lets `claw think tail --type dispatch_decision`
+        # show *why* it matched, not just *which* handler ran.
+        if matched_pattern is None and captured and handler:
+            matched_pattern = handler
         try:
             self.observe.emit(
                 "dispatch_decision",
@@ -1110,6 +1118,7 @@ class BotService:
                     "route": route,
                     "reason": reason,
                     "captured": captured,
+                    "matched_pattern": matched_pattern,
                     "text_preview": text[:80],
                     "text_len": len(text),
                     # legacy alias kept so existing dashboards keep parsing

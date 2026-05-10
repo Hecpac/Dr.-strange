@@ -46,6 +46,13 @@ class BoardTask:
     created_at: float = 0.0
     claimed_at: float = 0.0
     completed_at: float = 0.0
+    # Wave 2.5: goal hierarchy. parent_task_id links a sub-task to the
+    # parent that decomposed it; project_id and milestone_id link the task
+    # to higher-level coordination objects so Kairos / brain can reason
+    # about progress across multiple tasks toward one outcome.
+    parent_task_id: str | None = None
+    project_id: str | None = None
+    milestone_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -55,6 +62,41 @@ class BoardTask:
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> BoardTask:
         d["status"] = TaskStatus(d.get("status", "queued"))
+        return cls(**{k: v for k, v in d.items() if k in cls.__slots__})
+
+
+class ProjectStatus(str, Enum):
+    ACTIVE = "active"
+    COMPLETED = "completed"
+    BLOCKED = "blocked"
+    ABANDONED = "abandoned"
+
+
+@dataclass(slots=True)
+class Project:
+    """A coordination object grouping multiple BoardTasks toward one outcome.
+
+    Wave 2.5 of the autonomy plan. Projects let Kairos and the brain reason
+    about progress across multiple tasks instead of operating on flat queue.
+    """
+
+    id: str
+    title: str
+    success_criteria: list[str] = field(default_factory=list)
+    status: ProjectStatus = ProjectStatus.ACTIVE
+    owner_session: str = ""
+    created_at: float = 0.0
+    updated_at: float = 0.0
+    notes: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        d = asdict(self)
+        d["status"] = self.status.value
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> Project:
+        d["status"] = ProjectStatus(d.get("status", "active"))
         return cls(**{k: v for k, v in d.items() if k in cls.__slots__})
 
 
@@ -68,6 +110,8 @@ class TaskBoard:
     def __init__(self, board_root: Path | str = Path.home() / ".claw" / "board") -> None:
         self.root = Path(board_root)
         self.root.mkdir(parents=True, exist_ok=True)
+        self.projects_root = self.root / "projects"
+        self.projects_root.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
 
     # ── publish ──────────────────────────────────────────────
@@ -81,6 +125,9 @@ class TaskBoard:
         priority: int = 0,
         required_lane: str = "worker",
         tags: list[str] | None = None,
+        parent_task_id: str | None = None,
+        project_id: str | None = None,
+        milestone_id: str | None = None,
     ) -> BoardTask:
         """Add a new task to the board. Returns the created task."""
         task = BoardTask(
@@ -92,6 +139,9 @@ class TaskBoard:
             required_lane=required_lane,
             tags=tags or [],
             created_at=time.time(),
+            parent_task_id=parent_task_id,
+            project_id=project_id,
+            milestone_id=milestone_id,
         )
         self._save(task)
         logger.info("TaskBoard: published %s by %s", task.id, created_by)
@@ -185,11 +235,89 @@ class TaskBoard:
                 removed += 1
         return removed
 
+    # ── projects (Wave 2.5: goal hierarchy) ────────────────────
+
+    def publish_project(
+        self,
+        title: str,
+        *,
+        success_criteria: list[str] | None = None,
+        owner_session: str = "",
+        notes: str = "",
+    ) -> Project:
+        """Create a new project; tasks can be linked via project_id."""
+        now = time.time()
+        project = Project(
+            id=uuid.uuid4().hex[:12],
+            title=title,
+            success_criteria=success_criteria or [],
+            owner_session=owner_session,
+            notes=notes,
+            created_at=now,
+            updated_at=now,
+        )
+        self._save_project(project)
+        logger.info("TaskBoard: project %s '%s' created", project.id, title)
+        return project
+
+    def get_project(self, project_id: str) -> Project | None:
+        path = self.projects_root / f"{project_id}.json"
+        if not path.exists():
+            return None
+        try:
+            return Project.from_dict(json.loads(path.read_text(encoding="utf-8")))
+        except Exception:
+            logger.warning("TaskBoard: corrupt project file %s", path)
+            return None
+
+    def list_projects(self, *, status: ProjectStatus | None = None) -> list[Project]:
+        projects: list[Project] = []
+        for path in self.projects_root.glob("*.json"):
+            try:
+                projects.append(Project.from_dict(json.loads(path.read_text(encoding="utf-8"))))
+            except Exception:
+                logger.warning("TaskBoard: skipping corrupt project file %s", path)
+        if status is not None:
+            projects = [p for p in projects if p.status == status]
+        return sorted(projects, key=lambda p: -p.updated_at)
+
+    def tasks_for_project(self, project_id: str) -> list[BoardTask]:
+        return sorted(
+            (t for t in self._load_all() if t.project_id == project_id),
+            key=lambda t: (-t.priority, t.created_at),
+        )
+
+    def project_status_summary(self, project_id: str) -> dict[str, int]:
+        """Counts of task statuses for a given project. Useful for derivation
+        of overall project status (all completed → project completed, any
+        failed → project blocked, etc. — derivation lives in callers)."""
+        tasks = self.tasks_for_project(project_id)
+        counts: dict[str, int] = {}
+        for task in tasks:
+            counts[task.status.value] = counts.get(task.status.value, 0) + 1
+        counts["total"] = len(tasks)
+        return counts
+
+    def update_project_status(self, project_id: str, status: ProjectStatus) -> Project | None:
+        with self._lock:
+            project = self.get_project(project_id)
+            if project is None:
+                return None
+            project.status = status
+            project.updated_at = time.time()
+            self._save_project(project)
+            return project
+
     # ── persistence ──────────────────────────────────────────
 
     def _save(self, task: BoardTask) -> None:
         (self.root / f"{task.id}.json").write_text(
             json.dumps(task.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+
+    def _save_project(self, project: Project) -> None:
+        (self.projects_root / f"{project.id}.json").write_text(
+            json.dumps(project.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8"
         )
 
     def _load(self, task_id: str) -> BoardTask | None:

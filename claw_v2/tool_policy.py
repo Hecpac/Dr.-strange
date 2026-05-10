@@ -22,6 +22,11 @@ class ToolPolicy:
     allowed_paths: tuple[str, ...] = ()
     blocked_path_patterns: tuple[str, ...] = ()
     allowed_domains: tuple[str, ...] = ()
+    # Ordered list of tool names to try if this tool is blocked by sandbox
+    # or denylist (PermissionError). Used by ToolRegistry.execute_with_pivot.
+    # Same args are passed; if they don't fit the alternative the chain
+    # continues. Empty by default — no pivoting unless declared.
+    fallback_tools: tuple[str, ...] = ()
 
 
 SECRET_PATH_PATTERNS: tuple[str, ...] = (

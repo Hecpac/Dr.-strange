@@ -334,3 +334,21 @@ def test_dispatch_decision_marks_explicit_task_id(bot) -> None:
         and ev["reason"] == "literal_task_id_match"
         for ev in events
     ), f"missing explicit_command marker for task_id message; chain={events!r}"
+
+
+def test_dispatch_decision_payload_includes_matched_pattern_field(bot) -> None:
+    """Wave 2.4: every dispatch_decision payload carries a `matched_pattern`
+    field. For captured events it is at least the handler name; richer
+    labels (`shortcut.url_extract`, `task_intent.resume_previous_es`) are
+    populated by handlers that expose their classification. Lets `claw think
+    tail --type dispatch_decision` show *why* a handler fired, not just *which*."""
+    events = _capture_dispatch_decisions(bot, "estado de la task nlm-5a9c55c8929d")
+    assert events, "expected at least one dispatch_decision event"
+    for ev in events:
+        assert "matched_pattern" in ev, f"matched_pattern missing from payload: {ev!r}"
+    captured = [ev for ev in events if ev.get("captured")]
+    if captured:
+        for ev in captured:
+            assert ev["matched_pattern"], (
+                f"captured event must have non-empty matched_pattern: {ev!r}"
+            )

@@ -1,22 +1,19 @@
-"""xfail strict markers for brain pushback / autonomy contracts.
+"""Brain pushback / autonomy contract presence tests.
 
-These tests encode behavior Hector has reported as missing:
-- Brain offers A/B/C options when the obvious next action should just execute.
-- Brain does not push back on factually wrong / ambiguous premises (sycophancy).
+Encode behavior Hector reported as missing in Wave 1:
+- Brain offered A/B/C options when the obvious next action should execute.
+- Brain did not push back on factually wrong / ambiguous premises.
 
-The fix lands in Wave 2 (Brain pushback contract + prefill stress test corpus).
-Until then, these are xfail strict — they will turn red when the prompt is
-extended, prompting removal of the marker.
+Wave 2 added BRAIN_PUSHBACK_CONTRACT + extended CONVERSATIONAL_STYLE_CONTRACT.
+These tests now verify the contracts are present in the assembled prompt.
 
 Reference: Anthropic, "Sycophancy in personal guidance" (2026-04). The
 prefill stress-test methodology described there is the validation method
-behind these contracts.
+behind these contracts (real prefill tests live separately as integration).
 """
 from __future__ import annotations
 
 import unittest
-
-import pytest
 
 from claw_v2.brain import _brain_system_prompt
 
@@ -25,7 +22,6 @@ def _build_prompt() -> str:
     return _brain_system_prompt("you are an autonomous agent for testing")
 
 
-@pytest.mark.xfail(strict=True, reason="Wave 2: pushback contract not yet authored.")
 class BrainPushbackContractTests(unittest.TestCase):
     """The brain prompt must explicitly authorize disagreement on bad premises."""
 
@@ -64,7 +60,6 @@ class BrainPushbackContractTests(unittest.TestCase):
         )
 
 
-@pytest.mark.xfail(strict=True, reason="Wave 2: explicit anti-dashboard phrasing missing.")
 class ConversationalStyleAntiDashboardTests(unittest.TestCase):
     """Conversational style contract must explicitly forbid Checkpoint/tablas."""
 

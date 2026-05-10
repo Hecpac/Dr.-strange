@@ -83,6 +83,7 @@ class KairosService:
         monitored_sites: list[Any] | None = None,
         action_budget: float = DEFAULT_ACTION_BUDGET,
         brief: bool = True,
+        agent_loop_factory: Any | None = None,
     ) -> None:
         self.router = router
         self.heartbeat = heartbeat
@@ -99,6 +100,12 @@ class KairosService:
         self.monitored_sites = list(monitored_sites or [])
         self.action_budget = action_budget
         self.brief = brief
+        # Wave 2.6: lets Kairos drive an AgentLoop on a goal_id when it
+        # decides a project / milestone needs an active push. Factory takes
+        # (goal_id, project_id, milestone_id) and returns a configured
+        # AgentLoop (planner/executor/verifier already wired). Disabled by
+        # default — Kairos stays router-lite unless the runtime opts in.
+        self.agent_loop_factory: Any | None = agent_loop_factory
         self.state = KairosState()
 
     def tick(self) -> TickDecision:
@@ -298,7 +305,9 @@ class KairosService:
             "- Actions must complete in under 15 seconds.\n"
             "- Available actions: none, notify_user, dispatch_to_agent, approve_pending, "
             "run_skill, pause_agent, escalate_to_human, wiki_deep_lint, wiki_research, "
-            "wiki_scrape, site_monitor, auto_publish_social, auto_deploy, gmail_digest, publish_task, claim_task.\n"
+            "wiki_scrape, site_monitor, auto_publish_social, auto_deploy, gmail_digest, publish_task, claim_task, run_agent_loop.\n"
+            "- run_agent_loop: drive an AgentLoop on a goal/project/milestone (only when agent_loop_factory is configured). "
+            "detail = JSON {\"goal_id\": \"...\", \"project_id\": \"?\", \"milestone_id\": \"?\", \"goal_text\": \"?\"}\n"
             "- publish_task: add a task to the shared board for any agent to claim. "
             "detail = JSON {\"title\": \"...\", \"instruction\": \"...\", \"required_lane\": \"worker\", \"tags\": [...]}\n"
             "- claim_task: claim and execute a pending task from the board. "
@@ -394,6 +403,7 @@ class KairosService:
             "claim_task": self._handle_claim_task,
             "morning_video_brief": self._handle_morning_video_brief,
             "daemon_health_check": self._handle_daemon_health_check,
+            "run_agent_loop": self._handle_run_agent_loop,
         }
         handler = handlers.get(decision.action)
         if handler is None:
@@ -996,3 +1006,51 @@ class KairosService:
             logger.exception("daemon_health_check: failed to emit notification event")
         logger.info("KAIROS daemon_health_check: status=%s pids=%d tokens=%s",
                      status, len(pids), anomaly_tokens_found)
+
+    def _handle_run_agent_loop(
+        self, decision: TickDecision, trace_context: dict[str, Any] | None = None
+    ) -> None:
+        """Wave 2.6: drive an AgentLoop on a goal/project/milestone.
+
+        decision.detail is JSON: {"goal_id": "...", "project_id": "?",
+        "milestone_id": "?", "goal_text": "?"}. The agent_loop_factory must
+        be configured at construction; otherwise the action errors out.
+
+        Emits `kairos_agent_loop_complete` with the outcome status, reason,
+        and iteration count so `claw think` can replay the run.
+        """
+        if self.agent_loop_factory is None:
+            raise RuntimeError("agent_loop_factory is not configured on KairosService")
+        data = json.loads(decision.detail or "{}")
+        goal_id = str(data.get("goal_id") or "").strip()
+        if not goal_id:
+            raise ValueError("run_agent_loop requires goal_id in decision.detail")
+        project_id = data.get("project_id") or None
+        milestone_id = data.get("milestone_id") or None
+        goal_text = str(data.get("goal_text") or "").strip() or goal_id
+        loop = self.agent_loop_factory(goal_id, project_id, milestone_id)
+        outcome = loop.run(goal_text)
+        payload = {
+            "goal_id": goal_id,
+            "project_id": project_id,
+            "milestone_id": milestone_id,
+            "status": outcome.status,
+            "reason": outcome.reason,
+            "iterations": len(outcome.history),
+        }
+        self.observe.emit(
+            "kairos_agent_loop_complete",
+            trace_id=trace_context.get("trace_id") if trace_context else None,
+            root_trace_id=trace_context.get("root_trace_id") if trace_context else None,
+            span_id=trace_context.get("span_id") if trace_context else None,
+            parent_span_id=trace_context.get("parent_span_id") if trace_context else None,
+            job_id=trace_context.get("job_id") if trace_context else None,
+            artifact_id=trace_context.get("artifact_id") if trace_context else None,
+            payload=payload,
+        )
+        logger.info(
+            "KAIROS run_agent_loop: goal=%s status=%s iterations=%d",
+            goal_id,
+            outcome.status,
+            len(outcome.history),
+        )

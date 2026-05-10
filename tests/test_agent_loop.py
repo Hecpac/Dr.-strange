@@ -138,5 +138,101 @@ class AgentLoopTests(unittest.TestCase):
             self.assertIsNone(trace.critique)
 
 
+class AgentLoopBudgetTests(unittest.TestCase):
+    def test_max_cost_usd_stops_loop_after_budget_exhausted(self) -> None:
+        # Plan spec: 4 iterations × $5 each, cap $15 → must stop at iter 3.
+        cost_per_iter = [0.0, 5.0, 10.0, 15.0]  # cumulative reads BEFORE iter 1, 2, 3, 4
+
+        def cost_tracker() -> float:
+            return cost_per_iter[min(len(history), len(cost_per_iter) - 1)]
+
+        history: list[str] = []
+
+        def executor(plan: str):
+            history.append(plan)
+            return _make_result(f"iter-{len(history)}", status="failed")
+
+        loop = AgentLoop(
+            planner=lambda goal, h: f"p{len(h) + 1}",
+            executor=executor,
+            verifier=lambda result, obs: VerifierVerdict(status="failed"),
+            max_iterations=4,
+            max_cost_usd=15.0,
+            cost_tracker=cost_tracker,
+        )
+
+        outcome = loop.run("burn budget")
+
+        self.assertEqual(outcome.status, "exhausted")
+        self.assertEqual(len(outcome.history), 3, "should stop after iter 3 when cost reaches cap")
+        self.assertIn("budget_exhausted", outcome.reason)
+        self.assertIn("$15", outcome.reason)
+
+    def test_max_cost_usd_uses_baseline_so_only_loops_own_spend_counts(self) -> None:
+        # Cost tracker starts at $100 (prior spend). Loop has $10 budget,
+        # so we expect it to allow 2 iters before exceeding.
+        snapshots = [100.0, 105.0, 110.0]
+        idx = [0]
+
+        def cost_tracker() -> float:
+            v = snapshots[min(idx[0], len(snapshots) - 1)]
+            idx[0] += 1
+            return v
+
+        loop = AgentLoop(
+            planner=lambda goal, h: "p",
+            executor=lambda plan: _make_result("x", status="failed"),
+            verifier=lambda r, o: VerifierVerdict(status="failed"),
+            max_iterations=5,
+            max_cost_usd=10.0,
+            cost_tracker=cost_tracker,
+        )
+
+        outcome = loop.run("relative budget")
+
+        # baseline=100, after iter1 reading=105 (delta 5), after iter2 reading=110 (delta 10)
+        # iter 3 pre-check: tracker hits 110 again, delta=10 >= 10 → stop.
+        self.assertEqual(outcome.status, "exhausted")
+        self.assertIn("budget_exhausted", outcome.reason)
+
+    def test_max_wallclock_s_stops_loop(self) -> None:
+        ticks = [0.0, 1.0, 5.0, 10.0]
+        idx = [0]
+
+        def fake_clock() -> float:
+            v = ticks[min(idx[0], len(ticks) - 1)]
+            idx[0] += 1
+            return v
+
+        loop = AgentLoop(
+            planner=lambda goal, h: "p",
+            executor=lambda plan: _make_result("x", status="failed"),
+            verifier=lambda r, o: VerifierVerdict(status="failed"),
+            max_iterations=10,
+            max_wallclock_s=4.0,
+            clock=fake_clock,
+        )
+
+        outcome = loop.run("slow")
+
+        self.assertEqual(outcome.status, "exhausted")
+        self.assertIn("wallclock_exhausted", outcome.reason)
+
+    def test_no_budget_guards_when_trackers_unset(self) -> None:
+        loop = AgentLoop(
+            planner=lambda goal, h: "p",
+            executor=lambda plan: _make_result("x", status="failed"),
+            verifier=lambda r, o: VerifierVerdict(status="failed"),
+            max_iterations=2,
+            max_cost_usd=0.01,  # would trigger if tracker were wired
+            cost_tracker=None,  # disabled
+        )
+
+        outcome = loop.run("no budget")
+
+        self.assertEqual(outcome.status, "exhausted")
+        self.assertIn("max_iterations=2", outcome.reason)
+
+
 if __name__ == "__main__":
     unittest.main()
