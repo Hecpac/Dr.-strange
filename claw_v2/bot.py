@@ -3694,54 +3694,110 @@ class BotService:
             or compact in {"pendientes", "tareaspendientes"}
         ):
             return None
-        return self._pending_tasks_summary_response(session_id)
+        diagnostic = _looks_like_pending_tasks_diagnostic(text)
+        return self._pending_tasks_summary_response(session_id, diagnostic=diagnostic)
 
-    def _pending_tasks_summary_response(self, session_id: str) -> str:
-        lines = ["Tareas pendientes:"]
-        found = False
+    def _pending_tasks_summary_response(
+        self,
+        session_id: str,
+        *,
+        diagnostic: bool = False,
+    ) -> str:
         try:
             approvals = self.approvals.list_pending() if self.approvals is not None else []
         except Exception:
             approvals = []
-        if approvals:
-            found = True
-            lines.append(f"Aprobaciones pendientes: {len(approvals)}")
-            for item in approvals[:5]:
-                summary = str(item.get("summary") or item.get("action") or "aprobacion pendiente").strip()
-                lines.append(f"- Aprobacion: {summary[:180]}. Recomendacion: revisar vigencia antes de aprobar.")
-        records = []
+        records: list[Any] = []
         if self.task_ledger is not None:
             try:
                 records = self.task_ledger.list(session_id=session_id, limit=20)
             except Exception:
                 records = []
-        active = [record for record in records if str(getattr(record, "status", "")) in {"queued", "running"}]
+        active = [
+            record for record in records
+            if str(getattr(record, "status", "")) in {"queued", "running"}
+        ]
         blocked = [
             record for record in records
             if str(getattr(record, "verification_status", "")) in {"blocked", "missing_evidence", "pending"}
             or str(getattr(record, "status", "")) in {"failed", "timed_out", "lost"}
         ]
-        if active:
-            found = True
-            lines.append("Tareas activas:")
-            for record in active[:5]:
-                detail = str(getattr(record, "summary", "") or getattr(record, "objective", "") or "sin resumen").strip()
-                verification = str(getattr(record, "verification_status", "unknown") or "unknown")
-                lines.append(f"- Activa / {verification}: {detail[:180]}")
-        if blocked:
-            found = True
-            lines.append("Tareas bloqueadas o incompletas:")
+
+        if not (approvals or active or blocked):
+            return (
+                "Tareas pendientes:\n"
+                "No veo aprobaciones, tareas activas ni blockers recientes en esta conversación."
+            )
+
+        n_appr = len(approvals)
+        n_blocked = len(blocked)
+        n_active = len(active)
+
+        lines: list[str] = ["Tareas pendientes:"]
+        resumen = _format_resumen_line(
+            n_approvals=n_appr,
+            n_blocked=n_blocked,
+            n_active=n_active,
+        )
+        if resumen:
+            lines.append(resumen)
+
+        if approvals:
+            lines.append("")
+            lines.append("Aprobaciones:")
+            groups = _group_pending_approvals(approvals)
+            for action_label, reason_counts in list(groups.items())[:5]:
+                total = sum(reason_counts.values())
+                noun = "pendiente" if total == 1 else "pendientes"
+                lines.append(f"- {action_label}: {total} {noun}.")
+                ordered = sorted(reason_counts.items(), key=lambda kv: -kv[1])
+                for reason_key, count in ordered:
+                    label = _APPROVAL_REASON_LABELS.get(reason_key, "por revisión humana")
+                    lines.append(f"  - {count} {label}.")
+
+        category_counts: dict[str, int] = {}
+        for record in blocked:
+            key = _categorize_blocked_record(record)
+            category_counts[key] = category_counts.get(key, 0) + 1
+
+        if blocked or active:
+            lines.append("")
+            lines.append("Bloqueos principales:")
+            primary_total = 0
+            for key in _BLOCKED_PRIMARY_CATEGORIES:
+                count = category_counts.get(key, 0)
+                if count <= 0:
+                    continue
+                primary_total += count
+                lines.append(f"- {_format_blocked_category_count(key, count)}.")
+            other_count = sum(
+                count for key, count in category_counts.items()
+                if key not in _BLOCKED_PRIMARY_CATEGORIES
+            )
+            if other_count > 0:
+                lines.append(f"- {_format_blocked_category_count('other_blocked', other_count)}.")
+            if n_active > 0:
+                noun = "tarea en curso" if n_active == 1 else "tareas en curso"
+                lines.append(f"- {n_active} {noun}.")
+
+        actions = _build_recommended_actions(
+            has_approvals=bool(approvals),
+            category_counts=category_counts,
+        )
+        if actions:
+            lines.append("")
+            lines.append("Siguiente acción recomendada:")
+            for idx, action in enumerate(actions, start=1):
+                lines.append(f"{idx}. {action}.")
+
+        if diagnostic:
+            lines.append("")
+            lines.append("Diagnóstico técnico:")
+            for item in approvals[:5]:
+                lines.append(f"- aprobación · {_diagnose_pending_approval(item)}")
             for record in blocked[:5]:
-                detail = str(getattr(record, "error", "") or getattr(record, "summary", "") or getattr(record, "objective", "") or "sin detalle").strip()
-                verification = str(getattr(record, "verification_status", "unknown") or "unknown")
-                lines.append(f"- {verification}: {detail[:180]}. Recomendacion: revisar blocker y reintentar solo con tool habilitada.")
-        state = self.brain.memory.get_session_state(session_id)
-        pending_action = str(state.get("pending_action") or "").strip()
-        if pending_action:
-            found = True
-            lines.append(f"Accion pendiente de sesion: {pending_action[:180]}")
-        if not found:
-            lines.append("No veo aprobaciones, tareas activas ni blockers recientes en esta conversacion.")
+                lines.append(f"- tarea · {_diagnose_blocked_record(record)}")
+
         return "\n".join(lines)
 
     def _maybe_handle_actionable_task_request(
