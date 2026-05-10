@@ -1683,29 +1683,13 @@ class BotService:
             on_decision=self._emit_route_decision,
         )
         if route_outcome.captured and route_outcome.response is not None:
-            self._post_capture_intercepted(session_id, stripped, route_outcome.response)
+            self._post_capture_intercepted(
+                session_id,
+                stripped,
+                route_outcome.response,
+                assistant_limit=route_outcome.store_memory_limit,
+            )
             return route_outcome.response
-        boot_context_response = self._maybe_handle_boot_context_status(
-            stripped,
-            session_id=session_id,
-            runtime_channel=runtime_channel,
-        )
-        self._emit_dispatch_decision(
-            handler="boot_context_status",
-            route="intercepted" if boot_context_response is not None else "fall_through",
-            reason=(
-                "boot_context_status_matched"
-                if boot_context_response is not None
-                else "boot_context_status_no_match"
-            ),
-            session_id=session_id,
-            text=stripped,
-            captured=boot_context_response is not None,
-        )
-        if boot_context_response is not None:
-            self._store_memory_turn(session_id, stripped, boot_context_response, assistant_limit=3000)
-            self._remember_assistant_turn_state(session_id, stripped, boot_context_response)
-            return boot_context_response
         pending_tasks_response = self._maybe_handle_pending_tasks_query(stripped, session_id=session_id)
         self._emit_dispatch_decision(
             handler="pending_tasks",
@@ -1995,6 +1979,7 @@ class BotService:
         """
         return [
             Route("operational_alert", self._route_operational_alert),
+            Route("boot_context_status", self._route_boot_context_status),
         ]
 
     def _route_operational_alert(self, ctx: RouteContext) -> RouteOutcome:
@@ -2002,6 +1987,20 @@ class BotService:
         if response is None:
             return RouteOutcome.fall_through(reason="operational_alert_no_match")
         return RouteOutcome.intercepted(response, reason="operational_alert_matched")
+
+    def _route_boot_context_status(self, ctx: RouteContext) -> RouteOutcome:
+        response = self._maybe_handle_boot_context_status(
+            ctx.stripped,
+            session_id=ctx.session_id,
+            runtime_channel=ctx.runtime_channel,
+        )
+        if response is None:
+            return RouteOutcome.fall_through(reason="boot_context_status_no_match")
+        return RouteOutcome.intercepted(
+            response,
+            reason="boot_context_status_matched",
+            store_memory_limit=3000,
+        )
 
     def _emit_route_decision(self, name: str, outcome: RouteOutcome, ctx: RouteContext) -> None:
         self._emit_dispatch_decision(
@@ -2013,8 +2012,15 @@ class BotService:
             captured=outcome.captured,
         )
 
-    def _post_capture_intercepted(self, session_id: str, stripped: str, response: str) -> None:
-        self._store_memory_turn(session_id, stripped, response, assistant_limit=2000)
+    def _post_capture_intercepted(
+        self,
+        session_id: str,
+        stripped: str,
+        response: str,
+        *,
+        assistant_limit: int = 2000,
+    ) -> None:
+        self._store_memory_turn(session_id, stripped, response, assistant_limit=assistant_limit)
         self._remember_assistant_turn_state(session_id, stripped, response)
 
     def _handle_help_command(self, context: CommandContext) -> str:

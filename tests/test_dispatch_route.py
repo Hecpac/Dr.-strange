@@ -41,6 +41,14 @@ class RouteOutcomeFactoryTests(unittest.TestCase):
         outcome = RouteOutcome.intercepted("ok", extra={"matched_pattern": "greeting"})
         self.assertEqual(outcome.extra["matched_pattern"], "greeting")
 
+    def test_intercepted_default_store_memory_limit(self) -> None:
+        outcome = RouteOutcome.intercepted("ok")
+        self.assertEqual(outcome.store_memory_limit, 2000)
+
+    def test_intercepted_custom_store_memory_limit(self) -> None:
+        outcome = RouteOutcome.intercepted("ok", store_memory_limit=3000)
+        self.assertEqual(outcome.store_memory_limit, 3000)
+
 
 class DispatchRoutesTests(unittest.TestCase):
     def test_first_intercepting_route_wins(self) -> None:

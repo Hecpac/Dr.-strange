@@ -46,6 +46,9 @@ class RouteOutcome:
     reason: str = ""
     captured: bool = False
     extra: dict[str, Any] = field(default_factory=dict)
+    # Per-handler memory store limit. Some routes (boot context status,
+    # link analysis) want a larger transcript window than the 2k default.
+    store_memory_limit: int = 2000
 
     @classmethod
     def fall_through(cls, reason: str = "") -> "RouteOutcome":
@@ -58,6 +61,7 @@ class RouteOutcome:
         *,
         reason: str = "",
         extra: dict[str, Any] | None = None,
+        store_memory_limit: int = 2000,
     ) -> "RouteOutcome":
         return cls(
             route="intercepted",
@@ -65,6 +69,7 @@ class RouteOutcome:
             reason=reason,
             captured=True,
             extra=extra or {},
+            store_memory_limit=store_memory_limit,
         )
 
 
