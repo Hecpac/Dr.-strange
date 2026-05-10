@@ -8,8 +8,8 @@
 ## meta
 
 ```yaml
-describes_commit: e218b07
-doc_version: 1.1
+describes_commit: 7413b32+kairos-approvals
+doc_version: 1.2
 last_verified: 2026-05-10
 verification_method: manual + grep cross-check
 anchor_strategy: symbol_only  # path:symbol, no line numbers
@@ -54,6 +54,19 @@ invariants:
       - ToolPolicy.allowed_contexts  # from where it can be invoked
       - tier_check  # tier ≤ autoexec_max_tier OR approval_gate(...)
     why: Single-flag bypass is impossible by construction.
+
+  kairos_external_mutation_gated:
+    rule: Kairos handlers that mutate external state (post to social, push
+          to a remote, send a real email) must either create a pending
+          ApprovalManager record OR be opt-in via an explicit env flag.
+    members:
+      - _handle_auto_publish_social  # KAIROS_AUTO_PUBLISH_SOCIAL=1
+      - _handle_auto_deploy          # KAIROS_AUTO_DEPLOY=1
+    why: tick() runs inside system_approval_mode, which auto-approves any
+         Tier 3 tool call with audit. Handlers that bypass ToolRegistry
+         entirely (calling adapter.publish or subprocess directly) would
+         escape every gate. The pending-record path forces a human action
+         from Telegram before the side effect lands.
 ```
 
 ---
@@ -381,6 +394,12 @@ fallback is invariant (§6); KAIROS just defers to next tick.
 but does NOT directly invoke `AgentLoop` or `CoordinatorService`. It is a
 router-lite, not a full agent. Fixing that is Wave 2 in the plan.
 
+**Mutating handlers** (`auto_publish_social`, `auto_deploy`) default to
+draft + pending approval — they call `approvals.create(...)` and emit
+`kairos_auto_*_pending` instead of mutating external state. To run them
+fully autonomously the operator sets `KAIROS_AUTO_PUBLISH_SOCIAL=1` or
+`KAIROS_AUTO_DEPLOY=1`; default off. See invariant §1 `kairos_external_mutation_gated`.
+
 ---
 
 ## 6. do_not (prescriptive)
@@ -416,6 +435,15 @@ do_not:
     why: Manual freezes are explicit operator decisions; only circuit_breaker:*
          freezes are evidence-backed by rolling windows and safe to TTL out.
     enforced_by: ObservationWindowState._load_state stale-freeze TTL guard.
+
+  - change: Call adapter.publish, subprocess git push, or any other direct
+            external-state mutation from a Kairos handler without going
+            through ApprovalManager.create or an explicit env opt-in.
+    why: kairos.tick() wraps every action in system_approval_mode, so a
+         direct call bypasses the pending-record audit trail and any human
+         gate. New mutating handlers must follow the
+         _autonomous_action_authorized(env_var) pattern.
+    enforced_by: invariant kairos_external_mutation_gated (§1).
 ```
 
 ---

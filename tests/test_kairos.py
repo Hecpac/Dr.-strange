@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import time
 import unittest
@@ -495,6 +496,139 @@ class EnhancedContextTests(unittest.TestCase):
         svc, _, _, _ = _make_service(bus=bus)
         ctx = svc._gather_context()
         self.assertIn("Expired requests: 1", ctx)
+
+
+class AutoActionApprovalTests(unittest.TestCase):
+    """Fase 1: auto_publish_social and auto_deploy default to draft +
+    pending approval. Live execution is opt-in via env flag.
+    """
+
+    def setUp(self) -> None:
+        for var in ("KAIROS_AUTO_PUBLISH_SOCIAL", "KAIROS_AUTO_DEPLOY"):
+            os.environ.pop(var, None)
+
+    def _wiki_with_page(self, content: str = "Insight body") -> tuple[MagicMock, Path]:
+        tmpdir = Path(tempfile.mkdtemp())
+        wiki = MagicMock()
+        wiki.wiki_dir = tmpdir
+        page = tmpdir / "p.md"
+        page.write_text(content, encoding="utf-8")
+        return wiki, tmpdir
+
+    def _approvals_mock(self) -> MagicMock:
+        approvals = MagicMock()
+        approvals.create.return_value = MagicMock(
+            approval_id="abc123",
+            token="tok",
+            action="kairos:auto_publish_social",
+            summary="draft",
+        )
+        return approvals
+
+    def test_auto_publish_social_default_creates_pending_no_publish(self) -> None:
+        wiki, _ = self._wiki_with_page()
+        approvals = self._approvals_mock()
+        svc, router, _, observe = _make_service(wiki=wiki, approvals=approvals)
+        router.ask.return_value = MagicMock(content="Tweet draft text")
+        decision = TickDecision(action="auto_publish_social")
+        with patch("claw_v2.social.x_adapter_from_keychain") as adapter_factory:
+            svc._handle_auto_publish_social(decision)
+        adapter_factory.assert_not_called()
+        approvals.create.assert_called_once()
+        kwargs = approvals.create.call_args.kwargs
+        self.assertEqual(kwargs.get("action"), "kairos:auto_publish_social")
+        self.assertIn("Tweet draft text", kwargs.get("summary", ""))
+        emit_kinds = [c.args[0] for c in observe.emit.call_args_list]
+        self.assertIn("kairos_auto_publish_social_pending", emit_kinds)
+        self.assertNotIn("kairos_auto_publish_social", emit_kinds)
+
+    def test_auto_publish_social_with_env_publishes(self) -> None:
+        wiki, _ = self._wiki_with_page()
+        approvals = self._approvals_mock()
+        svc, router, _, observe = _make_service(wiki=wiki, approvals=approvals)
+        router.ask.return_value = MagicMock(content="Tweet draft text")
+        adapter = MagicMock()
+        adapter.publish.return_value = MagicMock(success=True, post_id="pid")
+        decision = TickDecision(action="auto_publish_social")
+        with patch.dict(os.environ, {"KAIROS_AUTO_PUBLISH_SOCIAL": "1"}), \
+             patch("claw_v2.social.x_adapter_from_keychain", return_value=adapter):
+            svc._handle_auto_publish_social(decision)
+        adapter.publish.assert_called_once_with("Tweet draft text")
+        approvals.create.assert_not_called()
+        emit_kinds = [c.args[0] for c in observe.emit.call_args_list]
+        self.assertIn("kairos_auto_publish_social", emit_kinds)
+        self.assertNotIn("kairos_auto_publish_social_pending", emit_kinds)
+
+    def test_auto_publish_social_no_approvals_and_disabled_errors(self) -> None:
+        wiki, _ = self._wiki_with_page()
+        svc, router, _, _ = _make_service(wiki=wiki)
+        router.ask.return_value = MagicMock(content="Tweet draft text")
+        decision = TickDecision(action="auto_publish_social")
+        with patch("claw_v2.social.x_adapter_from_keychain") as adapter_factory:
+            with self.assertRaises(RuntimeError):
+                svc._handle_auto_publish_social(decision)
+        adapter_factory.assert_not_called()
+
+    def test_auto_deploy_default_creates_pending_no_push(self) -> None:
+        approvals = self._approvals_mock()
+        svc, _, _, observe = _make_service(approvals=approvals)
+        decision = TickDecision(action="auto_deploy")
+        run_results = [
+            MagicMock(returncode=0, stdout="deploy_sha\n"),
+            MagicMock(returncode=0, stdout="local_sha\n"),
+        ]
+        with patch("subprocess.run", side_effect=run_results) as runner:
+            svc._handle_auto_deploy(decision)
+        self.assertEqual(runner.call_count, 2)
+        approvals.create.assert_called_once()
+        kwargs = approvals.create.call_args.kwargs
+        self.assertEqual(kwargs.get("action"), "kairos:auto_deploy")
+        emit_kinds = [c.args[0] for c in observe.emit.call_args_list]
+        self.assertIn("kairos_auto_deploy_pending", emit_kinds)
+        self.assertNotIn("kairos_auto_deploy", emit_kinds)
+
+    def test_auto_deploy_with_env_pushes(self) -> None:
+        approvals = self._approvals_mock()
+        svc, _, _, observe = _make_service(approvals=approvals)
+        decision = TickDecision(action="auto_deploy")
+        run_results = [
+            MagicMock(returncode=0, stdout="deploy_sha\n"),
+            MagicMock(returncode=0, stdout="local_sha\n"),
+            MagicMock(returncode=0, stdout=""),
+        ]
+        with patch.dict(os.environ, {"KAIROS_AUTO_DEPLOY": "1"}), \
+             patch("subprocess.run", side_effect=run_results) as runner:
+            svc._handle_auto_deploy(decision)
+        self.assertEqual(runner.call_count, 3)
+        approvals.create.assert_not_called()
+        push_call = runner.call_args_list[2]
+        self.assertIn("push", push_call.args[0])
+        emit_kinds = [c.args[0] for c in observe.emit.call_args_list]
+        self.assertIn("kairos_auto_deploy", emit_kinds)
+
+    def test_auto_deploy_already_up_to_date_skips_pending(self) -> None:
+        approvals = self._approvals_mock()
+        svc, _, _, _ = _make_service(approvals=approvals)
+        decision = TickDecision(action="auto_deploy")
+        run_results = [
+            MagicMock(returncode=0, stdout="same_sha\n"),
+            MagicMock(returncode=0, stdout="same_sha\n"),
+        ]
+        with patch("subprocess.run", side_effect=run_results):
+            svc._handle_auto_deploy(decision)
+        approvals.create.assert_not_called()
+
+    def test_auto_deploy_no_approvals_and_disabled_errors(self) -> None:
+        svc, _, _, _ = _make_service()
+        decision = TickDecision(action="auto_deploy")
+        run_results = [
+            MagicMock(returncode=0, stdout="deploy_sha\n"),
+            MagicMock(returncode=0, stdout="local_sha\n"),
+        ]
+        with patch("subprocess.run", side_effect=run_results) as runner:
+            with self.assertRaises(RuntimeError):
+                svc._handle_auto_deploy(decision)
+        self.assertEqual(runner.call_count, 2)
 
 
 if __name__ == "__main__":

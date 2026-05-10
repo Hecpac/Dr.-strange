@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 import json
 import logging
+import os
 import subprocess
 import time
 from dataclasses import dataclass
@@ -45,6 +46,15 @@ class KairosState:
     actions_taken: int = 0
     last_tick_at: float = 0.0
     last_action: str = ""
+
+
+def _autonomous_action_authorized(env_var: str) -> bool:
+    """Opt-in env flag: only "1" or "true" (case-insensitive) authorize the
+    handler to mutate external state without going through the approvals
+    pending-record path.
+    """
+    value = (os.environ.get(env_var) or "").strip().lower()
+    return value in {"1", "true", "yes"}
 
 
 def _classify_decide_error(error_str: str) -> str:
@@ -698,7 +708,9 @@ class KairosService:
         ]
 
     def _handle_auto_publish_social(self, decision: TickDecision, trace_context: dict[str, Any] | None = None) -> None:
-        """Draft a tweet from wiki insights and publish via X API."""
+        """Draft a tweet from wiki insights. Default: pending human approval.
+        Opt-in autonomous publish via env KAIROS_AUTO_PUBLISH_SOCIAL=1.
+        """
         if self.wiki is None:
             raise RuntimeError("WikiService not configured")
         pages = sorted(self.wiki.wiki_dir.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
@@ -715,6 +727,35 @@ class KairosService:
         tweet_text = resp.content.strip().strip('"')
         if len(tweet_text) > 280:
             tweet_text = tweet_text[:277] + "..."
+
+        if not _autonomous_action_authorized("KAIROS_AUTO_PUBLISH_SOCIAL"):
+            if self.approvals is None:
+                raise RuntimeError(
+                    "auto_publish_social requires either approvals manager or "
+                    "KAIROS_AUTO_PUBLISH_SOCIAL=1 to run autonomously"
+                )
+            pending = self.approvals.create(
+                action="kairos:auto_publish_social",
+                summary=tweet_text,
+                metadata={"tweet": tweet_text, "handle": "PachanoDesign"},
+            )
+            self.observe.emit(
+                "kairos_auto_publish_social_pending",
+                trace_id=trace_context.get("trace_id") if trace_context else None,
+                root_trace_id=trace_context.get("root_trace_id") if trace_context else None,
+                span_id=trace_context.get("span_id") if trace_context else None,
+                parent_span_id=trace_context.get("parent_span_id") if trace_context else None,
+                job_id=trace_context.get("job_id") if trace_context else None,
+                artifact_id=trace_context.get("artifact_id") if trace_context else None,
+                payload={
+                    "tweet": tweet_text,
+                    "approval_id": pending.approval_id,
+                    "approval_token": pending.token,
+                },
+            )
+            logger.info("KAIROS auto_publish_social: pending approval=%s", pending.approval_id)
+            return
+
         from claw_v2.social import x_adapter_from_keychain
         adapter = x_adapter_from_keychain(handle="PachanoDesign")
         result = adapter.publish(tweet_text)
@@ -729,9 +770,9 @@ class KairosService:
                           payload={"tweet": tweet_text, "success": result.success, "post_id": result.post_id})
 
     def _handle_auto_deploy(self, decision: TickDecision, trace_context: dict[str, Any] | None = None) -> None:
-        """Trigger Vercel deploy via git push if local is ahead."""
-        import subprocess
-        from pathlib import Path
+        """Trigger Vercel deploy via git push. Default: pending human approval.
+        Opt-in autonomous push via env KAIROS_AUTO_DEPLOY=1.
+        """
         result = subprocess.run(
             ["gh", "api", "repos/Hecpac/PHD-Web/deployments", "--jq", ".[0].sha"],
             capture_output=True, text=True, timeout=15,
@@ -748,6 +789,41 @@ class KairosService:
         if latest_deploy_sha == local_head:
             logger.info("KAIROS auto_deploy: already up to date")
             return
+
+        if not _autonomous_action_authorized("KAIROS_AUTO_DEPLOY"):
+            if self.approvals is None:
+                raise RuntimeError(
+                    "auto_deploy requires either approvals manager or "
+                    "KAIROS_AUTO_DEPLOY=1 to run autonomously"
+                )
+            summary = f"deploy {local_head[:7]} (current prod {latest_deploy_sha[:7]})"
+            pending = self.approvals.create(
+                action="kairos:auto_deploy",
+                summary=summary,
+                metadata={
+                    "repo": "phd",
+                    "local_head": local_head,
+                    "deploy_sha": latest_deploy_sha,
+                },
+            )
+            self.observe.emit(
+                "kairos_auto_deploy_pending",
+                trace_id=trace_context.get("trace_id") if trace_context else None,
+                root_trace_id=trace_context.get("root_trace_id") if trace_context else None,
+                span_id=trace_context.get("span_id") if trace_context else None,
+                parent_span_id=trace_context.get("parent_span_id") if trace_context else None,
+                job_id=trace_context.get("job_id") if trace_context else None,
+                artifact_id=trace_context.get("artifact_id") if trace_context else None,
+                payload={
+                    "local_head": local_head,
+                    "deploy_sha": latest_deploy_sha,
+                    "approval_id": pending.approval_id,
+                    "approval_token": pending.token,
+                },
+            )
+            logger.info("KAIROS auto_deploy: pending approval=%s", pending.approval_id)
+            return
+
         push = subprocess.run(
             ["git", "-C", str(Path.home() / "Projects" / "phd"), "push", "origin", "main"],
             capture_output=True, text=True, timeout=30,
