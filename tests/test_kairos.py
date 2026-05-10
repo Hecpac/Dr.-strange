@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import ANY, MagicMock, patch
 
 from claw_v2.bus import AgentBus, _new_message
-from claw_v2.kairos import KairosService, TickDecision, KairosState
+from claw_v2.kairos import KairosService, TickDecision, KairosState, _classify_decide_error
 
 
 @dataclass
@@ -119,6 +119,44 @@ class DecideTests(unittest.TestCase):
         decision = svc._decide("ctx")
         self.assertEqual(decision.action, "none")
         self.assertIn("timeout", decision.error)
+
+    def test_decide_emits_event_on_failure_with_codex_timeout_classification(self) -> None:
+        svc, router, _, observe = _make_service()
+        router.ask.side_effect = RuntimeError("Codex CLI timed out after 300.0s")
+        decision = svc._decide("ctx")
+        self.assertEqual(decision.action, "none")
+        emit_calls = [call for call in observe.emit.call_args_list if call.args[0] == "kairos_decide_failed"]
+        self.assertEqual(len(emit_calls), 1)
+        payload = emit_calls[0].kwargs["payload"]
+        self.assertEqual(payload["error_kind"], "codex_timeout")
+        self.assertIn("Codex CLI timed out", payload["error"])
+
+    def test_decide_emits_event_with_general_classification_for_unknown_error(self) -> None:
+        svc, router, _, observe = _make_service()
+        router.ask.side_effect = RuntimeError("something unexpected")
+        svc._decide("ctx")
+        emit_calls = [call for call in observe.emit.call_args_list if call.args[0] == "kairos_decide_failed"]
+        self.assertEqual(emit_calls[0].kwargs["payload"]["error_kind"], "general")
+
+
+class ClassifyDecideErrorTests(unittest.TestCase):
+    def test_codex_timeout_recognized(self) -> None:
+        self.assertEqual(_classify_decide_error("Codex CLI timed out after 300.0s"), "codex_timeout")
+
+    def test_codex_timeout_recognized_in_lowercase_variants(self) -> None:
+        self.assertEqual(_classify_decide_error("codex provider timed out"), "codex_timeout")
+
+    def test_circuit_open_recognized(self) -> None:
+        self.assertEqual(
+            _classify_decide_error("observation window frozen: circuit_breaker:cost_per_hour"),
+            "circuit_open",
+        )
+
+    def test_generic_timeout_recognized(self) -> None:
+        self.assertEqual(_classify_decide_error("HTTP request timeout"), "timeout")
+
+    def test_other_errors_classified_general(self) -> None:
+        self.assertEqual(_classify_decide_error("AttributeError: foo"), "general")
 
 
 class ParseDecisionTests(unittest.TestCase):

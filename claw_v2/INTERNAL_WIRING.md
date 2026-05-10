@@ -1,0 +1,507 @@
+# Claw v2 — Internal Wiring
+
+> Architectural reference for Claw / Dr. Strange to consult during refactors,
+> debugging, and self-improvement. Not part of boot context. Read on demand.
+
+---
+
+## meta
+
+```yaml
+describes_commit: e218b07
+doc_version: 1.1
+last_verified: 2026-05-10
+verification_method: manual + grep cross-check
+anchor_strategy: symbol_only  # path:symbol, no line numbers
+audience: claw_v2  # consumed by the agent itself
+```
+
+If `git rev-parse HEAD` diverges substantially from `describes_commit`,
+assume parts of this doc may be stale. The invariants below are the most
+stable section; the layer detail decays fastest.
+
+---
+
+## 1. invariants
+
+Non-negotiable. Any refactor that breaks one breaks operability even if
+tests pass. Defend them.
+
+```yaml
+invariants:
+  audit_trail:
+    rule: Every decision emits an event
+    examples: [dispatch_decision, llm_response, llm_fallback, llm_circuit_open,
+               coordinator_*, tool_call, approval_pending, brain_turn_*,
+               kairos_decide_failed, observation_window_freeze_*]
+    why: Without trail, post-mortem debugging is impossible and self-improvement
+         has no signal.
+
+  no_silent_degrade:
+    rule: Failure is visible to the agent
+    examples:
+      - CircuitBreaker opens explicitly per provider
+      - Fallback is logged, not silent (anthropic ↔ openai only)
+      - Sandbox violations raise PermissionError
+      - Prompt-injection results in structured quarantine payload
+      - Kairos errors emit kairos_decide_failed with classified error_kind
+    why: Silent failure produces wrong actions taken with confidence.
+
+  triple_and_gating:
+    rule: Tool execution requires three independent authorizations in AND
+    factors:
+      - allowed_agent_classes  # who can see the tool
+      - ToolPolicy.allowed_contexts  # from where it can be invoked
+      - tier_check  # tier ≤ autoexec_max_tier OR approval_gate(...)
+    why: Single-flag bypass is impossible by construction.
+```
+
+---
+
+## 2. message flow
+
+```
+Telegram → BotService.handle_text
+   ↓
+   Layer 1: pre-brain dispatchers (15 handlers in chain — see §5.1)
+   Layer 2: CapabilityRouter (intent → chat | runtime_handoff | skill)
+   Layer 3: CapabilityPreflight (binaries + sandbox policy)
+   ↓
+   BrainService → LLMRouter.ask(lane="brain")
+   ├─ pre-hooks
+   ├─ Adapter (Anthropic with session reuse for prefix cache)
+   ├─ CircuitBreaker (opens per provider)
+   ├─ Fallback (anthropic ↔ openai; codex no fallback — explicit)
+   ├─ ObservationWindow gate (cost_per_hour, tool_calls_per_minute)
+   ├─ post-hooks (sanitize)
+   ↓
+   Tool calls → ToolRegistry.execute
+   ├─ allowed_agent_classes
+   ├─ SandboxPolicy + DomainAllowlistEnforcer
+   ├─ Tier 1/2: direct execute
+   ├─ Tier 3: ApprovalGate → Telegram (raise ApprovalPending) | System (auto)
+   ├─ sanitize_tool_output (anti prompt-injection)
+   ↓
+   Heavy tasks → TaskHandler.start_autonomous_task
+   ├─ TaskLedger.create (SQLite ledger in data/claw.db)
+   ├─ CoordinatorService — research → synthesis → impl → verify
+   ├─ AgentLoop wrap (plan/exec/observe/verify/critique/replan)
+   ├─ SubAgentService (assigned_agent → SOUL.md)
+   ├─ ApprovalGate (tier 3)
+   ├─ Verifier votes → _aggregate_verifier_votes → recommendation + risk
+   ↓
+   ObserveStream emits events at every layer (data/claw.db)
+   ObservationWindowState gates / persists freeze state in
+       data/observation_window.json (sibling of db_path).
+```
+
+---
+
+## 3. lanes (LLMRouter)
+
+```yaml
+lanes:
+  brain:    { tool_capable: true,  default: anthropic }
+  worker:   { tool_capable: true,  default: codex_or_anthropic }
+  verifier: { tool_capable: false, default: multi_vote }
+  research: { tool_capable: false, default: openai_or_google }
+  judge:    { tool_capable: false, default: anthropic }
+
+NON_TOOL_LANES: [verifier, research, judge]
+enforced_by: LLMRouter._validate_lane_input  # claw_v2/llm.py
+```
+
+### resilience
+
+- `ProviderCircuitBreaker` (`claw_v2/retry_policy.py`) opens per provider after
+  N failures, blocks calls until `opened_until`.
+- Fallback chain:
+  ```yaml
+  anthropic: openai
+  openai: anthropic
+  codex:
+    fallback_provider: null  # explicit — codex is ChatGPT subscription
+  ```
+- ObservationWindowState (`claw_v2/observation_window.py`) is an additional
+  gate over LLM and tool execution: rolling 1h cost, rolling 1min tool-call
+  rate, hard denylist (git push -f, vercel --prod, gh release create, dynamic
+  rm -rf). Frozen state persists between restarts; `circuit_breaker:*`
+  freezes auto-clear after `stale_freeze_seconds` (default 3600s) since the
+  rolling-window evidence has decayed by then. Manual freezes (manual_*)
+  always require explicit unfreeze.
+
+### provider-aware sessions
+
+`BrainService.handle_message` (`claw_v2/brain.py`) consults
+`memory.get_provider_session(session_id, provider)`. Local TTL 7200s;
+Anthropic backend may evict earlier — `AdapterError` triggers retry with
+fresh session.
+
+### verifier consensus
+
+`_aggregate_verifier_votes` (`claw_v2/brain.py`) reduces N votes to:
+
+- `unanimous_approve`: ≥2 verifiers, all approve, risk ∈ {low, medium},
+  no blockers, no missing_checks → `recommendation="approve"`.
+- `single_verifier_approve`: 1 verifier, approve, risk=low, no blockers,
+  no missing_checks → `recommendation="approve"`.
+- otherwise → `consensus_status` ∈ {`disagreement`, `verifier_error`},
+  `recommendation="needs_approval"`, risk forced to `high` (or `critical`).
+
+**The `judge` lane is NOT invoked in this aggregator.** Judge is used in
+`claw_v2/skills.py`, `claw_v2/learning.py`, and `claw_v2/kairos.py` — not
+as a tiebreaker for brain consensus. Brain disagreement goes straight to
+`needs_approval`.
+
+---
+
+## 4. tool distribution (ToolRegistry)
+
+Central registry: `ToolRegistry` (`claw_v2/tools.py`) controls each
+`ToolDefinition` along three independent axes (the triple-AND from §1).
+
+### axis A — tier
+
+```yaml
+tiers:
+  TIER_READ_ONLY: 1        # bypass approval, daemon-safe
+  TIER_LOCAL_MUTATION: 2   # bypass approval, audited
+  TIER_REQUIRES_APPROVAL: 3  # mandatory gate
+
+autoexec_max_tier:
+  rule: tier ≤ autoexec_max_tier → execute; else approval_gate(...)
+  warning: Tier 3 ALWAYS calls approval_gate, even if autoexec_max_tier=3.
+           autoexec_max_tier is a ceiling, never an override.
+```
+
+### axis B — allowed_agent_classes
+
+Each tool declares its audience: `("researcher", "operator", "deployer")`.
+`ToolRegistry.allowed_tools(agent_class)` filters per subagent.
+
+### axis C — ToolPolicy
+
+Orthogonal metadata:
+
+```yaml
+ToolPolicy:
+  risk_level: [low, medium, high]
+  read_only: bool
+  allowed_contexts: [telegram, daemon, brain, research, operator]
+  requires_human: bool
+  allowed_paths: [...]
+  blocked_path_patterns: [...]  # SECRET_PATH_PATTERNS covers .env, *.pem, etc.
+```
+
+### output sanitization
+
+If `definition.ingests_external_content` is true, `sanitize_tool_output`
+scans for prompt-injection. On `verdict=malicious`, returns structured
+quarantine payload — never silently drops.
+
+### sandbox
+
+`sandbox_hook` (`claw_v2/sandbox.py`) validates each call against
+`SandboxPolicy(workspace_root, capability_profile)` plus
+`DomainAllowlistEnforcer` for network. Blocks with `PermissionError`.
+
+### daemon auto-approve
+
+`DAEMON_AUTO_APPROVE` (`claw_v2/tool_policy.py`) is a small set
+(memory.read, wiki.search, git.status, etc.) the daemon may invoke without
+human approval. Each member satisfies all four:
+
+```yaml
+- read_only: true
+- risk_level: low
+- "daemon" in allowed_contexts
+- requires_human: false
+```
+
+---
+
+## 5. dispatch layers
+
+### 5.1 layer 1 — pre-brain dispatchers (15 handlers)
+
+`BotService.handle_text` (`claw_v2/bot.py`) tries 15 handlers in order.
+Each emits `dispatch_decision`. Order matters; no test enforces it. The
+real call sites in `handle_text` (verified at HEAD `e218b07`):
+
+| # | Handler symbol | Trigger / contract |
+|---|---|---|
+| 1 | `_handle_pending_computer_approval_response` | response to pending computer-use approval |
+| 2 | `_maybe_handle_operational_alert` | "alertas operacionales" + parse |
+| 3 | `_maybe_handle_boot_context_status` | boot context queries |
+| 4 | `_maybe_handle_pending_tasks_query` | "tareas pendientes" / "pendientes" |
+| 5 | `_maybe_handle_actionable_task_request` | runtime=Telegram + state-derived objective |
+| 6 | `_maybe_handle_task_intent` | **gated OFF** by `CLAW_DISABLE_TASK_INTENT_ROUTER=1` (default) |
+| 7 | `_maybe_handle_operational_status` | operational status questions |
+| 8 | `_maybe_handle_change_status_question` | change-status questions |
+| 9 | `_maybe_handle_capability_route` | classify_autonomy_intent → CRITICAL_TASK_KINDS gate |
+| 10 | `_handle_pending_tool_approval_grant_response` | response to pending tool approval |
+| 11 | `_handle_autonomy_grant_response` | "tienes autonomía", "full autonomy" |
+| 12 | `_maybe_resolve_stateful_followup` | proceed-class continuation (state_handler) |
+| 13 | `_maybe_handle_shortcut` | URL extraction, chrome browse, link review |
+| 14 | `_nlm_handler.natural_language_response` | NotebookLM intent classifier |
+| 15 | `_task_handler.maybe_run_coordinated_task` | coordinated autonomous task |
+
+Then fallthrough to brain.
+
+**Known fragility**: handler #5 vs #6 overlap; #6 is gated OFF for that
+reason (`tests/test_dispatch_routing.py:121` codifies the over-capture as
+xfail strict). The CRITICAL_TASK_KINDS list in #9 is hardcoded
+(`{social_publish, pipeline_merge, deploy}`) — see TODO §7.
+
+**dispatch_decision payload**: `handler`, `route` (intercepted | fall_through),
+`reason`, `captured` (bool), `text_preview[:80]`, `text_len`, `session_id`.
+Does NOT yet include the exact regex/intent label that matched (see Wave 2).
+
+### 5.2 layer 2 — CapabilityRouter
+
+`route_request` in `CapabilityRouter` (`claw_v2/capability_router.py`):
+
+1. `classify_autonomy_intent(text)` → `AutonomyIntent`.
+2. `route_request(intent, ...)` → `CapabilityRoute(route="chat" | "runtime_handoff" | "skill" | ...)`.
+3. Hard rules:
+
+```yaml
+CRITICAL_TASK_KINDS:
+  members: [social_publish, pipeline_merge, deploy]
+  enforcement: requires_approval=true (no autoexec)
+  TODO: move to config so self-improvement loop can extend at runtime.
+
+sandbox_handoff:
+  condition: current_environment="claude_code_sandbox" AND
+             task_kind in _EXECUTION_REQUIRING_TASKS
+  action: force runtime_handoff
+```
+
+### 5.3 layer 3 — CapabilityPreflight
+
+`preflight_objective` in `CapabilityPreflight` (`claw_v2/capability_preflight.py`,
+new in branch `feat/tactical-autonomy-fixes`). Returns `CapabilityPreflightResult`
+with `task_kind`, `risk_tier`, `plan`, `checks: list[CommandPreflight]`,
+`blockers: list[str]`, `allowed: bool = not blockers`.
+
+Blocker reasons are legible: `command_not_found:poetry`,
+`policy_blocked:codex:profile_violation`. Persisted by
+`TaskHandler.record_blocked_task` into ledger as `error="; ".join(blockers)[:1000]`,
+plus `metadata["blockers"]` and `artifacts["preflight"]`.
+
+### 5.4 layer 4 — CoordinatorService
+
+`CoordinatorService` (`claw_v2/coordinator.py`). Four phases sequential
+within a task; tasks parallelizable across coordinator instances.
+
+```yaml
+phases: [research, synthesis, implementation, verification]
+parallelism:
+  max_workers: 4   # per CoordinatorService
+  scope: across tasks; phases within a task are sequential.
+
+scratch_dir: ~/.claw/scratch/<task_id>/
+  persists: research/*.json, synthesis.md, implementation/*.json, verification/*.json
+  resume: TaskLedger.list(statuses=("running",)) → _resume_autonomous_record
+```
+
+### 5.5 layer 5 — AgentLoop
+
+`AgentLoop` (`claw_v2/agent_loop.py`):
+
+```yaml
+cycle: [plan, execute, observe, verify, critique, replan]
+budget: max_iterations: int = 3   # ONLY guard today
+TODO: add max_cost_usd, max_wallclock_s (Wave 2)
+critic_runs_when: verdict != passed
+on_exhaustion: outcome="exhausted", full history returned
+```
+
+### 5.6 layer 6 — SubAgentService
+
+Named subagents (Alma, Hex, Lux, Rook, …) discovered by scanning
+`definitions_root` in `SubAgentService` (`claw_v2/agents.py`).
+
+```yaml
+subagent_layout:
+  SOUL.md:       role + provider/model in "- **Model:**" line  (required)
+  HEARTBEAT.md:  per-turn contract                              (required)
+  USER.md:       user-facing identity                           (required)
+  skills/<name>/SKILL.md:  tool/skill definitions               (optional)
+```
+
+`_parse_provider_and_model` falls back **silently** to
+`("anthropic", "claude-sonnet-4-6")` if `- **Model:**` line is missing.
+Bug if typo'd. See TODO §7.
+
+### 5.7 layer 7 — ApprovalGate
+
+`ApprovalGate` factory (`claw_v2/approval_gate.py`):
+
+```yaml
+build_telegram_approval_gate:
+  creates: pending record with HMAC token
+  notifies: optional notifier(pending) → Telegram
+  raises: ApprovalPending  (NOT PermissionError)
+  user_command: /approve <id> <token>
+
+build_system_auto_approve_gate:
+  creates: pending record
+  immediately: approve_internal (with audit trail)
+  used_by: [daemon, Kairos, heartbeat]
+
+approved_tool_invocation:
+  type: one-shot context manager
+  purpose: allow retry after approval without re-prompting
+```
+
+Gate selection:
+
+```yaml
+mechanism: ContextVar (_DAEMON_REASON)
+setter: system_approval_mode(reason)  # context manager
+default: telegram gate
+inside_block: system auto-approve gate
+```
+
+### 5.8 layer 8 — Kairos (proactive)
+
+`KairosService` (`claw_v2/kairos.py`). 30-min default tick, decides via
+`router.ask(lane="judge")`, executes one of 19 action handlers per tick
+(`notify_user`, `dispatch_to_agent`, `approve_pending`, `run_skill`,
+`wiki_*`, `site_monitor`, `auto_publish_social`, `auto_deploy`,
+`gmail_digest`, `generate_skill`, `nlm_wiki_sync`, `a2a_send`,
+`publish_task`, `claim_task`, `morning_video_brief`, `daemon_health_check`).
+
+Errors in `_decide` emit `kairos_decide_failed` with `error_kind` ∈
+{`codex_timeout`, `circuit_open`, `timeout`, `general`}. Codex without
+fallback is invariant (§6); KAIROS just defers to next tick.
+
+**Limitation**: Kairos publishes tasks to the board / sends bus messages
+but does NOT directly invoke `AgentLoop` or `CoordinatorService`. It is a
+router-lite, not a full agent. Fixing that is Wave 2 in the plan.
+
+---
+
+## 6. do_not (prescriptive)
+
+Self-improvement loop must reject these even if tests pass.
+
+```yaml
+do_not:
+  - change: Grant tool access to verifier, research, or judge lanes
+    why: Breaks advisory-only invariant.
+    enforced_by: LLMRouter._validate_lane_input
+
+  - change: Add fallback codex → anthropic
+    why: Codex is ChatGPT subscription. Silent fallback hides provider switch.
+    enforced_by: LLMRouter fallback config (claw_v2/llm.py)
+
+  - change: Bypass approval_gate for tier 3 tools when autoexec_max_tier=3
+    why: autoexec_max_tier is CEILING, not override.
+    enforced_by: ToolRegistry.execute
+
+  - change: Silently drop sanitized tool output instead of returning quarantine payload
+    why: Agent must see filtration to avoid blocking on missing real result.
+    enforced_by: sanitize_tool_output
+
+  - change: Remove audit emit from a new dispatcher or any layer
+    why: Invariant audit_trail. Blind spot in post-mortem.
+
+  - change: Hardcode CRITICAL_TASK_KINDS additions
+    why: Self-improvement should add critical kinds at runtime, not in PR.
+    proposed: move to config + emit critical_task_kinds_changed event on edit.
+
+  - change: Auto-clear manual_* freezes
+    why: Manual freezes are explicit operator decisions; only circuit_breaker:*
+         freezes are evidence-backed by rolling windows and safe to TTL out.
+    enforced_by: ObservationWindowState._load_state stale-freeze TTL guard.
+```
+
+---
+
+## 7. open TODOs
+
+```yaml
+todos:
+  - item: tests/arch_invariants.py
+    why: Import NON_TOOL_LANES, CRITICAL_TASK_KINDS, DAEMON_AUTO_APPROVE,
+         SECRET_PATH_PATTERNS, _DAEMON_REASON. Fail if any disappears
+         without doc update. Closes the loop on last_verified.
+
+  - item: AgentLoop max_cost_usd + max_wallclock_s
+    why: max_iterations=3 is poor budget proxy when each iter is Opus.
+    plan_wave: 2
+
+  - item: dispatch_decision matched_pattern field
+    why: Today only handler/route/reason. Need exact regex/intent label
+         to enable real "see how it thinks" replays.
+    plan_wave: 2
+
+  - item: Tool pivoting in ToolRegistry code
+    why: SELF_HEALING_LOOP_CONTRACT lives only in prompt. LLM-respect inconsistent.
+    plan_wave: 2
+
+  - item: Brain pushback contract + prefill stress test
+    why: 8 contracts in prompt, none authorize disagreement. Anthropic 2026
+         sycophancy paper methodology applicable.
+    plan_wave: 2
+
+  - item: Goal hierarchy in BoardTask (parent_task_id, project_id)
+    why: GoalContract type already has parent_goal_id. Board is flat.
+    plan_wave: 2
+
+  - item: Kairos invokes AgentLoop on goals
+    why: Today Kairos is router-lite. To deliver results, must drive the loop.
+    plan_wave: 2
+
+  - item: LearningLoop auto-apply (close self-improvement loop)
+    why: Today suggest_soul_updates only proposes; nobody applies.
+    plan_wave: 3
+
+  - item: Trust calibration on autoexec_max_tier
+    why: Static ceiling. Should adjust per-(agent, task_kind) success_rate.
+    plan_wave: 3
+
+  - item: Vector memory cold path (Letta-style hot/cold)
+    why: Embeddings stored as TEXT, retrieval falls back to LIKE.
+    plan_wave: 3
+
+  - item: SKILL0-style internalization
+    why: Skills are cheat-sheets (retrieve-and-paste). Paper trains the model
+         and progressively withdraws context. Aplicable a Claw skill registry.
+    plan_wave: 4
+```
+
+---
+
+## 8. quick reference
+
+When refactoring, ask in order:
+
+1. Does the change touch any invariant in §1 or any item in §6?
+   → Stop. Read those sections. If still want to proceed, escalate.
+2. Does the change move a symbol mentioned in this doc?
+   → Update this doc in same commit. Bump `doc_version`, set
+     `last_verified`, set `describes_commit` to new HEAD.
+3. Does the change add a new layer, lane, gate, or tier?
+   → Add to YAML in the relevant section. Add a `do_not` if the new
+     element has a non-obvious failure mode.
+4. Does the change touch `bot.py:handle_text` or `agents.py`?
+   → Highest churn files. Re-verify all anchors that point into them.
+
+## 9. observability quick-paths
+
+To "see how it thinks" without sqlite3:
+
+```bash
+python -m claw_v2.cli.think tail --limit 20                  # latest events
+python -m claw_v2.cli.think tail --type dispatch_decision    # routing only
+python -m claw_v2.cli.think trace <trace_id>                 # full trace
+python -m claw_v2.cli.think replay <session_id>              # session reasoning
+python -m claw_v2.cli.think spending                         # cost rollup today
+python -m claw_v2.cli.think circuit                          # observation window state
+```
+
+DB lives at `data/claw.db` (active) + `data/observation_window.json`
+(circuit state). Bot does NOT need to be running for these.

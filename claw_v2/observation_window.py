@@ -25,6 +25,7 @@ class ObservationWindowConfig:
     cost_per_hour_threshold: float = 10.00
     tool_calls_per_minute_threshold: int = 10
     daily_budget_cap: float | None = None
+    stale_freeze_seconds: float = 3600.0
 
 
 def hard_denylist_reason(tool_name: str, args: dict[str, Any]) -> str | None:
@@ -293,6 +294,35 @@ class ObservationWindowState:
         self._frozen = bool(data.get("frozen"))
         self._freeze_reason = str(data.get("reason") or "")
         self._freeze_actor = str(data.get("actor") or "")
+        # circuit_breaker:* freezes are backed by rolling-window evidence (1h cost,
+        # 1m tool-call rate). Once the window has decayed past the TTL, the freeze
+        # is no longer evidence-backed; auto-clear so a restart isn't permanently
+        # bricked. Manual freezes (manual_*) always require explicit unfreeze.
+        if self._frozen and self._freeze_reason.startswith("circuit_breaker:"):
+            age = _freeze_age_seconds(data.get("updated_at"))
+            if age > self.config.stale_freeze_seconds:
+                stale_reason = self._freeze_reason
+                stale_actor = self._freeze_actor
+                self._frozen = False
+                self._freeze_reason = ""
+                self._freeze_actor = "auto_clear_stale"
+                self._persist_state_locked()
+                logger.warning(
+                    "Auto-cleared stale circuit_breaker freeze: reason=%s prior_actor=%s age=%.0fs ttl=%.0fs",
+                    stale_reason,
+                    stale_actor,
+                    age,
+                    self.config.stale_freeze_seconds,
+                )
+                self._emit(
+                    "observation_window_freeze_auto_cleared",
+                    {
+                        "stale_reason": stale_reason,
+                        "stale_actor": stale_actor,
+                        "age_seconds": round(age, 1),
+                        "ttl_seconds": self.config.stale_freeze_seconds,
+                    },
+                )
 
     def _persist_state_locked(self) -> None:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -435,3 +465,15 @@ def _coerce_float(value: object, default: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _freeze_age_seconds(updated_at_raw: object) -> float:
+    if not isinstance(updated_at_raw, str):
+        return float("inf")
+    try:
+        updated_at = datetime.fromisoformat(updated_at_raw.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return float("inf")
+    if updated_at.tzinfo is None:
+        updated_at = updated_at.replace(tzinfo=timezone.utc)
+    return max((datetime.now(timezone.utc) - updated_at).total_seconds(), 0.0)

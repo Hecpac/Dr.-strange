@@ -47,6 +47,17 @@ class KairosState:
     last_action: str = ""
 
 
+def _classify_decide_error(error_str: str) -> str:
+    lowered = error_str.lower()
+    if "codex cli timed out" in lowered or ("codex" in lowered and "timed out" in lowered):
+        return "codex_timeout"
+    if "circuit_breaker" in lowered or "observation window frozen" in lowered:
+        return "circuit_open"
+    if "timed out" in lowered or "timeout" in lowered:
+        return "timeout"
+    return "general"
+
+
 class KairosService:
     """Always-on proactive agent that evaluates context on each tick
     and decides whether to take an action without user input.
@@ -328,8 +339,18 @@ class KairosService:
             )
             return self._parse_decision(response.content)
         except Exception as exc:
-            logger.warning("KAIROS decide failed: %s", exc)
-            return TickDecision(action="none", error=str(exc))
+            error_str = str(exc)
+            error_kind = _classify_decide_error(error_str)
+            logger.warning("KAIROS decide failed (%s): %s", error_kind, exc)
+            self.observe.emit(
+                "kairos_decide_failed",
+                payload={
+                    "error": error_str[:300],
+                    "error_kind": error_kind,
+                    "ticks_so_far": self.state.ticks,
+                },
+            )
+            return TickDecision(action="none", error=error_str)
 
     @staticmethod
     def _parse_decision(text: str) -> TickDecision:

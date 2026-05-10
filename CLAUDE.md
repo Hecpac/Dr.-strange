@@ -39,3 +39,15 @@ Transform tasks into verifiable goals:
 ## 5. Worktrees
 
 Worktrees ubicados en `.worktrees/` (local al proyecto). No commitear contenido de ese directorio.
+
+## 6. Internal Wiring reference
+
+Antes de refactorear dispatchers (`bot.py:handle_text`), brain/verifier
+(`brain.py`), AgentLoop, ToolRegistry, o lanes — leer
+`claw_v2/INTERNAL_WIRING.md`. Cataloga invariantes (§1), reglas `do_not`
+(§6), el orden canónico de los 15 dispatch handlers (§5.1), y los TODOs
+abiertos por ola (§7). Tras un cambio que toque algo descrito ahí, actualizar
+`describes_commit` y `last_verified` en el mismo commit.
+
+Para "ver cómo piensa" sin abrir SQLite: `python -m claw_v2.cli.think
+tail|trace|spending|circuit|replay`.
