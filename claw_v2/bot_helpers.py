@@ -562,6 +562,8 @@ _INTERNAL_LEAK_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bcircuit breaker\b", re.IGNORECASE),
     re.compile(r"\bPID\s*[:#]?\s*\d+\b", re.IGNORECASE),
     re.compile(r"/Users/hector/"),
+    re.compile(r"</?\s*system-reminder\s*>", re.IGNORECASE),
+    re.compile(r"&lt;/?\s*system-reminder\s*&gt;", re.IGNORECASE),
 )
 
 # Indices in _INTERNAL_LEAK_PATTERNS that bump the entire reply to the error
@@ -569,7 +571,7 @@ _INTERNAL_LEAK_PATTERNS: tuple[re.Pattern[str], ...] = (
 # verbatim prompt echoes. Soft phrases ("respuesta bloqueada", "trazas internas",
 # "circuit breaker", etc.) are inline-redacted further below so legitimate
 # technical references do not nuke an otherwise valid reply.
-_NUKE_PATTERN_INDICES: tuple[int, ...] = (4, 5, 6, 20, 21, 22, 23, 24, 25)
+_NUKE_PATTERN_INDICES: tuple[int, ...] = (4, 5, 6, 20, 21, 22, 23, 24, 25, 30, 31)
 
 
 def _chat_response_has_internal_leak(text: str) -> bool:

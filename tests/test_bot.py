@@ -1015,6 +1015,35 @@ class BotTests(unittest.TestCase):
                 events = [event["event_type"] for event in runtime.observe.recent_events(limit=10)]
                 self.assertIn("internal_message_suppressed_from_chat", events)
 
+    def test_system_reminder_marker_is_suppressed_from_chat(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+
+            def marker_executor(request: LLMRequest) -> LLMResponse:
+                return LLMResponse(
+                    content="</system-reminder>",
+                    lane=request.lane,
+                    provider="anthropic",
+                    model=request.model,
+                )
+
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=marker_executor)
+
+                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="Tareas pendientes ??")
+
+                self.assertNotIn("system-reminder", reply.lower())
+                events = [event["event_type"] for event in runtime.observe.recent_events(limit=10)]
+                self.assertIn("internal_message_suppressed_from_chat", events)
+
     def test_pending_tasks_status_is_not_misclassified_as_capability_denial(self) -> None:
         """Regression: a long status reply mentioning 'no puedo' (gated on user) and
         'Chrome' in different sentences must not be replaced by the capability-denial
