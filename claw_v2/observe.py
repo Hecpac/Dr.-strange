@@ -76,6 +76,12 @@ class ObserveStream:
         artifact_id: str | None = None,
         payload: dict | None = None,
     ) -> None:
+        # Wave 3.5: defense-in-depth — scrub system-reminder markers from the
+        # payload BEFORE we persist or fan out to subscribers, so a leak that
+        # bypassed the chat sanitizer still doesn't end up on disk.
+        from claw_v2.leak_scrub import scrub_for_persistence
+
+        clean_payload = scrub_for_persistence(payload or {})
         with self._lock:
             self._conn.execute(
                 """
@@ -97,13 +103,13 @@ class ObserveStream:
                     parent_span_id,
                     job_id,
                     artifact_id,
-                    json.dumps(payload or {}),
+                    json.dumps(clean_payload),
                 ),
             )
             self._conn.commit()
         callbacks = self._subscribers.get(event_type)
         if callbacks:
-            event_payload = payload or {}
+            event_payload = clean_payload
             for cb in callbacks:
                 try:
                     cb(event_payload)

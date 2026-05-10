@@ -23,6 +23,13 @@ _ERROR_SNIPPET_CHARS = 500
 logger = logging.getLogger(__name__)
 
 
+class SubAgentConfigError(ValueError):
+    """Raised when a SOUL.md file cannot be parsed cleanly. Wave 3.6:
+    surfaces silent fallback to claude-sonnet-4-6 as an explicit error
+    when CLAW_STRICT_SOUL_MODEL=1 — typos in subagent specs were
+    previously masked, causing wrong-model dispatch with no signal."""
+
+
 @dataclass(frozen=True, slots=True)
 class ArtifactEvidence:
     """Brain-bypass refactor commit #8: a typed pointer to a piece of evidence
@@ -1166,7 +1173,18 @@ class SubAgentService:
         if user_path.exists():
             user_ctx = user_path.read_text(encoding="utf-8")
         skills = self._load_skills(agent_dir / "skills")
-        provider, model = self._parse_model_from_soul(soul)
+        # Wave 3.6: strict mode opt-in via env. Default OFF preserves
+        # backward compat with existing SOUL.md files; production can flip
+        # it on once all subagent specs declare an explicit model.
+        import os
+
+        strict = os.getenv("CLAW_STRICT_SOUL_MODEL", "0") == "1"
+        try:
+            provider, model = self._parse_model_from_soul(soul, strict=strict)
+        except SubAgentConfigError as exc:
+            raise SubAgentConfigError(
+                f"Cannot load subagent {agent_dir.name!r}: {exc}"
+            ) from exc
         display_name = self._parse_display_name(soul)
         return SubAgentDefinition(
             name=agent_dir.name,
@@ -1191,7 +1209,16 @@ class SubAgentService:
         return skills
 
     @staticmethod
-    def _parse_model_from_soul(soul: str) -> tuple[str, str]:
+    def _parse_model_from_soul(soul: str, *, strict: bool = False) -> tuple[str, str]:
+        """Parse provider+model from a SOUL.md.
+
+        Looks for a "- **Model:**" line; if missing, falls back to scanning
+        the whole soul for provider keywords. Wave 3.6: when ``strict`` is
+        true, raises :class:`SubAgentConfigError` if neither path yields a
+        match (instead of silently defaulting to claude-sonnet-4-6 — a
+        silent default is a debugging hazard when a typo creeps into
+        SOUL.md).
+        """
         model_line = ""
         for line in soul.splitlines():
             stripped = line.strip()
@@ -1218,6 +1245,14 @@ class SubAgentService:
             return ("openai", "gpt-4.1")
         if "gpt" in text:
             return ("openai", "gpt-5.4")
+        if strict:
+            preview = (model_line or "").strip() or "(missing)"
+            raise SubAgentConfigError(
+                "SOUL.md has no parseable model: '- **Model:**' line missing "
+                "or has no recognized provider keyword "
+                f"(got: {preview!r}). "
+                "Add an explicit line like '- **Model:** claude-opus-4-7'."
+            )
         return ("anthropic", "claude-sonnet-4-6")
 
     @staticmethod
