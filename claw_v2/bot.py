@@ -22,6 +22,7 @@ from claw_v2.approval import ApprovalManager
 from claw_v2.approval_gate import ApprovalPending, approved_tool_invocation
 from claw_v2.brain import BrainService
 from claw_v2.bot_commands import BotCommand, CommandContext, dispatch_commands
+from claw_v2.dispatch import Route, RouteContext, RouteOutcome, dispatch_routes
 from claw_v2.capability_router import (
     CapabilityRoute,
     RuntimeAliveProbe,
@@ -527,6 +528,7 @@ class BotService:
         self._skill_lock = threading.Lock()
         self._pre_state_commands = self._build_pre_state_commands()
         self._post_shortcut_commands = self._build_post_shortcut_commands()
+        self._pre_brain_routes: list[Route] = self._build_pre_brain_routes()
 
     @property
     def terminal_bridge(self) -> object | None:
@@ -1668,23 +1670,21 @@ class BotService:
                 text=stripped,
                 captured=True,
             )
-        operational_alert_response = self._maybe_handle_operational_alert(stripped, session_id=session_id)
-        self._emit_dispatch_decision(
-            handler="operational_alert",
-            route="intercepted" if operational_alert_response is not None else "fall_through",
-            reason=(
-                "operational_alert_matched"
-                if operational_alert_response is not None
-                else "operational_alert_no_match"
-            ),
+        route_ctx = RouteContext(
+            user_id=user_id,
             session_id=session_id,
-            text=stripped,
-            captured=operational_alert_response is not None,
+            text=text,
+            stripped=stripped,
+            runtime_channel=runtime_channel,
         )
-        if operational_alert_response is not None:
-            self._store_memory_turn(session_id, stripped, operational_alert_response, assistant_limit=2000)
-            self._remember_assistant_turn_state(session_id, stripped, operational_alert_response)
-            return operational_alert_response
+        route_outcome = dispatch_routes(
+            self._pre_brain_routes,
+            route_ctx,
+            on_decision=self._emit_route_decision,
+        )
+        if route_outcome.captured and route_outcome.response is not None:
+            self._post_capture_intercepted(session_id, stripped, route_outcome.response)
+            return route_outcome.response
         boot_context_response = self._maybe_handle_boot_context_status(
             stripped,
             session_id=session_id,
@@ -1987,6 +1987,35 @@ class BotService:
             BotCommand("social", self._handle_social_command, exact=("/social_preview", "/social_publish", "/social_status"), prefixes=("/social_preview ", "/social_publish ", "/social_approve ")),
             *self._nlm_handler.commands(),
         ]
+
+    def _build_pre_brain_routes(self) -> list[Route]:
+        """Semantic dispatch routes (incremental migration of the 15 legacy
+        handlers in handle_text). Order matches the legacy chain — each
+        migrated handler keeps its slot until all of them live here.
+        """
+        return [
+            Route("operational_alert", self._route_operational_alert),
+        ]
+
+    def _route_operational_alert(self, ctx: RouteContext) -> RouteOutcome:
+        response = self._maybe_handle_operational_alert(ctx.stripped, session_id=ctx.session_id)
+        if response is None:
+            return RouteOutcome.fall_through(reason="operational_alert_no_match")
+        return RouteOutcome.intercepted(response, reason="operational_alert_matched")
+
+    def _emit_route_decision(self, name: str, outcome: RouteOutcome, ctx: RouteContext) -> None:
+        self._emit_dispatch_decision(
+            handler=name,
+            route=outcome.route,
+            reason=outcome.reason,
+            session_id=ctx.session_id,
+            text=ctx.stripped,
+            captured=outcome.captured,
+        )
+
+    def _post_capture_intercepted(self, session_id: str, stripped: str, response: str) -> None:
+        self._store_memory_turn(session_id, stripped, response, assistant_limit=2000)
+        self._remember_assistant_turn_state(session_id, stripped, response)
 
     def _handle_help_command(self, context: CommandContext) -> str:
         if context.stripped == "/help":
