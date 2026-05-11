@@ -28,7 +28,15 @@ class _TaskHandler:
         ]
 
     def mark_first_task_queue_entry(self, queue, *, from_status, to_status):
-        return queue
+        updated = []
+        transitioned = False
+        for item in queue:
+            current = dict(item)
+            if not transitioned and current.get("status") == from_status:
+                current["status"] = to_status
+                transitioned = True
+            updated.append(current)
+        return updated
 
     def mark_task_queue_in_progress(self, queue, *, summary=None, task_id=None):
         updated = []
@@ -121,6 +129,51 @@ class StateHandlerRegressionTests(unittest.TestCase):
         self.assertIsInstance(shortcut, _BrainShortcut)
         assert isinstance(shortcut, _BrainShortcut)
         self.assertIn("Opción elegida: corregir bug", shortcut.text)
+
+    def test_dale_rejects_redacted_pending_action(self) -> None:
+        memory, handler = self._handler()
+        token = "Aa1234567890Bb1234567890Cc1234567890"
+        memory.update_session_state(
+            "s1",
+            mode="coding",
+            pending_action=f"Objective: {token}",
+        )
+
+        response = handler.maybe_resolve_stateful_followup("Dale", session_id="s1")
+        state = memory.get_session_state("s1")
+
+        self.assertIsInstance(response, str)
+        self.assertIn("valor sensible redactado", response)
+        self.assertEqual(state["pending_action"], "")
+        self.assertEqual(state["verification_status"], "blocked")
+        self.assertEqual(state["last_checkpoint"]["reason"], "sensitive_context_redacted")
+
+    def test_dale_rejects_redacted_task_queue_item(self) -> None:
+        memory, handler = self._handler()
+        token = "Aa1234567890Bb1234567890Cc1234567890"
+        memory.update_session_state(
+            "s1",
+            mode="coding",
+            task_queue=[
+                {
+                    "task_id": "task-sensitive",
+                    "summary": f"Run objective {token}",
+                    "mode": "coding",
+                    "status": "pending",
+                    "source": "coordinator",
+                    "priority": 0,
+                    "depends_on": [],
+                }
+            ],
+        )
+
+        response = handler.maybe_resolve_stateful_followup("Dale", session_id="s1")
+        state = memory.get_session_state("s1")
+
+        self.assertIsInstance(response, str)
+        self.assertIn("valor sensible redactado", response)
+        self.assertEqual(state["task_queue"][0]["status"], "blocked")
+        self.assertEqual(state["verification_status"], "blocked")
 
 
 if __name__ == "__main__":

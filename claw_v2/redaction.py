@@ -5,6 +5,13 @@ from typing import Any
 
 _PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\b\d{8,12}:[A-Za-z0-9_\-]{30,}\b"), "<REDACTED:telegram_token>"),
+    # Generic high-entropy catcher. Hardened 2026-05-11 after adversarial
+    # tests: requires 32+ monolithic alphanumeric chars (no hyphens — so
+    # UUIDs like 5d6282ce-54d0-4F5E-... split into short segments and fail)
+    # AND >=8 digits AND mixed case. This avoids matching camelCase
+    # identifiers and mixed-case UUIDs while still catching long monolithic
+    # API keys. Prefix-based patterns below handle shorter tokens.
+    (re.compile(r"\b(?=[A-Za-z0-9_]{32,}\b)(?=(?:[^0-9]*\d){8,})(?=.*[a-z])(?=.*[A-Z])[A-Za-z0-9_]+\b"), "[REDACTED]"),
     (re.compile(r"sk-[A-Za-z0-9_\-]{20,}"), "[REDACTED]"),
     (re.compile(r"ghp_[A-Za-z0-9_]{20,}"), "[REDACTED]"),
     (re.compile(r"github_pat_[A-Za-z0-9_]{20,}"), "[REDACTED]"),

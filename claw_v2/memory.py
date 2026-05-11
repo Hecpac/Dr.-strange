@@ -487,8 +487,9 @@ class MemoryStore:
         # bypasses it (different code path, refactor regression) doesn't
         # poison rolling conversation memory.
         from claw_v2.leak_scrub import redact_system_reminders
+        from claw_v2.redaction import redact_sensitive
 
-        clean_content = redact_system_reminders(content)
+        clean_content = redact_sensitive(redact_system_reminders(content), limit=0)
         with self._lock:
             self._conn.execute(
                 "INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)",
@@ -761,24 +762,29 @@ class MemoryStore:
         current: dict,
         **kwargs: Any,
     ) -> dict:
+        from claw_v2.redaction import redact_sensitive
+
         def _pick(key: str) -> Any:
             v = kwargs.get(key)
             return v if v is not None else current[key]
 
+        def _clean(value: Any) -> Any:
+            return redact_sensitive(value, limit=0)
+
         payload = {
             "autonomy_mode": _pick("autonomy_mode"),
             "mode": _pick("mode"),
-            "current_goal": _pick("current_goal"),
-            "pending_action": _pick("pending_action"),
+            "current_goal": _clean(_pick("current_goal")),
+            "pending_action": _clean(_pick("pending_action")),
             "step_budget": _pick("step_budget"),
             "steps_taken": _pick("steps_taken"),
             "verification_status": _pick("verification_status"),
-            "active_object_json": json.dumps(_pick("active_object")),
-            "last_options_json": json.dumps(_pick("last_options")),
-            "task_queue_json": json.dumps(_pick("task_queue")),
-            "pending_approvals_json": json.dumps(_pick("pending_approvals")),
-            "last_checkpoint_json": json.dumps(_pick("last_checkpoint")),
-            "rolling_summary": _pick("rolling_summary"),
+            "active_object_json": json.dumps(_clean(_pick("active_object"))),
+            "last_options_json": json.dumps(_clean(_pick("last_options"))),
+            "task_queue_json": json.dumps(_clean(_pick("task_queue"))),
+            "pending_approvals_json": json.dumps(_clean(_pick("pending_approvals"))),
+            "last_checkpoint_json": json.dumps(_clean(_pick("last_checkpoint"))),
+            "rolling_summary": _clean(_pick("rolling_summary")),
         }
         self._conn.execute(
             """
