@@ -3917,12 +3917,20 @@ class BotService:
     @staticmethod
     def _looks_like_direct_actionable_task(text: str) -> bool:
         normalized = _normalize_command_text(text)
+        # "pr" must be a standalone token, not a substring of "pregunta",
+        # "preocupa", "preferir", etc. Same for the action verbs: require a
+        # word-boundary start so "completas" (2nd-person present) does not
+        # trip the PR-completion branch when paired with "pregunta".
+        pr_completion = (
+            re.search(r"\bpr\b", normalized) is not None
+            and re.search(r"\b(termina|completa|finaliza)", normalized) is not None
+        )
         return (
             ("actualiza" in normalized and any(token in normalized for token in ("codex", "claude", "codex app")))
             or ("regenera" in normalized and "lock" in normalized)
             or ("poetry.lock" in normalized)
             or ("pyproject" in normalized and "lock" in normalized)
-            or ("pr" in normalized and any(token in normalized for token in ("termina", "completa", "finaliza")))
+            or pr_completion
         )
 
     @staticmethod
