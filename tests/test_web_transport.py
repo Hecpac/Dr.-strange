@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import http.client
 import json
+import socket
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 from urllib.request import Request, urlopen
 
+from claw_v2 import web_transport as web_transport_module
 from claw_v2.bot import BotService
 from claw_v2.chat_api import LocalChatAPI
 from claw_v2.observation_window import ObservationWindowState
@@ -20,6 +23,17 @@ class _StubBotService:
 
     def handle_text(self, *, user_id: str, session_id: str, text: str) -> str:
         return f"reply:{user_id}:{session_id}:{text}"
+
+
+def _http_status(port: int, path: str, *, method: str = "GET", headers: dict[str, str] | None = None) -> int:
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    try:
+        conn.request(method, path, headers=headers or {})
+        response = conn.getresponse()
+        response.read()
+        return response.status
+    finally:
+        conn.close()
 
 
 class WebTransportTests(unittest.IsolatedAsyncioTestCase):
@@ -92,6 +106,42 @@ class WebTransportTests(unittest.IsolatedAsyncioTestCase):
             await transport.stop()
         self.assertFalse(transport.is_serving())
 
+    async def test_static_server_rejects_path_traversal(self) -> None:
+        transport = WebTransport(
+            chat_api=LocalChatAPI(bot_service=_StubBotService()),
+            host="127.0.0.1",
+            port=0,
+        )
+        await transport.start()
+        try:
+            self.assertEqual(_http_status(transport.port, "/chat.js"), 200)
+            for path in (
+                "/../config.py",
+                "/%2e%2e/config.py",
+                "/..%2fconfig.py",
+                "/%252e%252e/config.py",
+            ):
+                with self.subTest(path=path):
+                    self.assertIn(_http_status(transport.port, path), {403, 404})
+        finally:
+            await transport.stop()
+
+    def test_static_server_rejects_symlink_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            static_root = root / "static"
+            static_root.mkdir()
+            outside = root / "outside.txt"
+            outside.write_text("secret", encoding="utf-8")
+            link = static_root / "leak.txt"
+            try:
+                link.symlink_to(outside)
+            except OSError as exc:  # pragma: no cover - platform dependent
+                self.skipTest(f"symlinks unavailable: {exc}")
+
+            with patch("claw_v2.web_transport._static_root", return_value=static_root.resolve()):
+                self.assertIsNone(web_transport_module._resolve_static_path("/leak.txt"))
+
     async def test_serves_observability_dashboard_and_freeze_endpoint(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             window = ObservationWindowState(state_path=Path(tmpdir) / "window.json")
@@ -111,6 +161,33 @@ class WebTransportTests(unittest.IsolatedAsyncioTestCase):
                 with urlopen(request) as response:
                     payload = json.loads(response.read().decode("utf-8"))
                 self.assertTrue(payload["frozen"])
+                self.assertTrue(window.frozen)
+            finally:
+                await transport.stop()
+
+    async def test_observability_requires_token_when_chat_api_is_protected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            window = ObservationWindowState(state_path=Path(tmpdir) / "window.json")
+            transport = WebTransport(
+                chat_api=LocalChatAPI(bot_service=_StubBotService(), auth_token="secret-token"),
+                observability_dashboard=ObservabilityDashboard(window),
+                host="127.0.0.1",
+                port=0,
+            )
+            await transport.start()
+            try:
+                self.assertEqual(_http_status(transport.port, "/observability/state"), 401)
+                self.assertEqual(_http_status(transport.port, "/observability/freeze", method="POST"), 401)
+                self.assertFalse(window.frozen)
+                self.assertEqual(
+                    _http_status(
+                        transport.port,
+                        "/observability/freeze",
+                        method="POST",
+                        headers={"X-Chat-Token": "secret-token"},
+                    ),
+                    200,
+                )
                 self.assertTrue(window.frozen)
             finally:
                 await transport.stop()
@@ -199,3 +276,22 @@ class WebTransportTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(payload["reply"], "reply:123:mac-main:hola")
         finally:
             await transport.stop()
+
+    async def test_start_does_not_kill_process_holding_port(self) -> None:
+        async def no_sleep(_delay: float) -> None:
+            return None
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            sock.listen()
+            port = int(sock.getsockname()[1])
+            transport = WebTransport(
+                chat_api=LocalChatAPI(bot_service=_StubBotService()),
+                host="127.0.0.1",
+                port=port,
+            )
+            with patch("claw_v2.web_transport.os.kill") as kill_mock:
+                with patch("claw_v2.web_transport.asyncio.sleep", new=no_sleep):
+                    with self.assertRaises(OSError):
+                        await transport.start()
+                kill_mock.assert_not_called()
