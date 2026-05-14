@@ -177,6 +177,7 @@ class TaskHandler:
         preflight: dict[str, Any] | None = None,
         plan: list[str] | None = None,
         verification_requirement: str | None = None,
+        verify: str | None = None,
     ) -> str:
         if self.coordinator is None:
             return "coordinator unavailable"
@@ -258,6 +259,7 @@ class TaskHandler:
             route=active_route,
             goal_id=goal_id,
             task_contract=task_contract,
+            verify=verify,
         )
         claim_id = self._p0_record_task_claim(
             goal_id=goal_id,
@@ -1698,6 +1700,7 @@ class TaskHandler:
         route: dict[str, Any],
         goal_id: str | None = None,
         task_contract: dict[str, Any] | None = None,
+        verify: str | None = None,
     ) -> None:
         if self.task_ledger is None:
             return
@@ -1717,6 +1720,7 @@ class TaskHandler:
                 "autonomous": True,
                 **(task_contract or {}),
                 **({"goal_id": goal_id} if goal_id else {}),
+                **({"verify": verify} if verify else {}),
             },
             artifacts=self._initial_task_artifacts(
                 task_id=task_id,
