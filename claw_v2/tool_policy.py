@@ -172,6 +172,12 @@ def path_is_secret(candidate: str | Path) -> bool:
 
 
 def _decode_path_text(path: str | Path) -> str:
+    # Path objects came from the filesystem and may legitimately contain
+    # percent signs in filenames — unquoting them would corrupt the name.
+    # Only decode str input, which represents untrusted user-supplied paths
+    # where percent-encoding is a known traversal evasion vector.
+    if isinstance(path, Path):
+        return str(path)
     value = str(path)
     for _ in range(3):
         decoded = unquote(value)
