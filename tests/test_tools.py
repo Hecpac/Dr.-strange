@@ -92,6 +92,77 @@ class ToolRegistryTests(unittest.TestCase):
                     network_enforcer=DomainAllowlistEnforcer(),
                 )
 
+    def test_read_tool_blocks_secret_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            (workspace / ".env").write_text("SECRET=abc", encoding="utf-8")
+            (workspace / ".env.disabled").write_text("SECRET=abc", encoding="utf-8")
+            (workspace / "README.md").write_text("normal", encoding="utf-8")
+            registry = ToolRegistry.default(workspace_root=workspace)
+
+            result = registry.execute("Read", {"path": str(workspace / "README.md")}, agent_class="researcher")
+            self.assertEqual(result["content"], "normal")
+
+            for path in (".env", ".env.disabled", "subdir/../.env", "%2eenv"):
+                with self.subTest(path=path):
+                    with self.assertRaises(PermissionError):
+                        registry.execute("Read", {"path": path}, agent_class="researcher")
+
+    def test_grep_skips_secret_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            docs = workspace / "docs"
+            docs.mkdir(parents=True)
+            (workspace / ".env").write_text("OPENAI_API_KEY=sk-test-secret", encoding="utf-8")
+            (docs / "note.txt").write_text("normal text", encoding="utf-8")
+            registry = ToolRegistry.default(workspace_root=workspace)
+
+            secret_query = registry.execute(
+                "Grep",
+                {"root": str(workspace), "query": "OPENAI_API_KEY"},
+                agent_class="researcher",
+            )
+            self.assertEqual(secret_query["matches"], [])
+
+            normal_query = registry.execute(
+                "Grep",
+                {"root": str(workspace), "query": "normal text"},
+                agent_class="researcher",
+            )
+            self.assertEqual(len(normal_query["matches"]), 1)
+            self.assertEqual(Path(normal_query["matches"][0]["path"]).name, "note.txt")
+
+    def test_analyze_image_blocks_secret_path_before_request(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            (workspace / ".env").write_text("OPENAI_API_KEY=sk-test-secret", encoding="utf-8")
+            registry = ToolRegistry.default(workspace_root=workspace)
+
+            with patch.dict("os.environ", {"OPENAI_API_KEY": "sk-test"}, clear=False):
+                with patch("claw_v2.tools.urlopen") as urlopen_mock:
+                    with self.assertRaises(PermissionError):
+                        registry.execute("AnalyzeImage", {"image_path": ".env"}, agent_class="researcher")
+                    urlopen_mock.assert_not_called()
+
+    def test_analyze_image_rejects_non_image_before_request(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            (workspace / "not_image.txt").write_text("not an image", encoding="utf-8")
+            registry = ToolRegistry.default(workspace_root=workspace)
+
+            with patch.dict("os.environ", {"OPENAI_API_KEY": "sk-test"}, clear=False):
+                with patch("claw_v2.tools.urlopen") as urlopen_mock:
+                    with self.assertRaisesRegex(ValueError, "supported image"):
+                        registry.execute(
+                            "AnalyzeImage",
+                            {"image_path": "not_image.txt"},
+                            agent_class="researcher",
+                        )
+                    urlopen_mock.assert_not_called()
+
 
     def test_firecrawl_extract_registered(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

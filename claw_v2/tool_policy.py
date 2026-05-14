@@ -4,6 +4,7 @@ import fnmatch
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import unquote
 
 
 RISK_ORDER: dict[str, int] = {"low": 0, "medium": 1, "high": 2, "critical": 3}
@@ -170,14 +171,30 @@ def path_is_secret(candidate: str | Path) -> bool:
     return False
 
 
-def validate_workspace_path(path: str | Path, *, workspace_root: str | Path) -> Path:
-    candidate = Path(path)
+def _decode_path_text(path: str | Path) -> str:
+    # Path objects came from the filesystem and may legitimately contain
+    # percent signs in filenames — unquoting them would corrupt the name.
+    # Only decode str input, which represents untrusted user-supplied paths
+    # where percent-encoding is a known traversal evasion vector.
+    if isinstance(path, Path):
+        return str(path)
+    value = str(path)
+    for _ in range(3):
+        decoded = unquote(value)
+        if decoded == value:
+            break
+        value = decoded
+    return value
+
+
+def validate_workspace_path(path: str | Path, *, workspace_root: str | Path, allow_secret: bool = False) -> Path:
+    candidate = Path(_decode_path_text(path))
     root = Path(workspace_root).resolve()
     resolved = (root / candidate).resolve() if not candidate.is_absolute() else candidate.resolve()
     try:
         resolved.relative_to(root)
     except ValueError as exc:
         raise PermissionError(f"path outside WORKSPACE_ROOT: {path}") from exc
-    if path_is_secret(resolved):
+    if not allow_secret and path_is_secret(resolved):
         raise PermissionError(f"refusing to access secret path: {path}")
     return resolved
