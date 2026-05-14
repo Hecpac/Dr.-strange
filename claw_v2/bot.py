@@ -2874,7 +2874,7 @@ class BotService:
                 outcome="failure",
                 error_snippet=(raw_content or "empty_response")[:500],
                 lesson="When the brain returns empty output, ask a clarifying question and inspect prompt/context assembly.",
-                predicted_confidence=self.brain._last_confidence or None,
+                predicted_confidence=self.brain._last_confidence.get(session_id) or None,
             )
         else:
             self._browse_handler._record_learning_outcome(
@@ -2884,7 +2884,7 @@ class BotService:
                 approach="brain.handle_message",
                 outcome="success",
                 lesson="The brain produced a usable reply for this conversational request.",
-                predicted_confidence=self.brain._last_confidence or None,
+                predicted_confidence=self.brain._last_confidence.get(session_id) or None,
             )
         self._remember_assistant_turn_state(session_id, source_text, content)
         return content
