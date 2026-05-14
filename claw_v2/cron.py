@@ -45,6 +45,10 @@ def _next_due_for_daily_at(
     minute = int(minute_str)
     now_dt = datetime.fromtimestamp(now, tz=tz)
     candidate = now_dt.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    # Canonicalize via UTC round-trip to resolve DST ambiguities:
+    # - Spring-forward gap (e.g. 02:30 doesn't exist): advances to the next valid time.
+    # - Fall-back overlap (same wall-clock twice): takes fold=0 (first occurrence).
+    candidate = datetime.fromtimestamp(candidate.timestamp(), tz=tz)
     last_run_dt = datetime.fromtimestamp(last_run_at, tz=tz) if last_run_at > 0 else None
     if last_run_dt is not None and last_run_dt.date() == candidate.date():
         # Already ran today: schedule next run for tomorrow at HH:MM.

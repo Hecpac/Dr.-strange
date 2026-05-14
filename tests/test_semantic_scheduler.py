@@ -172,5 +172,42 @@ class ConfigValidationTests(unittest.TestCase):
         self.assertIn("must declare interval_seconds or daily_at", str(ctx.exception))
 
 
+class TestNextDueDST(unittest.TestCase):
+    # Regression for Bug #6: now_dt.replace(hour=...) can produce a datetime in the
+    # spring-forward gap (02:00–03:00 AM) or the fall-back overlap, yielding an
+    # incorrect timestamp. Fixed by round-tripping through UTC after replace().
+
+    def _epoch(self, iso: str, tz_key: str) -> float:
+        tz = ZoneInfo(tz_key)
+        return datetime.fromisoformat(iso).replace(tzinfo=tz).timestamp()
+
+    def test_spring_forward_gap_resolves_to_valid_timestamp(self) -> None:
+        # 2025-03-09: clocks spring forward from 02:00 to 03:00 in America/Chicago.
+        # 02:30 does not exist. The UTC round-trip must produce a valid, existent datetime.
+        tz_key = "America/Chicago"
+        tz = ZoneInfo(tz_key)
+        # "now" is 01:00 CST, just before the gap
+        now = self._epoch("2025-03-09T01:00:00", tz_key)
+        next_due = _next_due_for_daily_at("02:30", tz_key, 0.0, now=now)
+        # The resolved timestamp must round-trip cleanly (no fold artifact)
+        resolved = datetime.fromtimestamp(next_due, tz=tz)
+        self.assertEqual(datetime.fromtimestamp(resolved.timestamp(), tz=tz), resolved)
+        # Must be after now and not in the past
+        self.assertGreater(next_due, now)
+
+    def test_fall_back_overlap_fires_once(self) -> None:
+        # 2025-11-02: clocks fall back from 02:00 to 01:00 in America/Chicago.
+        # 01:30 occurs twice. The job should fire on the first occurrence (fold=0).
+        tz_key = "America/Chicago"
+        tz = ZoneInfo(tz_key)
+        # "now" is 00:30 CDT, before the ambiguous hour
+        now = self._epoch("2025-11-02T00:30:00", tz_key)
+        next_due = _next_due_for_daily_at("01:30", tz_key, 0.0, now=now)
+        resolved = datetime.fromtimestamp(next_due, tz=tz)
+        # Must be on the same date and fold=0 (CDT, UTC-5)
+        self.assertEqual(resolved.date().isoformat(), "2025-11-02")
+        self.assertGreater(next_due, now)
+
+
 if __name__ == "__main__":
     unittest.main()
