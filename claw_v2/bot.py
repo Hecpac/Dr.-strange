@@ -484,6 +484,7 @@ class BotService:
             observe=observe,
             task_ledger=task_ledger,
             job_service=job_service,
+            router=getattr(brain, "router", None),
             get_session_state=brain.memory.get_session_state,
             update_session_state=brain.memory.update_session_state,
             store_message=self._store_message_from_handler,

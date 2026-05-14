@@ -35,6 +35,20 @@ from claw_v2.bot_helpers import (
 from claw_v2.evidence_ledger import EvidenceRef, record_claim
 from claw_v2.goal_contract import create_goal
 from claw_v2.model_registry import model_overrides_from_state
+from claw_v2.verification import (
+    DimensionRawResponse,
+    parse_judge_response,
+    record_target_event,
+    run_petri_judge_for_task,
+    should_use_petri_verifier,
+)
+
+import logging as _logging
+import uuid as _uuid
+
+logger = _logging.getLogger(__name__)
+
+_PETRI_DIMENSIONS_ROOT = Path(__file__).parent / "verification" / "dimensions"
 
 
 class TaskHandler:
@@ -46,6 +60,7 @@ class TaskHandler:
         observe: Any | None = None,
         task_ledger: Any | None = None,
         job_service: Any | None = None,
+        router: Any | None = None,
         get_session_state: Callable[[str], dict[str, Any]],
         update_session_state: Callable[..., Any],
         store_message: Callable[[str, str, str], Any] | None = None,
@@ -57,6 +72,7 @@ class TaskHandler:
         self.observe = observe
         self.task_ledger = task_ledger
         self.job_service = job_service
+        self.router = router
         self._get_session_state = get_session_state
         self._update_session_state = update_session_state
         self._store_message = store_message
@@ -562,6 +578,24 @@ class TaskHandler:
                 return
             if not resumed:
                 self._precheck_worktree(task_id=task_id, mode=mode)
+            if self._telemetry_root is not None:
+                try:
+                    record_target_event(
+                        self._telemetry_root,
+                        task_id=task_id,
+                        event_type="task_started",
+                        payload={
+                            "objective": objective,
+                            "mode": mode,
+                            "session_id": session_id,
+                        },
+                    )
+                except Exception:
+                    logger.debug(
+                        "failed to record petri task_started for %s",
+                        task_id,
+                        exc_info=True,
+                    )
             response = self._run_coordinated_task(
                 session_id,
                 objective,
@@ -598,6 +632,13 @@ class TaskHandler:
             completed_state = self._get_session_state(session_id)
             completed_checkpoint = completed_state.get("last_checkpoint") or {}
             verification_status = str(completed_state.get("verification_status") or "unknown")
+            verification_status, petri_scores = self._maybe_run_petri_verifier(
+                task_id=task_id,
+                session_id=session_id,
+                objective=objective,
+                response=response,
+                verification_status=verification_status,
+            )
             terminal_status = (
                 "succeeded" if verification_status == "passed"
                 else "failed" if verification_status == "failed"
@@ -728,6 +769,8 @@ class TaskHandler:
                     response_preview=response[:1000],
                     terminal_status=terminal_status,
                 )
+                if petri_scores is not None:
+                    artifacts["petri_scores"] = petri_scores
                 self.task_ledger.mark_terminal(
                     task_id,
                     status=terminal_status,
@@ -1224,6 +1267,89 @@ class TaskHandler:
             return {}
         record = self.task_ledger.get(task_id)
         return dict(record.artifacts or {}) if record is not None else {}
+
+    def _petri_judge_fn(
+        self, *, task_id: str
+    ) -> Callable[[str], DimensionRawResponse]:
+        # Spec § 4.4: judge MUST run in a session that does not share
+        # scratchpad with the target. Fresh session_id per invocation keeps
+        # the cross-provider critic isolated from the target agent's brain
+        # session.
+        if self.router is None:
+            raise RuntimeError("petri judge requires router")
+        router = self.router
+        judge_session_id = f"petri-judge-{task_id}-{_uuid.uuid4().hex[:8]}"
+
+        def _judge(prompt: str) -> DimensionRawResponse:
+            # evidence_pack is required by the judge lane contract (llm.py
+            # _validate_lane_input). The transcript itself is carried in the
+            # prompt body; this pack tags the call so trace consumers can
+            # filter petri judge invocations vs other judge work.
+            response = router.ask(
+                prompt,
+                lane="judge",
+                session_id=judge_session_id,
+                evidence_pack={"task_id": task_id, "kind": "petri_judge"},
+                max_budget=0.20,
+                timeout=60.0,
+            )
+            return parse_judge_response(response.content)
+
+        return _judge
+
+    def _maybe_run_petri_verifier(
+        self,
+        *,
+        task_id: str,
+        session_id: str,
+        objective: str,
+        response: str,
+        verification_status: str,
+    ) -> tuple[str, dict[str, Any] | None]:
+        # Second-opinion only when the legacy verifier already approved.
+        # A failed task does not need petri — it is already on the failure
+        # path. Petri's job is to catch false-positives, not pile on.
+        if verification_status != "passed":
+            return verification_status, None
+        if self._telemetry_root is None or self.task_ledger is None:
+            return verification_status, None
+        task_record = self.task_ledger.get(task_id)
+        task_metadata = task_record.metadata if task_record is not None else None
+        if not should_use_petri_verifier(task_metadata):
+            return verification_status, None
+        try:
+            record_target_event(
+                self._telemetry_root,
+                task_id=task_id,
+                event_type="task_completed",
+                payload={
+                    "objective": objective,
+                    "response": response[:4000],
+                    "reported_verification_status": verification_status,
+                    "session_id": session_id,
+                },
+            )
+            outcome = run_petri_judge_for_task(
+                task_id=task_id,
+                telemetry_root=self._telemetry_root,
+                dimensions_root=_PETRI_DIMENSIONS_ROOT,
+                judge_fn=self._petri_judge_fn(task_id=task_id),
+            )
+        except Exception:
+            logger.exception(
+                "petri judge crashed for task %s; keeping legacy verifier result",
+                task_id,
+            )
+            return verification_status, None
+        petri_scores = outcome.report.to_dict()
+        if outcome.report.overall_status != "passed":
+            logger.warning(
+                "petri judge downgraded task %s from passed to failed (failures=%s)",
+                task_id,
+                ",".join(outcome.report.failures),
+            )
+            return "failed", petri_scores
+        return verification_status, petri_scores
 
     def _completion_artifacts(
         self,
