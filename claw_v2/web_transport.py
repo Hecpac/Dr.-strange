@@ -4,6 +4,7 @@ import asyncio
 import errno
 import json
 import logging
+import mimetypes
 import os
 import threading
 import time
@@ -27,11 +28,19 @@ def _static_root() -> Path:
 
 
 def _content_type_for(path: str) -> str:
+    # Explicit overrides for text assets where we want a charset; mimetypes
+    # falls back to the stdlib database for everything else (images, fonts,
+    # etc.) so static assets get the right MIME instead of text/html.
+    if path.endswith(".html") or path.endswith(".htm"):
+        return "text/html; charset=utf-8"
     if path.endswith(".js"):
         return "application/javascript; charset=utf-8"
     if path.endswith(".css"):
         return "text/css; charset=utf-8"
-    return "text/html; charset=utf-8"
+    guessed, _ = mimetypes.guess_type(path)
+    if guessed:
+        return guessed
+    return "application/octet-stream"
 
 
 def _decode_path_info(path_info: str) -> str:
