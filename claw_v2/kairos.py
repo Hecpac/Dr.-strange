@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 import json
 import logging
+import os
 import subprocess
 import time
 from dataclasses import dataclass
@@ -47,6 +48,26 @@ class KairosState:
     last_action: str = ""
 
 
+def _autonomous_action_authorized(env_var: str) -> bool:
+    """Opt-in env flag: only "1" or "true" (case-insensitive) authorize the
+    handler to mutate external state without going through the approvals
+    pending-record path.
+    """
+    value = (os.environ.get(env_var) or "").strip().lower()
+    return value in {"1", "true", "yes"}
+
+
+def _classify_decide_error(error_str: str) -> str:
+    lowered = error_str.lower()
+    if "codex cli timed out" in lowered or ("codex" in lowered and "timed out" in lowered):
+        return "codex_timeout"
+    if "circuit_breaker" in lowered or "observation window frozen" in lowered:
+        return "circuit_open"
+    if "timed out" in lowered or "timeout" in lowered:
+        return "timeout"
+    return "general"
+
+
 class KairosService:
     """Always-on proactive agent that evaluates context on each tick
     and decides whether to take an action without user input.
@@ -72,6 +93,7 @@ class KairosService:
         monitored_sites: list[Any] | None = None,
         action_budget: float = DEFAULT_ACTION_BUDGET,
         brief: bool = True,
+        agent_loop_factory: Any | None = None,
     ) -> None:
         self.router = router
         self.heartbeat = heartbeat
@@ -88,6 +110,12 @@ class KairosService:
         self.monitored_sites = list(monitored_sites or [])
         self.action_budget = action_budget
         self.brief = brief
+        # Wave 2.6: lets Kairos drive an AgentLoop on a goal_id when it
+        # decides a project / milestone needs an active push. Factory takes
+        # (goal_id, project_id, milestone_id) and returns a configured
+        # AgentLoop (planner/executor/verifier already wired). Disabled by
+        # default — Kairos stays router-lite unless the runtime opts in.
+        self.agent_loop_factory: Any | None = agent_loop_factory
         self.state = KairosState()
 
     def tick(self) -> TickDecision:
@@ -287,7 +315,9 @@ class KairosService:
             "- Actions must complete in under 15 seconds.\n"
             "- Available actions: none, notify_user, dispatch_to_agent, approve_pending, "
             "run_skill, pause_agent, escalate_to_human, wiki_deep_lint, wiki_research, "
-            "wiki_scrape, site_monitor, auto_publish_social, auto_deploy, gmail_digest, publish_task, claim_task.\n"
+            "wiki_scrape, site_monitor, auto_publish_social, auto_deploy, gmail_digest, publish_task, claim_task, run_agent_loop.\n"
+            "- run_agent_loop: drive an AgentLoop on a goal/project/milestone (only when agent_loop_factory is configured). "
+            "detail = JSON {\"goal_id\": \"...\", \"project_id\": \"?\", \"milestone_id\": \"?\", \"goal_text\": \"?\"}\n"
             "- publish_task: add a task to the shared board for any agent to claim. "
             "detail = JSON {\"title\": \"...\", \"instruction\": \"...\", \"required_lane\": \"worker\", \"tags\": [...]}\n"
             "- claim_task: claim and execute a pending task from the board. "
@@ -328,8 +358,18 @@ class KairosService:
             )
             return self._parse_decision(response.content)
         except Exception as exc:
-            logger.warning("KAIROS decide failed: %s", exc)
-            return TickDecision(action="none", error=str(exc))
+            error_str = str(exc)
+            error_kind = _classify_decide_error(error_str)
+            logger.warning("KAIROS decide failed (%s): %s", error_kind, exc)
+            self.observe.emit(
+                "kairos_decide_failed",
+                payload={
+                    "error": error_str[:300],
+                    "error_kind": error_kind,
+                    "ticks_so_far": self.state.ticks,
+                },
+            )
+            return TickDecision(action="none", error=error_str)
 
     @staticmethod
     def _parse_decision(text: str) -> TickDecision:
@@ -373,6 +413,7 @@ class KairosService:
             "claim_task": self._handle_claim_task,
             "morning_video_brief": self._handle_morning_video_brief,
             "daemon_health_check": self._handle_daemon_health_check,
+            "run_agent_loop": self._handle_run_agent_loop,
         }
         handler = handlers.get(decision.action)
         if handler is None:
@@ -667,7 +708,9 @@ class KairosService:
         ]
 
     def _handle_auto_publish_social(self, decision: TickDecision, trace_context: dict[str, Any] | None = None) -> None:
-        """Draft a tweet from wiki insights and publish via X API."""
+        """Draft a tweet from wiki insights. Default: pending human approval.
+        Opt-in autonomous publish via env KAIROS_AUTO_PUBLISH_SOCIAL=1.
+        """
         if self.wiki is None:
             raise RuntimeError("WikiService not configured")
         pages = sorted(self.wiki.wiki_dir.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
@@ -684,6 +727,34 @@ class KairosService:
         tweet_text = resp.content.strip().strip('"')
         if len(tweet_text) > 280:
             tweet_text = tweet_text[:277] + "..."
+
+        if not _autonomous_action_authorized("KAIROS_AUTO_PUBLISH_SOCIAL"):
+            if self.approvals is None:
+                raise RuntimeError(
+                    "auto_publish_social requires either approvals manager or "
+                    "KAIROS_AUTO_PUBLISH_SOCIAL=1 to run autonomously"
+                )
+            pending = self.approvals.create(
+                action="kairos:auto_publish_social",
+                summary=tweet_text,
+                metadata={"tweet": tweet_text, "handle": "PachanoDesign"},
+            )
+            self.observe.emit(
+                "kairos_auto_publish_social_pending",
+                trace_id=trace_context.get("trace_id") if trace_context else None,
+                root_trace_id=trace_context.get("root_trace_id") if trace_context else None,
+                span_id=trace_context.get("span_id") if trace_context else None,
+                parent_span_id=trace_context.get("parent_span_id") if trace_context else None,
+                job_id=trace_context.get("job_id") if trace_context else None,
+                artifact_id=trace_context.get("artifact_id") if trace_context else None,
+                payload={
+                    "tweet": tweet_text,
+                    "approval_id": pending.approval_id,
+                },
+            )
+            logger.info("KAIROS auto_publish_social: pending approval=%s", pending.approval_id)
+            return
+
         from claw_v2.social import x_adapter_from_keychain
         adapter = x_adapter_from_keychain(handle="PachanoDesign")
         result = adapter.publish(tweet_text)
@@ -698,9 +769,9 @@ class KairosService:
                           payload={"tweet": tweet_text, "success": result.success, "post_id": result.post_id})
 
     def _handle_auto_deploy(self, decision: TickDecision, trace_context: dict[str, Any] | None = None) -> None:
-        """Trigger Vercel deploy via git push if local is ahead."""
-        import subprocess
-        from pathlib import Path
+        """Trigger Vercel deploy via git push. Default: pending human approval.
+        Opt-in autonomous push via env KAIROS_AUTO_DEPLOY=1.
+        """
         result = subprocess.run(
             ["gh", "api", "repos/Hecpac/PHD-Web/deployments", "--jq", ".[0].sha"],
             capture_output=True, text=True, timeout=15,
@@ -717,6 +788,40 @@ class KairosService:
         if latest_deploy_sha == local_head:
             logger.info("KAIROS auto_deploy: already up to date")
             return
+
+        if not _autonomous_action_authorized("KAIROS_AUTO_DEPLOY"):
+            if self.approvals is None:
+                raise RuntimeError(
+                    "auto_deploy requires either approvals manager or "
+                    "KAIROS_AUTO_DEPLOY=1 to run autonomously"
+                )
+            summary = f"deploy {local_head[:7]} (current prod {latest_deploy_sha[:7]})"
+            pending = self.approvals.create(
+                action="kairos:auto_deploy",
+                summary=summary,
+                metadata={
+                    "repo": "phd",
+                    "local_head": local_head,
+                    "deploy_sha": latest_deploy_sha,
+                },
+            )
+            self.observe.emit(
+                "kairos_auto_deploy_pending",
+                trace_id=trace_context.get("trace_id") if trace_context else None,
+                root_trace_id=trace_context.get("root_trace_id") if trace_context else None,
+                span_id=trace_context.get("span_id") if trace_context else None,
+                parent_span_id=trace_context.get("parent_span_id") if trace_context else None,
+                job_id=trace_context.get("job_id") if trace_context else None,
+                artifact_id=trace_context.get("artifact_id") if trace_context else None,
+                payload={
+                    "local_head": local_head,
+                    "deploy_sha": latest_deploy_sha,
+                    "approval_id": pending.approval_id,
+                },
+            )
+            logger.info("KAIROS auto_deploy: pending approval=%s", pending.approval_id)
+            return
+
         push = subprocess.run(
             ["git", "-C", str(Path.home() / "Projects" / "phd"), "push", "origin", "main"],
             capture_output=True, text=True, timeout=30,
@@ -975,3 +1080,51 @@ class KairosService:
             logger.exception("daemon_health_check: failed to emit notification event")
         logger.info("KAIROS daemon_health_check: status=%s pids=%d tokens=%s",
                      status, len(pids), anomaly_tokens_found)
+
+    def _handle_run_agent_loop(
+        self, decision: TickDecision, trace_context: dict[str, Any] | None = None
+    ) -> None:
+        """Wave 2.6: drive an AgentLoop on a goal/project/milestone.
+
+        decision.detail is JSON: {"goal_id": "...", "project_id": "?",
+        "milestone_id": "?", "goal_text": "?"}. The agent_loop_factory must
+        be configured at construction; otherwise the action errors out.
+
+        Emits `kairos_agent_loop_complete` with the outcome status, reason,
+        and iteration count so `claw think` can replay the run.
+        """
+        if self.agent_loop_factory is None:
+            raise RuntimeError("agent_loop_factory is not configured on KairosService")
+        data = json.loads(decision.detail or "{}")
+        goal_id = str(data.get("goal_id") or "").strip()
+        if not goal_id:
+            raise ValueError("run_agent_loop requires goal_id in decision.detail")
+        project_id = data.get("project_id") or None
+        milestone_id = data.get("milestone_id") or None
+        goal_text = str(data.get("goal_text") or "").strip() or goal_id
+        loop = self.agent_loop_factory(goal_id, project_id, milestone_id)
+        outcome = loop.run(goal_text)
+        payload = {
+            "goal_id": goal_id,
+            "project_id": project_id,
+            "milestone_id": milestone_id,
+            "status": outcome.status,
+            "reason": outcome.reason,
+            "iterations": len(outcome.history),
+        }
+        self.observe.emit(
+            "kairos_agent_loop_complete",
+            trace_id=trace_context.get("trace_id") if trace_context else None,
+            root_trace_id=trace_context.get("root_trace_id") if trace_context else None,
+            span_id=trace_context.get("span_id") if trace_context else None,
+            parent_span_id=trace_context.get("parent_span_id") if trace_context else None,
+            job_id=trace_context.get("job_id") if trace_context else None,
+            artifact_id=trace_context.get("artifact_id") if trace_context else None,
+            payload=payload,
+        )
+        logger.info(
+            "KAIROS run_agent_loop: goal=%s status=%s iterations=%d",
+            goal_id,
+            outcome.status,
+            len(outcome.history),
+        )

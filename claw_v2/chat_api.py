@@ -38,12 +38,19 @@ class LocalChatAPI:
         default_user_id: str | None = None,
         observe: ObserveStream | None = None,
         auth_token: str | None = None,
+        observation_window: object | None = None,
+        task_board: object | None = None,
     ) -> None:
         self._bot_service = bot_service
         self._agent_runtime = agent_runtime
         self._default_user_id = default_user_id or bot_service.allowed_user_id or "local-user"
         self._observe = observe or getattr(bot_service, "observe", None)
         self._auth_token = auth_token.strip() if isinstance(auth_token, str) and auth_token.strip() else None
+        # Wave 3.7: dashboard endpoints under /api/think/*. Optional dependencies —
+        # endpoints return 503 when their backing service isn't wired so the chat
+        # API still serves /api/chat in environments without observability.
+        self._observation_window = observation_window or getattr(bot_service, "observation_window", None)
+        self._task_board = task_board
 
     def handle_http(
         self,
@@ -72,6 +79,14 @@ class LocalChatAPI:
         if normalized_path.startswith("/api/traces/"):
             trace_id = normalized_path.removeprefix("/api/traces/").strip()
             return self._dispatch_trace_replay(method=method, trace_id=trace_id)
+        if normalized_path == "/api/think/spending":
+            return self._think_spending(method=method)
+        if normalized_path == "/api/think/recent":
+            return self._think_recent(method=method, path=path)
+        if normalized_path == "/api/think/circuit":
+            return self._think_circuit(method=method)
+        if normalized_path == "/api/think/projects":
+            return self._think_projects(method=method)
         if normalized_path != "/api/chat":
             return ChatAPIResponse(status_code=404, payload={"error": f"not found: {normalized_path}"})
         if method.upper() != "POST":
@@ -116,6 +131,86 @@ class LocalChatAPI:
                 "trace_id": None,
             },
         )
+
+    # ------------------------------------------------------------------
+    # Wave 3.7: dashboard endpoints. JSON payloads only; no HTML in this
+    # layer — the CLI `claw think` already covers human inspection. Each
+    # endpoint is GET-only and returns 503 if its backing service is
+    # missing.
+    # ------------------------------------------------------------------
+
+    def _think_spending(self, *, method: str) -> ChatAPIResponse:
+        if method.upper() != "GET":
+            return ChatAPIResponse(status_code=405, payload={"error": "method not allowed", "allowed": ["GET"]})
+        if self._observe is None:
+            return ChatAPIResponse(status_code=503, payload={"error": "observe stream unavailable"})
+        try:
+            spending = self._observe.spending_today()
+            cost_per_agent = self._observe.cost_per_agent_today()
+        except Exception as exc:
+            return ChatAPIResponse(status_code=500, payload={"error": f"spending query failed: {exc}"})
+        return ChatAPIResponse(
+            status_code=200,
+            payload={"spending_today": spending, "cost_per_agent_today": cost_per_agent},
+        )
+
+    def _think_recent(self, *, method: str, path: str) -> ChatAPIResponse:
+        if method.upper() != "GET":
+            return ChatAPIResponse(status_code=405, payload={"error": "method not allowed", "allowed": ["GET"]})
+        if self._observe is None:
+            return ChatAPIResponse(status_code=503, payload={"error": "observe stream unavailable"})
+        limit = self._query_param_as_int(path, "limit", default=50)
+        event_type = self._query_param(path, "type")
+        try:
+            events = self._observe.recent_events(limit=limit, event_type=event_type)
+        except Exception as exc:
+            return ChatAPIResponse(status_code=500, payload={"error": f"recent_events failed: {exc}"})
+        return ChatAPIResponse(
+            status_code=200,
+            payload={"events": events, "filter_type": event_type, "limit": limit},
+        )
+
+    def _think_circuit(self, *, method: str) -> ChatAPIResponse:
+        if method.upper() != "GET":
+            return ChatAPIResponse(status_code=405, payload={"error": "method not allowed", "allowed": ["GET"]})
+        if self._observation_window is None:
+            return ChatAPIResponse(status_code=503, payload={"error": "observation_window unavailable"})
+        try:
+            payload = self._observation_window.status_payload()
+        except Exception as exc:
+            return ChatAPIResponse(status_code=500, payload={"error": f"status_payload failed: {exc}"})
+        return ChatAPIResponse(status_code=200, payload=payload)
+
+    def _think_projects(self, *, method: str) -> ChatAPIResponse:
+        if method.upper() != "GET":
+            return ChatAPIResponse(status_code=405, payload={"error": "method not allowed", "allowed": ["GET"]})
+        if self._task_board is None:
+            return ChatAPIResponse(status_code=503, payload={"error": "task_board unavailable"})
+        try:
+            projects = self._task_board.list_projects()
+        except Exception as exc:
+            return ChatAPIResponse(status_code=500, payload={"error": f"list_projects failed: {exc}"})
+        rows = []
+        for project in projects:
+            project_dict = project.to_dict() if hasattr(project, "to_dict") else dict(vars(project))
+            try:
+                project_dict["task_summary"] = self._task_board.project_status_summary(project.id)
+            except Exception:
+                project_dict["task_summary"] = {}
+            rows.append(project_dict)
+        return ChatAPIResponse(status_code=200, payload={"projects": rows})
+
+    @staticmethod
+    def _query_param(path: str, key: str) -> str | None:
+        if "?" not in path:
+            return None
+        from urllib.parse import parse_qs
+
+        query = path.split("?", 1)[1]
+        params = parse_qs(query, keep_blank_values=False)
+        if key not in params or not params[key]:
+            return None
+        return params[key][0]
 
     def _dispatch_traces(self, *, method: str, path: str) -> ChatAPIResponse:
         if method.upper() != "GET":

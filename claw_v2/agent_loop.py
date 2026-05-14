@@ -14,6 +14,7 @@ TaskLedger, EvidenceVerifier).
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -84,10 +85,31 @@ class AgentLoop:
     )
     critic: Callable[[tuple[IterationTrace, ...]], str] | None = None
     max_iterations: int = 3
+    # Wave 2.2: budget guards alongside max_iterations. Iteration count is a
+    # poor proxy for spend when each iteration is an Opus call. cost_tracker
+    # returns CUMULATIVE USD spent since loop start; AgentLoop subtracts the
+    # baseline at .run() entry so the loop only accounts for its own spend.
+    # max_wallclock_s caps total wall-time (planner + executor + verifier).
+    # If the corresponding tracker is None, that guard is disabled.
+    max_cost_usd: float | None = None
+    max_wallclock_s: float | None = None
+    cost_tracker: Callable[[], float] | None = None
+    clock: Callable[[], float] = field(default=time.time)
 
     def run(self, goal: str) -> AgentLoopOutcome:
         history: list[IterationTrace] = []
+        start_at = self.clock()
+        cost_baseline = self.cost_tracker() if self.cost_tracker is not None else 0.0
         for iteration in range(1, self.max_iterations + 1):
+            exhausted = self._budget_exhausted(start_at, cost_baseline)
+            if exhausted is not None:
+                last = history[-1] if history else None
+                return AgentLoopOutcome(
+                    status="exhausted",
+                    final_result=last.result if last else None,
+                    history=tuple(history),
+                    reason=exhausted,
+                )
             plan = self.planner(goal, tuple(history))
             result = self.executor(plan)
             observation = self.observer(result)
@@ -132,3 +154,14 @@ class AgentLoop:
             history=tuple(history),
             reason=f"max_iterations={self.max_iterations} reached without pass",
         )
+
+    def _budget_exhausted(self, start_at: float, cost_baseline: float) -> str | None:
+        if self.max_wallclock_s is not None:
+            elapsed = self.clock() - start_at
+            if elapsed >= self.max_wallclock_s:
+                return f"wallclock_exhausted: elapsed={elapsed:.1f}s >= max={self.max_wallclock_s:.1f}s"
+        if self.max_cost_usd is not None and self.cost_tracker is not None:
+            cost_used = max(self.cost_tracker() - cost_baseline, 0.0)
+            if cost_used >= self.max_cost_usd:
+                return f"budget_exhausted: cost=${cost_used:.4f} >= max=${self.max_cost_usd:.4f}"
+        return None

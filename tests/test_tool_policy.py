@@ -346,5 +346,100 @@ class DaemonExecutorIntegrationTests(unittest.TestCase):
                 self.assertEqual(result, {"events": []})
 
 
+class ConfigLoadingTests(unittest.TestCase):
+    """Fase 2: TOOL_POLICIES is loaded from claw_v2/config/tool_policies.json.
+    These tests guard the loader contract — schema validation, sentinel
+    expansion, and the minimum set of tools the rest of the system relies on.
+    """
+
+    def test_config_file_exists_and_loads(self) -> None:
+        from claw_v2.tool_policy import _config_path
+        path = _config_path()
+        self.assertTrue(path.exists(), msg=f"missing config file: {path}")
+
+    def test_required_tools_present_after_load(self) -> None:
+        required = {
+            "memory.read",
+            "wiki.search",
+            "task_ledger.read",
+            "git.status",
+            "observe.recent_events_redacted",
+            "file.read_workspace_nonsecret",
+            "Read",
+            "Write",
+            "Edit",
+            "Bash",
+            "social.publish",
+            "deploy.production",
+            "git.force_push",
+            "file.delete",
+            "WikiDelete",
+            "SkillExecute",
+        }
+        missing = required - set(TOOL_POLICIES.keys())
+        self.assertFalse(missing, msg=f"missing tools after JSON load: {missing}")
+
+    def test_secret_path_sentinel_expanded(self) -> None:
+        # blocked_path_patterns: "SECRET_PATH_PATTERNS" in JSON must expand to
+        # the in-code tuple — keep secret patterns code-owned, not config-owned.
+        for name in ("Read", "file.read", "file.read_workspace_nonsecret"):
+            with self.subTest(name=name):
+                policy = TOOL_POLICIES[name]
+                self.assertEqual(policy.blocked_path_patterns, SECRET_PATH_PATTERNS)
+
+    def test_critical_tools_carry_requires_human(self) -> None:
+        for name in ("social.publish", "deploy.production", "git.force_push"):
+            with self.subTest(name=name):
+                policy = TOOL_POLICIES[name]
+                self.assertTrue(policy.requires_human, msg=name)
+                self.assertEqual(policy.risk_level, "critical")
+
+    def test_allowed_contexts_loaded_as_frozenset(self) -> None:
+        policy = TOOL_POLICIES["memory.read"]
+        self.assertIsInstance(policy.allowed_contexts, frozenset)
+        self.assertIn("daemon", policy.allowed_contexts)
+        self.assertIn("brain", policy.allowed_contexts)
+
+
+class ConfigValidationTests(unittest.TestCase):
+    """Loader fail-fast on malformed config — never silently fall back to
+    empty policies, since that would let unknown tools default to medium-risk.
+    """
+
+    def _write_and_load(self, content: str) -> dict:
+        from claw_v2.tool_policy import _load_tool_policies_from_config
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "tool_policies.json"
+            path.write_text(content, encoding="utf-8")
+            return _load_tool_policies_from_config(path)
+
+    def test_invalid_json_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            self._write_and_load("{not json")
+
+    def test_missing_tools_section_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            self._write_and_load('{"version": 1}')
+
+    def test_unknown_risk_level_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            self._write_and_load(
+                '{"version": 1, "tools": {"x": {"risk_level": "extreme",'
+                ' "read_only": false, "allowed_contexts": ["telegram"]}}}'
+            )
+
+    def test_missing_required_field_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            self._write_and_load(
+                '{"version": 1, "tools": {"x": {"risk_level": "low",'
+                ' "read_only": true}}}'  # missing allowed_contexts
+            )
+
+    def test_missing_config_file_raises(self) -> None:
+        from claw_v2.tool_policy import _load_tool_policies_from_config
+        with self.assertRaises(FileNotFoundError):
+            _load_tool_policies_from_config(Path("/nonexistent/tool_policies.json"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from claw_v2.observation_window import (
@@ -118,6 +120,79 @@ class ObservationWindowTests(unittest.TestCase):
         self.assertFalse(_diagnostic_only_freeze_reason("circuit_breaker:cost_per_hour"))
         self.assertTrue(_diagnostic_only_freeze_reason("circuit_breaker:tool_calls_per_minute"))
         self.assertTrue(_diagnostic_only_freeze_reason("circuit_breaker:provider_failure"))
+
+    def test_stale_circuit_breaker_freeze_auto_clears_on_load(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "window.json"
+            stale_ts = (datetime.now(timezone.utc) - timedelta(seconds=120)).isoformat()
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "frozen": True,
+                        "reason": "circuit_breaker:cost_per_hour",
+                        "actor": "brain",
+                        "updated_at": stale_ts,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            observe = _RecordingObserve()
+            window = ObservationWindowState(
+                observe=observe,
+                state_path=state_path,
+                config=ObservationWindowConfig(stale_freeze_seconds=60.0),
+            )
+            self.assertFalse(window.frozen)
+            self.assertEqual(window.freeze_reason, "")
+            event_names = [name for name, _ in observe.events]
+            self.assertIn("observation_window_freeze_auto_cleared", event_names)
+            persisted = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertFalse(persisted["frozen"])
+            self.assertEqual(persisted["actor"], "auto_clear_stale")
+
+    def test_recent_circuit_breaker_freeze_persists_on_load(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "window.json"
+            recent_ts = (datetime.now(timezone.utc) - timedelta(seconds=10)).isoformat()
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "frozen": True,
+                        "reason": "circuit_breaker:cost_per_hour",
+                        "actor": "brain",
+                        "updated_at": recent_ts,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            window = ObservationWindowState(
+                state_path=state_path,
+                config=ObservationWindowConfig(stale_freeze_seconds=60.0),
+            )
+            self.assertTrue(window.frozen)
+            self.assertEqual(window.freeze_reason, "circuit_breaker:cost_per_hour")
+
+    def test_manual_freeze_does_not_auto_clear_even_when_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "window.json"
+            stale_ts = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "frozen": True,
+                        "reason": "manual_telegram",
+                        "actor": "telegram:1",
+                        "updated_at": stale_ts,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            window = ObservationWindowState(
+                state_path=state_path,
+                config=ObservationWindowConfig(stale_freeze_seconds=60.0),
+            )
+            self.assertTrue(window.frozen)
+            self.assertEqual(window.freeze_reason, "manual_telegram")
 
     def test_critical_action_alert_can_notify_with_safe_brief_message(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

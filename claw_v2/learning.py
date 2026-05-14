@@ -1,12 +1,15 @@
 """Learning loop — records outcomes, retrieves lessons, derives insights via LLM."""
 from __future__ import annotations
 
+import hashlib
+from datetime import datetime, timezone
 from html import escape
 import json
 import logging
 import re
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from claw_v2.observe import ObserveStream
@@ -423,6 +426,229 @@ class LearningLoop:
         )
         return proposal
 
+    def apply_soul_updates(
+        self,
+        *,
+        agent_name: str,
+        soul_path: Path | str,
+        proposal: dict[str, Any],
+        evaluator: object | None = None,
+        min_priority: str = "high",
+        backup_dir: Path | str | None = None,
+    ) -> dict[str, Any]:
+        """Wave 3.1: close the self-improvement loop.
+
+        Filters proposal.suggestions by min_priority (default "high"), gates
+        through evaluator.run_self_improvement_gate if provided, backs up the
+        original SOUL.md, appends an "Auto-applied lessons" section, writes
+        the new SOUL.md, and emits a soul_updated event with hashes for audit.
+
+        Returns a dict: applied (bool), event_id (str|None),
+        backup_path (str|None), before_hash, after_hash, reason.
+        Skipped runs emit soul_update_skipped instead.
+        """
+        soul_path = Path(soul_path)
+        if not soul_path.exists():
+            return {"applied": False, "event_id": None, "backup_path": None, "reason": f"soul_not_found:{soul_path}"}
+
+        suggestions = [
+            s for s in proposal.get("suggestions") or []
+            if _priority_at_least(str(s.get("priority", "")), min_priority)
+        ]
+        if not suggestions:
+            return {"applied": False, "event_id": None, "backup_path": None, "reason": "no_suggestions_at_priority"}
+
+        before_text = soul_path.read_text(encoding="utf-8")
+        before_hash = _short_hash(before_text)
+        summary = str(proposal.get("summary") or "").strip()
+        event_id = f"soul_update.{int(time.time())}.{agent_name}.{before_hash}"
+        addition = _format_soul_addition(suggestions, summary=summary, event_id=event_id)
+        after_text = before_text.rstrip() + "\n\n" + addition + "\n"
+        after_hash = _short_hash(after_text)
+
+        if evaluator is not None:
+            diff_text = "\n".join("+ " + line for line in addition.splitlines())
+            gate = evaluator.run_self_improvement_gate(
+                plan=summary[:300],
+                diff=diff_text,
+                test_output="",
+            )
+            if not getattr(gate, "passed", False):
+                if self.observe is not None:
+                    self.observe.emit(
+                        "soul_update_skipped",
+                        payload={
+                            "agent_name": agent_name,
+                            "before_hash": before_hash,
+                            "reason": "gate_denied",
+                            "failures": list(getattr(gate, "failures", []) or []),
+                            "proposal_summary": summary[:300],
+                        },
+                    )
+                return {"applied": False, "event_id": None, "backup_path": None, "reason": "gate_denied"}
+
+        backup_dir_path = Path(backup_dir) if backup_dir is not None else soul_path.parent / ".soul_backups"
+        backup_dir_path.mkdir(parents=True, exist_ok=True)
+        backup_path = backup_dir_path / f"{event_id}.SOUL.md"
+        backup_path.write_text(before_text, encoding="utf-8")
+
+        soul_path.write_text(after_text, encoding="utf-8")
+
+        if self.observe is not None:
+            self.observe.emit(
+                "soul_updated",
+                payload={
+                    "event_id": event_id,
+                    "agent_name": agent_name,
+                    "soul_path": str(soul_path),
+                    "backup_path": str(backup_path),
+                    "before_hash": before_hash,
+                    "after_hash": after_hash,
+                    "suggestions_applied": [
+                        str(s.get("section") or s.get("change") or "")[:80]
+                        for s in suggestions
+                    ],
+                    "proposal_summary": summary[:300],
+                },
+            )
+
+        return {
+            "applied": True,
+            "event_id": event_id,
+            "backup_path": str(backup_path),
+            "before_hash": before_hash,
+            "after_hash": after_hash,
+            "reason": "applied",
+        }
+
+    def detect_failure_clusters(
+        self,
+        *,
+        min_cluster_size: int = 5,
+        outcome_limit: int = 200,
+    ) -> dict[str, list[dict]]:
+        """Wave 3.4: group recent failures by tag.
+
+        Returns ``{tag: [outcomes...]}`` only for tags with at least
+        ``min_cluster_size`` failures in the last ``outcome_limit`` records.
+        Generic tags ("error", "task") are filtered upstream by
+        :func:`_normalize_tags`, so the dict only contains operational
+        tags worth turning into a skill.
+        """
+        outcomes = self.memory.iter_recent_outcomes(limit=outcome_limit)
+        failures = [
+            outcome for outcome in outcomes
+            if str(outcome.get("outcome") or "").lower() in {"failure", "partial"}
+        ]
+        by_tag: dict[str, list[dict]] = {}
+        for failure in failures:
+            for tag in failure.get("tags") or []:
+                by_tag.setdefault(str(tag), []).append(failure)
+        return {tag: items for tag, items in by_tag.items() if len(items) >= min_cluster_size}
+
+    def auto_expand_skills(
+        self,
+        *,
+        skill_registry: Any,
+        evaluator: object | None = None,
+        min_cluster_size: int = 5,
+        outcome_limit: int = 200,
+    ) -> dict[str, Any]:
+        """Wave 3.4: turn failure clusters into skill candidates.
+
+        For each cluster meeting ``min_cluster_size``, builds a task
+        description from sample failure summaries and asks
+        ``skill_registry.generate_skill`` for a candidate. If an
+        ``evaluator`` is provided, gates each candidate through
+        ``run_self_improvement_gate`` first. Emits ``skill_auto_expanded``
+        per applied candidate.
+        """
+        clusters = self.detect_failure_clusters(
+            min_cluster_size=min_cluster_size,
+            outcome_limit=outcome_limit,
+        )
+        results: list[dict[str, Any]] = []
+        for tag, outcomes in clusters.items():
+            sample_descriptions = [
+                str(outcome.get("description") or "")[:120]
+                for outcome in outcomes[:5]
+            ]
+            task_description = (
+                f"Create a self-contained skill that handles failure pattern "
+                f"tagged '{tag}' (observed {len(outcomes)} times). "
+                "Sample descriptions: " + " | ".join(sample_descriptions)
+            )
+            if evaluator is not None:
+                gate = evaluator.run_self_improvement_gate(
+                    plan=f"auto_expand_skills:{tag}",
+                    diff=f"+ skill candidate for tag {tag}",
+                    test_output=f"{len(outcomes)} failures observed",
+                )
+                if not getattr(gate, "passed", False):
+                    results.append({"tag": tag, "applied": False, "reason": "gate_denied"})
+                    continue
+            try:
+                skill_result = skill_registry.generate_skill(
+                    task_description=task_description, tags=[tag]
+                )
+            except Exception as exc:  # noqa: BLE001 — generation failures must not crash the loop
+                results.append({"tag": tag, "applied": False, "reason": f"generation_error:{exc!s}"[:200]})
+                continue
+            if skill_result.get("success"):
+                if self.observe is not None:
+                    self.observe.emit(
+                        "skill_auto_expanded",
+                        payload={
+                            "tag": tag,
+                            "cluster_size": len(outcomes),
+                            "skill_name": skill_result.get("name"),
+                        },
+                    )
+                results.append(
+                    {
+                        "tag": tag,
+                        "applied": True,
+                        "skill_name": skill_result.get("name"),
+                        "cluster_size": len(outcomes),
+                    }
+                )
+            else:
+                results.append(
+                    {
+                        "tag": tag,
+                        "applied": False,
+                        "reason": skill_result.get("error") or "skill_generation_failed",
+                    }
+                )
+        return {"clusters_processed": len(clusters), "results": results}
+
+    def revert_soul_update(
+        self,
+        *,
+        soul_path: Path | str,
+        backup_path: Path | str,
+        event_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Wave 3.1: restore SOUL.md from a backup written by apply_soul_updates."""
+        soul_path = Path(soul_path)
+        backup_path = Path(backup_path)
+        if not backup_path.exists():
+            return {"reverted": False, "reason": f"backup_not_found:{backup_path}"}
+        backup_text = backup_path.read_text(encoding="utf-8")
+        soul_path.write_text(backup_text, encoding="utf-8")
+        restored_hash = _short_hash(backup_text)
+        if self.observe is not None:
+            self.observe.emit(
+                "soul_reverted",
+                payload={
+                    "event_id": event_id,
+                    "soul_path": str(soul_path),
+                    "backup_path": str(backup_path),
+                    "restored_hash": restored_hash,
+                },
+            )
+        return {"reverted": True, "restored_hash": restored_hash, "reason": "ok"}
+
     def _derive_soul_update_proposal(
         self,
         *,
@@ -472,6 +698,50 @@ class LearningLoop:
         except Exception:
             logger.warning("Soul update proposal derivation failed", exc_info=True)
             return _heuristic_soul_update_proposal(signals, outcomes, events)
+
+
+_PRIORITY_RANK: dict[str, int] = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+
+
+def _priority_at_least(have: str, want: str) -> bool:
+    return _PRIORITY_RANK.get(have.strip().lower(), -1) >= _PRIORITY_RANK.get(want.strip().lower(), 99)
+
+
+def _short_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+
+
+def _format_soul_addition(
+    suggestions: list[dict[str, Any]],
+    *,
+    summary: str,
+    event_id: str,
+) -> str:
+    """Render a markdown section that LearningLoop appends to SOUL.md.
+
+    Format keeps the addition self-describing — the section header carries
+    the event_id so a human reading the SOUL.md can correlate the change to
+    the audit event without external lookup.
+    """
+    ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    lines = [
+        f"## Auto-applied lessons ({event_id})",
+        f"<!-- learning_loop, applied {ts} -->",
+        "",
+    ]
+    if summary:
+        lines.append(f"_Pattern:_ {summary}")
+        lines.append("")
+    for suggestion in suggestions:
+        section = str(suggestion.get("section") or "general").strip() or "general"
+        change = str(suggestion.get("change") or "").strip()
+        reason = str(suggestion.get("reason") or "").strip()
+        priority = str(suggestion.get("priority") or "").strip()
+        bullet = f"- **{section}** ({priority}): {change}"
+        if reason:
+            bullet += f"\n  - _why:_ {reason}"
+        lines.append(bullet)
+    return "\n".join(lines)
 
 
 def _prompt_optimization_signals(outcomes: list[dict], events: list[dict]) -> list[dict[str, Any]]:

@@ -481,10 +481,19 @@ class MemoryStore:
         max_messages: int = 80,
         preserve_recent: int = 40,
     ) -> None:
+        # Wave 3.5: defense-in-depth — strip system-reminder markers before
+        # they hit the messages table. The chat-output sanitizer is the
+        # primary line of defense; this is the secondary so a leak that
+        # bypasses it (different code path, refactor regression) doesn't
+        # poison rolling conversation memory.
+        from claw_v2.leak_scrub import redact_system_reminders
+        from claw_v2.redaction import redact_sensitive
+
+        clean_content = redact_sensitive(redact_system_reminders(content), limit=0)
         with self._lock:
             self._conn.execute(
                 "INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)",
-                (session_id, role, content),
+                (session_id, role, clean_content),
             )
             self._conn.commit()
         if compact:
@@ -753,24 +762,29 @@ class MemoryStore:
         current: dict,
         **kwargs: Any,
     ) -> dict:
+        from claw_v2.redaction import redact_sensitive
+
         def _pick(key: str) -> Any:
             v = kwargs.get(key)
             return v if v is not None else current[key]
 
+        def _clean(value: Any) -> Any:
+            return redact_sensitive(value, limit=0)
+
         payload = {
             "autonomy_mode": _pick("autonomy_mode"),
             "mode": _pick("mode"),
-            "current_goal": _pick("current_goal"),
-            "pending_action": _pick("pending_action"),
+            "current_goal": _clean(_pick("current_goal")),
+            "pending_action": _clean(_pick("pending_action")),
             "step_budget": _pick("step_budget"),
             "steps_taken": _pick("steps_taken"),
             "verification_status": _pick("verification_status"),
-            "active_object_json": json.dumps(_pick("active_object")),
-            "last_options_json": json.dumps(_pick("last_options")),
-            "task_queue_json": json.dumps(_pick("task_queue")),
-            "pending_approvals_json": json.dumps(_pick("pending_approvals")),
-            "last_checkpoint_json": json.dumps(_pick("last_checkpoint")),
-            "rolling_summary": _pick("rolling_summary"),
+            "active_object_json": json.dumps(_clean(_pick("active_object"))),
+            "last_options_json": json.dumps(_clean(_pick("last_options"))),
+            "task_queue_json": json.dumps(_clean(_pick("task_queue"))),
+            "pending_approvals_json": json.dumps(_clean(_pick("pending_approvals"))),
+            "last_checkpoint_json": json.dumps(_clean(_pick("last_checkpoint"))),
+            "rolling_summary": _clean(_pick("rolling_summary")),
         }
         self._conn.execute(
             """
@@ -1464,6 +1478,29 @@ class MemoryStore:
                 (f"%{query}%", f"%{query}%", f"%{query}%", limit),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def iter_recent_outcomes(self, *, limit: int = 200) -> list[dict]:
+        """Wave 3.4: outcome rows including parsed tags. Used by
+        LearningLoop.detect_failure_clusters to group failures by tag and
+        identify gap-skill candidates."""
+        rows = self._conn.execute(
+            """
+            SELECT task_type, task_id, description, approach, outcome, lesson,
+                   error_snippet, retries, created_at, feedback, tags
+            FROM task_outcomes ORDER BY id DESC LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        out: list[dict] = []
+        for row in rows:
+            record = dict(row)
+            tags_raw = record.get("tags") or "[]"
+            try:
+                record["tags"] = json.loads(tags_raw) if isinstance(tags_raw, str) else list(tags_raw or [])
+            except (TypeError, ValueError):
+                record["tags"] = []
+            out.append(record)
+        return out
 
     def recent_failures(self, *, task_type: str | None = None, limit: int = 5) -> list[dict]:
         if task_type:

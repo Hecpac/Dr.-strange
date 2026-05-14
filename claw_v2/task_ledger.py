@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
+from claw_v2.redaction import redact_sensitive
 from claw_v2.task_completion import COMPLETION_CANDIDATES, validate_completion
 
 
@@ -114,7 +115,10 @@ class TaskLedger:
     ) -> TaskRecord:
         self._validate_status(status)
         now = time.time()
-        route = dict(route or {})
+        objective = str(redact_sensitive(objective, limit=0))
+        route = redact_sensitive(dict(route or {}), limit=0)
+        metadata = redact_sensitive(dict(metadata or {}), limit=0)
+        artifacts = redact_sensitive(dict(artifacts or {}), limit=0)
         record = TaskRecord(
             task_id=task_id,
             session_id=session_id,
@@ -180,6 +184,9 @@ class TaskLedger:
     ) -> TaskRecord | None:
         if status not in TERMINAL_STATUSES:
             raise ValueError(f"terminal status required, got {status!r}")
+        summary = str(redact_sensitive(summary, limit=0))
+        error = str(redact_sensitive(error, limit=0))
+        artifacts = redact_sensitive(dict(artifacts or {}), limit=0)
         if status in COMPLETION_CANDIDATES:
             decision = validate_completion(
                 {
@@ -250,6 +257,9 @@ class TaskLedger:
         artifacts: dict[str, Any] | None = None,
     ) -> TaskRecord | None:
         now = time.time()
+        summary = str(redact_sensitive(summary, limit=0))
+        error = str(redact_sensitive(error, limit=0))
+        artifacts = redact_sensitive(dict(artifacts or {}), limit=0)
         with self._lock:
             self._conn.execute(
                 """
@@ -442,13 +452,16 @@ class TaskLedger:
         return record
 
     def _record_values(self, record: TaskRecord) -> tuple[Any, ...]:
+        artifacts = redact_sensitive(record.artifacts, limit=0)
+        route = redact_sensitive(record.route, limit=0)
+        metadata = redact_sensitive(record.metadata, limit=0)
         return (
             record.task_id,
             record.session_id,
             record.channel,
             record.external_session_id,
             record.external_user_id,
-            record.objective,
+            redact_sensitive(record.objective, limit=0),
             record.mode,
             record.runtime,
             record.provider,
@@ -458,12 +471,12 @@ class TaskLedger:
             record.created_at,
             record.started_at,
             record.completed_at,
-            record.summary,
-            record.error,
+            redact_sensitive(record.summary, limit=0),
+            redact_sensitive(record.error, limit=0),
             record.verification_status,
-            json.dumps(record.artifacts, sort_keys=True),
-            json.dumps(record.route, sort_keys=True),
-            json.dumps(record.metadata, sort_keys=True),
+            json.dumps(artifacts, sort_keys=True),
+            json.dumps(route, sort_keys=True),
+            json.dumps(metadata, sort_keys=True),
             record.updated_at,
         )
 
@@ -501,6 +514,7 @@ class TaskLedger:
     def _emit(self, event_type: str, payload: dict[str, Any]) -> None:
         if self.observe is None:
             return
+        payload = redact_sensitive(payload, limit=0)
         task_id = _as_optional_str(payload.get("task_id"))
         self.observe.emit(
             event_type,

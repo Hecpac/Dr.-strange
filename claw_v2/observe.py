@@ -76,6 +76,12 @@ class ObserveStream:
         artifact_id: str | None = None,
         payload: dict | None = None,
     ) -> None:
+        # Wave 3.5: defense-in-depth — scrub system-reminder markers from the
+        # payload BEFORE we persist or fan out to subscribers, so a leak that
+        # bypassed the chat sanitizer still doesn't end up on disk.
+        from claw_v2.leak_scrub import scrub_for_persistence
+
+        clean_payload = scrub_for_persistence(payload or {})
         with self._lock:
             self._conn.execute(
                 """
@@ -97,13 +103,13 @@ class ObserveStream:
                     parent_span_id,
                     job_id,
                     artifact_id,
-                    json.dumps(payload or {}),
+                    json.dumps(clean_payload),
                 ),
             )
             self._conn.commit()
         callbacks = self._subscribers.get(event_type)
         if callbacks:
-            event_payload = payload or {}
+            event_payload = clean_payload
             for cb in callbacks:
                 try:
                     cb(event_payload)
@@ -233,19 +239,22 @@ class ObserveStream:
             "rows": rows_payload,
         }
 
-    def recent_events(self, limit: int = 20) -> list[dict]:
+    def recent_events(self, limit: int = 20, *, event_type: str | None = None) -> list[dict]:
+        query = """
+            SELECT event_type, lane, provider, model,
+                   trace_id, root_trace_id, span_id, parent_span_id, job_id, artifact_id,
+                   payload, timestamp
+            FROM observe_stream
+        """
+        params: tuple[object, ...]
+        if event_type:
+            query += " WHERE event_type = ?\n            ORDER BY id DESC\n            LIMIT ?"
+            params = (event_type, limit)
+        else:
+            query += " ORDER BY id DESC\n            LIMIT ?"
+            params = (limit,)
         with self._lock:
-            rows = self._conn.execute(
-                """
-                SELECT event_type, lane, provider, model,
-                       trace_id, root_trace_id, span_id, parent_span_id, job_id, artifact_id,
-                       payload, timestamp
-                FROM observe_stream
-                ORDER BY id DESC
-                LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
+            rows = self._conn.execute(query, params).fetchall()
         return [
             _event_row_to_dict(row)
             for row in rows

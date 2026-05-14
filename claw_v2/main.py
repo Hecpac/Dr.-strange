@@ -533,9 +533,95 @@ def _setup_agent_services(
         auto_research=auto_research,
         task_board=task_board,
         monitored_sites=config.monitored_sites,
+        agent_loop_factory=_build_kairos_agent_loop_factory(
+            sub_agents=sub_agents,
+            observe=observe,
+        ),
     )
     buddy = BuddyService(config.db_path.parent / "buddy.db")
     return auto_research, sub_agents, coordinator, task_board, heartbeat, kairos, buddy
+
+
+def _build_kairos_agent_loop_factory(
+    *,
+    sub_agents,
+    observe,
+    default_worker_agent: str = "rook",
+):
+    """Wave 2.6: factory the KairosService can call to spin up an AgentLoop
+    on a goal/project/milestone.
+
+    - planner: passthrough on first iter; uses the prior iteration's critique
+      on retries (cheap, no extra LLM call for planning).
+    - executor: dispatches the plan to a worker subagent via dispatch_typed.
+      Default "rook"; if missing, falls through to whichever worker subagent
+      is registered first.
+    - verifier: passes when SubAgentResult.status reports success.
+    - critic: short summary fed back into the next planner.
+    - budget: max_iterations=3 + max_cost_usd=10.0 (Wave 2.2 guard).
+
+    project_id and milestone_id are accepted but only used as audit context
+    today — future iterations can route to project-specific subagents.
+    """
+    from claw_v2.agent_loop import AgentLoop, VerifierVerdict
+
+    def _resolve_worker_agent(preferred: str) -> str:
+        try:
+            registered = sub_agents.list_agents() if hasattr(sub_agents, "list_agents") else []
+            names = {getattr(agent, "name", str(agent)) for agent in registered}
+            if preferred in names:
+                return preferred
+            for candidate in registered:
+                lane = getattr(candidate, "lane", "worker")
+                if lane == "worker":
+                    return getattr(candidate, "name", preferred)
+        except Exception:
+            pass
+        return preferred
+
+    def factory(goal_id: str, project_id: str | None, milestone_id: str | None):
+        worker_agent = _resolve_worker_agent(default_worker_agent)
+
+        def planner(goal: str, history) -> str:
+            if not history:
+                return goal
+            last = history[-1]
+            return last.critique or goal
+
+        def executor(plan: str):
+            return sub_agents.dispatch_typed(worker_agent, plan, lane="worker")
+
+        def verifier(result, observation: str):
+            status_tag = str(getattr(result, "status", "")).lower()
+            if status_tag in {"succeeded", "passed", "ok"}:
+                return VerifierVerdict(status="passed", reason=str(getattr(result, "summary", ""))[:160])
+            return VerifierVerdict(status="failed", reason=str(getattr(result, "summary", ""))[:160])
+
+        def critic(history) -> str:
+            last = history[-1]
+            return (
+                f"Iter {last.iteration} verdict={last.verdict.status}: "
+                f"{last.verdict.reason}. Try a different angle."
+            )
+
+        def cost_tracker() -> float:
+            try:
+                spending = observe.spending_today()
+                return float(spending.get("total") or 0.0)
+            except Exception:
+                return 0.0
+
+        return AgentLoop(
+            planner=planner,
+            executor=executor,
+            verifier=verifier,
+            critic=critic,
+            max_iterations=3,
+            max_cost_usd=10.0,
+            cost_tracker=cost_tracker,
+        )
+
+    return factory
 
 
 def _create_pull_request_service(workspace_root: Path) -> GitHubPullRequestService | None:

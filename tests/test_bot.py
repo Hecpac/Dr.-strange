@@ -980,6 +980,210 @@ class BotTests(unittest.TestCase):
 
                 self.assertIn("Qué acción concreta", reply)
 
+    def test_telegram_update_request_creates_blocked_task_even_when_task_intent_flag_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+                "CLAW_DISABLE_TASK_INTENT_ROUTER": "1",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+
+                reply = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="Actualiza Codex, Claude Code y Codex app",
+                    runtime_channel="telegram",
+                )
+
+                self.assertIn("Creé la tarea", reply)
+                self.assertIn("preflight", reply)
+                self.assertNotIn("PreToolUse", reply)
+                self.assertNotIn("tg-", reply)
+                records = runtime.task_ledger.list(session_id="s1", limit=5)
+                self.assertEqual(len(records), 1)
+                self.assertEqual(records[0].status, "failed")
+                self.assertEqual(records[0].verification_status, "blocked")
+                self.assertEqual(records[0].metadata["task_kind"], "maintenance_update_tools")
+                self.assertEqual(records[0].metadata["source_message"], "Actualiza Codex, Claude Code y Codex app")
+                self.assertTrue(records[0].metadata["blockers"])
+                events = [event["event_type"] for event in runtime.observe.recent_events(limit=30)]
+                self.assertIn("capability_preflight_started", events)
+                self.assertIn("capability_preflight_result", events)
+                self.assertIn("tool_blocker_detected", events)
+                self.assertIn("task_blocked_with_evidence", events)
+
+    def test_telegram_contextual_update_followup_creates_durable_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.memory.update_session_state(
+                    "s1",
+                    current_goal="Actualiza Codex, Claude Code y Codex app",
+                )
+
+                reply = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="Debes actualizarlas tú",
+                    runtime_channel="telegram",
+                )
+
+                self.assertIn("Creé la tarea", reply)
+                records = runtime.task_ledger.list(session_id="s1", limit=5)
+                self.assertEqual(records[0].objective, "Actualiza Codex, Claude Code y Codex app")
+                self.assertEqual(records[0].verification_status, "blocked")
+                self.assertEqual(records[0].metadata["source_message"], "Debes actualizarlas tú")
+
+    def test_telegram_actionable_router_disabled_reports_blocker_not_chat(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+                "CLAW_DISABLE_TELEGRAM_ACTIONABLE_TASK_ROUTER": "1",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+
+                reply = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="Actualiza Codex, Claude Code y Codex app",
+                    runtime_channel="telegram",
+                )
+
+                self.assertIn("desactivado por configuracion", reply)
+                self.assertIn("/task_run", reply)
+                self.assertEqual(runtime.task_ledger.list(session_id="s1", limit=5), [])
+
+    def test_hazlo_with_executable_pending_action_creates_blocked_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.memory.update_session_state(
+                    "s1",
+                    mode="coding",
+                    pending_action="Regenera el lock del PR QTS",
+                )
+
+                reply = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="Hazlo",
+                    runtime_channel="telegram",
+                )
+
+                self.assertIn("Creé la tarea", reply)
+                records = runtime.task_ledger.list(session_id="s1", limit=5)
+                self.assertEqual(records[0].objective, "Regenera el lock del PR QTS")
+                self.assertEqual(records[0].verification_status, "blocked")
+                self.assertEqual(records[0].metadata["task_kind"], "qts_lock_regeneration")
+
+    def test_tareas_pendientes_summarizes_backlog_without_internal_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                pending = runtime.approvals.create(
+                    action="coordinated_task",
+                    summary="Regenerar lock QTS",
+                )
+                runtime.task_ledger.create(
+                    task_id="internal-task-1",
+                    session_id="s1",
+                    objective="Regenera el lock del PR QTS",
+                    runtime="telegram_preflight",
+                    mode="coding",
+                    status="running",
+                )
+                runtime.task_ledger.mark_terminal(
+                    "internal-task-1",
+                    status="failed",
+                    summary="Task blocked during capability preflight",
+                    error="policy_blocked:poetry",
+                    verification_status="blocked",
+                )
+
+                reply = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="Tareas pendientes",
+                    runtime_channel="telegram",
+                )
+
+                self.assertIn("Aprobaciones pendientes: 1", reply)
+                self.assertIn("Regenerar lock QTS", reply)
+                self.assertIn("Tareas bloqueadas", reply)
+                self.assertNotIn(pending.approval_id, reply)
+                self.assertNotIn(pending.token, reply)
+                self.assertNotIn("internal-task-1", reply)
+                self.assertNotIn("approval_id", reply)
+                self.assertNotIn("tg-", reply)
+
+    def test_qts_lock_request_creates_blocker_with_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+
+                runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="Regenera el lock del PR QTS",
+                    runtime_channel="telegram",
+                )
+
+                record = runtime.task_ledger.list(session_id="s1", limit=1)[0]
+                self.assertEqual(record.verification_status, "blocked")
+                self.assertEqual(record.metadata["task_kind"], "qts_lock_regeneration")
+                self.assertIn("preflight", record.artifacts)
+                self.assertTrue(any("poetry" in item for item in record.metadata["blockers"]))
+
     def test_unverified_capability_denial_is_suppressed_from_chat(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -1012,6 +1216,35 @@ class BotTests(unittest.TestCase):
                 self.assertNotIn("message_id", lowered)
                 self.assertNotIn("chat_id", lowered)
                 self.assertNotIn("respuesta del modelo fue bloqueada", lowered)
+                events = [event["event_type"] for event in runtime.observe.recent_events(limit=10)]
+                self.assertIn("internal_message_suppressed_from_chat", events)
+
+    def test_system_reminder_marker_is_suppressed_from_chat(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+
+            def marker_executor(request: LLMRequest) -> LLMResponse:
+                return LLMResponse(
+                    content="</system-reminder>",
+                    lane=request.lane,
+                    provider="anthropic",
+                    model=request.model,
+                )
+
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=marker_executor)
+
+                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="cuentame una respuesta de prueba")
+
+                self.assertNotIn("system-reminder", reply.lower())
                 events = [event["event_type"] for event in runtime.observe.recent_events(limit=10)]
                 self.assertIn("internal_message_suppressed_from_chat", events)
 
@@ -1057,7 +1290,7 @@ class BotTests(unittest.TestCase):
                 reply = runtime.bot.handle_text(
                     user_id="123",
                     session_id="s1",
-                    text="volvamos a las tareas pendientes",
+                    text="dame un resumen operativo general",
                 )
 
                 self.assertIn("AI Lead Gen Fase 3", reply)
