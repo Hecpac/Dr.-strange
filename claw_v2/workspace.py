@@ -372,6 +372,8 @@ class AgentWorkspace:
         writable. The entry is prefixed with today's date in YYYY-MM-DD form.
         """
         from datetime import datetime, timezone
+        import os
+        import tempfile
         path = self.root / "MEMORY.md"
         try:
             existing = path.read_text(encoding="utf-8") if path.exists() else "# MEMORY.md\n\n"
@@ -379,7 +381,18 @@ class AgentWorkspace:
             line = f"- {today}: {entry.strip()}\n"
             if line in existing:
                 return True
-            path.write_text(existing.rstrip() + "\n" + line, encoding="utf-8")
+            new_content = existing.rstrip() + "\n" + line
+            fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), prefix=".MEMORY.md.", suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(new_content)
+                os.replace(tmp_path, path)
+            except Exception:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
             return True
         except OSError:
             return False
