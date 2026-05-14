@@ -1273,14 +1273,21 @@ def _aggregate_verifier_votes(votes: list[dict]) -> dict:
     risk_levels = [str(vote.get("risk_level", "medium")) for vote in all_votes]
     highest_risk = max(risk_levels or ["medium"], key=_risk_rank)
     total_voters = len(all_votes)
-    # Single-voter deployments (all Anthropic, no secondary) must still be able to approve.
-    # _apply_policy_floor still applies after this, so high/critical risk will require
-    # human approval regardless.
+    # Single-voter deployments (all Anthropic, no secondary) must still be able to
+    # approve, but only for low-risk actions. Medium-risk single-voter approvals
+    # require human review — the cross-provider critic design (2026-04-29) ties
+    # single_verifier_approve to low risk specifically. With 2+ voters, unanimous
+    # approval covers low+medium. _apply_policy_floor still applies after this,
+    # so high/critical risk will require human approval regardless.
+    if total_voters >= 2:
+        allowed_risk_levels = {"low", "medium"}
+    else:
+        allowed_risk_levels = {"low"}
     consensus_approve = (
         len(clean_votes) >= 1
         and len(clean_votes) == total_voters
         and recommendations == {"approve"}
-        and highest_risk in {"low", "medium"}
+        and highest_risk in allowed_risk_levels
         and not blockers
         and not missing_checks
     )
