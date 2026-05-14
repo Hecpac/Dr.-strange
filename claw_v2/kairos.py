@@ -750,7 +750,6 @@ class KairosService:
                 payload={
                     "tweet": tweet_text,
                     "approval_id": pending.approval_id,
-                    "approval_token": pending.token,
                 },
             )
             logger.info("KAIROS auto_publish_social: pending approval=%s", pending.approval_id)
@@ -818,7 +817,6 @@ class KairosService:
                     "local_head": local_head,
                     "deploy_sha": latest_deploy_sha,
                     "approval_id": pending.approval_id,
-                    "approval_token": pending.token,
                 },
             )
             logger.info("KAIROS auto_deploy: pending approval=%s", pending.approval_id)
