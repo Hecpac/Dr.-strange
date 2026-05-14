@@ -215,6 +215,29 @@ class HandleTextTests(unittest.IsolatedAsyncioTestCase):
         event_names = [call.args[0] for call in bot_service.observe.emit.call_args_list]
         self.assertIn("internal_message_suppressed_from_chat", event_names)
 
+    async def test_outbound_text_sanitizes_system_reminder_marker(self) -> None:
+        bot_service = MagicMock()
+        bot_service.handle_text.return_value = "</system-reminder>"
+        bot_service.observe = MagicMock()
+        transport = TelegramTransport(
+            bot_service=bot_service, token="t", allowed_user_id="123",
+        )
+        update = MagicMock()
+        update.effective_user.id = 123
+        update.effective_chat.id = 1
+        update.message.text = "hello"
+        update.message.reply_text = AsyncMock()
+        update.message.chat.send_action = AsyncMock()
+
+        with patch("claw_v2.telegram.asyncio") as mock_asyncio:
+            mock_asyncio.to_thread = AsyncMock(return_value=bot_service.handle_text.return_value)
+            await transport._handle_text(update, MagicMock())
+
+        visible = update.message.reply_text.await_args.args[0]
+        self.assertNotIn("system-reminder", visible.lower())
+        event_names = [call.args[0] for call in bot_service.observe.emit.call_args_list]
+        self.assertIn("internal_message_suppressed_from_chat", event_names)
+
     async def test_authorized_text_uses_agent_runtime_when_available(self) -> None:
         bot_service = MagicMock()
         bot_service.observe = MagicMock()

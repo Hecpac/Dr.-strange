@@ -120,17 +120,25 @@ class AgentServiceTests(unittest.TestCase):
             self.assertEqual(state["pause_reason"], "codex_timeout")
             self.assertEqual(state["consecutive_failures"], 1)
             self.assertIn("Codex CLI timed out", state["last_error"])
-            observe.emit.assert_called_once()
-            event_type = observe.emit.call_args.args[0]
-            payload = observe.emit.call_args.kwargs["payload"]
-            self.assertEqual(event_type, "auto_research_adapter_error")
+            event_types = [call.args[0] for call in observe.emit.call_args_list]
+            self.assertIn("codex_timeout_detected", event_types)
+            self.assertIn("codex_retry_started", event_types)
+            self.assertIn("codex_retry_failed", event_types)
+            self.assertIn("auto_research_adapter_error", event_types)
+            self.assertIn("task_blocked_with_evidence", event_types)
+            payload = next(
+                call.kwargs["payload"]
+                for call in observe.emit.call_args_list
+                if call.args[0] == "auto_research_adapter_error"
+            )
             self.assertEqual(payload["agent"], "operator-timeout")
             self.assertEqual(payload["reason"], "codex_timeout")
+            self.assertEqual(payload["checkpoint"]["verification_status"], "blocked")
 
             paused_result = service.run_loop("operator-timeout", max_experiments=3)
             self.assertEqual(paused_result.experiments_run, 0)
             self.assertEqual(paused_result.reason, "codex_timeout")
-            self.assertEqual(calls, 1)
+            self.assertEqual(calls, 2)
 
             service.resume("operator-timeout")
             service.experiment_runner = scripted_experiment_runner([ExperimentRecord(1, 0.2, 0.1, "improved")])

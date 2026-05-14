@@ -20,6 +20,15 @@ from claw_v2.bot_helpers import (
     _looks_like_ratio_reference_request,
     _select_next_task_queue_item,
 )
+from claw_v2.redaction import redact_sensitive
+
+
+_REDACTED_MARKERS = ("[REDACTED]", "<REDACTED:")
+
+
+def _contains_sensitive_redaction(text: str) -> bool:
+    redacted = str(redact_sensitive(text, limit=0))
+    return redacted != text or any(marker in redacted for marker in _REDACTED_MARKERS)
 
 
 @dataclass(slots=True)
@@ -199,6 +208,11 @@ class StateHandler:
                 )
             pending_action = state.get("pending_action")
             if isinstance(pending_action, str) and pending_action.strip():
+                if _contains_sensitive_redaction(pending_action):
+                    return self._reject_sensitive_continuation(
+                        session_id,
+                        source="pending_action",
+                    )
                 self._emit(
                     "approval_detected",
                     {"session_id": session_id, "source": "pending_action", "text_preview": text[:80]},
@@ -227,6 +241,18 @@ class StateHandler:
             current_mode = state.get("mode") or "chat"
             next_task = _select_next_task_queue_item(task_queue, preferred_mode=current_mode)
             if next_task is not None:
+                next_summary = str(next_task.get("summary") or "")
+                if _contains_sensitive_redaction(next_summary):
+                    blocked_queue = self._task_handler.mark_first_task_queue_entry(
+                        task_queue,
+                        from_status="pending",
+                        to_status="blocked",
+                    )
+                    return self._reject_sensitive_continuation(
+                        session_id,
+                        source="task_queue",
+                        task_queue=blocked_queue,
+                    )
                 task_queue = self._task_handler.mark_task_queue_in_progress(task_queue, task_id=next_task.get("task_id"))
                 self._memory.update_session_state(session_id, task_queue=task_queue)
                 checkpoint = state.get("last_checkpoint") or {}
@@ -250,6 +276,11 @@ class StateHandler:
                 if proposal:
                     proposal_source = "recent_assistant"
             if proposal:
+                if _contains_sensitive_redaction(proposal):
+                    return self._reject_sensitive_continuation(
+                        session_id,
+                        source=proposal_source or "proposal",
+                    )
                 self._memory.update_session_state(session_id, pending_action=proposal)
                 checkpoint = state.get("last_checkpoint") or {}
                 checkpoint_text = json.dumps(checkpoint, ensure_ascii=True, sort_keys=True) if checkpoint else "{}"
@@ -281,6 +312,33 @@ class StateHandler:
             )
             return "¿Qué acción concreta quieres que ejecute?"
         return None
+
+    def _reject_sensitive_continuation(
+        self,
+        session_id: str,
+        *,
+        source: str,
+        task_queue: list[dict[str, Any]] | None = None,
+    ) -> str:
+        checkpoint = {
+            "summary": "Continuation rejected because pending context contained redacted sensitive material.",
+            "verification_status": "blocked",
+            "reason": "sensitive_context_redacted",
+            "source": source,
+        }
+        update: dict[str, Any] = {
+            "pending_action": "",
+            "verification_status": "blocked",
+            "last_checkpoint": checkpoint,
+        }
+        if task_queue is not None:
+            update["task_queue"] = task_queue
+        self._memory.update_session_state(session_id, **update)
+        self._emit(
+            "sensitive_continuation_rejected",
+            {"session_id": session_id, "source": source},
+        )
+        return "La acción pendiente contiene un valor sensible redactado. Reenvíame el objetivo concreto sin tokens ni secretos."
 
     def _last_options_still_valid(self, state: dict[str, Any]) -> bool:
         active_object = state.get("active_object") or {}

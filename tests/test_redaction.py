@@ -60,6 +60,13 @@ class RedactSensitiveTests(unittest.TestCase):
         text = "Hello, this is a normal log line with nothing sensitive."
         self.assertEqual(redact_sensitive(text), text)
 
+    def test_strips_high_entropy_mixed_alnum_objective(self) -> None:
+        token = "Aa1234567890Bb1234567890Cc1234567890"
+        text = f"Objective: {token}"
+        result = redact_sensitive(text)
+        self.assertNotIn(token, result)
+        self.assertIn("[REDACTED]", result)
+
 
 class RecursiveRedactionTests(unittest.TestCase):
     def test_recursive_dict(self) -> None:

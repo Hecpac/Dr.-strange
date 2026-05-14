@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import time
 import unittest
@@ -225,6 +226,37 @@ class TaskLedgerTests(unittest.TestCase):
                     runtime="coordinator",
                     status="done",
                 )
+
+    def test_redacts_sensitive_objective_and_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ledger = TaskLedger(Path(tmpdir) / "claw.db")
+            token = "Aa1234567890Bb1234567890Cc1234567890"
+
+            ledger.create(
+                task_id="task-sensitive",
+                session_id="s1",
+                objective=f"Objective: {token}",
+                runtime="coordinator",
+                status="running",
+                route={"channel": "telegram", "approval_token": token},
+                metadata={"source_message": f"Run {token}"},
+                artifacts={"output": f"Result {token}"},
+            )
+            ledger.mark_terminal(
+                "task-sensitive",
+                status="failed",
+                summary=f"Blocked {token}",
+                error=f"Error {token}",
+                verification_status="blocked",
+                artifacts={"log": f"Trace {token}"},
+            )
+
+            record = ledger.get("task-sensitive")
+            self.assertIsNotNone(record)
+            assert record is not None
+            payload = json.dumps(record.to_dict(), sort_keys=True)
+            self.assertNotIn(token, payload)
+            self.assertIn("[REDACTED]", payload)
 
 
 if __name__ == "__main__":

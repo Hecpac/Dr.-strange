@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import time
 import unittest
@@ -9,7 +10,7 @@ from pathlib import Path
 from unittest.mock import ANY, MagicMock, patch
 
 from claw_v2.bus import AgentBus, _new_message
-from claw_v2.kairos import KairosService, TickDecision, KairosState
+from claw_v2.kairos import KairosService, TickDecision, KairosState, _classify_decide_error
 
 
 @dataclass
@@ -119,6 +120,120 @@ class DecideTests(unittest.TestCase):
         decision = svc._decide("ctx")
         self.assertEqual(decision.action, "none")
         self.assertIn("timeout", decision.error)
+
+    def test_decide_emits_event_on_failure_with_codex_timeout_classification(self) -> None:
+        svc, router, _, observe = _make_service()
+        router.ask.side_effect = RuntimeError("Codex CLI timed out after 300.0s")
+        decision = svc._decide("ctx")
+        self.assertEqual(decision.action, "none")
+        emit_calls = [call for call in observe.emit.call_args_list if call.args[0] == "kairos_decide_failed"]
+        self.assertEqual(len(emit_calls), 1)
+        payload = emit_calls[0].kwargs["payload"]
+        self.assertEqual(payload["error_kind"], "codex_timeout")
+        self.assertIn("Codex CLI timed out", payload["error"])
+
+    def test_decide_emits_event_with_general_classification_for_unknown_error(self) -> None:
+        svc, router, _, observe = _make_service()
+        router.ask.side_effect = RuntimeError("something unexpected")
+        svc._decide("ctx")
+        emit_calls = [call for call in observe.emit.call_args_list if call.args[0] == "kairos_decide_failed"]
+        self.assertEqual(emit_calls[0].kwargs["payload"]["error_kind"], "general")
+
+
+class RunAgentLoopHandlerTests(unittest.TestCase):
+    def test_run_agent_loop_invokes_factory_and_emits_outcome_event(self) -> None:
+        from claw_v2.agent_loop import AgentLoopOutcome
+
+        run_calls: list[str] = []
+
+        class _StubLoop:
+            def run(self, goal: str):
+                run_calls.append(goal)
+                return AgentLoopOutcome(
+                    status="passed", final_result=None, history=(), reason="ok"
+                )
+
+        factory_calls: list[tuple] = []
+
+        def factory(goal_id, project_id, milestone_id):
+            factory_calls.append((goal_id, project_id, milestone_id))
+            return _StubLoop()
+
+        svc, _, _, observe = _make_service(agent_loop_factory=factory)
+        decision = TickDecision(
+            action="run_agent_loop",
+            reason="milestone overdue",
+            detail=json.dumps(
+                {
+                    "goal_id": "g_landing",
+                    "project_id": "p_site",
+                    "milestone_id": "m_hero",
+                    "goal_text": "Ship hero copy",
+                }
+            ),
+        )
+        svc._handle_run_agent_loop(decision)
+
+        self.assertEqual(factory_calls, [("g_landing", "p_site", "m_hero")])
+        self.assertEqual(run_calls, ["Ship hero copy"])
+        emit_calls = [
+            call for call in observe.emit.call_args_list
+            if call.args[0] == "kairos_agent_loop_complete"
+        ]
+        self.assertEqual(len(emit_calls), 1)
+        payload = emit_calls[0].kwargs["payload"]
+        self.assertEqual(payload["goal_id"], "g_landing")
+        self.assertEqual(payload["status"], "passed")
+        self.assertEqual(payload["iterations"], 0)
+
+    def test_run_agent_loop_raises_when_factory_not_configured(self) -> None:
+        svc, *_ = _make_service()  # no agent_loop_factory
+        decision = TickDecision(action="run_agent_loop", detail='{"goal_id": "x"}')
+        with self.assertRaises(RuntimeError):
+            svc._handle_run_agent_loop(decision)
+
+    def test_run_agent_loop_requires_goal_id(self) -> None:
+        svc, *_ = _make_service(agent_loop_factory=lambda *a, **kw: None)
+        decision = TickDecision(action="run_agent_loop", detail='{}')
+        with self.assertRaises(ValueError):
+            svc._handle_run_agent_loop(decision)
+
+    def test_run_agent_loop_falls_back_goal_text_to_goal_id(self) -> None:
+        from claw_v2.agent_loop import AgentLoopOutcome
+
+        seen: list[str] = []
+
+        class _StubLoop:
+            def run(self, goal):
+                seen.append(goal)
+                return AgentLoopOutcome("passed", None, (), "ok")
+
+        factory = lambda goal_id, project_id, milestone_id: _StubLoop()
+        svc, *_ = _make_service(agent_loop_factory=factory)
+        svc._handle_run_agent_loop(
+            TickDecision(action="run_agent_loop", detail='{"goal_id": "g_solo"}')
+        )
+        self.assertEqual(seen, ["g_solo"])
+
+
+class ClassifyDecideErrorTests(unittest.TestCase):
+    def test_codex_timeout_recognized(self) -> None:
+        self.assertEqual(_classify_decide_error("Codex CLI timed out after 300.0s"), "codex_timeout")
+
+    def test_codex_timeout_recognized_in_lowercase_variants(self) -> None:
+        self.assertEqual(_classify_decide_error("codex provider timed out"), "codex_timeout")
+
+    def test_circuit_open_recognized(self) -> None:
+        self.assertEqual(
+            _classify_decide_error("observation window frozen: circuit_breaker:cost_per_hour"),
+            "circuit_open",
+        )
+
+    def test_generic_timeout_recognized(self) -> None:
+        self.assertEqual(_classify_decide_error("HTTP request timeout"), "timeout")
+
+    def test_other_errors_classified_general(self) -> None:
+        self.assertEqual(_classify_decide_error("AttributeError: foo"), "general")
 
 
 class ParseDecisionTests(unittest.TestCase):
@@ -381,6 +496,139 @@ class EnhancedContextTests(unittest.TestCase):
         svc, _, _, _ = _make_service(bus=bus)
         ctx = svc._gather_context()
         self.assertIn("Expired requests: 1", ctx)
+
+
+class AutoActionApprovalTests(unittest.TestCase):
+    """Fase 1: auto_publish_social and auto_deploy default to draft +
+    pending approval. Live execution is opt-in via env flag.
+    """
+
+    def setUp(self) -> None:
+        for var in ("KAIROS_AUTO_PUBLISH_SOCIAL", "KAIROS_AUTO_DEPLOY"):
+            os.environ.pop(var, None)
+
+    def _wiki_with_page(self, content: str = "Insight body") -> tuple[MagicMock, Path]:
+        tmpdir = Path(tempfile.mkdtemp())
+        wiki = MagicMock()
+        wiki.wiki_dir = tmpdir
+        page = tmpdir / "p.md"
+        page.write_text(content, encoding="utf-8")
+        return wiki, tmpdir
+
+    def _approvals_mock(self) -> MagicMock:
+        approvals = MagicMock()
+        approvals.create.return_value = MagicMock(
+            approval_id="abc123",
+            token="tok",
+            action="kairos:auto_publish_social",
+            summary="draft",
+        )
+        return approvals
+
+    def test_auto_publish_social_default_creates_pending_no_publish(self) -> None:
+        wiki, _ = self._wiki_with_page()
+        approvals = self._approvals_mock()
+        svc, router, _, observe = _make_service(wiki=wiki, approvals=approvals)
+        router.ask.return_value = MagicMock(content="Tweet draft text")
+        decision = TickDecision(action="auto_publish_social")
+        with patch("claw_v2.social.x_adapter_from_keychain") as adapter_factory:
+            svc._handle_auto_publish_social(decision)
+        adapter_factory.assert_not_called()
+        approvals.create.assert_called_once()
+        kwargs = approvals.create.call_args.kwargs
+        self.assertEqual(kwargs.get("action"), "kairos:auto_publish_social")
+        self.assertIn("Tweet draft text", kwargs.get("summary", ""))
+        emit_kinds = [c.args[0] for c in observe.emit.call_args_list]
+        self.assertIn("kairos_auto_publish_social_pending", emit_kinds)
+        self.assertNotIn("kairos_auto_publish_social", emit_kinds)
+
+    def test_auto_publish_social_with_env_publishes(self) -> None:
+        wiki, _ = self._wiki_with_page()
+        approvals = self._approvals_mock()
+        svc, router, _, observe = _make_service(wiki=wiki, approvals=approvals)
+        router.ask.return_value = MagicMock(content="Tweet draft text")
+        adapter = MagicMock()
+        adapter.publish.return_value = MagicMock(success=True, post_id="pid")
+        decision = TickDecision(action="auto_publish_social")
+        with patch.dict(os.environ, {"KAIROS_AUTO_PUBLISH_SOCIAL": "1"}), \
+             patch("claw_v2.social.x_adapter_from_keychain", return_value=adapter):
+            svc._handle_auto_publish_social(decision)
+        adapter.publish.assert_called_once_with("Tweet draft text")
+        approvals.create.assert_not_called()
+        emit_kinds = [c.args[0] for c in observe.emit.call_args_list]
+        self.assertIn("kairos_auto_publish_social", emit_kinds)
+        self.assertNotIn("kairos_auto_publish_social_pending", emit_kinds)
+
+    def test_auto_publish_social_no_approvals_and_disabled_errors(self) -> None:
+        wiki, _ = self._wiki_with_page()
+        svc, router, _, _ = _make_service(wiki=wiki)
+        router.ask.return_value = MagicMock(content="Tweet draft text")
+        decision = TickDecision(action="auto_publish_social")
+        with patch("claw_v2.social.x_adapter_from_keychain") as adapter_factory:
+            with self.assertRaises(RuntimeError):
+                svc._handle_auto_publish_social(decision)
+        adapter_factory.assert_not_called()
+
+    def test_auto_deploy_default_creates_pending_no_push(self) -> None:
+        approvals = self._approvals_mock()
+        svc, _, _, observe = _make_service(approvals=approvals)
+        decision = TickDecision(action="auto_deploy")
+        run_results = [
+            MagicMock(returncode=0, stdout="deploy_sha\n"),
+            MagicMock(returncode=0, stdout="local_sha\n"),
+        ]
+        with patch("subprocess.run", side_effect=run_results) as runner:
+            svc._handle_auto_deploy(decision)
+        self.assertEqual(runner.call_count, 2)
+        approvals.create.assert_called_once()
+        kwargs = approvals.create.call_args.kwargs
+        self.assertEqual(kwargs.get("action"), "kairos:auto_deploy")
+        emit_kinds = [c.args[0] for c in observe.emit.call_args_list]
+        self.assertIn("kairos_auto_deploy_pending", emit_kinds)
+        self.assertNotIn("kairos_auto_deploy", emit_kinds)
+
+    def test_auto_deploy_with_env_pushes(self) -> None:
+        approvals = self._approvals_mock()
+        svc, _, _, observe = _make_service(approvals=approvals)
+        decision = TickDecision(action="auto_deploy")
+        run_results = [
+            MagicMock(returncode=0, stdout="deploy_sha\n"),
+            MagicMock(returncode=0, stdout="local_sha\n"),
+            MagicMock(returncode=0, stdout=""),
+        ]
+        with patch.dict(os.environ, {"KAIROS_AUTO_DEPLOY": "1"}), \
+             patch("subprocess.run", side_effect=run_results) as runner:
+            svc._handle_auto_deploy(decision)
+        self.assertEqual(runner.call_count, 3)
+        approvals.create.assert_not_called()
+        push_call = runner.call_args_list[2]
+        self.assertIn("push", push_call.args[0])
+        emit_kinds = [c.args[0] for c in observe.emit.call_args_list]
+        self.assertIn("kairos_auto_deploy", emit_kinds)
+
+    def test_auto_deploy_already_up_to_date_skips_pending(self) -> None:
+        approvals = self._approvals_mock()
+        svc, _, _, _ = _make_service(approvals=approvals)
+        decision = TickDecision(action="auto_deploy")
+        run_results = [
+            MagicMock(returncode=0, stdout="same_sha\n"),
+            MagicMock(returncode=0, stdout="same_sha\n"),
+        ]
+        with patch("subprocess.run", side_effect=run_results):
+            svc._handle_auto_deploy(decision)
+        approvals.create.assert_not_called()
+
+    def test_auto_deploy_no_approvals_and_disabled_errors(self) -> None:
+        svc, _, _, _ = _make_service()
+        decision = TickDecision(action="auto_deploy")
+        run_results = [
+            MagicMock(returncode=0, stdout="deploy_sha\n"),
+            MagicMock(returncode=0, stdout="local_sha\n"),
+        ]
+        with patch("subprocess.run", side_effect=run_results) as runner:
+            with self.assertRaises(RuntimeError):
+                svc._handle_auto_deploy(decision)
+        self.assertEqual(runner.call_count, 2)
 
 
 if __name__ == "__main__":
