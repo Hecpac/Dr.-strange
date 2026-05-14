@@ -69,7 +69,11 @@ _SECONDARY_PROVIDER_DEFAULT_MODELS: dict[str, str] = {
     "openai": "gpt-5.4-mini",
     "google": "gemini-2.5-pro",
     "ollama": "gemma4",
-    "codex": "gpt-5.5-codex",
+    # gpt-5.5 (no -codex suffix) is the generalist variant that works with
+    # both ChatGPT auth (free Codex CLI plan) and API auth. The -codex
+    # variant is API-only. Operators on API auth can override via
+    # JUDGE_MODEL=gpt-5.5-codex.
+    "codex": "gpt-5.5",
 }
 
 
