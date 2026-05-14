@@ -515,6 +515,40 @@ class TaskHandler:
             verification_tasks=verification_tasks,
             lane_overrides=self._lane_model_overrides(session_id),
         )
+        # Record per-phase worker results to the target stream so the petri
+        # judge has concrete evidence (file paths, commit hashes, exit codes)
+        # to score against — not just the agent's final claim. Cheap append
+        # to JSONL; runs unconditionally so non-strict tasks still get a
+        # post-mortem trail.
+        if self._telemetry_root is not None:
+            try:
+                for phase_name, workers in (result.phase_results or {}).items():
+                    for worker in workers or []:
+                        record_target_event(
+                            self._telemetry_root,
+                            task_id=task_id,
+                            event_type="worker_result",
+                            payload={
+                                "phase": phase_name,
+                                "task_name": getattr(worker, "task_name", ""),
+                                "content": (getattr(worker, "content", "") or "")[:8000],
+                                "duration_seconds": getattr(worker, "duration_seconds", 0.0),
+                                "error": getattr(worker, "error", "") or "",
+                            },
+                        )
+                if result.synthesis:
+                    record_target_event(
+                        self._telemetry_root,
+                        task_id=task_id,
+                        event_type="coordinator_synthesis",
+                        payload={"synthesis": result.synthesis[:8000]},
+                    )
+            except Exception:
+                logger.debug(
+                    "failed to record petri worker_result events for %s",
+                    task_id,
+                    exc_info=True,
+                )
         checkpoint = _coordinator_checkpoint(result, objective=objective)
         current_queue = self._get_session_state(session_id).get("task_queue") or []
         self._update_session_state(

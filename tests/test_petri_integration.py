@@ -263,6 +263,127 @@ class PetriJudgeIsolationTests(unittest.TestCase):
                 self.assertTrue(sid.startswith("petri-judge-task-1-"))
 
 
+class PetriWorkerResultEventTests(unittest.TestCase):
+    """Coordinator phase results land in the target stream so the judge sees
+    concrete evidence per phase (file paths, commit hashes, exit codes), not
+    just the agent's final claim."""
+
+    def test_worker_results_recorded_to_target_stream(self) -> None:
+        from claw_v2.coordinator import CoordinatorResult, WorkerResult
+
+        with tempfile.TemporaryDirectory() as raw:
+            tmpdir = Path(raw)
+            state: dict = {
+                "verification_status": "passed",
+                "last_checkpoint": {"summary": "done"},
+                "active_object": {"active_task": {"task_id": "task-1"}},
+                "task_queue": [],
+            }
+
+            def get_state(_sid: str) -> dict:
+                return state
+
+            def update_state(_sid: str, **kwargs: object) -> None:
+                state.update(kwargs)
+
+            ledger = TaskLedger(tmpdir / "claw.db")
+            ledger.create(
+                task_id="task-1",
+                session_id="s1",
+                objective="apply redaction fix",
+                mode="coding",
+                runtime="coordinator",
+                status="running",
+            )
+
+            coordinator = MagicMock()
+            coordinator.run.return_value = CoordinatorResult(
+                task_id="task-1",
+                phase_results={
+                    "implementation": [
+                        WorkerResult(
+                            task_name="apply_fix",
+                            content="Edited claw_v2/redaction.py at line 14. Commit abc123.",
+                            duration_seconds=2.5,
+                        )
+                    ],
+                    "verification": [
+                        WorkerResult(
+                            task_name="run_tests",
+                            content="Ran pytest tests/test_redaction.py — 43 passed",
+                            duration_seconds=1.0,
+                        )
+                    ],
+                },
+                synthesis="Redaction fix applied and tests pass.",
+            )
+
+            handler = TaskHandler(
+                coordinator=coordinator,
+                task_ledger=ledger,
+                get_session_state=get_state,
+                update_session_state=update_state,
+                telemetry_root=tmpdir / "telemetry",
+            )
+
+            handler._run_coordinated_task(
+                "s1", "apply redaction fix", mode="coding", forced=False, task_id="task-1"
+            )
+
+            target = read_target_stream(tmpdir / "telemetry", "task-1")
+            event_types = [r.event_type for r in target]
+            self.assertIn("worker_result", event_types)
+            self.assertIn("coordinator_synthesis", event_types)
+
+            # Concrete invariant: implementation worker_result must carry the
+            # commit hash that the judge will look for under verification_drift.
+            impl_events = [
+                r for r in target
+                if r.event_type == "worker_result" and r.payload.get("phase") == "implementation"
+            ]
+            self.assertEqual(len(impl_events), 1)
+            self.assertIn("abc123", impl_events[0].payload["content"])
+
+    def test_worker_results_skipped_when_telemetry_root_missing(self) -> None:
+        # Defensive: handlers built without a telemetry_root (e.g. unit tests
+        # that don't care about petri) must not raise when the coordinator
+        # returns results.
+        from claw_v2.coordinator import CoordinatorResult, WorkerResult
+
+        state: dict = {
+            "verification_status": "passed",
+            "last_checkpoint": {"summary": "done"},
+            "active_object": {"active_task": {"task_id": "task-1"}},
+            "task_queue": [],
+        }
+
+        def get_state(_sid: str) -> dict:
+            return state
+
+        def update_state(_sid: str, **kwargs: object) -> None:
+            state.update(kwargs)
+
+        coordinator = MagicMock()
+        coordinator.run.return_value = CoordinatorResult(
+            task_id="task-1",
+            phase_results={"implementation": [WorkerResult("t", "c", 0.1)]},
+            synthesis="done",
+        )
+
+        handler = TaskHandler(
+            coordinator=coordinator,
+            task_ledger=None,
+            get_session_state=get_state,
+            update_session_state=update_state,
+            telemetry_root=None,
+        )
+
+        # Should not raise.
+        handler._run_coordinated_task(
+            "s1", "x", mode="coding", forced=False, task_id="task-1"
+        )
+
+
 class PetriVerifyKwargTests(unittest.TestCase):
     """Path B production opt-in: start_autonomous_task accepts verify="strict"
     and threads it into task_ledger metadata where _maybe_run_petri_verifier
