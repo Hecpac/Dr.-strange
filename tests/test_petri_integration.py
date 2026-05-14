@@ -263,5 +263,62 @@ class PetriJudgeIsolationTests(unittest.TestCase):
                 self.assertTrue(sid.startswith("petri-judge-task-1-"))
 
 
+class PetriVerifyKwargTests(unittest.TestCase):
+    """Path B production opt-in: start_autonomous_task accepts verify="strict"
+    and threads it into task_ledger metadata where _maybe_run_petri_verifier
+    reads it. Tests stub _run_autonomous_task to avoid spawning the worker
+    thread (it would race the tmpdir cleanup)."""
+
+    def _make_handler(self, ledger: TaskLedger, tmpdir: Path) -> TaskHandler:
+        state: dict = {"task_queue": [], "active_object": {}}
+
+        def get_state(_sid: str) -> dict:
+            return state
+
+        def update_state(_sid: str, **kwargs: object) -> None:
+            state.update(kwargs)
+
+        handler = TaskHandler(
+            coordinator=MagicMock(),
+            task_ledger=ledger,
+            get_session_state=get_state,
+            update_session_state=update_state,
+            telemetry_root=tmpdir / "telemetry",
+        )
+        # Stub the worker so tests assert only on metadata creation,
+        # not on coordinator execution.
+        handler._run_autonomous_task = MagicMock()
+        return handler
+
+    def test_start_autonomous_task_propagates_verify_to_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmpdir = Path(raw)
+            ledger = TaskLedger(tmpdir / "claw.db")
+            handler = self._make_handler(ledger, tmpdir)
+
+            handler.start_autonomous_task(
+                "sess-1",
+                "Refactor brain.py",
+                mode="coding",
+                verify="strict",
+            )
+
+            records = list(ledger.list(statuses=("running",), limit=5))
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0].metadata.get("verify"), "strict")
+
+    def test_start_autonomous_task_without_verify_omits_field(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmpdir = Path(raw)
+            ledger = TaskLedger(tmpdir / "claw.db")
+            handler = self._make_handler(ledger, tmpdir)
+
+            handler.start_autonomous_task("sess-1", "Quick lookup", mode="research")
+
+            records = list(ledger.list(statuses=("running",), limit=5))
+            self.assertEqual(len(records), 1)
+            self.assertNotIn("verify", records[0].metadata)
+
+
 if __name__ == "__main__":
     unittest.main()
