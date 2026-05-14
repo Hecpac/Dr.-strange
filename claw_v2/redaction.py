@@ -11,7 +11,7 @@ _PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # AND >=8 digits AND mixed case. This avoids matching camelCase
     # identifiers and mixed-case UUIDs while still catching long monolithic
     # API keys. Prefix-based patterns below handle shorter tokens.
-    (re.compile(r"\b(?=[A-Za-z0-9_]{32,}\b)(?=(?:[^0-9]*\d){8,})(?=.*[a-z])(?=.*[A-Z])[A-Za-z0-9_]+\b"), "[REDACTED]"),
+    (re.compile(r"\b(?=[A-Za-z0-9_]{32,}\b)(?=(?:[A-Za-z_]*\d){8,})(?=[A-Z0-9_]*[a-z])(?=[a-z0-9_]*[A-Z])[A-Za-z0-9_]+\b"), "[REDACTED]"),
     (re.compile(r"sk-[A-Za-z0-9_\-]{20,}"), "[REDACTED]"),
     (re.compile(r"ghp_[A-Za-z0-9_]{20,}"), "[REDACTED]"),
     (re.compile(r"github_pat_[A-Za-z0-9_]{20,}"), "[REDACTED]"),
