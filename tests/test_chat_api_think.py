@@ -66,7 +66,6 @@ class ThinkRecentTests(unittest.TestCase):
         observe = MagicMock()
         observe.recent_events.return_value = [
             {"event_type": "dispatch_decision", "payload": {}},
-            {"event_type": "llm_response", "payload": {}},
             {"event_type": "dispatch_decision", "payload": {}},
         ]
         api = LocalChatAPI(bot_service=bot_service, observe=observe)
@@ -75,6 +74,7 @@ class ThinkRecentTests(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         payload = json.loads(body.decode("utf-8"))
+        observe.recent_events.assert_called_once_with(limit=50, event_type="dispatch_decision")
         self.assertEqual(payload["filter_type"], "dispatch_decision")
         self.assertTrue(all(ev["event_type"] == "dispatch_decision" for ev in payload["events"]))
 

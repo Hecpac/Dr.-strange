@@ -162,17 +162,12 @@ class LocalChatAPI:
         limit = self._query_param_as_int(path, "limit", default=50)
         event_type = self._query_param(path, "type")
         try:
-            raw = self._observe.recent_events(limit=max(limit * 5, 50))
+            events = self._observe.recent_events(limit=limit, event_type=event_type)
         except Exception as exc:
             return ChatAPIResponse(status_code=500, payload={"error": f"recent_events failed: {exc}"})
-        filtered = (
-            [event for event in raw if event.get("event_type") == event_type]
-            if event_type
-            else list(raw)
-        )
         return ChatAPIResponse(
             status_code=200,
-            payload={"events": filtered[:limit], "filter_type": event_type, "limit": limit},
+            payload={"events": events, "filter_type": event_type, "limit": limit},
         )
 
     def _think_circuit(self, *, method: str) -> ChatAPIResponse:
