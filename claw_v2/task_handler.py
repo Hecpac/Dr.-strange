@@ -31,6 +31,8 @@ from claw_v2.bot_helpers import (
     _normalize_command_text,
     _stable_task_id,
     _task_approval_summary,
+    detect_meta_introspection_request,
+    has_explicit_implementation_request,
 )
 from claw_v2.evidence_ledger import EvidenceRef, record_claim
 from claw_v2.goal_contract import create_goal
@@ -134,8 +136,44 @@ class TaskHandler:
             )
         return "coordinated task rejected"
 
+    def _reject_non_actionable_objective(
+        self, text: str, *, session_id: str, source: str
+    ) -> bool:
+        """Defensive guard for PR 0B.
+
+        Mirrors the meta/introspection guard in the bot router so that any
+        future caller of `start_autonomous_task` / `maybe_run_coordinated_task`
+        (not just `bot.handle_text`) is protected. An explicit implementation
+        verb in the text bypasses the rejection — coding work still flows.
+        """
+        if not text or has_explicit_implementation_request(text):
+            return False
+        intent = detect_meta_introspection_request(text)
+        if intent is None:
+            return False
+        if self.observe is not None:
+            try:
+                self.observe.emit(
+                    "coordinator_rejected_non_actionable_objective",
+                    payload={
+                        "session_id": session_id,
+                        "source": source,
+                        "kind": intent.kind,
+                        "reason": intent.reason,
+                        "normalized_text": intent.normalized_text,
+                    },
+                )
+            except Exception:
+                logger.debug(
+                    "coordinator_rejected_non_actionable_objective emit failed",
+                    exc_info=True,
+                )
+        return True
+
     def maybe_run_coordinated_task(self, session_id: str, text: str) -> str | None:
         if self.coordinator is None or not text or text.startswith("/"):
+            return None
+        if self._reject_non_actionable_objective(text, session_id=session_id, source="maybe_run_coordinated_task"):
             return None
         state = self._get_session_state(session_id)
         if state.get("autonomy_mode") != "autonomous":
@@ -178,9 +216,19 @@ class TaskHandler:
         plan: list[str] | None = None,
         verification_requirement: str | None = None,
         verify: str | None = None,
+        delegation_metadata: dict[str, Any] | None = None,
     ) -> str:
         if self.coordinator is None:
             return "coordinator unavailable"
+        if self._reject_non_actionable_objective(
+            objective, session_id=session_id, source="start_autonomous_task"
+        ):
+            return (
+                "No inicio el coordinador para esta entrada: parece una "
+                "pregunta reflexiva o un objetivo no accionable. Si quieres "
+                "que implemente algo, dilo explicitamente (por ejemplo, "
+                "\"implementa el fix\" o \"aplica el patch\")."
+            )
         mode = mode or _infer_session_mode(objective)
         task_id = f"{session_id}:{time.time_ns()}"
         checkpoint = {
@@ -188,6 +236,8 @@ class TaskHandler:
             "verification_status": "running",
             "task_id": task_id,
         }
+        if delegation_metadata:
+            checkpoint["delegation_metadata"] = dict(delegation_metadata)
         state = self._get_session_state(session_id)
         route = active_route = dict(
             state.get("active_object", {}).get("last_channel_route") or {}
@@ -221,6 +271,8 @@ class TaskHandler:
         }
         if goal_id:
             active_object["active_task"]["goal_id"] = goal_id
+        if delegation_metadata:
+            active_object["active_task"]["delegation_metadata"] = dict(delegation_metadata)
         self._update_session_state(
             session_id,
             mode=mode,

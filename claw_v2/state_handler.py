@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from claw_v2.bot_helpers import (
+    OwnerDelegationIntent,
     _build_checkpoint,
     _compact_summary,
     _default_step_budget,
@@ -16,11 +17,18 @@ from claw_v2.bot_helpers import (
     _extract_ratio_context_from_text,
     _extract_verification_status,
     _infer_session_mode,
+    _is_secret_shaped_token,
     _looks_like_proceed_request,
     _looks_like_ratio_reference_request,
     _select_next_task_queue_item,
+    is_destructive_or_external_objective,
 )
 from claw_v2.redaction import redact_sensitive
+
+
+# PR 0D: pending_action freshness window. Matches the existing
+# `_last_options_still_valid` 30-minute TTL so the two slots age the same.
+PENDING_ACTION_TTL_SECONDS = 30 * 60
 
 
 _REDACTED_MARKERS = ("[REDACTED]", "<REDACTED:")
@@ -35,6 +43,19 @@ def _contains_sensitive_redaction(text: str) -> bool:
 class _BrainShortcut:
     text: str
     memory_text: str | None = None
+
+
+@dataclass(slots=True)
+class DelegatedObjectiveResolution:
+    """Result of resolving an owner-delegation intent against context."""
+
+    objective: str | None
+    resolution_source: str | None  # which slot the objective came from
+    mode: str
+    is_risky: bool
+    selected_option_index: int | None = None
+    clarifying_question: str | None = None
+    pending_options: list[str] | None = None
 
 
 class StateHandler:
@@ -80,10 +101,36 @@ class StateHandler:
         options = _extract_numbered_options(reply_text)
         pending_action = state.get("pending_action")
         extracted_pending_action = _extract_pending_action_from_reply(reply_text)
+        pending_action_source: str | None = None
         if extracted_pending_action is not None:
             pending_action = extracted_pending_action
+            pending_action_source = "assistant_explicit_step"
+        # PR 0D: when the assistant ends with a proposal question
+        # ("¿lo arranco?", "¿procedo?", etc.), capture the proposal body as
+        # pending_action so the next "ok"/"hazlo tú"/"córrelo tú" has a
+        # concrete target to resolve. Previously pending_action was only
+        # set when the reply literally contained "siguiente paso:" —
+        # which the brain almost never wrote, leaving the DB column at
+        # 0/35 non-empty per the 2026-05-16 audit.
+        if not (isinstance(pending_action, str) and pending_action.strip()):
+            if self._looks_like_proposal_question(reply_text):
+                proposal = self._summarize_proposal(reply_text)
+                if proposal:
+                    pending_action = proposal
+                    pending_action_source = "assistant_proposal_question"
         if options:
             pending_action = ""
+            pending_action_source = None
+        # PR 0D: refuse to persist secret-shaped pending_action so a
+        # later "ok" cannot replay a token as an objective.
+        if isinstance(pending_action, str) and pending_action.strip():
+            if _is_secret_shaped_token(pending_action) or _contains_sensitive_redaction(pending_action):
+                self._emit(
+                    "resolver_state_skipped_sensitive",
+                    {"session_id": session_id, "slot": "pending_action"},
+                )
+                pending_action = ""
+                pending_action_source = None
         active_object = dict(state.get("active_object") or {})
         if options:
             active_object["last_options_meta"] = {
@@ -91,6 +138,18 @@ class StateHandler:
                 "source": "assistant_numbered_options",
                 "topic": _compact_summary(user_text, limit=140) or "",
             }
+        if isinstance(pending_action, str) and pending_action.strip() and pending_action_source:
+            active_object["pending_action_meta"] = {
+                "created_at": time.time(),
+                "source": pending_action_source,
+                "ttl_seconds": PENDING_ACTION_TTL_SECONDS,
+                "tier_hint": "unknown",
+                "topic": _compact_summary(user_text, limit=140) or "",
+            }
+        elif not (isinstance(pending_action, str) and pending_action.strip()):
+            # Clear stale meta when pending_action is cleared, otherwise the
+            # next reload would resurrect an orphaned meta block.
+            active_object.pop("pending_action_meta", None)
         rolling_summary = _compact_summary(reply_text)
         verification_status = _extract_verification_status(reply_text) or state.get("verification_status", "unknown")
         checkpoint = _build_checkpoint(reply_text, pending_action=pending_action, verification_status=verification_status)
@@ -137,6 +196,27 @@ class StateHandler:
             rolling_summary=rolling_summary,
             active_object=active_object,
         )
+        # PR 0D: emit per-slot persistence telemetry so audits can detect
+        # write-paths failing to populate slots (cf. 2026-05-16 finding #7).
+        if isinstance(pending_action, str) and pending_action.strip():
+            self._emit(
+                "pending_action_persisted",
+                {
+                    "session_id": session_id,
+                    "source": pending_action_source,
+                    "length": len(pending_action),
+                },
+            )
+        if isinstance(task_queue, list) and task_queue:
+            self._emit(
+                "task_queue_persisted",
+                {"session_id": session_id, "entries": len(task_queue)},
+            )
+        if options:
+            self._emit(
+                "last_options_persisted",
+                {"session_id": session_id, "options": len(options)},
+            )
 
     def maybe_resolve_stateful_followup(self, text: str, *, session_id: str) -> str | _BrainShortcut | None:
         if not text or text.startswith("/"):
@@ -340,6 +420,32 @@ class StateHandler:
         )
         return "La acción pendiente contiene un valor sensible redactado. Reenvíame el objetivo concreto sin tokens ni secretos."
 
+    def _pending_action_still_fresh(self, state: dict[str, Any]) -> bool:
+        """True iff pending_action has fresh meta (≤ TTL).
+
+        Pending actions written before PR 0D do not carry a meta block;
+        those are treated as fresh (legacy compatibility), so the resolver
+        does not break existing sessions on first reload after upgrade.
+        Once a new pending_action is persisted with meta, the TTL kicks in.
+        """
+        active_object = state.get("active_object") or {}
+        if not isinstance(active_object, dict):
+            return True
+        meta = active_object.get("pending_action_meta")
+        if not isinstance(meta, dict):
+            return True
+        created_at = meta.get("created_at")
+        try:
+            age = time.time() - float(created_at)
+        except (TypeError, ValueError):
+            return True
+        ttl = meta.get("ttl_seconds")
+        try:
+            ttl_value = float(ttl) if ttl is not None else PENDING_ACTION_TTL_SECONDS
+        except (TypeError, ValueError):
+            ttl_value = PENDING_ACTION_TTL_SECONDS
+        return age <= ttl_value
+
     def _last_options_still_valid(self, state: dict[str, Any]) -> bool:
         active_object = state.get("active_object") or {}
         if not isinstance(active_object, dict):
@@ -420,6 +526,205 @@ class StateHandler:
             "pasame los 2",
             "pasame los dos",
         }
+
+    def resolve_delegated_objective(
+        self,
+        *,
+        session_id: str,
+        text: str,
+        intent: OwnerDelegationIntent,
+    ) -> DelegatedObjectiveResolution:
+        """Resolve "córrelo tú" / "decide tú" / "te toca a ti" against context.
+
+        Resolution order (first non-empty wins):
+          1. intent.explicit_action_hint (inline object in the user message)
+          2. session_state.pending_action
+          3. first in-progress / pending entry in task_queue
+          4. session_state.last_checkpoint.pending_action
+          5. session_state.active_object.active_task.objective
+          6. session_state.last_options (for decision delegation)
+          7. recent assistant proposal in memory
+          8. session_state.current_goal
+
+        For decision delegation: when options are present and ALL are safe,
+        deterministically picks index 0. When any option is risky, returns a
+        clarifying question instead.
+
+        When the objective cannot be resolved, returns a single concrete
+        clarifying question — never "elige tú" / "decide tú".
+        """
+        state = self._get_state(session_id)
+        self._emit(
+            "resolver_state_reloaded",
+            {
+                "session_id": session_id,
+                "has_pending_action": bool((state.get("pending_action") or "").strip()),
+                "task_queue_entries": len(state.get("task_queue") or [])
+                if isinstance(state.get("task_queue"), list)
+                else 0,
+                "last_options_count": len(state.get("last_options") or [])
+                if isinstance(state.get("last_options"), list)
+                else 0,
+            },
+        )
+
+        # 1. Explicit hint in current text.
+        if intent.explicit_action_hint:
+            objective = intent.explicit_action_hint.strip()
+            return DelegatedObjectiveResolution(
+                objective=objective,
+                resolution_source="user_text_inline_hint",
+                mode=_infer_session_mode(objective),
+                is_risky=is_destructive_or_external_objective(objective),
+            )
+
+        # Decision delegation goes through last_options first.
+        if intent.is_decision_delegation:
+            options_resolution = self._resolve_decision_from_options(state)
+            if options_resolution is not None:
+                return options_resolution
+
+        # 2. pending_action — freshness-gated. A pending_action older than
+        # PENDING_ACTION_TTL_SECONDS is treated as stale and ignored so
+        # an old "ok" cannot replay obsolete proposals.
+        pending = (state.get("pending_action") or "").strip()
+        if pending and not _contains_sensitive_redaction(pending) and not _is_secret_shaped_token(pending):
+            if self._pending_action_still_fresh(state):
+                return DelegatedObjectiveResolution(
+                    objective=pending,
+                    resolution_source="session_state.pending_action",
+                    mode=_infer_session_mode(pending),
+                    is_risky=is_destructive_or_external_objective(pending),
+                )
+            self._emit(
+                "resolver_state_stale_ignored",
+                {"session_id": session_id, "slot": "pending_action"},
+            )
+
+        # 3. task_queue active/pending entry
+        queue = state.get("task_queue") or []
+        if isinstance(queue, list):
+            preferred_mode = str(state.get("mode") or "chat")
+            next_item = _select_next_task_queue_item(queue, preferred_mode=preferred_mode)
+            if next_item is not None:
+                summary = str(next_item.get("summary") or "").strip()
+                if summary and not _contains_sensitive_redaction(summary):
+                    return DelegatedObjectiveResolution(
+                        objective=summary,
+                        resolution_source="session_state.task_queue",
+                        mode=str(next_item.get("mode") or preferred_mode),
+                        is_risky=is_destructive_or_external_objective(summary),
+                    )
+
+        # 4. last_checkpoint pending_action
+        checkpoint = state.get("last_checkpoint") or {}
+        if isinstance(checkpoint, dict):
+            cp_pending = str(checkpoint.get("pending_action") or "").strip()
+            if cp_pending and not _contains_sensitive_redaction(cp_pending):
+                return DelegatedObjectiveResolution(
+                    objective=cp_pending,
+                    resolution_source="session_state.last_checkpoint.pending_action",
+                    mode=_infer_session_mode(cp_pending),
+                    is_risky=is_destructive_or_external_objective(cp_pending),
+                )
+
+        # 5. active_object.active_task.objective
+        active_object = state.get("active_object") or {}
+        if isinstance(active_object, dict):
+            active_task = active_object.get("active_task") or {}
+            if isinstance(active_task, dict):
+                task_obj = str(active_task.get("objective") or "").strip()
+                if task_obj:
+                    return DelegatedObjectiveResolution(
+                        objective=task_obj,
+                        resolution_source="session_state.active_object.active_task",
+                        mode=str(active_task.get("mode") or "chat"),
+                        is_risky=is_destructive_or_external_objective(task_obj),
+                    )
+
+        # 6. recent assistant proposal
+        proposal = self._extract_proposal_from_recent_assistant(session_id)
+        if proposal:
+            return DelegatedObjectiveResolution(
+                objective=proposal,
+                resolution_source="recent_assistant_proposal",
+                mode=_infer_session_mode(proposal),
+                is_risky=is_destructive_or_external_objective(proposal),
+            )
+
+        # 7. current_goal
+        current_goal = (state.get("current_goal") or "").strip()
+        if current_goal and len(current_goal) >= 8 and current_goal != text.strip():
+            return DelegatedObjectiveResolution(
+                objective=current_goal,
+                resolution_source="session_state.current_goal",
+                mode=_infer_session_mode(current_goal),
+                is_risky=is_destructive_or_external_objective(current_goal),
+            )
+
+        # Nothing resolved — return one concrete clarifying question.
+        return DelegatedObjectiveResolution(
+            objective=None,
+            resolution_source=None,
+            mode="chat",
+            is_risky=False,
+            clarifying_question=(
+                "Lo tomo como tuyo, pero necesito una linea concreta: "
+                "¿que accion quieres que ejecute? (1 frase imperativa)"
+            ),
+        )
+
+    def _resolve_decision_from_options(
+        self, state: dict[str, Any]
+    ) -> DelegatedObjectiveResolution | None:
+        options = state.get("last_options") or []
+        if not isinstance(options, list) or not options:
+            return None
+        if not self._last_options_still_valid(state):
+            return None
+        safe_options: list[str] = []
+        any_risky = False
+        for raw in options:
+            text = str(raw).strip()
+            if not text:
+                continue
+            if is_destructive_or_external_objective(text):
+                any_risky = True
+            safe_options.append(text)
+        if not safe_options:
+            return None
+        if any_risky:
+            preview = "\n".join(f"  {idx + 1}. {opt}" for idx, opt in enumerate(safe_options[:4]))
+            return DelegatedObjectiveResolution(
+                objective=None,
+                resolution_source="last_options_risky",
+                mode="chat",
+                is_risky=True,
+                clarifying_question=(
+                    "Hay opciones con efectos externos o destructivos. "
+                    "Confirma explicitamente cual ejecuto:\n" + preview
+                ),
+                pending_options=safe_options,
+            )
+        chosen = safe_options[0]
+        return DelegatedObjectiveResolution(
+            objective=chosen,
+            resolution_source="last_options_deterministic",
+            mode=_infer_session_mode(chosen),
+            is_risky=False,
+            selected_option_index=0,
+            pending_options=safe_options,
+        )
+
+    def _get_state(self, session_id: str) -> dict[str, Any]:
+        getter = getattr(self._memory, "get_session_state", None)
+        if not callable(getter):
+            return {}
+        try:
+            state = getter(session_id)
+        except Exception:
+            return {}
+        return state if isinstance(state, dict) else {}
 
     def _reply_context_text(self, state: dict[str, Any]) -> str:
         active_object = state.get("active_object") or {}

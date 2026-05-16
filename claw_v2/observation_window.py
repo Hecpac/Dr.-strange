@@ -15,6 +15,11 @@ logger = logging.getLogger(__name__)
 
 NotifyCallback = Callable[[str], None]
 
+# Cost-per-hour breaker is an LLM-spend signal. It must not block safe local
+# read-only inspection — operators (and the bot) still need Read/Grep/Glob to
+# diagnose what is happening. Higher tiers stay gated.
+LOCAL_READ_ONLY_TIER = 1
+
 
 class ObservationWindowBlocked(PermissionError):
     """Raised when the observation window blocks autonomous execution."""
@@ -130,11 +135,24 @@ class ObservationWindowState:
             self._notify_alert(f"Blocked hard-denylisted tool: {tool_name} ({reason})")
             raise ObservationWindowBlocked(reason)
         with self._lock:
-            if self._frozen:
-                reason = self._freeze_reason or "observation_window_frozen"
-                payload = {"tool": tool_name, "tier": tier, "actor": actor, "reason": reason}
+            frozen = self._frozen
+            freeze_reason = self._freeze_reason or "observation_window_frozen"
+        if frozen:
+            if _is_cost_breaker_reason(freeze_reason) and tier <= LOCAL_READ_ONLY_TIER:
+                self._emit(
+                    "tool_allowed_during_cost_breaker",
+                    {
+                        "tool": tool_name,
+                        "tier": tier,
+                        "actor": actor,
+                        "freeze_reason": freeze_reason,
+                    },
+                )
+            else:
+                payload = {"tool": tool_name, "tier": tier, "actor": actor, "reason": freeze_reason}
                 self._emit("tool_blocked_by_freeze", payload)
-                raise ObservationWindowBlocked(f"observation window frozen: {reason}")
+                raise ObservationWindowBlocked(f"observation window frozen: {freeze_reason}")
+        with self._lock:
             now = self._clock()
             self._tool_call_times.append(now)
             self._prune_locked(now)
@@ -184,11 +202,15 @@ class ObservationWindowState:
                 self._prune_locked(now)
                 cost_per_hour = sum(item_cost for _, item_cost in self._llm_costs)
             if cost_per_hour > self.config.cost_per_hour_threshold:
+                lane = str(event.get("lane")) if event.get("lane") is not None else None
+                provider = str(event.get("provider")) if event.get("provider") is not None else None
                 self.trip_breaker(
                     "cost_per_hour",
                     value=cost_per_hour,
                     threshold=self.config.cost_per_hour_threshold,
-                    actor=str(event.get("lane") or "llm"),
+                    actor=lane or "llm",
+                    lane=lane,
+                    provider=provider,
                 )
         if bool(event.get("degraded_mode")):
             self._notify_stream(
@@ -201,7 +223,16 @@ class ObservationWindowState:
                 )
             )
 
-    def trip_breaker(self, name: str, *, value: float, threshold: float, actor: str) -> None:
+    def trip_breaker(
+        self,
+        name: str,
+        *,
+        value: float,
+        threshold: float,
+        actor: str,
+        lane: str | None = None,
+        provider: str | None = None,
+    ) -> None:
         with self._lock:
             first_trip = name not in self._tripped_breakers
             self._tripped_breakers.add(name)
@@ -213,6 +244,23 @@ class ObservationWindowState:
         }
         self._emit("circuit_breaker_tripped", payload)
         self.freeze(reason=f"circuit_breaker:{name}", actor=actor)
+        if name == "cost_per_hour":
+            degraded_payload: dict[str, Any] = {
+                "actor": actor,
+                "value": round(value, 6),
+                "threshold": threshold,
+                "allowed_capabilities": ["tier_1_local_read_only"],
+                "blocked_capabilities": [
+                    "llm_calls_until_window_decays",
+                    "tier_2_local_mutation",
+                    "tier_3_external_or_approval_required",
+                ],
+            }
+            if lane is not None:
+                degraded_payload["lane"] = lane
+            if provider is not None:
+                degraded_payload["provider"] = provider
+            self._emit("autonomy_degraded_by_cost_breaker", degraded_payload)
         if first_trip:
             logger.warning(
                 "Circuit breaker tripped: %s value=%.3f threshold=%.3f actor=%s",
@@ -368,6 +416,11 @@ class ObservationWindowState:
 def _format_stream_line(*, tool: str, tier: str, actor: str, cost: float, status: str) -> str:
     hhmm = datetime.now().strftime("%H:%M")
     return f"[{hhmm}] tool={tool} tier={tier} actor={actor} cost=${cost:.4f} status={status}"
+
+
+def _is_cost_breaker_reason(reason: str) -> bool:
+    """True iff the freeze is purely an LLM cost-per-hour signal."""
+    return reason == "circuit_breaker:cost_per_hour"
 
 
 def _diagnostic_only_freeze_reason(reason: str) -> bool:
