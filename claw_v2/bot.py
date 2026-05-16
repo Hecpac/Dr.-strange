@@ -62,6 +62,7 @@ from claw_v2.model_registry import (
 from claw_v2.pipeline import PipelineService
 from claw_v2.social import SocialPublisher
 from claw_v2.bot_helpers import *  # noqa: F403
+from claw_v2.bot_helpers import _is_secret_shaped_token  # explicit: private helper
 
 if TYPE_CHECKING:
     from claw_v2.jobs import JobService
@@ -1708,6 +1709,17 @@ class BotService:
             self._store_memory_turn(session_id, stripped, pending_tasks_response, assistant_limit=2000)
             self._remember_assistant_turn_state(session_id, stripped, pending_tasks_response)
             return pending_tasks_response
+        owner_delegation_response = self._maybe_handle_owner_delegation_request(
+            stripped,
+            session_id=session_id,
+            runtime_channel=runtime_channel,
+        )
+        if owner_delegation_response is not None:
+            self._store_memory_turn(
+                session_id, stripped, owner_delegation_response, assistant_limit=4000
+            )
+            self._remember_assistant_turn_state(session_id, stripped, owner_delegation_response)
+            return owner_delegation_response
         actionable_task_response = self._maybe_handle_actionable_task_request(
             stripped,
             session_id=session_id,
@@ -1788,6 +1800,75 @@ class BotService:
             self._store_memory_turn(session_id, stripped, change_status_response, assistant_limit=2000)
             self._remember_assistant_turn_state(session_id, stripped, change_status_response)
             return change_status_response
+        # PR 0B: meta/introspection guard. Reflective questions, clarification
+        # asks, audit requests, and secret-shaped tokens must NOT reach the
+        # coordinator/coding pipeline; route them to brain chat instead. An
+        # explicit implementation verb in the message ("implementa", "patch X")
+        # disqualifies the guard so real coding work still flows downstream.
+        meta_intent = detect_meta_introspection_request(stripped)
+        if meta_intent is not None:
+            if self.observe is not None:
+                try:
+                    self.observe.emit(
+                        "meta_introspection_match",
+                        payload={
+                            "session_id": session_id,
+                            "kind": meta_intent.kind,
+                            "reason": meta_intent.reason,
+                            "normalized_text": meta_intent.normalized_text,
+                        },
+                    )
+                except Exception:
+                    logger.debug("meta_introspection_match emit failed", exc_info=True)
+            routed_event = (
+                "meta_introspection_routed_to_audit"
+                if meta_intent.kind == "audit"
+                else "meta_introspection_routed_to_chat"
+            )
+            if self.observe is not None:
+                try:
+                    self.observe.emit(
+                        routed_event,
+                        payload={
+                            "session_id": session_id,
+                            "kind": meta_intent.kind,
+                            "reason": meta_intent.reason,
+                        },
+                    )
+                except Exception:
+                    logger.debug("%s emit failed", routed_event, exc_info=True)
+            self._emit_dispatch_decision(
+                handler="meta_introspection_guard",
+                route="intercepted",
+                reason=f"meta_introspection:{meta_intent.kind}",
+                session_id=session_id,
+                text=stripped,
+                captured=True,
+                matched_pattern=meta_intent.reason,
+            )
+            return self._brain_text_response(
+                session_id, stripped, runtime_channel=runtime_channel
+            )
+        if self.observe is not None:
+            try:
+                self.observe.emit(
+                    "meta_introspection_no_match",
+                    payload={"session_id": session_id},
+                )
+            except Exception:
+                logger.debug("meta_introspection_no_match emit failed", exc_info=True)
+        if has_explicit_implementation_request(stripped):
+            if self.observe is not None:
+                try:
+                    self.observe.emit(
+                        "meta_introspection_allows_implementation",
+                        payload={"session_id": session_id},
+                    )
+                except Exception:
+                    logger.debug(
+                        "meta_introspection_allows_implementation emit failed",
+                        exc_info=True,
+                    )
         # Most semantic pre-brain routes stay gated, but explicit operational
         # capability requests like AI news and X trends remain deterministic.
         capability_route_allowed = self._capability_route_allowed(stripped)
@@ -2888,7 +2969,385 @@ class BotService:
                 predicted_confidence=self.brain._last_confidence.get(session_id) or None,
             )
         self._remember_assistant_turn_state(session_id, source_text, content)
+        self._attach_brain_tool_use_ledger(
+            session_id=session_id,
+            response=response,
+            source_text=source_text,
+            runtime_channel=runtime_channel,
+        )
         return content
+
+    def _attach_brain_tool_use_ledger(
+        self,
+        *,
+        session_id: str,
+        response: Any,
+        source_text: str,
+        runtime_channel: str | None,
+    ) -> None:
+        """PR 0E — Brain Tool-Use Ledger.
+
+        After a brain fallback turn returns, scan observe events for the
+        turn's trace_id. If any tools ran, either attach to an existing
+        active task (owner-delegation/coordinator) or create a synthetic
+        agent_tasks row so the tool-use leaves a durable audit trail.
+
+        Decision matrix:
+          - 0 tool events                  → emit noop, no task created
+          - any tool event + active task   → attach (no second task)
+          - any tool event + no active task→ create synthetic task; mark
+                                              terminal with verification
+                                              status derived from
+                                              failures + evidence
+          - approval-gated tool blocked    → recorded as
+                                              brain_tooluse_ledger_skipped_sensitive
+
+        Never marks verification_status="passed" on a brain fallback —
+        the brain has no evidence pack, so the defense-in-depth
+        `task_completion.validate_completion` gate would downgrade
+        success-without-evidence anyway.
+        """
+        if self.task_ledger is None or self.observe is None:
+            return
+        try:
+            artifacts = getattr(response, "artifacts", None) or {}
+        except Exception:
+            artifacts = {}
+        trace_id = str(artifacts.get("trace_id") or "")
+        if not trace_id:
+            return
+        try:
+            events = self.observe.trace_events(trace_id)
+        except Exception:
+            return
+        tool_events: list[dict[str, Any]] = []
+        tool_failure_events: list[dict[str, Any]] = []
+        approval_events: list[dict[str, Any]] = []
+        for ev in events:
+            etype = str(ev.get("event_type") or "")
+            if etype == "sdk_post_tool_use":
+                tool_events.append(ev)
+            elif etype == "sdk_post_tool_use_failure":
+                tool_failure_events.append(ev)
+            elif etype in {"approval_required", "tool_blocked_by_freeze", "tool_hard_denylist_blocked"}:
+                approval_events.append(ev)
+        if not tool_events and not tool_failure_events and not approval_events:
+            try:
+                self.observe.emit(
+                    "brain_tooluse_ledger_noop_no_tools",
+                    payload={"session_id": session_id, "trace_id": trace_id},
+                )
+            except Exception:
+                logger.debug("brain_tooluse_ledger_noop_no_tools emit failed", exc_info=True)
+            return
+        # Attach to existing active task if one is present.
+        try:
+            state = self.brain.memory.get_session_state(session_id)
+        except Exception:
+            state = {}
+        active_object = state.get("active_object") or {} if isinstance(state, dict) else {}
+        active_task = active_object.get("active_task") or {} if isinstance(active_object, dict) else {}
+        existing_task_id = ""
+        if isinstance(active_task, dict):
+            existing_task_id = str(active_task.get("task_id") or "")
+            existing_status = str(active_task.get("status") or "")
+            if existing_task_id and existing_status not in ("running",):
+                existing_task_id = ""
+        if existing_task_id:
+            try:
+                self.observe.emit(
+                    "brain_tooluse_ledger_attached_existing",
+                    payload={
+                        "session_id": session_id,
+                        "existing_task_id": existing_task_id,
+                        "trace_id": trace_id,
+                        "tools_count": len(tool_events),
+                        "failures_count": len(tool_failure_events),
+                    },
+                )
+            except Exception:
+                logger.debug("brain_tooluse_ledger_attached_existing emit failed", exc_info=True)
+            return
+        # Approval-required tool was blocked — record as skipped/sensitive,
+        # do NOT mark success.
+        if approval_events and not tool_events and not tool_failure_events:
+            try:
+                self.observe.emit(
+                    "brain_tooluse_ledger_skipped_sensitive",
+                    payload={
+                        "session_id": session_id,
+                        "trace_id": trace_id,
+                        "blocked_events": len(approval_events),
+                    },
+                )
+            except Exception:
+                logger.debug("brain_tooluse_ledger_skipped_sensitive emit failed", exc_info=True)
+            return
+        # Synthetic task creation.
+        task_id = f"brain-tooluse:{session_id}:{time.time_ns()}"
+        started_at_ts = time.time()
+        (
+            tools_run,
+            files_touched,
+            commands_run,
+            files_read,
+            files_written,
+            grep_patterns,
+            glob_patterns,
+            first_error,
+        ) = self._summarize_brain_tool_events(tool_events, tool_failure_events)
+        # PR 0F: scrub secret-shaped tokens out of the user message
+        # summary before it lands in metadata or the manifest. The lower
+        # `redact_sensitive` only matches well-known providers' shapes;
+        # this catches mixed-alphanumeric tokens shaped like opaque
+        # session/api credentials (same heuristic PR 0B/0D use).
+        source_summary, sensitive_redactions = self._redact_secret_tokens(
+            (source_text or "")[:200]
+        )
+        metadata = {
+            "origin": "brain_fallback",
+            "brain_tool_use": True,
+            "channel": (runtime_channel or "").lower() or None,
+            "source_message_summary": source_summary,
+            "verification_required": True,
+            "manual_handoff_forbidden": bool(active_task),
+            "created_by": "brain_tool_use_ledger",
+            "trace_id": trace_id,
+        }
+        # PR 0F: evidence_manifest is the proof that this brain tool-use
+        # turn really did the work it claims. task_completion recognizes
+        # the shape and lets the row close terminally without forcing
+        # `succeeded+passed` (which we have no right to claim without an
+        # explicit verifier).
+        evidence_manifest: dict[str, Any] = {
+            "version": 1,
+            "task_id": task_id,
+            "session_id": session_id,
+            "origin": "brain_fallback",
+            "channel": (runtime_channel or "").lower() or None,
+            "user_message_summary": source_summary,
+            "started_at": started_at_ts,
+            "trace_id": trace_id,
+            "tools_run": tools_run[:50],
+            "files_read": sorted(files_read)[:50],
+            "files_written": sorted(files_written)[:50],
+            "files_touched": sorted(files_touched)[:50],
+            "commands_run": commands_run[:20],
+            "grep_patterns": grep_patterns[:20],
+            "glob_patterns": glob_patterns[:20],
+            "checks_run": [],
+            "outputs_summarized": "",
+            "tool_event_count": len(tool_events),
+            "tool_failure_count": len(tool_failure_events),
+            "approval_event_count": len(approval_events),
+            "blockers": [],
+            "sensitive_redactions_applied": sensitive_redactions > 0,
+            "verification_result": "unknown",
+        }
+        brain_artifacts = {
+            "evidence_manifest": evidence_manifest,
+            # Legacy top-level fields kept for backwards-compat with the
+            # PR 0E tests and any downstream audit query that reads
+            # artifacts.tools_run directly.
+            "tools_run": tools_run[:50],
+            "files_touched": sorted(files_touched)[:50],
+            "commands_run": commands_run[:20],
+            "trace_id": trace_id,
+            "tool_event_count": len(tool_events),
+            "tool_failure_count": len(tool_failure_events),
+            "approval_event_count": len(approval_events),
+        }
+        try:
+            self.task_ledger.create(
+                task_id=task_id,
+                session_id=session_id,
+                objective=(
+                    f"brain fallback tool-use turn ({len(tool_events)} "
+                    f"tool calls, trace {trace_id[:8]})"
+                ),
+                runtime=(runtime_channel or "brain_fallback"),
+                mode="brain_fallback",
+                status="running",
+                metadata=metadata,
+                artifacts=brain_artifacts,
+            )
+        except Exception:
+            logger.exception("brain tool-use ledger create failed")
+            return
+        try:
+            self.observe.emit(
+                "brain_tooluse_ledger_started",
+                payload={
+                    "session_id": session_id,
+                    "task_id": task_id,
+                    "trace_id": trace_id,
+                    "tools_count": len(tool_events),
+                    "failures_count": len(tool_failure_events),
+                },
+            )
+        except Exception:
+            logger.debug("brain_tooluse_ledger_started emit failed", exc_info=True)
+        # Decide terminal status.
+        if tool_failure_events:
+            evidence_manifest["completed_at"] = time.time()
+            evidence_manifest["verification_result"] = "failed"
+            evidence_manifest["blockers"] = [first_error[:200] or "tool execution failed"]
+            self.task_ledger.mark_terminal(
+                task_id,
+                status="failed",
+                summary=f"brain tool-use failed: {first_error[:120]}",
+                error=first_error[:300],
+                verification_status="failed",
+                artifacts=brain_artifacts,
+            )
+            try:
+                self.observe.emit(
+                    "brain_tooluse_ledger_failed",
+                    payload={
+                        "task_id": task_id,
+                        "error_count": len(tool_failure_events),
+                        "first_error_kind": first_error[:60],
+                    },
+                )
+            except Exception:
+                logger.debug("brain_tooluse_ledger_failed emit failed", exc_info=True)
+            return
+        # PR 0F: tools ran without failure AND we have an
+        # evidence_manifest → the row closes terminally as succeeded +
+        # needs_verification (no out-of-band verifier rerun required).
+        # The PR 0F branch in task_completion.validate_completion
+        # recognizes the manifest and accepts the close. Without a
+        # manifest the existing false-success guard would still
+        # downgrade to running+missing_evidence — that's why we attach
+        # the manifest unconditionally above.
+        evidence_manifest["completed_at"] = time.time()
+        evidence_manifest["verification_result"] = "needs_verification"
+        self.task_ledger.mark_terminal(
+            task_id,
+            status="succeeded",
+            summary=f"brain tool-use turn: {len(tool_events)} tool calls (unverified)",
+            verification_status="needs_verification",
+            artifacts=brain_artifacts,
+        )
+        try:
+            self.observe.emit(
+                "brain_tooluse_ledger_needs_verification",
+                payload={"task_id": task_id, "tools_count": len(tool_events)},
+            )
+            self.observe.emit(
+                "brain_tooluse_ledger_completed",
+                payload={
+                    "task_id": task_id,
+                    "verification_status": "needs_verification",
+                    "tools_count": len(tool_events),
+                },
+            )
+        except Exception:
+            logger.debug("brain_tooluse_ledger_completed emit failed", exc_info=True)
+
+    @staticmethod
+    def _redact_secret_tokens(text: str) -> tuple[str, int]:
+        """Scrub secret-shaped tokens (mixed alphanumeric, ≥16 chars,
+        no spaces, contains upper/lower/digit) from a text snippet
+        before it gets persisted. Returns (redacted_text, redaction_count).
+        """
+        if not text:
+            return text, 0
+        redactions = 0
+        out_tokens: list[str] = []
+        # Preserve original whitespace boundaries roughly — token-level
+        # substitution is enough for telemetry summaries.
+        for token in text.split(" "):
+            if _is_secret_shaped_token(token):
+                redactions += 1
+                out_tokens.append(f"<REDACTED:secret-shape:len={len(token)}>")
+            else:
+                out_tokens.append(token)
+        return " ".join(out_tokens), redactions
+
+    @staticmethod
+    def _summarize_brain_tool_events(
+        tool_events: list[dict[str, Any]],
+        failure_events: list[dict[str, Any]],
+    ) -> tuple[
+        list[str],
+        set[str],
+        list[str],
+        set[str],
+        set[str],
+        list[str],
+        list[str],
+        str,
+    ]:
+        """Pull (tools_run, files_touched, commands_run, files_read,
+        files_written, grep_patterns, glob_patterns, first_error) from
+        observe rows. Payloads are JSON strings; we parse defensively and
+        cap every captured string so secrets can't accidentally bloat the
+        artifacts blob (the ledger also runs `redact_sensitive` on write).
+        """
+        tools_run: list[str] = []
+        files_touched: set[str] = set()
+        files_read: set[str] = set()
+        files_written: set[str] = set()
+        commands_run: list[str] = []
+        grep_patterns: list[str] = []
+        glob_patterns: list[str] = []
+        first_error = ""
+        for ev in list(tool_events) + list(failure_events):
+            raw_payload = ev.get("payload")
+            if isinstance(raw_payload, str):
+                try:
+                    payload = json.loads(raw_payload)
+                except Exception:
+                    payload = {}
+            elif isinstance(raw_payload, dict):
+                payload = raw_payload
+            else:
+                payload = {}
+            tool_name = str(payload.get("tool_name") or "unknown")[:60]
+            tools_run.append(tool_name)
+            tool_input = payload.get("tool_input") or {}
+            if isinstance(tool_input, dict):
+                if tool_name in ("Read", "NotebookEdit"):
+                    fp = tool_input.get("file_path") or tool_input.get("notebook_path")
+                    if fp:
+                        capped = str(fp)[:200]
+                        files_touched.add(capped)
+                        files_read.add(capped)
+                elif tool_name in ("Edit", "Write"):
+                    fp = tool_input.get("file_path")
+                    if fp:
+                        capped = str(fp)[:200]
+                        files_touched.add(capped)
+                        files_written.add(capped)
+                elif tool_name == "Bash":
+                    cmd = tool_input.get("command") or tool_input.get("cmd")
+                    if cmd:
+                        commands_run.append(str(cmd)[:200])
+                elif tool_name == "Grep":
+                    pattern = tool_input.get("pattern")
+                    path = tool_input.get("path")
+                    if pattern:
+                        grep_patterns.append(str(pattern)[:200])
+                    if path:
+                        files_touched.add(str(path)[:200])
+                elif tool_name == "Glob":
+                    pattern = tool_input.get("pattern")
+                    if pattern:
+                        glob_patterns.append(str(pattern)[:200])
+            err = payload.get("error")
+            if err and not first_error:
+                first_error = str(err)[:300]
+        return (
+            tools_run,
+            files_touched,
+            commands_run,
+            files_read,
+            files_written,
+            grep_patterns,
+            glob_patterns,
+            first_error,
+        )
 
     def _with_runtime_capability_context(self, prompt_text: str, *, runtime_channel: str | None = None) -> str:
         context = self._runtime_capability_context(runtime_channel=runtime_channel)
@@ -3750,6 +4209,172 @@ class BotService:
         if not found:
             lines.append("No veo aprobaciones, tareas activas ni blockers recientes en esta conversacion.")
         return "\n".join(lines)
+
+    def _maybe_handle_owner_delegation_request(
+        self,
+        text: str,
+        *,
+        session_id: str,
+        runtime_channel: str | None,
+    ) -> str | None:
+        """PR 0C — owner-delegation kernel.
+
+        Detects "córrelo tú", "decide tú", "te toca a ti", etc. and turns
+        them into durable, task-scoped delegated work. Runs BEFORE
+        actionable_task_request / task_intent / capability_route / brain
+        fallback so it cannot be silenced by CLAW_DISABLE_* flags or by an
+        assisted session.
+
+        Resolution and safety policy live in StateHandler.resolve_delegated_objective
+        and bot_helpers.is_destructive_or_external_objective. This method
+        is just the dispatcher: classify → resolve → branch (safe → start
+        delegated task; risky → approval question; unresolved → clarify).
+        """
+        intent = detect_owner_delegation(text)
+        if intent is None:
+            if self.observe is not None:
+                try:
+                    self.observe.emit(
+                        "owner_delegation_no_match",
+                        payload={"session_id": session_id},
+                    )
+                except Exception:
+                    logger.debug("owner_delegation_no_match emit failed", exc_info=True)
+            return None
+        if self.observe is not None:
+            try:
+                self.observe.emit(
+                    "owner_delegation_match",
+                    payload={
+                        "session_id": session_id,
+                        "kind": intent.kind,
+                        "confidence": intent.confidence,
+                        "normalized_text": intent.normalized_text,
+                        "requires_resolution": intent.requires_resolution,
+                        "explicit_action_hint": intent.explicit_action_hint,
+                        "runtime_channel": (runtime_channel or "").lower() or None,
+                    },
+                )
+            except Exception:
+                logger.debug("owner_delegation_match emit failed", exc_info=True)
+        self._emit_dispatch_decision(
+            handler="owner_delegation",
+            route="intercepted",
+            reason=f"owner_delegation:{intent.kind}",
+            session_id=session_id,
+            text=text,
+            captured=True,
+            matched_pattern=f"owner_delegation:{intent.kind}",
+        )
+        resolution = self._state_handler.resolve_delegated_objective(
+            session_id=session_id, text=text, intent=intent
+        )
+        # Unresolved → one concrete clarifying question. We do NOT say
+        # "decide tú" / "elige tú" — the resolver enforces that.
+        if resolution.objective is None:
+            event_name = (
+                "owner_delegation_approval_required"
+                if resolution.is_risky
+                else "owner_delegation_unresolved"
+            )
+            if self.observe is not None:
+                try:
+                    self.observe.emit(
+                        event_name,
+                        payload={
+                            "session_id": session_id,
+                            "kind": intent.kind,
+                            "resolution_source": resolution.resolution_source,
+                        },
+                    )
+                except Exception:
+                    logger.debug("%s emit failed", event_name, exc_info=True)
+            return resolution.clarifying_question or (
+                "Lo tomo como tuyo, pero dime en una frase imperativa que "
+                "accion concreta ejecuto."
+            )
+        # Risky / external / destructive → ask one approval question.
+        if resolution.is_risky:
+            if self.observe is not None:
+                try:
+                    self.observe.emit(
+                        "owner_delegation_approval_required",
+                        payload={
+                            "session_id": session_id,
+                            "kind": intent.kind,
+                            "resolution_source": resolution.resolution_source,
+                            "mode": resolution.mode,
+                        },
+                    )
+                except Exception:
+                    logger.debug(
+                        "owner_delegation_approval_required emit failed", exc_info=True
+                    )
+            objective_preview = (resolution.objective or "")[:200]
+            return (
+                "Lo que pides toca algo externo, destructivo o con costo "
+                "(deploy / merge / publish / send / payment / secret / "
+                "delete / production). No lo ejecuto sin tu aprobacion "
+                "explicita.\n\n"
+                f"Objetivo resuelto: {objective_preview}\n\n"
+                "Responde \"aprobado\" para que proceda, o aclara el alcance."
+            )
+        # Safe + resolved → start a durable task-scoped delegated coordinator
+        # run. We intentionally do NOT flip the session autonomy_mode; the
+        # autonomy is scoped to this task via delegation_metadata.
+        delegation_metadata = {
+            "owner_delegation": True,
+            "delegated_by_owner": True,
+            "source_message": text[:500],
+            "resolution_source": resolution.resolution_source,
+            "verification_required": True,
+            "autonomy_scope": "task",
+            "manual_handoff_forbidden": True,
+            "delegation_kind": intent.kind,
+            "runtime_channel": (runtime_channel or "").lower() or None,
+        }
+        try:
+            response = self._task_handler.start_autonomous_task(
+                session_id,
+                resolution.objective,
+                mode=resolution.mode,
+                delegation_metadata=delegation_metadata,
+            )
+        except Exception:
+            logger.exception("owner_delegation start_autonomous_task failed")
+            if self.observe is not None:
+                try:
+                    self.observe.emit(
+                        "owner_delegation_blocked",
+                        payload={
+                            "session_id": session_id,
+                            "kind": intent.kind,
+                            "resolution_source": resolution.resolution_source,
+                            "reason": "start_autonomous_task_exception",
+                        },
+                    )
+                except Exception:
+                    logger.debug("owner_delegation_blocked emit failed", exc_info=True)
+            return (
+                "Intente arrancar la tarea delegada pero el coordinador "
+                "fallo. Reporto sin disimulo: revisa los logs y dime si "
+                "reintento."
+            )
+        if self.observe is not None:
+            try:
+                self.observe.emit(
+                    "owner_delegation_started_task",
+                    payload={
+                        "session_id": session_id,
+                        "kind": intent.kind,
+                        "resolution_source": resolution.resolution_source,
+                        "mode": resolution.mode,
+                    },
+                )
+            except Exception:
+                logger.debug("owner_delegation_started_task emit failed", exc_info=True)
+        prefix = "Lo tomo como tarea delegada.\n\n"
+        return prefix + (response or "")
 
     def _maybe_handle_actionable_task_request(
         self,

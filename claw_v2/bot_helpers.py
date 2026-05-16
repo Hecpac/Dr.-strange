@@ -7,9 +7,17 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from dataclasses import dataclass
+
 from claw_v2.coordinator import CoordinatorResult, WorkerTask
 
 __all__ = [
+    "MetaIntrospectionIntent",
+    "OwnerDelegationIntent",
+    "detect_meta_introspection_request",
+    "detect_owner_delegation",
+    "has_explicit_implementation_request",
+    "is_destructive_or_external_objective",
     "_AUTH_DOMAINS",
     "_AUTONOMY_ACTION_PATTERNS",
     "_AUTONOMY_MODES",
@@ -455,6 +463,359 @@ def _looks_like_nlm_meta_discussion(text: str) -> bool:
 def _normalize_command_text(text: str) -> str:
     folded = unicodedata.normalize("NFKD", text)
     return "".join(ch for ch in folded if not unicodedata.combining(ch)).lower()
+
+
+@dataclass(frozen=True)
+class MetaIntrospectionIntent:
+    """Result of detecting a non-actionable meta/reflective/audit prompt.
+
+    `kind` is one of:
+        - "meta":  reflective question about the bot's behavior or
+                   clarification of intent.
+        - "audit": request to inspect logs / traces / past failures.
+        - "non_actionable_token": input looks like an opaque secret-shaped
+                   token rather than an objective.
+    """
+
+    kind: str
+    normalized_text: str
+    reason: str
+
+
+# Patterns are matched against `_normalize_command_text(text)`, which
+# lowercases and strips diacritics. Use ASCII-only literals.
+_META_INTROSPECTION_PATTERNS_ES: tuple[str, ...] = (
+    # "por que" (interrogative) and "porque" (conjunction/typo) both reach
+    # here — accept both because users mix them freely in chat.
+    r"\b(?:por que|porque) no (?:completas|completaste|terminas|terminaste|haces|hiciste|puedes|pudiste|frenas|paraste|cierras|cerraste)\b",
+    r"\b(?:por que|porque) (?:fallaste|fallas|fallo|te frenas|frenas|te detienes|te detuviste)\b",
+    r"\bcual fue la causa\b",
+    r"\b(?:que|cual) fue el problema\b",
+    r"\b(?:entendiste|me entendiste|entiendes)\b",
+    r"\bdime si (?:esta lectura|esta interpretacion|este resumen|esta respuesta|este analisis) (?:es correcta|es correcto|esta bien)\b",
+    r"\banaliza (?:esta conversacion|este chat|esta respuesta|este comportamiento|esta interaccion)\b",
+    r"\brevisa (?:el chat|esta conversacion|esta respuesta|este comportamiento|el historial)\b",
+    r"\bque opinas (?:de|sobre) (?:esta|este|esa|ese|tu|la|el)\b",
+    r"\bque (?:queremos|quieres|quiero) (?:comunicar|decir|expresar|transmitir)\b",
+)
+_META_INTROSPECTION_PATTERNS_EN: tuple[str, ...] = (
+    r"\bwhy did you (?:fail|stop|skip|miss|not finish|not complete|freeze)\b",
+    r"\bwhat went wrong\b",
+    r"\b(?:do|did) you understand\b",
+    r"\banalyze (?:this conversation|this chat|this behavior|this response|this interaction)\b",
+    r"\breview (?:this conversation|this chat|this response|this behavior|the history)\b",
+    r"\bis this (?:reading|interpretation|summary|response|analysis) correct\b",
+    r"\bwhat are we (?:trying to|going to|here to) (?:communicate|say|express|convey)\b",
+)
+_META_AUDIT_PATTERNS: tuple[str, ...] = (
+    r"\binvestiga (?:los logs|el log|la traza|el bug|esta falla|este error|esta tarea fallida|la falla)\b",
+    r"\bauditar?(?:la|lo|el|los|esta|este) (?:falla|error|tarea|log|traza)\b",
+    r"\brevisa los logs\b",
+    r"\bdebug (?:this|the) (?:log|logs|trace|failure|error)\b",
+    r"\binspect (?:the|this) (?:log|logs|trace|failure|error)\b",
+)
+_EXPLICIT_IMPLEMENTATION_PATTERNS: tuple[str, ...] = (
+    # Spanish imperative implementation verbs.
+    r"\bimplementa\b",
+    r"\bparchea\b",
+    r"\bagrega (?:un |unos |los )?tests?\b",
+    r"\bmodifica (?:el|la|los|las|este|esta)\b",
+    r"\bcorrige (?:el|la|los|las|este|esta)\b",
+    r"\baplica (?:el|este|ese|un) (?:cambio|fix|patch|parche)\b",
+    r"\bescribe (?:el|un) (?:patch|parche|fix|codigo)\b",
+    r"\bcrea (?:el|un) (?:pr|pull request|commit|patch|parche)\b",
+    # English imperative implementation verbs.
+    r"\bimplement (?:the|this|a)\b",
+    r"\bpatch \w",
+    r"\badd (?:a |the |some |more )?tests?\b",
+    r"\bmodify (?:the|this)\b",
+    r"\bfix (?:the|this|that) (?:bug|issue|test|build|error)\b",
+    r"\bapply (?:the|this|that) (?:change|fix|patch)\b",
+    r"\bwrite (?:the|a) (?:patch|fix|code)\b",
+    r"\bcreate (?:the|a) (?:pr|pull request|commit|patch)\b",
+)
+
+
+def has_explicit_implementation_request(text: str) -> bool:
+    """True iff the message contains an unambiguous request to write/modify code.
+
+    Used to prevent the meta-introspection guard from blocking real
+    implementation work. Past-tense conjugations ("implementaste",
+    "parcheaste") do not match — only imperative / present forms do, so a
+    question about prior implementation is still treated as meta.
+    """
+    if not text:
+        return False
+    normalized = _normalize_command_text(text)
+    return any(re.search(pattern, normalized) for pattern in _EXPLICIT_IMPLEMENTATION_PATTERNS)
+
+
+def _is_secret_shaped_token(text: str) -> bool:
+    """True iff the input is a single high-entropy token rather than a sentence.
+
+    Matches things like `8eyt8R1Hp008liTCA98a` (mixed-case alphanumeric, no
+    spaces, length >= 16). Avoids false positives on common task IDs
+    (`tg-574707975:1778533984299303000`) because those contain `:` and have
+    no mixed case.
+    """
+    stripped = (text or "").strip()
+    if not stripped or any(ch.isspace() for ch in stripped):
+        return False
+    if len(stripped) < 16:
+        return False
+    if not re.fullmatch(r"[A-Za-z0-9_\-]+", stripped):
+        return False
+    has_upper = any(c.isupper() for c in stripped)
+    has_lower = any(c.islower() for c in stripped)
+    has_digit = any(c.isdigit() for c in stripped)
+    return has_upper and has_lower and has_digit
+
+
+@dataclass(frozen=True)
+class OwnerDelegationIntent:
+    """Result of detecting an owner-delegation phrase.
+
+    `kind` is one of:
+        - "execution":    user wants the bot to RUN the pending/proposed action
+                          ("córrelo tú", "hazlo tu", "ejecútalo tú", "run it
+                          yourself"). Usually requires resolving WHAT to run.
+        - "decision":     user wants the bot to CHOOSE among options ("decide
+                          tú", "you decide", "tú decides").
+        - "no_manual_work": user is refusing further manual back-and-forth
+                          ("te toca a ti", "encárgate tú", "ya no tengo que
+                          teclear nada", "stop asking me to run commands").
+
+    `requires_resolution` is True when the verb is pronoun-bound and needs
+    context to know WHAT to do.
+
+    `explicit_action_hint` carries any object/verb that appeared inline with
+    the delegation (e.g. "encárgate tú DE actualizar el deck" → hint =
+    "actualizar el deck"). When set, the resolver can use it directly
+    without searching session state.
+    """
+
+    kind: str
+    confidence: float
+    normalized_text: str
+    requires_resolution: bool
+    is_execution_delegation: bool = False
+    is_decision_delegation: bool = False
+    is_no_manual_work_delegation: bool = False
+    explicit_action_hint: str | None = None
+
+
+# Patterns run against `_normalize_command_text(text)` — ASCII, lowercase,
+# diacritics stripped. Use plain ASCII letters only. Word boundaries (\b)
+# prevent false positives inside longer compound words.
+
+# Execution delegation: "córrelo tú mismo", "hazlo tu", "ejecútalo tú", etc.
+_OWNER_DELEGATION_EXEC_PATTERNS_ES: tuple[str, ...] = (
+    r"\b(?:correlo|corrolo)s?\s+tu(?:\s+mismo)?\b",
+    r"\bcorre\s+los?\s+tu(?:\s+mismo)?\b",
+    r"\bpuedes\s+correr(?:los?)?\s+tu\b",
+    r"\bhaz\s*los?\s+tu(?:\s+mismo)?\b",
+    r"\bhazlo\s+tu(?:\s+mismo)?\b",
+    r"\bejecuta(?:lo|los)?\s+tu(?:\s+mismo)?\b",
+    r"\blo\s+haces\s+tu(?:\s+mismo)?\b",
+    r"\blo\s+corres\s+tu(?:\s+mismo)?\b",
+)
+_OWNER_DELEGATION_EXEC_PATTERNS_EN: tuple[str, ...] = (
+    r"\brun\s+(?:it|this|that|them|those)\s+yourself\b",
+    r"\byou\s+run\s+(?:it|this|that|them|those)\b",
+    r"\bdo\s+(?:it|this|that|them)\s+yourself\b",
+    r"\bdo\s+(?:it|this|that|them)\s+for\s+me\b",
+    r"\byou\s+handle\s+(?:it|this|that|them)\b",
+)
+
+# Decision delegation: pure "decide tú" / "you decide" variants.
+_OWNER_DELEGATION_DECISION_PATTERNS_ES: tuple[str, ...] = (
+    r"\bdecide\s+tu\b",
+    r"\btu\s+decides\b",
+    r"\bescoge\s+tu\b",
+    r"\belige\s+tu\b",
+    r"\btu\s+eliges\b",
+)
+_OWNER_DELEGATION_DECISION_PATTERNS_EN: tuple[str, ...] = (
+    r"\byou\s+decide\b",
+    r"\byou\s+choose\b",
+    r"\byou\s+pick\b",
+)
+
+# No-manual-work delegation: user is refusing manual handoff entirely.
+_OWNER_DELEGATION_NO_MANUAL_PATTERNS_ES: tuple[str, ...] = (
+    r"\bte\s+toca\s+a\s+ti\b",
+    r"\b(?:ya\s+)?no\s+tengo\s+que\s+teclear(?:\s+nada)?\b",
+    r"\bno\s+me\s+pidas\s+(?:que\s+lo\s+haga|que\s+teclee|que\s+corra)\b",
+    r"\bno\s+me\s+preguntes(?:\s+m[aá]s)?\b",
+    r"\bno\s+me\s+devuelvas\s+el\s+trabajo\b",
+    r"\bno\s+me\s+hagas\s+teclear\b",
+    r"\bencargate\s+tu(?:\s+de\s+(?P<hint_es_encargate>.+))?\b",
+    r"\bgestiona(?:lo|los)?\s+tu(?:\s+de\s+(?P<hint_es_gestiona>.+))?\b",
+)
+_OWNER_DELEGATION_NO_MANUAL_PATTERNS_EN: tuple[str, ...] = (
+    r"\btake\s+ownership(?:\s+of\s+(?P<hint_en_ownership>.+))?\b",
+    r"\bhandle\s+it\b",
+    r"\bdon'?t\s+ask\s+me\s+(?:to\s+do\s+it|to\s+run|anymore)\b",
+    r"\bstop\s+asking\s+me\s+to\s+(?:run|do|type)\b",
+)
+
+
+# Verbs/objects that almost always need context to resolve.
+_PRONOUN_ONLY_TOKENS = (
+    "lo", "los", "la", "las", "eso", "esos", "ello", "ellos", "it", "this",
+    "that", "them", "those",
+)
+
+# Destructive / external / irreversible / credential markers.
+_RISKY_OBJECTIVE_PATTERNS: tuple[str, ...] = (
+    r"\b(?:deploy|despliega|desplegar|deployment|deploys?)\b",
+    r"\b(?:merge|mergea|mergear)\b",
+    r"\b(?:publish|publica|publicar|publishing|publi[ck]a)\b",
+    r"\b(?:send|env[ií]a|enviar|mandar)\s+(?:el|un|una|the|a|an)?\s*(?:email|correo|mensaje|telegram|sms|notification|tweet|post)\b",
+    r"\b(?:submit|env[ií]a)\s+(?:the|la|el|una)?\s*(?:application|aplicacion|solicitud|form|formulario)\b",
+    r"\b(?:pay|paga|pagar|payment|charge|cobra|cobrar|spend|gasta|gastar)\b",
+    r"\b(?:borra|borrar|delete|elimina|eliminar|drop|remove)\s+(?:la|el|los|las|all|the|table|database|data|files|user|account|customer|usuario|cuenta)\b",
+    r"\brm\s+-rf\b",
+    r"\b(?:secret|secrets|password|passwords|token|tokens|credentials|credenciales|api[_\s]?key|rotar|rotate)\b",
+    r"\b(?:production|prod|en\s+produccion|on\s+prod)\b",
+    r"\bsudo\b",
+    r"\bdrop\s+table\b",
+    r"\b(?:force\s*push|--force\b|git\s+push\s+--force)\b",
+)
+
+
+def is_destructive_or_external_objective(text: str) -> bool:
+    """True iff the resolved objective looks destructive, external,
+    irreversible, or credential-gated."""
+    if not text:
+        return False
+    normalized = _normalize_command_text(text)
+    return any(re.search(pattern, normalized) for pattern in _RISKY_OBJECTIVE_PATTERNS)
+
+
+def _extract_inline_hint(match: re.Match[str]) -> str | None:
+    """Pull a named capture group out of an owner-delegation match, if any.
+
+    Patterns that opt into capturing inline objects use named groups whose
+    names start with ``hint_``; this helper returns the first non-empty
+    one. Returns ``None`` when the delegation phrase carried no inline
+    object (the common case for "córrelo tú").
+    """
+    try:
+        groups = match.groupdict()
+    except IndexError:
+        return None
+    for name, value in groups.items():
+        if not name.startswith("hint_"):
+            continue
+        if value:
+            cleaned = value.strip().strip(".!?")
+            if cleaned and cleaned not in _PRONOUN_ONLY_TOKENS:
+                return cleaned[:200]
+    return None
+
+
+def detect_owner_delegation(text: str) -> OwnerDelegationIntent | None:
+    """Classify owner-delegation phrases.
+
+    Returns ``None`` when the input is empty or doesn't match any
+    delegation pattern. Casual chat ("hola", "ok", "gracias", "perfecto")
+    does not match because the patterns require specific verbs/pronouns.
+    """
+    if not text:
+        return None
+    normalized = _normalize_command_text(text)
+
+    for pattern in _OWNER_DELEGATION_EXEC_PATTERNS_ES + _OWNER_DELEGATION_EXEC_PATTERNS_EN:
+        match = re.search(pattern, normalized)
+        if match:
+            hint = _extract_inline_hint(match)
+            return OwnerDelegationIntent(
+                kind="execution",
+                confidence=0.95,
+                normalized_text=normalized[:200],
+                requires_resolution=hint is None,
+                is_execution_delegation=True,
+                explicit_action_hint=hint,
+            )
+
+    for pattern in _OWNER_DELEGATION_DECISION_PATTERNS_ES + _OWNER_DELEGATION_DECISION_PATTERNS_EN:
+        match = re.search(pattern, normalized)
+        if match:
+            return OwnerDelegationIntent(
+                kind="decision",
+                confidence=0.92,
+                normalized_text=normalized[:200],
+                requires_resolution=True,
+                is_decision_delegation=True,
+                explicit_action_hint=_extract_inline_hint(match),
+            )
+
+    for pattern in _OWNER_DELEGATION_NO_MANUAL_PATTERNS_ES + _OWNER_DELEGATION_NO_MANUAL_PATTERNS_EN:
+        match = re.search(pattern, normalized)
+        if match:
+            hint = _extract_inline_hint(match)
+            return OwnerDelegationIntent(
+                kind="no_manual_work",
+                confidence=0.90,
+                normalized_text=normalized[:200],
+                requires_resolution=hint is None,
+                is_no_manual_work_delegation=True,
+                explicit_action_hint=hint,
+            )
+
+    return None
+
+
+def detect_meta_introspection_request(text: str) -> MetaIntrospectionIntent | None:
+    """Classify reflective/meta/audit/non-actionable prompts.
+
+    Returns `None` when the message is either:
+      - empty,
+      - an explicit implementation request (those win over meta),
+      - or simply not meta/audit/secret-shaped.
+
+    Otherwise returns a `MetaIntrospectionIntent` whose `kind` is one of
+    `meta`, `audit`, or `non_actionable_token`. The caller is responsible
+    for routing — typically to chat/brain — and for not logging
+    `normalized_text` if `kind == "non_actionable_token"` (the field is
+    redacted to length-and-shape for that kind).
+    """
+    if not text:
+        return None
+    if has_explicit_implementation_request(text):
+        return None
+    normalized = _normalize_command_text(text)
+    for pattern in _META_AUDIT_PATTERNS:
+        match = re.search(pattern, normalized)
+        if match:
+            return MetaIntrospectionIntent(
+                kind="audit",
+                normalized_text=normalized[:200],
+                reason=f"audit_pattern:{match.group(0)[:40]}",
+            )
+    for pattern in _META_INTROSPECTION_PATTERNS_ES + _META_INTROSPECTION_PATTERNS_EN:
+        match = re.search(pattern, normalized)
+        if match:
+            return MetaIntrospectionIntent(
+                kind="meta",
+                normalized_text=normalized[:200],
+                reason=f"meta_pattern:{match.group(0)[:40]}",
+            )
+    if _is_secret_shaped_token(text):
+        token = text.strip()
+        shape = (
+            f"len={len(token)}"
+            f" upper={sum(1 for c in token if c.isupper())}"
+            f" lower={sum(1 for c in token if c.islower())}"
+            f" digit={sum(1 for c in token if c.isdigit())}"
+        )
+        return MetaIntrospectionIntent(
+            kind="non_actionable_token",
+            normalized_text=f"<redacted:{shape}>",
+            reason="single_token_high_entropy",
+        )
+    return None
 
 
 def _stable_task_id(summary: str, *, mode: str, source: str) -> str:
