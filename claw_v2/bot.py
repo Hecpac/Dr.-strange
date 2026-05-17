@@ -2050,6 +2050,32 @@ class BotService:
                 session_id=session_id,
                 runtime_channel=runtime_channel,
             )
+        failure_summary_response = self._maybe_handle_operational_failure_summary(
+            stripped,
+            session_id=session_id,
+        )
+        self._emit_dispatch_decision(
+            handler="operational_failure_summary",
+            route="intercepted" if failure_summary_response is not None else "fall_through",
+            reason=(
+                "operational_failure_summary_matched"
+                if failure_summary_response is not None
+                else "operational_failure_summary_no_match"
+            ),
+            session_id=session_id,
+            text=stripped,
+            captured=failure_summary_response is not None,
+        )
+        if failure_summary_response is not None:
+            failure_summary_response = self._quality_guard_response(
+                session_id,
+                stripped,
+                failure_summary_response,
+                source="operational_failure_summary",
+            )
+            self._store_memory_turn(session_id, stripped, failure_summary_response, assistant_limit=3000)
+            self._remember_assistant_turn_state(session_id, stripped, failure_summary_response)
+            return failure_summary_response
         operational_status_response = self._maybe_handle_operational_status(stripped, session_id=session_id)
         self._emit_dispatch_decision(
             handler="operational_status",
@@ -2118,26 +2144,12 @@ class BotService:
             matched_pattern=telegram_imperative_pattern,
         )
         if isinstance(telegram_imperative_response, _BrainShortcut):
-            is_pending_execution = (
-                telegram_imperative_response.text.startswith("Continúa con esta acción pendiente:")
-                or telegram_imperative_response.text.startswith("Continúa con este siguiente paso")
-                or telegram_imperative_response.text.startswith("Continúa con esta acción propuesta previamente:")
-            )
-            result = self._brain_text_response(
+            return self._handle_stateful_brain_shortcut(
                 session_id,
-                telegram_imperative_response.text,
-                memory_text=telegram_imperative_response.memory_text,
+                stripped,
+                telegram_imperative_response,
                 runtime_channel=runtime_channel,
             )
-            if is_pending_execution and self.observe is not None:
-                try:
-                    self.observe.emit(
-                        "pending_action_execution_completed",
-                        payload={"session_id": session_id, "response_length": len(result)},
-                    )
-                except Exception:
-                    logger.debug("failed to emit pending_action_execution_completed", exc_info=True)
-            return result
         if telegram_imperative_response is not None:
             telegram_imperative_response = self._quality_guard_response(
                 session_id,
@@ -2315,25 +2327,12 @@ class BotService:
             return self._handle_autonomy_grant_response(session_id, stripped)
         stateful_followup = self._maybe_resolve_stateful_followup(stripped, session_id=session_id)
         if isinstance(stateful_followup, _BrainShortcut):
-            is_pending_execution = (
-                stateful_followup.text.startswith("Continúa con esta acción pendiente:")
-                or stateful_followup.text.startswith("Continúa con este siguiente paso")
-            )
-            result = self._brain_text_response(
+            return self._handle_stateful_brain_shortcut(
                 session_id,
-                stateful_followup.text,
-                memory_text=stateful_followup.memory_text,
+                stripped,
+                stateful_followup,
                 runtime_channel=runtime_channel,
             )
-            if is_pending_execution and self.observe is not None:
-                try:
-                    self.observe.emit(
-                        "pending_action_execution_completed",
-                        payload={"session_id": session_id, "response_length": len(result)},
-                    )
-                except Exception:
-                    logger.debug("failed to emit pending_action_execution_completed", exc_info=True)
-            return result
         if stateful_followup is not None:
             self._store_memory_turn(session_id, stripped, stateful_followup, assistant_limit=2000)
             self._remember_assistant_turn_state(session_id, stripped, stateful_followup)
@@ -3547,6 +3546,10 @@ class BotService:
             "created_by": "brain_tool_use_ledger",
             "trace_id": trace_id,
         }
+        task_objective = (
+            source_summary
+            or f"brain fallback tool-use turn ({len(tool_events)} tool calls, trace {trace_id[:8]})"
+        )
         # PR 0F: evidence_manifest is the proof that this brain tool-use
         # turn really did the work it claims. task_completion recognizes
         # the shape and lets the row close terminally without forcing
@@ -3595,10 +3598,7 @@ class BotService:
             self.task_ledger.create(
                 task_id=task_id,
                 session_id=session_id,
-                objective=(
-                    f"brain fallback tool-use turn ({len(tool_events)} "
-                    f"tool calls, trace {trace_id[:8]})"
-                ),
+                objective=task_objective,
                 runtime=(runtime_channel or "brain_fallback"),
                 mode="brain_fallback",
                 status="running",
@@ -4160,6 +4160,38 @@ class BotService:
             raise PermissionError("TELEGRAM_ALLOWED_USER_ID must be configured")
         if user_id != self.allowed_user_id:
             raise PermissionError("user is not allowed to access this bot")
+        multimodal_text = self._text_from_multimodal_blocks(content_blocks)
+        failure_summary_response = self._maybe_handle_operational_failure_summary(
+            multimodal_text,
+            session_id=session_id,
+        )
+        self._emit_dispatch_decision(
+            handler="operational_failure_summary",
+            route="intercepted" if failure_summary_response is not None else "fall_through",
+            reason=(
+                "operational_failure_summary_matched"
+                if failure_summary_response is not None
+                else "operational_failure_summary_no_match"
+            ),
+            session_id=session_id,
+            text=multimodal_text,
+            captured=failure_summary_response is not None,
+        )
+        if failure_summary_response is not None:
+            failure_summary_response = self._quality_guard_response(
+                session_id,
+                multimodal_text,
+                failure_summary_response,
+                source="operational_failure_summary",
+            )
+            self._store_memory_turn(
+                session_id,
+                memory_text or multimodal_text,
+                failure_summary_response,
+                assistant_limit=3000,
+            )
+            self._remember_assistant_turn_state(session_id, multimodal_text, failure_summary_response)
+            return failure_summary_response
         runtime_context = self._runtime_capability_context(runtime_channel=runtime_channel) if runtime_channel else ""
         prompt_blocks = list(content_blocks)
         if runtime_context:
@@ -4173,6 +4205,19 @@ class BotService:
             ).content
         except ApprovalPending as exc:
             return _format_approval_pending(exc)
+
+    @staticmethod
+    def _text_from_multimodal_blocks(content_blocks: list[dict[str, Any]]) -> str:
+        parts: list[str] = []
+        for block in content_blocks:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") != "text":
+                continue
+            text = str(block.get("text") or "").strip()
+            if text:
+                parts.append(text)
+        return "\n".join(parts).strip()
 
 
     def _tokens_info_response(self, session_id: str) -> str:
@@ -4614,6 +4659,57 @@ class BotService:
     def _maybe_resolve_stateful_followup(self, text: str, *, session_id: str) -> str | _BrainShortcut | None:
         return self._state_handler.maybe_resolve_stateful_followup(text, session_id=session_id)
 
+    def _handle_stateful_brain_shortcut(
+        self,
+        session_id: str,
+        user_text: str,
+        shortcut: _BrainShortcut,
+        *,
+        runtime_channel: str | None,
+    ) -> str | None:
+        is_pending_execution = self._stateful_shortcut_is_pending_execution(shortcut)
+        if is_pending_execution and (runtime_channel or "").strip().lower() == "telegram":
+            actionable_response = self._maybe_handle_actionable_task_request(
+                user_text,
+                session_id=session_id,
+                runtime_channel=runtime_channel,
+            )
+            if actionable_response is not None:
+                self._emit_safe(
+                    "stateful_continuation_routed_to_actionable_task",
+                    {
+                        "session_id": session_id,
+                        "source_text": user_text[:80],
+                        "response_length": len(actionable_response),
+                    },
+                )
+                self._store_memory_turn(session_id, user_text, actionable_response, assistant_limit=2000)
+                self._remember_assistant_turn_state(session_id, user_text, actionable_response)
+                return actionable_response
+        result = self._brain_text_response(
+            session_id,
+            shortcut.text,
+            memory_text=shortcut.memory_text,
+            runtime_channel=runtime_channel,
+        )
+        if is_pending_execution and self.observe is not None:
+            try:
+                self.observe.emit(
+                    "pending_action_execution_completed",
+                    payload={"session_id": session_id, "response_length": len(result)},
+                )
+            except Exception:
+                logger.debug("failed to emit pending_action_execution_completed", exc_info=True)
+        return result
+
+    @staticmethod
+    def _stateful_shortcut_is_pending_execution(shortcut: _BrainShortcut) -> bool:
+        return (
+            shortcut.text.startswith("Continúa con esta acción pendiente:")
+            or shortcut.text.startswith("Continúa con este siguiente paso")
+            or shortcut.text.startswith("Continúa con esta acción propuesta previamente:")
+        )
+
     def _maybe_handle_shortcut(self, text: str, *, session_id: str) -> str | _BrainShortcut | None:
         if not text or text.startswith("/"):
             return None
@@ -4786,6 +4882,7 @@ class BotService:
         compact = re.sub(r"[^a-z0-9]+", "", normalized)
         return (
             ("tareas" in normalized and "pendient" in normalized)
+            or self._task_status_overview_query_matches(normalized)
             or compact in {"pendientes", "tareaspendientes", "pendietes", "tareaspendietes"}
         )
 
@@ -4796,6 +4893,12 @@ class BotService:
         session_id: str,
         runtime_channel: str | None = None,
     ) -> str:
+        if self._task_status_overview_query_matches(text):
+            response = self._pending_tasks_summary_response(session_id)
+            self._store_memory_turn(session_id, text, response, assistant_limit=2000)
+            self._remember_assistant_turn_state(session_id, text, response)
+            self._emit_pending_tasks_synthesis("deterministic_status", session_id=session_id)
+            return response
         evidence = self._pending_tasks_evidence_pack(session_id)
         prompt = self._format_pending_tasks_synthesis_prompt(text, evidence=evidence)
         try:
@@ -4846,6 +4949,27 @@ class BotService:
                 error=str(exc)[:300],
             )
             return fallback
+
+    @staticmethod
+    def _task_status_overview_query_matches(text: str) -> bool:
+        normalized = _normalize_command_text(text).strip(" \t\n\r.,;:!?¿¡")
+        compact = re.sub(r"[^a-z0-9]+", "", normalized)
+        if compact in {
+            "estatusdelastareas",
+            "estadodelastareas",
+            "statusdelastareas",
+            "estatusdetareas",
+            "estadodetareas",
+            "statusdetareas",
+            "estatusdelledger",
+            "estadodelledger",
+            "statusdelledger",
+        }:
+            return True
+        return (
+            any(token in normalized for token in ("estatus", "estado", "status"))
+            and any(token in normalized for token in ("tareas", "tasks", "ledger"))
+        )
 
     def _emit_pending_tasks_synthesis(self, mode: str, *, session_id: str, error: str | None = None) -> None:
         payload: dict[str, Any] = {"session_id": session_id, "mode": mode}
@@ -5019,7 +5143,7 @@ class BotService:
         active = [record for record in records if str(getattr(record, "status", "")) in {"queued", "running"}]
         blocked = [record for record in records if self._is_pending_task_blocker(record)]
         state = self.brain.memory.get_session_state(session_id)
-        pending_action = str(state.get("pending_action") or "").strip()
+        pending_action = self._pending_action_for_task_summary(state)
         lines: list[str] = []
         if active:
             count = len(active)
@@ -5049,6 +5173,24 @@ class BotService:
             lines.append("")
             lines.append("No veo nada que este esperando de mi ahora mismo.")
         return "\n".join(lines)
+
+    @staticmethod
+    def _pending_action_for_task_summary(state: dict[str, Any]) -> str:
+        pending_action = str(state.get("pending_action") or "").strip()
+        if not pending_action:
+            return ""
+        active_object = state.get("active_object") or {}
+        meta = active_object.get("pending_action_meta") if isinstance(active_object, dict) else None
+        source = str((meta or {}).get("source") or "") if isinstance(meta, dict) else ""
+        normalized = _normalize_command_text(pending_action)
+        if source == "assistant_proposal_question" and (
+            normalized.startswith("voy ahora con eso")
+            or "retome alguna otra de las que quedaron perdidas" in normalized
+            or "estatus rapido del ledger" in normalized
+            or "resumen del dia" in normalized
+        ):
+            return ""
+        return pending_action
 
     def _pending_tasks_approval_summary_lines(self, approvals: list[dict[str, Any]]) -> list[str]:
         if not approvals:
@@ -6623,6 +6765,232 @@ class BotService:
             lines.append("Aprobaciones pendientes: 0")
         lines.append("Comandos útiles: `/jobs`, `/tasks`, `/quality`, `/restart`.")
         return "\n".join(lines)
+
+    def _maybe_handle_operational_failure_summary(self, text: str, *, session_id: str) -> str | None:
+        normalized = _normalize_command_text(text).strip()
+        if not self._matches_operational_failure_summary_request(normalized):
+            return None
+        return self._format_operational_failure_summary(session_id)
+
+    @staticmethod
+    def _matches_operational_failure_summary_request(normalized: str) -> bool:
+        if not normalized:
+            return False
+        specific_task_failure = (
+            "por que fallo la tarea",
+            "porque fallo la tarea",
+            "por que fallo el task",
+            "porque fallo el task",
+            "por que fallaste la tarea",
+            "porque fallaste la tarea",
+        )
+        broad_report_markers = (
+            "resumen",
+            "recuento",
+            "auditoria",
+            "auditoría",
+            "fallos",
+            "errores",
+            "hoy",
+            "sesion",
+            "sesión",
+            "ninguna tarea",
+            "tareas",
+        )
+        if any(phrase in normalized for phrase in specific_task_failure) and not any(
+            marker in normalized for marker in broad_report_markers
+        ):
+            return False
+        direct_complaints = (
+            "no puede completar ninguna tarea",
+            "no puedes completar ninguna tarea",
+            "no estas completando ninguna tarea",
+            "no estás completando ninguna tarea",
+            "no completa ninguna tarea",
+            "no estas completando tareas",
+            "no estás completando tareas",
+        )
+        if any(phrase in normalized for phrase in direct_complaints):
+            return True
+        failure_terms = (
+            "fallo",
+            "fallos",
+            "fallaste",
+            "fallado",
+            "error",
+            "errores",
+            "problema",
+            "problemas",
+            "perdido",
+            "perdida",
+            "bloqueo",
+            "bloqueos",
+            "no complet",
+        )
+        report_terms = (
+            "resumen",
+            "recuento",
+            "auditoria",
+            "auditoría",
+            "reporte",
+            "explica",
+            "porque",
+            "por que",
+            "por qué",
+            "hoy",
+            "sesion",
+            "sesión",
+            "today",
+            "summary",
+        )
+        return any(term in normalized for term in failure_terms) and any(
+            term in normalized for term in report_terms
+        )
+
+    def _format_operational_failure_summary(self, session_id: str) -> str:
+        today_prefix = time.strftime("%Y-%m-%d", time.gmtime())
+        events = self._recent_today_observe_events(limit=700, today_prefix=today_prefix)
+        event_counts: dict[str, int] = {}
+        for event in events:
+            event_type = str(event.get("event_type") or "")
+            event_counts[event_type] = event_counts.get(event_type, 0) + 1
+
+        recent_messages = self._recent_session_messages(session_id, limit=80)
+        defensive_template_count = sum(
+            1
+            for msg in recent_messages
+            if msg.get("role") == "assistant"
+            and "no digo `arrancando`" in _normalize_command_text(str(msg.get("content") or ""))
+        )
+        clarification_count = sum(
+            1
+            for msg in recent_messages
+            if msg.get("role") == "assistant"
+            and (
+                "que accion concreta quieres que ejecute" in _normalize_command_text(str(msg.get("content") or ""))
+                or "necesito una aclaracion minima" in _normalize_command_text(str(msg.get("content") or ""))
+            )
+        )
+
+        lines = [
+            f"Resumen operativo de fallos de hoy ({today_prefix}), con evidencia local:",
+        ]
+        findings: list[str] = []
+        imperative_bounces = (
+            event_counts.get("telegram_imperative_clarification", 0)
+            + event_counts.get("active_mission_resolution_failed", 0)
+        )
+        if imperative_bounces:
+            findings.append(
+                f"Continuidad: {imperative_bounces} evento(s) de continuación terminaron en aclaración/bounce en vez de usar contexto."
+            )
+        blocked_start = event_counts.get("evidence_gate_blocked_start_claim", 0)
+        if blocked_start or defensive_template_count:
+            findings.append(
+                "Gate de evidencia: "
+                f"{blocked_start} bloqueo(s) observados y {defensive_template_count} respuesta(s) visibles con plantilla defensiva."
+            )
+        if clarification_count:
+            findings.append(
+                f"Contexto conversacional: {clarification_count} respuesta(s) pidieron una acción concreta aunque había contexto previo."
+            )
+        routed_continuations = event_counts.get("stateful_continuation_routed_to_actionable_task", 0)
+        if routed_continuations:
+            findings.append(
+                f"Continuación stateful: {routed_continuations} continuación(es) ya fueron convertidas en tarea durable."
+            )
+        worker_retry = event_counts.get("coordinator_worker_retry", 0)
+        if worker_retry:
+            latest_retry = self._latest_event_payload(events, "coordinator_worker_retry")
+            retry_error = _compact_summary(
+                str(redact_sensitive(latest_retry.get("error") or "", limit=240)),
+                limit=180,
+            )
+            findings.append(
+                f"Coordinador: {worker_retry} retry(s) de worker; último error: {retry_error or 'sin detalle'}."
+            )
+        autostash = event_counts.get("worktree_autostash", 0)
+        if autostash:
+            findings.append(
+                f"Worktree: {autostash} autostash registrado; eso puede ocultar cambios dirty durante una tarea autónoma."
+            )
+        if not findings:
+            findings.append("No encontré fallos operativos recientes en `observe_stream`; revisé el ledger y mensajes recientes.")
+        lines.extend(f"- {finding}" for finding in findings[:6])
+
+        task_lines = self._operational_failure_task_lines(session_id)
+        if task_lines:
+            lines.append("")
+            lines.append("Ledger:")
+            lines.extend(task_lines)
+        lines.append("")
+        lines.append(
+            "Diagnóstico: los reportes de fallos no deben caer al brain genérico; deben responder desde ledger/observe. "
+            "Las tareas no deben contarse como completadas hasta tener estado terminal en `agent_tasks`."
+        )
+        return "\n".join(lines)
+
+    def _recent_today_observe_events(self, *, limit: int, today_prefix: str) -> list[dict[str, Any]]:
+        if self.observe is None:
+            return []
+        try:
+            events = self.observe.recent_events(limit=limit)
+        except Exception:
+            logger.debug("failed to read observe_stream for failure summary", exc_info=True)
+            return []
+        today = [
+            event
+            for event in events
+            if str(event.get("timestamp") or "").startswith(today_prefix)
+        ]
+        return today or events
+
+    def _recent_session_messages(self, session_id: str, *, limit: int) -> list[dict[str, Any]]:
+        try:
+            return list(self.brain.memory.get_recent_messages(session_id, limit=limit))
+        except Exception:
+            logger.debug("failed to read recent messages for failure summary", exc_info=True)
+            return []
+
+    @staticmethod
+    def _latest_event_payload(events: list[dict[str, Any]], event_type: str) -> dict[str, Any]:
+        for event in events:
+            if event.get("event_type") == event_type:
+                payload = event.get("payload") or {}
+                return payload if isinstance(payload, dict) else {}
+        return {}
+
+    def _operational_failure_task_lines(self, session_id: str) -> list[str]:
+        if self.task_ledger is None:
+            return []
+        try:
+            records = self.task_ledger.list(session_id=session_id, limit=6)
+        except Exception:
+            logger.debug("failed to read task ledger for failure summary", exc_info=True)
+            return []
+        if not records:
+            return ["- Sin tareas recientes en esta sesión."]
+        lines: list[str] = []
+        for record in records[:4]:
+            task_id = _compact_summary(str(getattr(record, "task_id", "") or ""), limit=80)
+            status = _compact_summary(str(getattr(record, "status", "unknown") or "unknown"), limit=40)
+            verification = _compact_summary(
+                str(getattr(record, "verification_status", "unknown") or "unknown"),
+                limit=60,
+            )
+            objective = _compact_summary(
+                str(redact_sensitive(getattr(record, "objective", "") or "", limit=300)),
+                limit=180,
+            )
+            error = _compact_summary(
+                str(redact_sensitive(getattr(record, "error", "") or "", limit=240)),
+                limit=140,
+            )
+            detail = f" - {error}" if error else ""
+            lines.append(
+                f"- `{task_id}`: {status} / {verification} - {objective or 'sin objetivo'}{detail}"
+            )
+        return lines
 
     def _maybe_handle_boot_context_status(
         self,

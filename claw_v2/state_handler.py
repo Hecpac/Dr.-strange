@@ -147,7 +147,7 @@ class StateHandler:
         # which the brain almost never wrote, leaving the DB column at
         # 0/35 non-empty per the 2026-05-16 audit.
         if not (isinstance(pending_action, str) and pending_action.strip()):
-            if self._looks_like_proposal_question(reply_text):
+            if self._looks_like_proposal_question(reply_text) and not self._looks_like_ledger_status_choice(reply_text):
                 proposal = self._summarize_proposal(reply_text)
                 if proposal:
                     pending_action = proposal
@@ -1012,6 +1012,18 @@ class StateHandler:
         return bool(
             self._PROPOSAL_QUESTION_RE.search(tail_block)
             or self._CONTEXTUAL_PROPOSAL_QUESTION_RE.search(tail_block)
+        )
+
+    @staticmethod
+    def _looks_like_ledger_status_choice(text: str) -> bool:
+        normalized = _normalize_command_text(text)
+        return (
+            "estatus rapido del ledger" in normalized
+            or "resumen del dia" in normalized
+            or "activa:" in normalized
+        ) and (
+            "voy ahora con eso" in normalized
+            or "retome alguna otra de las que quedaron perdidas" in normalized
         )
 
     def _extract_proposal_from_reply_context(self, state: dict[str, Any]) -> str | None:
