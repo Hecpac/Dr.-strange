@@ -330,6 +330,7 @@ class BrainToolUseLedgerTests(unittest.TestCase):
             runtime_channel="telegram",
         )
         task = self.ledger.list(limit=10)[0]
+        self.assertEqual(task.notify_policy, "none")
         self.assertNotEqual(task.verification_status, "passed")
         # PR 0F: with evidence_manifest attached, the row closes
         # terminally as succeeded + needs_verification (no longer

@@ -30,9 +30,17 @@ def should_notify_task_ledger_terminal(payload: dict, notified_task_ids: set[str
     status = str(payload.get("status") or "")
     runtime = str(payload.get("runtime") or "")
     notify_policy = str(payload.get("notify_policy") or "done_only")
+    metadata = payload.get("metadata") or {}
     if not session_id.startswith("tg-") or not task_id:
         return False
     if task_id in notified_task_ids or notify_policy == "none":
+        return False
+    if task_id.startswith("brain-tooluse:"):
+        return False
+    if isinstance(metadata, dict) and (
+        metadata.get("brain_tool_use") is True
+        or metadata.get("created_by") == "brain_tool_use_ledger"
+    ):
         return False
     if status not in {"succeeded", "failed", "timed_out", "cancelled", "lost"}:
         return False
