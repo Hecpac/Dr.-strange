@@ -265,5 +265,107 @@ class MorningBriefTests(unittest.TestCase):
             self.assertEqual(observe.recent_events(limit=1)[0]["event_type"], "evening_brief_sent")
 
 
+class ConversationalBriefTests(unittest.TestCase):
+    """C: brief renders via LLM router when available; falls back to template."""
+
+    @staticmethod
+    def _stub_router(content: str = "Cierre conversacional de prueba."):
+        from claw_v2.types import LLMResponse
+
+        class _StubRouter:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            def ask(self, prompt, *, system_prompt=None, lane="brain", **kwargs):
+                self.calls.append(
+                    {
+                        "prompt": prompt,
+                        "system_prompt": system_prompt,
+                        "lane": lane,
+                        **kwargs,
+                    }
+                )
+                return LLMResponse(content=content, lane=lane, provider="stub", model="stub")
+
+        return _StubRouter()
+
+    def _service(self, root: Path, **overrides):
+        ledger = overrides.pop("ledger", TaskLedger(root / "claw.db"))
+        settings_kwargs = {
+            "hour": 21,
+            "stamp_path": root / "evening.txt",
+            "report_name": "evening_brief",
+            "greeting": "Cierre del dia, Hector.",
+        }
+        settings_kwargs.update(overrides.pop("settings", {}))
+        return MorningBriefService(
+            settings=MorningBriefSettings(**settings_kwargs),
+            notify=overrides.pop("notify", lambda _: None),
+            observe=overrides.pop("observe", None),
+            task_ledger=ledger,
+            llm_router=overrides.pop("llm_router", None),
+            clock=overrides.pop("clock", lambda: datetime(2026, 5, 16, 21, 0)),
+            weather_fetcher=overrides.pop("weather_fetcher", lambda l, t: "auto: 85F sol"),
+            calendar_fetcher=overrides.pop("calendar_fetcher", lambda t: "sin eventos"),
+            email_fetcher=overrides.pop("email_fetcher", lambda t: "0 sin leer"),
+            **overrides,
+        )
+
+    def test_brief_uses_llm_router_when_available(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            router = self._stub_router("Cierre del día narrativo del LLM.")
+            service = self._service(root, llm_router=router)
+            message = service.build_message(datetime(2026, 5, 16, 21, 0))
+            self.assertEqual(message, "Cierre del día narrativo del LLM.")
+            self.assertEqual(len(router.calls), 1)
+            self.assertEqual(router.calls[0]["lane"], "judge")
+
+    def test_brief_falls_back_to_template_when_llm_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            observe = ObserveStream(root / "claw.db")
+
+            class _RaisingRouter:
+                def ask(self, *args, **kwargs):
+                    raise RuntimeError("router unavailable")
+
+            service = self._service(root, llm_router=_RaisingRouter(), observe=observe)
+            message = service.build_message(datetime(2026, 5, 16, 21, 0))
+            self.assertIn("Cierre del dia, Hector.", message)
+            self.assertIn("Clima: auto: 85F sol", message)
+            kinds = [ev["event_type"] for ev in observe.recent_events(limit=10)]
+            self.assertIn("evening_brief_llm_failed", kinds)
+
+    def test_llm_context_does_not_include_raw_task_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            ledger = TaskLedger(root / "claw.db")
+            secret_id = "tg-574707975:1778952862707620000"
+            ledger.create(
+                task_id=secret_id,
+                session_id="tg-574707975",
+                objective="Cerrar la auditoría del agente",
+                runtime="brain_fallback",
+                status="failed",
+            )
+            router = self._stub_router("Brief generado.")
+            service = self._service(root, llm_router=router, ledger=ledger)
+            service.build_message(datetime(2026, 5, 16, 21, 0))
+            prompt_text = str(router.calls[0]["prompt"])
+            system_text = str(router.calls[0]["system_prompt"] or "")
+            combined = prompt_text + "\n" + system_text
+            self.assertNotIn(secret_id, combined)
+            self.assertIn("Cerrar la auditoría del agente", combined)
+
+    def test_no_llm_router_preserves_existing_template_behavior(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            service = self._service(root, llm_router=None)
+            message = service.build_message(datetime(2026, 5, 16, 21, 0))
+            self.assertIn("Cierre del dia, Hector.", message)
+            self.assertIn("Clima: auto: 85F sol", message)
+
+
 if __name__ == "__main__":
     unittest.main()

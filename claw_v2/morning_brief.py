@@ -89,6 +89,7 @@ class MorningBriefService:
         pipeline: Any | None = None,
         approvals: Any | None = None,
         memory: Any | None = None,
+        llm_router: Any | None = None,
         clock: Callable[[], datetime] | None = None,
         weather_fetcher: Callable[[str, float], str] | None = None,
         command_runner: Callable[[str, float], str] | None = None,
@@ -106,6 +107,7 @@ class MorningBriefService:
         self.pipeline = pipeline
         self.approvals = approvals
         self.memory = memory
+        self.llm_router = llm_router
         self.clock = clock or self._local_now
         self.weather_fetcher = weather_fetcher or fetch_weather_summary
         self.command_runner = command_runner or run_external_summary_command
@@ -154,6 +156,24 @@ class MorningBriefService:
         return message
 
     def build_message(self, now: datetime) -> str:
+        if self.llm_router is not None:
+            try:
+                rendered = self._render_via_llm(now)
+                if rendered.strip():
+                    self._emit(
+                        f"{self.settings.report_name}_llm_rendered",
+                        {"chars": len(rendered)},
+                    )
+                    return rendered
+            except Exception as exc:
+                logger.exception("brief LLM render failed; falling back to template")
+                self._emit(
+                    f"{self.settings.report_name}_llm_failed",
+                    {"reason": "llm_render_failed", "error": str(exc)[:300]},
+                )
+        return self._build_template_message(now)
+
+    def _build_template_message(self, now: datetime) -> str:
         self._source_records = []
         self._brief_counts = {
             "work_items": 0,
@@ -189,6 +209,193 @@ class MorningBriefService:
             )
             self._emit(f"{self.settings.report_name}_low_signal", diagnostics)
         return message
+
+    def _render_via_llm(self, now: datetime) -> str:
+        facts = self._extract_brief_facts(now)
+        system_prompt = self._brief_system_prompt()
+        user_prompt = self._brief_user_prompt(facts)
+        response = self.llm_router.ask(
+            user_prompt,
+            system_prompt=system_prompt,
+            lane="judge",
+            evidence_pack={
+                "report": self.settings.report_name,
+                "date": facts.get("date", ""),
+            },
+            max_budget=0.10,
+            timeout=15.0,
+        )
+        return str(getattr(response, "content", "") or "").strip()
+
+    def _extract_brief_facts(self, now: datetime) -> dict[str, Any]:
+        """Build a sanitized snapshot for LLM rendering.
+
+        Never includes raw task_id / session_id / job_id values — only
+        objective/summary text. Unavailable fuentes are omitted, not
+        rendered as `no disponible (RuntimeError)`.
+        """
+        facts: dict[str, Any] = {
+            "greeting": self.settings.greeting,
+            "date": format_spanish_date(now),
+        }
+        try:
+            weather = self.weather_fetcher(
+                self.settings.weather_location, self.settings.command_timeout_seconds
+            )
+            if weather and weather.strip():
+                facts["weather"] = _trim(weather, 220)
+        except Exception:
+            pass
+        cal = self._safe_external_value(
+            self.settings.calendar_command, self.calendar_fetcher
+        )
+        if cal:
+            facts["calendar"] = cal
+        mail = self._safe_external_value(
+            self.settings.email_command, self.email_fetcher
+        )
+        if mail:
+            facts["email"] = mail
+        work = self._safe_work_facts()
+        if work:
+            facts["work"] = work
+        approvals = self._safe_approval_facts(now)
+        if approvals:
+            facts["approvals"] = approvals
+        cost = self._safe_cost()
+        if cost is not None:
+            facts["cost_usd"] = round(cost, 4)
+        return facts
+
+    def _safe_external_value(
+        self, command: str | None, fetcher: Callable[[float], str]
+    ) -> str | None:
+        if command:
+            try:
+                value = self.command_runner(command, self.settings.command_timeout_seconds)
+            except Exception:
+                return None
+        else:
+            try:
+                value = fetcher(self.settings.command_timeout_seconds)
+            except Exception:
+                return None
+        text = (value or "").strip()
+        if not text:
+            return None
+        lowered = text.lower()
+        if any(marker in lowered for marker in EMPTY_CALENDAR_MARKERS):
+            return None
+        if any(marker in lowered for marker in EMPTY_EMAIL_MARKERS):
+            return None
+        if lowered.startswith("error ") or lowered.startswith("no disponible"):
+            return None
+        return _trim(text, 400)
+
+    def _safe_work_facts(self) -> dict[str, Any] | None:
+        if self.task_ledger is None:
+            return None
+        try:
+            tasks = self.task_ledger.list(limit=20)
+        except Exception:
+            return None
+        attention = [
+            _trim(getattr(t, "error", "") or getattr(t, "summary", "") or t.objective, 120)
+            for t in tasks
+            if str(getattr(t, "status", "")) in ATTENTION_TASK_STATUSES
+            or str(getattr(t, "verification_status", "")) in ATTENTION_VERIFICATION_STATUSES
+        ][:5]
+        done = [
+            _trim(getattr(t, "summary", "") or t.objective, 120)
+            for t in tasks
+            if str(getattr(t, "status", "")) in RECENT_DONE_TASK_STATUSES
+        ][:5]
+        active = [
+            _trim(t.objective, 120)
+            for t in tasks
+            if str(getattr(t, "status", "")) in ACTIVE_TASK_STATUSES
+        ][:5]
+        if not (attention or done or active):
+            return None
+        return {"attention": attention, "recent_done": done, "active": active}
+
+    def _safe_approval_facts(self, now: datetime) -> dict[str, int] | None:
+        if self.approvals is None:
+            return None
+        try:
+            approvals = self.approvals.list_pending()
+        except Exception:
+            return None
+        if not approvals:
+            return {"total": 0}
+        audit = self._classify_pending_approvals(approvals, now=now)
+        return {
+            "total": len(approvals),
+            "still_needed": int(audit.get("still_needed", 0)),
+            "stale": int(audit.get("stale", 0)),
+            "duplicate": int(audit.get("duplicate", 0)),
+            "expired": int(audit.get("expired", 0)),
+        }
+
+    def _safe_cost(self) -> float | None:
+        if self.metrics is None:
+            return None
+        try:
+            snapshot = self.metrics.snapshot()
+        except Exception:
+            return None
+        return _metrics_total_cost(snapshot)
+
+    @staticmethod
+    def _brief_system_prompt() -> str:
+        return (
+            "Eres Dr. Strange escribiéndole un brief diario a Hector por Telegram. "
+            "Escribe en español neutral (tú, no vos), conversacional, como colaborador "
+            "cercano que reporta de viva voz. NO uses bullets ni tablas ni headers. "
+            "NO menciones IDs internos, paths ni stack traces. Si una fuente está "
+            "ausente o vacía, no la menciones (no escribas 'no disponible'). "
+            "Empieza con el saludo y la fecha en una oración. Menciona 1-3 cosas "
+            "operativas que importan. Cierra con una línea humana corta. "
+            "Total: 4-8 oraciones máximo."
+        )
+
+    @staticmethod
+    def _brief_user_prompt(facts: dict[str, Any]) -> str:
+        lines: list[str] = [
+            f"Saludo: {facts.get('greeting', '')}",
+            f"Fecha: {facts.get('date', '')}",
+        ]
+        if facts.get("weather"):
+            lines.append(f"Clima: {facts['weather']}")
+        if facts.get("calendar"):
+            lines.append(f"Agenda: {facts['calendar']}")
+        if facts.get("email"):
+            lines.append(f"Correo: {facts['email']}")
+        work = facts.get("work") or {}
+        if work.get("attention"):
+            lines.append("Tareas con problema (objetivos):")
+            for obj in work["attention"]:
+                lines.append(f"  - {obj}")
+        if work.get("recent_done"):
+            lines.append("Cerradas recientemente (objetivos):")
+            for obj in work["recent_done"]:
+                lines.append(f"  - {obj}")
+        if work.get("active"):
+            lines.append("Activas ahora (objetivos):")
+            for obj in work["active"]:
+                lines.append(f"  - {obj}")
+        approvals = facts.get("approvals") or {}
+        if approvals.get("total"):
+            lines.append(
+                f"Aprobaciones pendientes: {approvals['total']} "
+                f"({approvals.get('stale', 0)} stale, "
+                f"{approvals.get('duplicate', 0)} duplicadas, "
+                f"{approvals.get('expired', 0)} expiradas)"
+            )
+        if "cost_usd" in facts:
+            lines.append(f"Costo estimado hoy: ${facts['cost_usd']:.4f}")
+        lines.append("Escribe el brief siguiendo las instrucciones del system prompt.")
+        return "\n".join(lines)
 
     def _local_now(self) -> datetime:
         return datetime.now(ZoneInfo(self.settings.timezone))

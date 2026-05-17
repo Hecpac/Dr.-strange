@@ -284,17 +284,23 @@ def test_explicit_imperative_bypasses_disabled_task_intent_flag(bot) -> None:
     _assert_not_brain_fallback(response, decisions)
 
 
-def test_actionable_no_match_returns_diagnostic_not_brain(bot) -> None:
+def test_actionable_no_match_falls_through_to_brain(bot) -> None:
+    """B: imperative router no longer emits a robotic diagnostic template;
+    actionable-but-unmapped messages fall through so the brain can answer
+    naturally. Telemetry events for the no-match decision are preserved."""
     response, decisions, events = _drive(bot, "Orquesta eso en la otra app rara")
 
     assert response
-    assert "no pude mapear" in response.lower() or "clarifica" in response.lower()
+    assert "no pude mapearla" not in response.lower()
+    assert "acción probable" not in response.lower()
+    assert "target probable" not in response.lower()
     assert "actionable_no_match" in events
     assert any(
-        ev.get("handler") == "telegram_imperative" and ev.get("reason") == "actionable_no_match"
+        ev.get("handler") == "telegram_imperative"
+        and ev.get("reason") == "actionable_no_match"
+        and ev.get("route") == "fall_through"
         for ev in decisions
     ), decisions
-    _assert_not_brain_fallback(response, decisions)
 
 
 def test_quality_command_exposes_imperative_router_metrics(bot) -> None:

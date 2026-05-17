@@ -268,6 +268,7 @@ async def run() -> int:
             pipeline=runtime.bot.pipeline,
             approvals=runtime.approvals,
             memory=runtime.memory,
+            llm_router=runtime.router,
         )
         evening_brief = MorningBriefService(
             settings=MorningBriefSettings(
@@ -291,6 +292,7 @@ async def run() -> int:
             pipeline=runtime.bot.pipeline,
             approvals=runtime.approvals,
             memory=runtime.memory,
+            llm_router=runtime.router,
         )
 
         from claw_v2.cron import ScheduledJob as _SJ

@@ -5312,7 +5312,10 @@ class BotService:
         response = self._handle_telegram_imperative(intent, text, session_id=session_id)
         return response, f"telegram_imperative:{intent.intent}", intent.matched_pattern
 
-    def _handle_actionable_no_match(self, text: str, *, session_id: str) -> str:
+    def _handle_actionable_no_match(self, text: str, *, session_id: str) -> str | None:
+        """Telemetry-only emit; returns None so dispatch chain continues to
+        the brain. The brain has session memory/mission context and produces
+        a natural reply instead of a robotic plantilla."""
         state = self.brain.memory.get_session_state(session_id)
         mission = self._active_mission_context(state)
         candidate_target = self._mission_target(mission) or "desconocido"
@@ -5335,12 +5338,7 @@ class BotService:
             },
         )
         self._emit_safe("telegram_actionable_no_match", {"session_id": session_id, "candidate_action": candidate_action})
-        return (
-            "Detecté esto como una solicitud de acción, pero no pude mapearla a una acción soportada.\n"
-            f"Acción probable: `{candidate_action}`\n"
-            f"Target probable: `{candidate_target}`\n"
-            "Clarifica con una frase concreta, por ejemplo: `abre Codex`, `pega el prompt` o `revisa la app`."
-        )
+        return None
 
     @staticmethod
     def _stable_text_hash(text: str) -> str:
