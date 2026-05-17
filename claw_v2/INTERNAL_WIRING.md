@@ -8,9 +8,9 @@
 ## meta
 
 ```yaml
-describes_commit: 1b6e37c+tool-policies-json
-doc_version: 1.3
-last_verified: 2026-05-10
+describes_commit: 917d80c+meta-skip-context-var
+doc_version: 1.4
+last_verified: 2026-05-17
 verification_method: manual + grep cross-check
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
@@ -67,6 +67,27 @@ invariants:
          entirely (calling adapter.publish or subprocess directly) would
          escape every gate. The pending-record path forces a human action
          from Telegram before the side effect lands.
+
+  evidence_gate_meta_skip_sync_path:
+    rule: The chain handle_text → _brain_text_response →
+          _prepare_visible_brain_content → _record_evidence_gate_explicit_blocker
+          must stay synchronous and on the same worker thread. The
+          meta_introspection_guard (claw_v2/bot.py) uses
+          `meta_introspection_context` (ContextVar in claw_v2/bot_helpers.py)
+          to mark the turn as meta so the evidence-gate emits
+          `evidence_gate_skipped_meta` and lets the brain reply pass through
+          instead of pinning a failed `runtime=evidence_gate` row in the
+          task ledger.
+    enforced_by:
+      - tests/test_meta_introspection_integration.py
+        (test_complaint_no_evidence_gate_task + _via_asyncio_to_thread
+        variant exercise the same-thread guarantee that asyncio.to_thread
+        from telegram.py:1010 relies on)
+    why: Converting any step to `async def` returns the coroutine before
+         the `with` block exits, resetting the ContextVar before the gate
+         reads it. Hector's complaints then become failed evidence_gate
+         tasks again and the user sees the explicit_blocker template with
+         internal IDs exposed (the exact 2026-05-17 P0-1 regression).
 ```
 
 ---
@@ -466,6 +487,20 @@ do_not:
          gate. New mutating handlers must follow the
          _autonomous_action_authorized(env_var) pattern.
     enforced_by: invariant kairos_external_mutation_gated (§1).
+
+  - change: Convert handle_text, _brain_text_response, or
+            _prepare_visible_brain_content to `async def`, or move the LLM
+            call to a thread that copies the parent context, without first
+            re-deriving the meta-skip flag from a non-ContextVar source.
+    why: The meta_introspection_guard wraps _brain_text_response in
+         `with meta_introspection_context(...)`. ContextVar resets in
+         __exit__; if the wrapped call returns a coroutine (no await
+         inside the with) or hands off to a context-copying executor, the
+         flag is gone before _prepare_visible_brain_content reads it and
+         meta complaints become failed evidence_gate ledger rows again
+         (reopens P0-1).
+    enforced_by: invariant evidence_gate_meta_skip_sync_path (§1) +
+                 tests/test_meta_introspection_integration.py.
 ```
 
 ---

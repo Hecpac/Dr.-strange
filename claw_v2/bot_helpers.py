@@ -1,10 +1,12 @@
 """Module-level helper functions and constants extracted from bot.py."""
 from __future__ import annotations
 
+import contextlib
 import re
 import unicodedata
+from contextvars import ContextVar
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 from urllib.parse import urlsplit
 
 from dataclasses import dataclass
@@ -12,6 +14,8 @@ from dataclasses import dataclass
 from claw_v2.coordinator import CoordinatorResult, WorkerTask
 
 __all__ = [
+    "current_meta_introspection_kind",
+    "meta_introspection_context",
     "MetaIntrospectionIntent",
     "OwnerDelegationIntent",
     "TelegramImperativeIntent",
@@ -126,6 +130,32 @@ __all__ = [
     "_tweet_oembed_fallback",
     "_help_response",
 ]
+
+
+_META_INTROSPECTION_CONTEXT: ContextVar[str | None] = ContextVar(
+    "claw_meta_introspection_context", default=None
+)
+
+
+@contextlib.contextmanager
+def meta_introspection_context(kind: str) -> Iterator[None]:
+    """Mark the current turn as routed by ``meta_introspection_guard``.
+
+    While active, the evidence-gate skips ledger row creation and the
+    user-visible reply replacement so brain answers to critiques, audits, or
+    clarification asks pass through intact. A dedicated observability event
+    (`evidence_gate_skipped_meta`) still fires so the self-improvement loop
+    keeps the signal.
+    """
+    token = _META_INTROSPECTION_CONTEXT.set(kind)
+    try:
+        yield
+    finally:
+        _META_INTROSPECTION_CONTEXT.reset(token)
+
+
+def current_meta_introspection_kind() -> str | None:
+    return _META_INTROSPECTION_CONTEXT.get()
 
 
 _BROWSE_SHORTCUT_TOKENS = (
