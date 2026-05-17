@@ -485,6 +485,31 @@ class BrainToolUseLedgerEdgeCasesTests(unittest.TestCase):
         self.assertEqual(len(recent), 1)
         self.assertEqual(recent[0].mode, "brain_fallback")
 
+    # --- C2: trace_events failure must be visible -----------------------------
+
+    def test_observe_trace_events_failure_emits_observe_failed_event(self) -> None:
+        """C2: trace_events failure must be visible (brain_tooluse_ledger_observe_failed)."""
+
+        class _RaisingTraceObserve(_RecordingObserve):
+            def trace_events(self, trace_id: str, *, limit: int | None = None) -> list[dict]:
+                raise RuntimeError("simulated observe failure")
+
+        observe = _RaisingTraceObserve()
+        bot = _make_bot(observe, self.ledger)
+        bot._attach_brain_tool_use_ledger(
+            session_id="tg-test",
+            response=_StubResponse(artifacts={"trace_id": "trace-X"}),
+            source_text="que ves?",
+            runtime_channel="telegram",
+        )
+        events = [name for name, _ in observe.events]
+        self.assertIn(
+            "brain_tooluse_ledger_observe_failed", events,
+            f"Expected brain_tooluse_ledger_observe_failed in {events}",
+        )
+        # Ledger must remain untouched on observe failure.
+        self.assertEqual(self.ledger.list(limit=10), [])
+
 
 if __name__ == "__main__":
     unittest.main()

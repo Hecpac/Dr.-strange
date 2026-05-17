@@ -312,7 +312,9 @@ def _looks_like_operator_action_request(text: str) -> bool:
         if detect_telegram_imperative(text) is not None or detect_owner_delegation(text) is not None:
             return True
     except Exception:
-        pass
+        logger.exception(
+            "dispatch detector failed in _looks_like_operator_action_request"
+        )
     if looks_like_actionable_telegram_message(text):
         return True
     return any(term in normalized for term in _OPERATOR_ACTION_REQUEST_TERMS)
@@ -3414,6 +3416,19 @@ class BotService:
         try:
             events = self.observe.trace_events(trace_id)
         except Exception:
+            logger.exception(
+                "brain_tooluse_ledger trace_events failed for trace_id=%s", trace_id
+            )
+            try:
+                self.observe.emit(
+                    "brain_tooluse_ledger_observe_failed",
+                    payload={"session_id": session_id, "trace_id": trace_id},
+                )
+            except Exception:
+                logger.debug(
+                    "brain_tooluse_ledger_observe_failed emit suppressed",
+                    exc_info=True,
+                )
             return
         tool_events: list[dict[str, Any]] = []
         tool_failure_events: list[dict[str, Any]] = []

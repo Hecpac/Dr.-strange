@@ -79,6 +79,32 @@ class ApprovalManagerTests(unittest.TestCase):
                 with self.assertRaises(ApprovalPending):
                     gate(definition, {"prompt": "second"})
 
+    def test_telegram_gate_logs_notifier_exception(self) -> None:
+        """C4: notifier failure must be visible (logger.exception)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = ApprovalManager(Path(tmpdir), "secret")
+
+            def raising_notifier(pending):
+                raise RuntimeError("notifier boom")
+
+            gate = build_telegram_approval_gate(manager, notifier=raising_notifier)
+            definition = ToolDefinition(
+                name="GPTImage",
+                description="Generate an image",
+                allowed_agent_classes=("operator",),
+                handler=lambda args: {"ok": True},
+                tier=TIER_REQUIRES_APPROVAL,
+            )
+            with self.assertLogs("claw_v2.approval_gate", level="ERROR") as captured:
+                with self.assertRaises(ApprovalPending) as ctx:
+                    gate(definition, {"prompt": "x"})
+            self.assertEqual(ctx.exception.tool, "GPTImage")
+            joined = "\n".join(captured.output)
+            self.assertIn("RuntimeError", joined)
+            self.assertIn("notifier boom", joined)
+            self.assertIn(ctx.exception.approval_id, joined)
+            self.assertEqual(len(manager.list_pending()), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

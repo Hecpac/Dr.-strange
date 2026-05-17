@@ -621,7 +621,22 @@ class BrainService:
             try:
                 self.checkpoint.schedule_restore(latest["ckpt_id"])
             except Exception:
-                logger.warning("schedule_restore failed", exc_info=True)
+                logger.exception("auto-rollback schedule_restore failed")
+                if self.observe is not None:
+                    try:
+                        self.observe.emit(
+                            "auto_rollback_failed",
+                            payload={
+                                "ckpt_id": latest["ckpt_id"],
+                                "session_id": session_id,
+                                "autonomy_mode": autonomy_mode,
+                            },
+                        )
+                    except Exception:
+                        logger.debug(
+                            "auto_rollback_failed emit suppressed",
+                            exc_info=True,
+                        )
 
     def _wiki_context(self, message: str) -> str:
         """Query the wiki for relevant pages and return a compact context section."""
@@ -1020,7 +1035,21 @@ class BrainService:
                 session_id=session_id,
             )
         except Exception:
-            logger.warning("Pre-action checkpoint failed", exc_info=True)
+            logger.exception("Pre-action checkpoint failed for %s", action[:80])
+            if self.observe is not None:
+                try:
+                    self.observe.emit(
+                        "pre_snapshot_failed",
+                        payload={
+                            "action": action[:80],
+                            "session_id": session_id,
+                        },
+                    )
+                except Exception:
+                    logger.debug(
+                        "pre_snapshot_failed emit suppressed",
+                        exc_info=True,
+                    )
             return None
 
     def _emit_execution_event(
