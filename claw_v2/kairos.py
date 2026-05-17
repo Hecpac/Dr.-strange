@@ -698,11 +698,17 @@ class KairosService:
             return
         self.task_board.start(task.id)
         try:
-            result = self.sub_agents.dispatch(agent_name, task.instruction, lane=lane)
-            self.task_board.complete(task.id, result)
+            sub_result = self.sub_agents.dispatch_typed(agent_name, task.instruction, lane=lane)
+            self.task_board.complete(task.id, sub_result.summary)
         except Exception as exc:
             self.task_board.fail(task.id, str(exc))
             raise
+        evidence_ref = sub_result.evidence[0].ref if sub_result.evidence else None
+        if sub_result.failures:
+            logger.warning(
+                "KAIROS claim_task agent=%s task=%s preferred-provider fallback: %s",
+                agent_name, task.id, list(sub_result.failures),
+            )
         self.observe.emit(
             "kairos_claim_task",
             trace_id=trace_context.get("trace_id") if trace_context else None,
@@ -711,7 +717,14 @@ class KairosService:
             parent_span_id=trace_context.get("parent_span_id") if trace_context else None,
             job_id=trace_context.get("job_id") if trace_context else None,
             artifact_id=trace_context.get("artifact_id") if trace_context else None,
-            payload={"task_id": task.id, "agent": agent_name, "title": task.title},
+            payload={
+                "task_id": task.id,
+                "agent": agent_name,
+                "title": task.title,
+                "status": sub_result.status,
+                "evidence_ref": evidence_ref,
+                "failures": list(sub_result.failures),
+            },
         )
 
     def _handle_wiki_deep_lint(self, decision: TickDecision, trace_context: dict[str, Any] | None = None) -> None:
