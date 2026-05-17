@@ -241,6 +241,7 @@ class RuntimeTests(unittest.TestCase):
                 "APPROVALS_ROOT": str(root / "approvals"),
                 "PIPELINE_STATE_ROOT": str(root / "pipeline"),
                 "WORKER_PROVIDER": "anthropic",
+                "RESEARCH_PROVIDER": "anthropic",
                 "VERIFIER_PROVIDER": "anthropic",
             }
             with patch.dict(os.environ, env, clear=False):

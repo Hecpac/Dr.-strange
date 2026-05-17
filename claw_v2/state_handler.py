@@ -187,6 +187,12 @@ class StateHandler:
                 "tier_hint": "unknown",
                 "topic": _compact_summary(user_text, limit=140) or "",
             }
+            active_object["last_actionable_proposal"] = {
+                "objective": pending_action[:500],
+                "source": pending_action_source,
+                "created_at": time.time(),
+                "created_message_id": last_message_id,
+            }
         elif not (isinstance(pending_action, str) and pending_action.strip()):
             # Clear stale meta when pending_action is cleared, otherwise the
             # next reload would resurrect an orphaned meta block.

@@ -562,6 +562,175 @@ def test_continue_uses_reply_context_markdown_pending_line(bot) -> None:
     ), decisions
 
 
+def _assert_valid_continuation_output(response: str | None) -> None:
+    assert response
+    lowered = response.lower()
+    assert "¿qué acción concreta quieres que ejecute?" not in lowered
+    assert "target: `desconocido`" not in lowered
+    assert "target desconocido" not in lowered
+
+
+def test_replay_voy_con_numero_procede_creates_durable_task(bot) -> None:
+    bot.brain.memory.store_message(
+        "tg-test",
+        "assistant",
+        "Voy con #3: auditar el router de continuaciones y preparar el parche. ¿Lo arranco?",
+    )
+
+    response, decisions, events = _drive(bot, "Procede")
+
+    _assert_valid_continuation_output(response)
+    assert "Creé la tarea" in response
+    assert "telegram_continuation_stateful_resolved" in events
+    records = bot.task_ledger.list(session_id="tg-test", limit=5)
+    assert records
+    assert "#3" in records[0].objective
+    assert "router de continuaciones" in records[0].objective
+    assert any(
+        ev.get("handler") == "telegram_imperative"
+        and ev.get("reason") == "telegram_imperative:task.continue_active_mission:stateful"
+        for ev in decisions
+    ), decisions
+
+
+def test_replay_contextual_choice_continua_chooses_single_proposal(bot) -> None:
+    bot.brain.memory.store_message(
+        "tg-test",
+        "assistant",
+        "¿Sigo con #4 o arreglo #6?",
+    )
+
+    response, _decisions, events = _drive(bot, "Continúa")
+
+    _assert_valid_continuation_output(response)
+    assert "Creé la tarea" in response
+    assert "telegram_continuation_stateful_resolved" in events
+    records = bot.task_ledger.list(session_id="tg-test", limit=5)
+    assert records
+    assert "#4" in records[0].objective
+
+
+def test_replay_pegalo_y_enviamelo_uses_active_prompt_or_blocks_explicitly(bot) -> None:
+    bot.brain.memory.update_session_state(
+        "tg-test",
+        mode="ops",
+        active_object={
+            "active_mission": {
+                "mission_id": "mission-claude",
+                "channel": "telegram",
+                "chat_id": "tg-test",
+                "active_target": "Claude",
+                "pending_action": "pegar prompt preparado en Claude",
+                "created_at": time.time(),
+                "expires_at": time.time() + 1800,
+            },
+            "active_prompt": {
+                "kind": "prompt",
+                "summary": "prompt preparado",
+                "text": "Construye el prototipo y devuelve el resultado.",
+            },
+            "reply_context": {
+                "source": "telegram_reply",
+                "text": "Tengo el prompt listo para Claude. ¿Lo pego ahora?",
+                "created_at": time.time(),
+            },
+        },
+    )
+    bot.computer = MagicMock()
+    bot.browser_use = None
+    bot.computer_gate = MagicMock()
+
+    with (
+        patch(
+            "claw_v2.bot.subprocess.run",
+            return_value=subprocess.CompletedProcess(["ok"], 0, "", ""),
+        ) as run,
+        patch("claw_v2.bot.time.sleep"),
+    ):
+        response, decisions, events = _drive(bot, "Pégalo y envíamelo aquí")
+
+    _assert_valid_continuation_output(response)
+    assert "ui.paste_text" in response
+    assert "succeeded" in response
+    assert "Texto pegado en `Claude` sin enviar." in response
+    assert run.call_args_list[1].args[0] == ["pbcopy"]
+    assert run.call_args_list[1].kwargs["input"] == "Construye el prototipo y devuelve el resultado."
+    assert "telegram_imperative_executed" in events
+    _assert_not_brain_fallback(response, decisions)
+
+
+def test_replay_revisa_en_google_cloud_has_explicit_target_blocker(bot) -> None:
+    response, decisions, events = _drive(bot, "Revisa en Google Cloud")
+
+    _assert_valid_continuation_output(response)
+    assert "ui.inspect_app" in response
+    assert "Google Cloud" in response
+    assert "blocked_by_capability" in response
+    assert "telegram_imperative_blocked" in events
+    _assert_not_brain_fallback(response, decisions)
+
+
+def test_replay_waiting_for_user_input_task_continua_resumes_task(bot) -> None:
+    bot.task_ledger.create(
+        task_id="tg-test:waiting",
+        session_id="tg-test",
+        objective="terminar auditoría P0 de Telegram continuation",
+        mode="coding",
+        runtime="coordinator",
+        status="running",
+    )
+    bot.task_ledger.mark_terminal(
+        "tg-test:waiting",
+        status="failed",
+        summary="waiting_for_user_input: confirmar siguiente paso",
+        error="waiting_for_user_input: confirmar siguiente paso",
+        verification_status="blocked",
+    )
+
+    response, _decisions, events = _drive(bot, "Continúa")
+
+    _assert_valid_continuation_output(response)
+    assert "Creé la tarea" in response
+    assert "telegram_continuation_stateful_resolved" in events
+    records = bot.task_ledger.list(session_id="tg-test", limit=5)
+    assert records
+    assert records[0].objective == "terminar auditoría P0 de Telegram continuation"
+
+
+def test_multiple_active_missions_asks_specific_choice_not_generic_action(bot) -> None:
+    bot.brain.memory.update_session_state(
+        "tg-test",
+        active_object={
+            "active_missions": [
+                {
+                    "mission_id": "m1",
+                    "channel": "telegram",
+                    "chat_id": "tg-test",
+                    "active_target": "Codex",
+                    "pending_action": "arreglar el router",
+                    "expires_at": time.time() + 1800,
+                },
+                {
+                    "mission_id": "m2",
+                    "channel": "telegram",
+                    "chat_id": "tg-test",
+                    "active_target": "Claude",
+                    "pending_action": "pegar el prompt",
+                    "expires_at": time.time() + 1800,
+                },
+            ]
+        },
+    )
+
+    response, _decisions, events = _drive(bot, "Procede")
+
+    _assert_valid_continuation_output(response)
+    assert "varias misiones activas" in response
+    assert "1. Codex: arreglar el router" in response
+    assert "2. Claude: pegar el prompt" in response
+    assert "telegram_continuation_stateful_resolved" in events
+
+
 def test_quality_command_exposes_imperative_router_metrics(bot) -> None:
     _seed_codex_mission(bot)
     _drive(bot, "Pégale el prompt")

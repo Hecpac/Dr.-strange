@@ -167,6 +167,7 @@ class P0RuntimeWiringTests(unittest.TestCase):
                 "PIPELINE_STATE_ROOT": str(root / "pipeline"),
                 "TELEMETRY_ROOT": str(root / "telemetry"),
                 "WORKER_PROVIDER": "anthropic",
+                "RESEARCH_PROVIDER": "anthropic",
                 "VERIFIER_PROVIDER": "anthropic",
             }
             with patch.dict(os.environ, env, clear=False):
