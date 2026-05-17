@@ -1681,54 +1681,76 @@ class BotService:
             content=content,
             response=response,
         ):
-            blocker_task_id = self._record_evidence_gate_explicit_blocker(
-                session_id=session_id,
-                source_text=source_text,
-                blocked_content=content,
-                reason="start_claim_without_evidence",
-            )
-            corrected = self._unexecuted_start_response(blocker_task_id)
-            self._emit_identity_capability_binding_guard(
-                "evidence_gate_blocked_start_claim",
-                session_id,
-                reason="start_claim_without_evidence",
-                original=content,
-                sanitized=corrected,
-            )
-            self._emit_internal_chat_suppressed(
-                session_id,
-                reason="start_claim_without_evidence",
-                original=content,
-                sanitized=corrected,
-            )
-            content = corrected
+            meta_kind = current_meta_introspection_kind()
+            if meta_kind is not None:
+                self._emit_safe(
+                    "evidence_gate_skipped_meta",
+                    {
+                        "session_id": session_id,
+                        "reason": "start_claim_without_evidence",
+                        "meta_kind": meta_kind,
+                    },
+                )
+            else:
+                blocker_task_id = self._record_evidence_gate_explicit_blocker(
+                    session_id=session_id,
+                    source_text=source_text,
+                    blocked_content=content,
+                    reason="start_claim_without_evidence",
+                )
+                corrected = self._unexecuted_start_response(blocker_task_id)
+                self._emit_identity_capability_binding_guard(
+                    "evidence_gate_blocked_start_claim",
+                    session_id,
+                    reason="start_claim_without_evidence",
+                    original=content,
+                    sanitized=corrected,
+                )
+                self._emit_internal_chat_suppressed(
+                    session_id,
+                    reason="start_claim_without_evidence",
+                    original=content,
+                    sanitized=corrected,
+                )
+                content = corrected
         elif self._completion_claim_lacks_evidence(
             session_id=session_id,
             source_text=source_text,
             content=content,
             response=response,
         ):
-            blocker_task_id = self._record_evidence_gate_explicit_blocker(
-                session_id=session_id,
-                source_text=source_text,
-                blocked_content=content,
-                reason="completion_claim_without_evidence",
-            )
-            corrected = self._pending_evidence_response(blocker_task_id)
-            self._emit_identity_capability_binding_guard(
-                "evidence_gate_blocked_completion_claim",
-                session_id,
-                reason="completion_claim_without_evidence",
-                original=content,
-                sanitized=corrected,
-            )
-            self._emit_internal_chat_suppressed(
-                session_id,
-                reason="completion_claim_without_evidence",
-                original=content,
-                sanitized=corrected,
-            )
-            content = corrected
+            meta_kind = current_meta_introspection_kind()
+            if meta_kind is not None:
+                self._emit_safe(
+                    "evidence_gate_skipped_meta",
+                    {
+                        "session_id": session_id,
+                        "reason": "completion_claim_without_evidence",
+                        "meta_kind": meta_kind,
+                    },
+                )
+            else:
+                blocker_task_id = self._record_evidence_gate_explicit_blocker(
+                    session_id=session_id,
+                    source_text=source_text,
+                    blocked_content=content,
+                    reason="completion_claim_without_evidence",
+                )
+                corrected = self._pending_evidence_response(blocker_task_id)
+                self._emit_identity_capability_binding_guard(
+                    "evidence_gate_blocked_completion_claim",
+                    session_id,
+                    reason="completion_claim_without_evidence",
+                    original=content,
+                    sanitized=corrected,
+                )
+                self._emit_internal_chat_suppressed(
+                    session_id,
+                    reason="completion_claim_without_evidence",
+                    original=content,
+                    sanitized=corrected,
+                )
+                content = corrected
         elif _looks_like_identity_drift(content):
             corrected = self._identity_binding_response()
             self._emit_identity_capability_binding_guard(
@@ -2510,9 +2532,15 @@ class BotService:
                 captured=True,
                 matched_pattern=meta_intent.reason,
             )
-            return self._brain_text_response(
-                session_id, stripped, runtime_channel=runtime_channel
-            )
+            # Invariant: the path handle_text → _brain_text_response →
+            # _prepare_visible_brain_content must stay synchronous on this thread;
+            # converting any step to async or copying context across threads
+            # resets the ContextVar before the evidence-gate reads it. See
+            # INTERNAL_WIRING.md §1 evidence_gate_meta_skip_sync_path.
+            with meta_introspection_context(meta_intent.kind):
+                return self._brain_text_response(
+                    session_id, stripped, runtime_channel=runtime_channel
+                )
         if self.observe is not None:
             try:
                 self.observe.emit(
