@@ -159,6 +159,7 @@ class BrainToolUseLedgerTests(unittest.TestCase):
         task = recent[0]
         self.assertEqual(task.mode, "brain_fallback")
         self.assertEqual(task.session_id, "tg-test")
+        self.assertEqual(task.objective, "que ves en CLAUDE.md?")
         self.assertEqual(task.metadata.get("origin"), "brain_fallback")
         self.assertTrue(task.metadata.get("brain_tool_use"))
         self.assertEqual(task.metadata.get("created_by"), "brain_tool_use_ledger")

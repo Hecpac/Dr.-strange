@@ -127,6 +127,170 @@ def test_status_greeting_routes_to_status_not_brain(bot) -> None:
     _assert_not_brain_fallback(response, decisions)
 
 
+def test_failure_summary_routes_to_operational_evidence_not_brain(bot) -> None:
+    bot.observe.emit(
+        "evidence_gate_blocked_start_claim",
+        payload={"session_id": "tg-test", "reason": "start_claim_without_evidence"},
+    )
+    bot.observe.emit(
+        "coordinator_worker_retry",
+        payload={
+            "task_name": "implement_change",
+            "lane": "worker",
+            "error": "Codex CLI timed out after 300.0s",
+            "attempt": 1,
+        },
+    )
+    bot.brain.memory.store_message(
+        "tg-test",
+        "assistant",
+        "No digo `arrancando` sin haber creado una tarea.",
+    )
+    bot.task_ledger.create(
+        task_id="tg-test:running",
+        session_id="tg-test",
+        objective="validación de la rama nueva (`brain_shortcut`)",
+        mode="coding",
+        runtime="coordinator",
+        status="running",
+    )
+
+    response, decisions, events = _drive(bot, "Haz un resumen de los fallos que haz tenido hoy")
+
+    assert response
+    assert "Resumen operativo de fallos de hoy" in response
+    assert "Gate de evidencia" in response
+    assert "Coordinador" in response
+    assert "Codex CLI timed out" in response
+    assert "`tg-test:running`" in response
+    assert "No digo `arrancando` sin haber creado" not in response
+    assert any(
+        ev.get("handler") == "operational_failure_summary"
+        and ev.get("route") == "intercepted"
+        for ev in decisions
+    ), decisions
+    assert "evidence_gate_blocked_start_claim" not in events
+    _assert_not_brain_fallback(response, decisions)
+
+
+def test_task_completion_complaint_routes_to_operational_evidence_not_brain(bot) -> None:
+    bot.task_ledger.create(
+        task_id="tg-test:active",
+        session_id="tg-test",
+        objective="arregla continuidad de tareas",
+        mode="coding",
+        runtime="coordinator",
+        status="running",
+    )
+
+    response, decisions, _events = _drive(bot, "Porque no estás completando ninguna tarea")
+
+    assert response
+    assert "Resumen operativo de fallos de hoy" in response
+    assert "`tg-test:active`" in response
+    assert any(
+        ev.get("handler") == "operational_failure_summary"
+        and ev.get("route") == "intercepted"
+        for ev in decisions
+    ), decisions
+    _assert_not_brain_fallback(response, decisions)
+
+
+def test_task_status_overview_routes_to_deterministic_summary_not_brain(bot) -> None:
+    bot.task_ledger.create(
+        task_id="tg-test:failed",
+        session_id="tg-test",
+        objective="validar brain_shortcut",
+        mode="coding",
+        runtime="coordinator",
+        status="running",
+    )
+    bot.task_ledger.mark_terminal(
+        "tg-test:failed",
+        status="failed",
+        summary="Codex CLI timed out",
+        error="Codex CLI timed out after 300.0s",
+        verification_status="failed",
+    )
+
+    with patch.object(type(bot.brain), "handle_message", side_effect=AssertionError("brain should not run")):
+        response, decisions, _events = _drive(bot, "Estatus de las tareas")
+
+    assert response
+    assert "Ahora mismo no tengo tareas corriendo ni en cola" in response
+    assert "¿Voy ahora" not in response
+    assert any(
+        ev.get("handler") == "pending_tasks"
+        and ev.get("route") == "intercepted"
+        for ev in decisions
+    ), decisions
+    state = bot.brain.memory.get_session_state("tg-test")
+    assert not state.get("pending_action")
+    _assert_not_brain_fallback(response, decisions)
+
+
+def test_task_status_summary_hides_stale_assistant_choice_pending_action(bot) -> None:
+    bot.brain.memory.update_session_state(
+        "tg-test",
+        pending_action=(
+            "Voy ahora con eso, o querés que retome alguna otra de las que quedaron perdidas. "
+            "Contexto previo: Estatus rápido del ledger."
+        ),
+        active_object={
+            "pending_action_meta": {
+                "source": "assistant_proposal_question",
+                "created_at": time.time(),
+            },
+        },
+    )
+
+    response, decisions, _events = _drive(bot, "Estatus de las tareas")
+
+    assert response
+    assert "Tambien tengo una accion pendiente" not in response
+    assert any(
+        ev.get("handler") == "pending_tasks"
+        and ev.get("route") == "intercepted"
+        for ev in decisions
+    ), decisions
+    _assert_not_brain_fallback(response, decisions)
+
+
+def test_multimodal_task_completion_complaint_routes_to_operational_evidence_not_brain(bot) -> None:
+    bot.task_ledger.create(
+        task_id="tg-test:active",
+        session_id="tg-test",
+        objective="arregla continuidad de tareas",
+        mode="coding",
+        runtime="coordinator",
+        status="running",
+    )
+
+    with patch.object(type(bot.brain), "handle_message", side_effect=AssertionError("brain should not run")):
+        response = bot.handle_multimodal(
+            user_id="123",
+            session_id="tg-test",
+            content_blocks=[
+                {"type": "text", "text": "Porque no estás completando ninguna tarea"},
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": "cG5n",
+                    },
+                },
+            ],
+            memory_text="[Imagen adjunta]\nPorque no estás completando ninguna tarea",
+            runtime_channel="telegram",
+        )
+
+    assert response
+    assert "Resumen operativo de fallos de hoy" in response
+    assert "`tg-test:active`" in response
+    assert response != "BRAIN_FALLBACK_USED"
+
+
 @pytest.mark.parametrize("text", ["Tareas pendientes", "Tareas pendietes"])
 def test_pending_tasks_includes_approval_summary_not_brain(bot, text: str) -> None:
     bot.approvals.create("demo", "approval for pending tasks")
@@ -304,7 +468,6 @@ def test_actionable_no_match_falls_through_to_brain(bot) -> None:
 
 
 def test_continue_prefers_pending_action_over_app_target_clarification(bot) -> None:
-    prompts: list[str] = []
     bot.brain.memory.update_session_state(
         "tg-test",
         mode="ops",
@@ -312,24 +475,16 @@ def test_continue_prefers_pending_action_over_app_target_clarification(bot) -> N
         pending_action="arreglar #6 continuation imperative router bounce en bot.py",
     )
 
-    def fake_handle_message(session_id, message, **_kwargs):
-        prompts.append(str(message))
-        return LLMResponse(
-            content="CONTINUATION_HANDLED",
-            lane="brain",
-            provider="anthropic",
-            model="claude-opus-4-7",
-        )
+    response, decisions, events = _drive(bot, "Continúa")
 
-    with patch.object(type(bot.brain), "handle_message", side_effect=fake_handle_message):
-        response, decisions, events = _drive(bot, "Continúa")
-
-    assert response == "CONTINUATION_HANDLED"
-    assert prompts
-    assert "Continúa con esta acción pendiente" in prompts[-1]
-    assert "arreglar #6 continuation" in prompts[-1]
-    assert "telegram_continuation_stateful_resolved" in events
+    assert response
+    assert "Creé la tarea" in response
     assert "Necesito una aclaración mínima" not in response
+    assert "telegram_continuation_stateful_resolved" in events
+    assert "stateful_continuation_routed_to_actionable_task" in events
+    records = bot.task_ledger.list(session_id="tg-test", limit=5)
+    assert records
+    assert records[0].objective == "arreglar #6 continuation imperative router bounce en bot.py"
     assert any(
         ev.get("handler") == "telegram_imperative"
         and ev.get("route") == "intercepted"
@@ -339,7 +494,6 @@ def test_continue_prefers_pending_action_over_app_target_clarification(bot) -> N
 
 
 def test_continue_uses_recent_contextual_proposal_in_telegram(bot) -> None:
-    prompts: list[str] = []
     bot.brain.memory.store_message(
         "tg-test",
         "assistant",
@@ -352,24 +506,16 @@ def test_continue_uses_recent_contextual_proposal_in_telegram(bot) -> None:
         ),
     )
 
-    def fake_handle_message(session_id, message, **_kwargs):
-        prompts.append(str(message))
-        return LLMResponse(
-            content="CONTEXTUAL_CONTINUATION_HANDLED",
-            lane="brain",
-            provider="anthropic",
-            model="claude-opus-4-7",
-        )
+    response, decisions, events = _drive(bot, "Continúa")
 
-    with patch.object(type(bot.brain), "handle_message", side_effect=fake_handle_message):
-        response, decisions, events = _drive(bot, "Continúa")
-
-    assert response == "CONTEXTUAL_CONTINUATION_HANDLED"
-    assert prompts
-    assert "acción propuesta previamente" in prompts[-1]
-    assert "#4" in prompts[-1]
-    assert "SOUL/AGENTS" in prompts[-1]
+    assert response
+    assert "Creé la tarea" in response
     assert "telegram_continuation_stateful_resolved" in events
+    assert "stateful_continuation_routed_to_actionable_task" in events
+    records = bot.task_ledger.list(session_id="tg-test", limit=5)
+    assert records
+    assert "#4" in records[0].objective
+    assert "SOUL/AGENTS" in records[0].objective
     assert any(
         ev.get("handler") == "telegram_imperative"
         and ev.get("route") == "intercepted"
@@ -379,7 +525,6 @@ def test_continue_uses_recent_contextual_proposal_in_telegram(bot) -> None:
 
 
 def test_continue_uses_reply_context_markdown_pending_line(bot) -> None:
-    prompts: list[str] = []
     reply_context = (
         "**Checkpoint:**\n"
         "- **Hecho:** inspeccion de observe_stream post-restart.\n"
@@ -398,24 +543,16 @@ def test_continue_uses_reply_context_markdown_pending_line(bot) -> None:
         },
     )
 
-    def fake_handle_message(session_id, message, **_kwargs):
-        prompts.append(str(message))
-        return LLMResponse(
-            content="PENDING_LINE_CONTINUATION_HANDLED",
-            lane="brain",
-            provider="anthropic",
-            model="claude-opus-4-7",
-        )
+    response, decisions, events = _drive(bot, "Continúa")
 
-    with patch.object(type(bot.brain), "handle_message", side_effect=fake_handle_message):
-        response, decisions, events = _drive(bot, "Continúa")
-
-    assert response == "PENDING_LINE_CONTINUATION_HANDLED"
-    assert prompts
-    assert "acción propuesta previamente" in prompts[-1]
-    assert "validacion de la rama nueva" in prompts[-1]
+    assert response
+    assert "Creé la tarea" in response
     assert "telegram_continuation_stateful_resolved" in events
+    assert "stateful_continuation_routed_to_actionable_task" in events
     assert "¿Qué acción concreta" not in response
+    records = bot.task_ledger.list(session_id="tg-test", limit=5)
+    assert records
+    assert records[0].objective == "validacion de la rama nueva (`brain_shortcut`)"
     assert any(
         ev.get("handler") == "telegram_imperative"
         and ev.get("route") == "intercepted"
