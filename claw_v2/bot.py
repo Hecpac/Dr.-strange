@@ -3937,18 +3937,16 @@ class BotService:
 
     def _pending_evidence_response(self) -> str:
         return (
-            "No marco esto como completado todavía. "
-            "La respuesta reclamó una acción hecha, pero no hay evidencia verificable "
-            "en el runtime para sostenerlo. Continúo solo con una de estas salidas: "
-            "tarea durable, acción ejecutada con evidencia, aprobación pendiente, "
-            "bloqueo de capacidad/política o una aclaración mínima."
+            "Necesito ejecutar la acción antes de darte resultado. "
+            "Decime cuál es el siguiente paso concreto que querés que dispare "
+            "(o respondé `te autorizo` si hay una aprobación pendiente) y arranco."
         )
 
     def _unexecuted_start_response(self) -> str:
         return (
-            "No digo `arrancando` sin haber creado una tarea, ejecutado una herramienta "
-            "o registrado evidencia. Esta solicitud debe pasar por un router accionable: "
-            "tarea durable, acción ejecutada, aprobación, bloqueo explícito o aclaración mínima."
+            "Antes de avanzar necesito una acción concreta para disparar: "
+            "una tarea, un comando puntual, o tu autorización si hay una aprobación abierta. "
+            "Decime qué disparo y lo ejecuto con evidencia."
         )
 
     def _emit_identity_capability_binding_guard(
@@ -5730,6 +5728,8 @@ class BotService:
                 return str(prompt.get("summary") or prompt.get("kind") or "prompt").strip() or None
             if isinstance(prompt, str) and prompt.strip():
                 return "prompt"
+            if self._prompt_text_from_reply_context(state):
+                return "prompt from reply context"
         if intent.artifact_hint == "instructions":
             prompt = active_object.get("active_prompt") or active_object.get("active_instructions") or {}
             if isinstance(prompt, dict):
@@ -5785,6 +5785,10 @@ class BotService:
             text = self._artifact_text_from_candidate(candidate)
             if text:
                 return text
+        if intent.artifact_hint == "prompt":
+            text = self._prompt_text_from_reply_context(state)
+            if text:
+                return text
         return None
 
     @staticmethod
@@ -5799,6 +5803,41 @@ class BotService:
             if isinstance(value, str) and value.strip():
                 return value.strip()
         return None
+
+    @staticmethod
+    def _prompt_text_from_reply_context(state: dict[str, Any]) -> str | None:
+        active_object = state.get("active_object") or {}
+        if not isinstance(active_object, dict):
+            return None
+        reply_context = active_object.get("reply_context") or {}
+        if not isinstance(reply_context, dict):
+            return None
+        text = str(reply_context.get("text") or "")
+        if not text.strip():
+            return None
+        lines = text.splitlines()
+        marker_index: int | None = None
+        for index, line in enumerate(lines):
+            normalized = _normalize_command_text(line)
+            if "prompt que voy a pegar" in normalized or "prompt to paste" in normalized:
+                marker_index = index
+                break
+        search_lines = lines[marker_index + 1 :] if marker_index is not None else lines
+        collected: list[str] = []
+        started = False
+        for line in search_lines:
+            stripped = line.strip()
+            if stripped.startswith(">"):
+                started = True
+                collected.append(stripped[1:].lstrip())
+                continue
+            if started and stripped == "":
+                collected.append("")
+                continue
+            if started:
+                break
+        prompt = "\n".join(collected).strip()
+        return prompt or None
 
     def _remember_telegram_mission(
         self,
@@ -6078,6 +6117,23 @@ class BotService:
         )
         if instruction is None:
             return None
+        if intent.intent == "ui.open_app":
+            return self._execute_local_open_app_imperative(
+                intent,
+                text,
+                session_id=session_id,
+                target=target,
+                artifact=artifact,
+            )
+        if intent.intent == "ui.paste_text":
+            return self._execute_local_paste_text_imperative(
+                intent,
+                text,
+                session_id=session_id,
+                target=target,
+                artifact=artifact,
+                artifact_text=artifact_text,
+            )
         self._emit_safe(
             "telegram_imperative_execution_started",
             {
@@ -6145,6 +6201,210 @@ class BotService:
             lines.append("")
             lines.append(str(handler_result))
         return "\n".join(lines)
+
+    def _execute_local_paste_text_imperative(
+        self,
+        intent: TelegramImperativeIntent,
+        text: str,
+        *,
+        session_id: str,
+        target: str | None,
+        artifact: str | None,
+        artifact_text: str | None,
+    ) -> str:
+        app_name = self._local_app_name_for_target(target)
+        execution_backend = "local_clipboard_paste"
+        if app_name is None:
+            result_status = "failed"
+            handler_result = "No pude resolver un nombre de app seguro para pegar."
+        elif not artifact_text:
+            result_status = "failed"
+            handler_result = "No encontré texto preparado para pegar."
+        else:
+            self._emit_safe(
+                "telegram_imperative_execution_started",
+                {
+                    "session_id": session_id,
+                    "intent": intent.intent,
+                    "target": target,
+                    "backend": execution_backend,
+                },
+            )
+            try:
+                open_result = subprocess.run(
+                    ["open", "-a", app_name],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                if open_result.returncode != 0:
+                    detail = (open_result.stderr or open_result.stdout or "open returned non-zero").strip()
+                    raise RuntimeError(f"open failed: {redact_sensitive(detail[:240])}")
+                time.sleep(0.4)
+                copy_result = subprocess.run(
+                    ["pbcopy"],
+                    input=artifact_text,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                if copy_result.returncode != 0:
+                    detail = (copy_result.stderr or copy_result.stdout or "pbcopy returned non-zero").strip()
+                    raise RuntimeError(f"pbcopy failed: {redact_sensitive(detail[:240])}")
+                paste_result = subprocess.run(
+                    [
+                        "osascript",
+                        "-e",
+                        'tell application "System Events" to keystroke "v" using command down',
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                if paste_result.returncode != 0:
+                    detail = (paste_result.stderr or paste_result.stdout or "osascript returned non-zero").strip()
+                    raise RuntimeError(f"paste failed: {redact_sensitive(detail[:240])}")
+            except Exception as exc:
+                result_status = "failed"
+                handler_result = f"No pude pegar en `{app_name}`: {str(exc)[:240]}"
+            else:
+                result_status = "succeeded"
+                handler_result = f"Texto pegado en `{app_name}` sin enviar."
+        task_id = self._record_telegram_imperative_task(
+            session_id=session_id,
+            text=text,
+            intent=intent,
+            target=target,
+            artifact=artifact,
+            result_status=result_status,
+            capability=None if result_status == "succeeded" else execution_backend,
+            summary=f"{intent.intent} executed through {execution_backend}: {result_status}.",
+            handler_result=handler_result,
+            execution_backend=execution_backend,
+            notify_policy="none",
+        )
+        event_payload = {
+            "session_id": session_id,
+            "intent": intent.intent,
+            "task_id": task_id,
+            "target": target,
+            "status": result_status,
+            "backend": execution_backend,
+            "approval_id": None,
+        }
+        if result_status == "failed":
+            self._emit_safe("telegram_imperative_execution_failed", event_payload)
+        else:
+            self._emit_safe("telegram_imperative_executed", event_payload)
+            self._emit_safe("telegram_imperative_routed", event_payload)
+        return "\n".join(
+            [
+                f"Intent: `{intent.intent}`",
+                f"Target: `{target or 'desconocido'}`",
+                f"Estado: `{result_status}`",
+                f"Task: `{task_id}`",
+                "",
+                handler_result,
+            ]
+        )
+
+    def _execute_local_open_app_imperative(
+        self,
+        intent: TelegramImperativeIntent,
+        text: str,
+        *,
+        session_id: str,
+        target: str | None,
+        artifact: str | None,
+    ) -> str:
+        app_name = self._local_app_name_for_target(target)
+        execution_backend = "local_app_open"
+        if app_name is None:
+            result_status = "failed"
+            handler_result = "No pude resolver un nombre de app seguro para abrir."
+        else:
+            self._emit_safe(
+                "telegram_imperative_execution_started",
+                {
+                    "session_id": session_id,
+                    "intent": intent.intent,
+                    "target": target,
+                    "backend": execution_backend,
+                },
+            )
+            try:
+                completed = subprocess.run(
+                    ["open", "-a", app_name],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+            except Exception as exc:
+                result_status = "failed"
+                handler_result = f"No pude abrir `{app_name}`: {str(exc)[:240]}"
+            else:
+                if completed.returncode == 0:
+                    result_status = "succeeded"
+                    handler_result = f"`{app_name}` abierto/enfocado."
+                else:
+                    result_status = "failed"
+                    detail = (completed.stderr or completed.stdout or "open returned non-zero").strip()
+                    handler_result = f"No pude abrir `{app_name}`: {redact_sensitive(detail[:240])}"
+        task_id = self._record_telegram_imperative_task(
+            session_id=session_id,
+            text=text,
+            intent=intent,
+            target=target,
+            artifact=artifact,
+            result_status=result_status,
+            capability=None if result_status == "succeeded" else execution_backend,
+            summary=f"{intent.intent} executed through {execution_backend}: {result_status}.",
+            handler_result=handler_result,
+            execution_backend=execution_backend,
+            notify_policy="none",
+        )
+        event_payload = {
+            "session_id": session_id,
+            "intent": intent.intent,
+            "task_id": task_id,
+            "target": target,
+            "status": result_status,
+            "backend": execution_backend,
+            "approval_id": None,
+        }
+        if result_status == "failed":
+            self._emit_safe("telegram_imperative_execution_failed", event_payload)
+        else:
+            self._emit_safe("telegram_imperative_executed", event_payload)
+            self._emit_safe("telegram_imperative_routed", event_payload)
+        return "\n".join(
+            [
+                f"Intent: `{intent.intent}`",
+                f"Target: `{target or 'desconocido'}`",
+                f"Estado: `{result_status}`",
+                f"Task: `{task_id}`",
+                "",
+                handler_result,
+            ]
+        )
+
+    @staticmethod
+    def _local_app_name_for_target(target: str | None) -> str | None:
+        if not target:
+            return None
+        normalized = _normalize_command_text(target)
+        if "codex" in normalized:
+            return "Codex"
+        if "chatgpt" in normalized or "chat gpt" in normalized:
+            return "ChatGPT"
+        if "claude" in normalized:
+            return "Claude"
+        if "chrome" in normalized:
+            return "Google Chrome"
+        cleaned = re.sub(r"\bapp\b", "", str(target), flags=re.IGNORECASE).strip(" ._-")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._+-]{0,79}", cleaned):
+            return None
+        return cleaned
 
     def _computer_instruction_for_telegram_imperative(
         self,
@@ -6244,6 +6504,7 @@ class BotService:
         handler_result: str | None = None,
         approval_id: str | None = None,
         execution_backend: str | None = None,
+        notify_policy: str = "done_only",
     ) -> str:
         task_id = f"{session_id}:telegram-imperative:{time.time_ns()}"
         action_result = {
@@ -6287,6 +6548,7 @@ class BotService:
                 runtime="telegram_imperative",
                 mode="ops",
                 status="running",
+                notify_policy=notify_policy,
                 metadata=metadata,
                 artifacts=artifacts,
             )

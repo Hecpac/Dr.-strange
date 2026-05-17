@@ -500,7 +500,7 @@ class Wave0GoldenTraceTests(unittest.TestCase):
                 runtime_channel="telegram",
             )
 
-            self.assertIn("No marco esto como completado", response)
+            self.assertIn("Necesito ejecutar la acción", response)
             self.assertNotIn("Cambié el archivo", response)
             events = [event["event_type"] for event in runtime.observe.recent_events(limit=50)]
             self.assertIn("evidence_gate_blocked_completion_claim", events)
@@ -523,7 +523,7 @@ class Wave0GoldenTraceTests(unittest.TestCase):
                 runtime_channel="telegram",
             )
 
-            self.assertIn("No digo `arrancando`", response)
+            self.assertIn("acción concreta para disparar", response)
             self.assertNotIn("Voy a depurar", response)
             events = [event["event_type"] for event in runtime.observe.recent_events(limit=50)]
             self.assertIn("evidence_gate_blocked_start_claim", events)
