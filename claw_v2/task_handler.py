@@ -1053,6 +1053,52 @@ class TaskHandler:
             count += 1
         return count
 
+    def resume_idle_autonomous_task(self, session_id: str, task_id: str) -> dict[str, Any]:
+        if self.task_ledger is None:
+            return {
+                "advanced": False,
+                "reason": "task_ledger_unavailable",
+                "message": "task ledger unavailable",
+            }
+        record = self.task_ledger.get(task_id)
+        if record is None:
+            return {
+                "advanced": False,
+                "reason": "task_not_found",
+                "message": f"task {task_id} not found",
+            }
+        metadata = dict(record.metadata or {})
+        if record.session_id != session_id:
+            return {
+                "advanced": False,
+                "reason": "session_mismatch",
+                "message": f"task {task_id} belongs to another session",
+            }
+        if record.runtime != "coordinator" or metadata.get("autonomous") is not True:
+            return {
+                "advanced": False,
+                "reason": "not_idle_resumable",
+                "message": f"task {task_id} is not an autonomous coordinator task",
+            }
+        if record.status not in {"queued", "running"}:
+            return {
+                "advanced": False,
+                "reason": "not_idle_resumable_status",
+                "message": f"task {task_id} is not idle-resumable from status {record.status}",
+            }
+        if self._has_live_task_thread(task_id):
+            return {
+                "advanced": False,
+                "reason": "already_running",
+                "message": f"task {task_id} is already running",
+            }
+        self._resume_autonomous_record(record, reason="idle_executor", requested_by_session=session_id)
+        return {
+            "advanced": True,
+            "reason": "resumed_by_idle_executor",
+            "message": f"La retomé automáticamente.\nTarea reanudada: `{task_id}`",
+        }
+
     def resume_task_response(self, session_id: str, task_id: str) -> str:
         if self.task_ledger is None:
             return "task ledger unavailable"

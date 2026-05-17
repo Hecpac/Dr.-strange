@@ -44,6 +44,20 @@ class ApprovalManagerTests(unittest.TestCase):
             self.assertTrue(finished.is_set())
             self.assertEqual(result["payload"]["status"], "pending")
 
+    def test_archive_removes_approval_from_pending_without_deleting_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = ApprovalManager(Path(tmpdir), "secret")
+            pending = manager.create("deploy", "Deploy to production")
+
+            archived = manager.archive(pending.approval_id, reason="duplicate")
+
+            self.assertTrue(archived)
+            self.assertEqual(manager.list_pending(), [])
+            payload = manager.read(pending.approval_id)
+            self.assertEqual(payload["status"], "archived")
+            self.assertEqual(payload["archive_reason"], "duplicate")
+            self.assertIn("archived_at", payload)
+
     def test_approved_tool_invocation_allows_one_matching_tool_call(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = ApprovalManager(Path(tmpdir), "secret")

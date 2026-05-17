@@ -207,6 +207,39 @@ class AutonomousMaintenanceFlagTests(unittest.TestCase):
                 # At least the maintenance jobs that exist were skipped.
                 self.assertTrue(skipped, msg="expected some maintenance jobs to be skipped")
 
+    def test_task_lifecycle_watchdog_is_scheduled_and_reports_work(self) -> None:
+        import os
+        from claw_v2.adapters.base import LLMRequest, LLMResponse
+        from claw_v2.main import build_runtime
+
+        def fake(req: LLMRequest) -> LLMResponse:
+            return LLMResponse(content="<response>ok</response>", lane=req.lane, provider="anthropic", model=req.model)
+
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake)
+                jobs = {job.name: job for job in runtime.scheduler.list_jobs()}
+                self.assertIn("task_lifecycle_watchdog", jobs)
+
+                with (
+                    patch.object(runtime.bot, "resume_interrupted_tasks", return_value=2),
+                    patch.object(runtime.task_ledger, "reconcile_false_successes", return_value=1),
+                ):
+                    jobs["task_lifecycle_watchdog"].handler()
+
+                events = runtime.observe.recent_events(limit=20, event_type="task_lifecycle_watchdog")
+                self.assertEqual(events[0]["payload"]["resumed_tasks"], 2)
+                self.assertEqual(events[0]["payload"]["reconciled_false_successes"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

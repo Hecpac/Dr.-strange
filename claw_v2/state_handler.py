@@ -20,23 +20,57 @@ from claw_v2.bot_helpers import (
     _is_secret_shaped_token,
     _looks_like_proceed_request,
     _looks_like_ratio_reference_request,
+    _normalize_command_text,
     _select_next_task_queue_item,
     is_destructive_or_external_objective,
 )
 from claw_v2.redaction import redact_sensitive
 
 
-# PR 0D: pending_action freshness window. Matches the existing
-# `_last_options_still_valid` 30-minute TTL so the two slots age the same.
-PENDING_ACTION_TTL_SECONDS = 30 * 60
+# Wave 0: pending_action freshness window. Short approvals resolve only
+# against fresh context: 3 message turns OR 10 minutes, whichever expires
+# first. Last-options remain on their older 30-minute window.
+PENDING_ACTION_TTL_SECONDS = 10 * 60
+PENDING_ACTION_MAX_MESSAGE_DELTA = 3
+PENDING_ACTION_COHERENCE_THRESHOLD = 0.40
 
 
 _REDACTED_MARKERS = ("[REDACTED]", "<REDACTED:")
+_TOPIC_STOPWORDS = {
+    "a", "al", "and", "de", "del", "el", "en", "for", "la", "las", "lo",
+    "los", "me", "mi", "que", "the", "to", "tu", "un", "una", "y", "yo",
+}
 
 
 def _contains_sensitive_redaction(text: str) -> bool:
     redacted = str(redact_sensitive(text, limit=0))
     return redacted != text or any(marker in redacted for marker in _REDACTED_MARKERS)
+
+
+def _topic_tokens(text: str) -> list[str]:
+    normalized = _normalize_command_text(text)
+    tokens = re.findall(r"[a-z0-9][a-z0-9_-]*", normalized)
+    return [tok for tok in tokens if len(tok) > 2 and tok not in _TOPIC_STOPWORDS]
+
+
+def _topic_cosine(left: str, right: str) -> float:
+    left_tokens = _topic_tokens(left)
+    right_tokens = _topic_tokens(right)
+    if not left_tokens or not right_tokens:
+        return 0.0
+    left_counts: dict[str, float] = {}
+    right_counts: dict[str, float] = {}
+    for tok in left_tokens:
+        left_counts[tok] = left_counts.get(tok, 0.0) + 1.0
+    for tok in right_tokens:
+        right_counts[tok] = right_counts.get(tok, 0.0) + 1.0
+    overlap = set(left_counts) & set(right_counts)
+    dot = sum(left_counts[tok] * right_counts[tok] for tok in overlap)
+    norm_left = sum(value * value for value in left_counts.values()) ** 0.5
+    norm_right = sum(value * value for value in right_counts.values()) ** 0.5
+    if norm_left == 0.0 or norm_right == 0.0:
+        return 0.0
+    return dot / (norm_left * norm_right)
 
 
 @dataclass(slots=True)
@@ -139,8 +173,15 @@ class StateHandler:
                 "topic": _compact_summary(user_text, limit=140) or "",
             }
         if isinstance(pending_action, str) and pending_action.strip() and pending_action_source:
+            last_message_id = 0
+            try:
+                last_message_id = int(self._memory.last_message_id(session_id))
+            except Exception:
+                last_message_id = 0
             active_object["pending_action_meta"] = {
                 "created_at": time.time(),
+                "created_message_id": last_message_id,
+                "max_message_delta": PENDING_ACTION_MAX_MESSAGE_DELTA,
                 "source": pending_action_source,
                 "ttl_seconds": PENDING_ACTION_TTL_SECONDS,
                 "tier_hint": "unknown",
@@ -293,6 +334,47 @@ class StateHandler:
                         session_id,
                         source="pending_action",
                     )
+                if not self._pending_action_still_fresh(state, session_id=session_id):
+                    self._expire_pending_action(
+                        session_id,
+                        state,
+                        reason="pending_action_stale",
+                    )
+                    self._emit(
+                        "stale_pending_action_rejected",
+                        {"session_id": session_id, "source": "pending_action"},
+                    )
+                    return (
+                        "La acción pendiente ya no está vigente. "
+                        "Dime en una frase qué acción quieres que ejecute ahora."
+                    )
+                if not self._pending_action_is_coherent(
+                    state,
+                    session_id=session_id,
+                    approval_text=text,
+                ):
+                    self._emit(
+                        "pending_action_coherence_failed",
+                        {"session_id": session_id, "source": "pending_action"},
+                    )
+                    return (
+                        "Tengo una acción pendiente, pero ya no coincide con el tema actual. "
+                        "Confirma en una frase la acción exacta que quieres que ejecute."
+                    )
+                if is_destructive_or_external_objective(pending_action):
+                    self._emit(
+                        "implicit_approval_requires_explicit_approval",
+                        {
+                            "session_id": session_id,
+                            "source": "pending_action",
+                            "pending_action_preview": pending_action[:160],
+                        },
+                    )
+                    return (
+                        "Esa acción toca algo externo, destructivo o irreversible. "
+                        "No la ejecuto con un ok corto. Confirma explícitamente el alcance "
+                        f"si quieres que proceda: {pending_action[:220]}"
+                    )
                 self._emit(
                     "approval_detected",
                     {"session_id": session_id, "source": "pending_action", "text_preview": text[:80]},
@@ -420,8 +502,13 @@ class StateHandler:
         )
         return "La acción pendiente contiene un valor sensible redactado. Reenvíame el objetivo concreto sin tokens ni secretos."
 
-    def _pending_action_still_fresh(self, state: dict[str, Any]) -> bool:
-        """True iff pending_action has fresh meta (≤ TTL).
+    def _pending_action_still_fresh(
+        self,
+        state: dict[str, Any],
+        *,
+        session_id: str | None = None,
+    ) -> bool:
+        """True iff pending_action has fresh meta (≤ TTL and turn count).
 
         Pending actions written before PR 0D do not carry a meta block;
         those are treated as fresh (legacy compatibility), so the resolver
@@ -444,7 +531,118 @@ class StateHandler:
             ttl_value = float(ttl) if ttl is not None else PENDING_ACTION_TTL_SECONDS
         except (TypeError, ValueError):
             ttl_value = PENDING_ACTION_TTL_SECONDS
-        return age <= ttl_value
+        if age > ttl_value:
+            return False
+        if session_id:
+            created_message_id = meta.get("created_message_id")
+            try:
+                created_id = int(created_message_id)
+            except (TypeError, ValueError):
+                created_id = 0
+            if created_id > 0:
+                try:
+                    current_id = int(self._memory.last_message_id(session_id))
+                except Exception:
+                    current_id = created_id
+                try:
+                    max_delta = int(meta.get("max_message_delta") or PENDING_ACTION_MAX_MESSAGE_DELTA)
+                except (TypeError, ValueError):
+                    max_delta = PENDING_ACTION_MAX_MESSAGE_DELTA
+                if current_id - created_id > max_delta:
+                    return False
+        return True
+
+    def _expire_pending_action(
+        self,
+        session_id: str,
+        state: dict[str, Any],
+        *,
+        reason: str,
+    ) -> None:
+        active_object = dict(state.get("active_object") or {})
+        active_object.pop("pending_action_meta", None)
+        checkpoint = dict(state.get("last_checkpoint") or {})
+        checkpoint.update(
+            {
+                "summary": "Pending action expired before approval.",
+                "verification_status": "blocked",
+                "reason": reason,
+            }
+        )
+        self._memory.update_session_state(
+            session_id,
+            pending_action="",
+            active_object=active_object,
+            last_checkpoint=checkpoint,
+            verification_status="blocked",
+        )
+
+    def _pending_action_is_coherent(
+        self,
+        state: dict[str, Any],
+        *,
+        session_id: str,
+        approval_text: str,
+    ) -> bool:
+        active_object = state.get("active_object") or {}
+        meta = active_object.get("pending_action_meta") if isinstance(active_object, dict) else None
+        if not isinstance(meta, dict):
+            return True
+        pending_action = str(state.get("pending_action") or "").strip()
+        topic = str(meta.get("topic") or "").strip()
+        pending_topic = " ".join(part for part in (topic, pending_action) if part)
+        if len(_topic_tokens(pending_topic)) < 2:
+            return True
+        current_topic = self._current_conversation_topic(
+            state,
+            session_id=session_id,
+            approval_text=approval_text,
+        )
+        if len(_topic_tokens(current_topic)) < 2:
+            return True
+        score = _topic_cosine(pending_topic, current_topic)
+        self._emit(
+            "pending_action_coherence_checked",
+            {
+                "session_id": session_id,
+                "score": round(score, 3),
+                "threshold": PENDING_ACTION_COHERENCE_THRESHOLD,
+            },
+        )
+        return score >= PENDING_ACTION_COHERENCE_THRESHOLD
+
+    def _current_conversation_topic(
+        self,
+        state: dict[str, Any],
+        *,
+        session_id: str,
+        approval_text: str,
+    ) -> str:
+        chunks: list[str] = []
+        current_goal = str(state.get("current_goal") or "").strip()
+        if current_goal and current_goal != approval_text.strip():
+            chunks.append(current_goal)
+        reply_context = self._reply_context_text(state)
+        if reply_context:
+            chunks.append(reply_context)
+        try:
+            messages = self._memory.get_recent_messages(session_id, limit=6)
+        except Exception:
+            messages = []
+        assistant_seen = 0
+        for message in reversed(messages):
+            role = message.get("role")
+            content = str(message.get("content") or "").strip()
+            if not content:
+                continue
+            if role == "user":
+                if _looks_like_proceed_request(content):
+                    continue
+                chunks.append(content)
+            elif role == "assistant" and assistant_seen < 2:
+                chunks.append(content)
+                assistant_seen += 1
+        return "\n".join(chunks)
 
     def _last_options_still_valid(self, state: dict[str, Any]) -> bool:
         active_object = state.get("active_object") or {}
@@ -589,13 +787,18 @@ class StateHandler:
         # an old "ok" cannot replay obsolete proposals.
         pending = (state.get("pending_action") or "").strip()
         if pending and not _contains_sensitive_redaction(pending) and not _is_secret_shaped_token(pending):
-            if self._pending_action_still_fresh(state):
+            if self._pending_action_still_fresh(state, session_id=session_id):
                 return DelegatedObjectiveResolution(
                     objective=pending,
                     resolution_source="session_state.pending_action",
                     mode=_infer_session_mode(pending),
                     is_risky=is_destructive_or_external_objective(pending),
                 )
+            self._expire_pending_action(
+                session_id,
+                state,
+                reason="pending_action_stale",
+            )
             self._emit(
                 "resolver_state_stale_ignored",
                 {"session_id": session_id, "slot": "pending_action"},
@@ -643,6 +846,16 @@ class StateHandler:
                     )
 
         # 6. recent assistant proposal
+        reply_context_proposal = self._extract_proposal_from_reply_context(state)
+        if reply_context_proposal:
+            return DelegatedObjectiveResolution(
+                objective=reply_context_proposal,
+                resolution_source="reply_context",
+                mode=_infer_session_mode(reply_context_proposal),
+                is_risky=is_destructive_or_external_objective(reply_context_proposal),
+            )
+
+        # 7. recent assistant proposal
         proposal = self._extract_proposal_from_recent_assistant(session_id)
         if proposal:
             return DelegatedObjectiveResolution(
@@ -652,7 +865,7 @@ class StateHandler:
                 is_risky=is_destructive_or_external_objective(proposal),
             )
 
-        # 7. current_goal
+        # 8. current_goal
         current_goal = (state.get("current_goal") or "").strip()
         if current_goal and len(current_goal) >= 8 and current_goal != text.strip():
             return DelegatedObjectiveResolution(
@@ -660,6 +873,15 @@ class StateHandler:
                 resolution_source="session_state.current_goal",
                 mode=_infer_session_mode(current_goal),
                 is_risky=is_destructive_or_external_objective(current_goal),
+            )
+
+        recent_user_goal = self._extract_recent_user_goal(session_id, exclude=text)
+        if recent_user_goal:
+            return DelegatedObjectiveResolution(
+                objective=recent_user_goal,
+                resolution_source="recent_user_goal",
+                mode=_infer_session_mode(recent_user_goal),
+                is_risky=is_destructive_or_external_objective(recent_user_goal),
             )
 
         # Nothing resolved — return one concrete clarifying question.
@@ -725,6 +947,28 @@ class StateHandler:
         except Exception:
             return {}
         return state if isinstance(state, dict) else {}
+
+    def _extract_recent_user_goal(self, session_id: str, *, exclude: str) -> str | None:
+        get_recent = getattr(self._memory, "get_recent_messages", None)
+        if not callable(get_recent):
+            return None
+        try:
+            messages = get_recent(session_id, limit=8)
+        except Exception:
+            return None
+        excluded = _normalize_command_text(exclude).strip()
+        for message in reversed(messages):
+            if message.get("role") != "user":
+                continue
+            content = str(message.get("content") or "").strip()
+            normalized = _normalize_command_text(content).strip()
+            if not content or normalized == excluded:
+                continue
+            if _looks_like_proceed_request(content):
+                continue
+            if len(content) >= 12:
+                return content[:320]
+        return None
 
     def _reply_context_text(self, state: dict[str, Any]) -> str:
         active_object = state.get("active_object") or {}

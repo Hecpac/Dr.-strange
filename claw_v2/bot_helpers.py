@@ -14,10 +14,13 @@ from claw_v2.coordinator import CoordinatorResult, WorkerTask
 __all__ = [
     "MetaIntrospectionIntent",
     "OwnerDelegationIntent",
+    "TelegramImperativeIntent",
     "detect_meta_introspection_request",
     "detect_owner_delegation",
+    "detect_telegram_imperative",
     "has_explicit_implementation_request",
     "is_destructive_or_external_objective",
+    "looks_like_actionable_telegram_message",
     "_AUTH_DOMAINS",
     "_AUTONOMY_ACTION_PATTERNS",
     "_AUTONOMY_MODES",
@@ -602,6 +605,32 @@ class OwnerDelegationIntent:
     is_decision_delegation: bool = False
     is_no_manual_work_delegation: bool = False
     explicit_action_hint: str | None = None
+    lexical_score: float = 0.0
+    direction_score: float = 0.0
+
+
+@dataclass(frozen=True)
+class TelegramImperativeIntent:
+    """Normalized operator command for Telegram imperative routing.
+
+    ``intent`` is deliberately narrower than "do task": UI focus, clipboard,
+    paste, submit, inspect, and continuation have different safety/capability
+    requirements. ``needs_context`` means the current message names a pronoun
+    or generic object ("la app", "el prompt", "eso") and must be resolved from
+    active mission/session state before execution.
+    """
+
+    intent: str
+    normalized_text: str
+    confidence: float
+    target_hint: str | None = None
+    artifact_hint: str | None = None
+    needs_context: bool = False
+    requires_ui_read: bool = False
+    requires_ui_write: bool = False
+    requires_submit: bool = False
+    requires_clipboard: bool = False
+    matched_pattern: str = ""
 
 
 # Patterns run against `_normalize_command_text(text)` — ASCII, lowercase,
@@ -715,6 +744,84 @@ def _extract_inline_hint(match: re.Match[str]) -> str | None:
     return None
 
 
+_OWNER_DELEGATION_MIN_SIGNAL = 0.70
+
+
+def _owner_delegation_lexical_score(normalized: str, matched_text: str) -> float:
+    matched_tokens = set(_normalize_command_text(matched_text).split())
+    if not matched_tokens:
+        return 0.0
+    tokens = set(normalized.split())
+    if not tokens:
+        return 0.0
+    return len(matched_tokens & tokens) / len(matched_tokens)
+
+
+def _owner_delegation_direction_score(normalized: str, *, kind: str) -> float:
+    """Return how strongly the utterance directs action at the agent.
+
+    Regex match alone is not enough. Phrases like "what would happen if you
+    decide?" contain the lexical trigger but are hypothetical, not a command.
+    """
+    text = f" {normalized} "
+    hypothetical_markers = (
+        " what would happen ",
+        " que pasaria ",
+        " que pasa si ",
+        " if you decide ",
+        " if you choose ",
+        " si decide tu ",
+        " si tu decides ",
+        " dime si decide tu ",
+        " antes de que ",
+        " deberia hacerlo tu o yo ",
+        " deberia hacerlo yo o tu ",
+    )
+    if any(marker in text for marker in hypothetical_markers):
+        return 0.20
+    if re.search(r"\b(?:deberia|should)\b.+\b(?:tu|you)\b.+\b(?:yo|me|i)\b", normalized):
+        return 0.25
+    if kind == "decision" and re.search(
+        r"\b(?:decide tu|tu decides|tu eliges|escoge tu|elige tu|you decide|you choose|you pick)\b",
+        normalized,
+    ):
+        return 0.95
+    if kind == "execution" and re.search(r"\b(?:tu|you|yourself|for me)\b", normalized):
+        return 0.95
+    if kind == "no_manual_work" and re.search(
+        r"\b(?:no me|no tengo|don't ask|don t ask|stop asking|take ownership|handle it|encargate|gestiona|gestionalo|te toca)\b",
+        normalized,
+    ):
+        return 0.95
+    return 0.65
+
+
+def _build_owner_delegation_intent(
+    *,
+    kind: str,
+    normalized: str,
+    match: re.Match[str],
+) -> OwnerDelegationIntent | None:
+    hint = _extract_inline_hint(match)
+    lexical_score = _owner_delegation_lexical_score(normalized, match.group(0))
+    direction_score = _owner_delegation_direction_score(normalized, kind=kind)
+    if lexical_score < _OWNER_DELEGATION_MIN_SIGNAL or direction_score < _OWNER_DELEGATION_MIN_SIGNAL:
+        return None
+    confidence = min(0.99, round((lexical_score + direction_score) / 2, 3))
+    return OwnerDelegationIntent(
+        kind=kind,
+        confidence=confidence,
+        normalized_text=normalized[:200],
+        requires_resolution=hint is None,
+        is_execution_delegation=(kind == "execution"),
+        is_decision_delegation=(kind == "decision"),
+        is_no_manual_work_delegation=(kind == "no_manual_work"),
+        explicit_action_hint=hint,
+        lexical_score=lexical_score,
+        direction_score=direction_score,
+    )
+
+
 def detect_owner_delegation(text: str) -> OwnerDelegationIntent | None:
     """Classify owner-delegation phrases.
 
@@ -729,42 +836,215 @@ def detect_owner_delegation(text: str) -> OwnerDelegationIntent | None:
     for pattern in _OWNER_DELEGATION_EXEC_PATTERNS_ES + _OWNER_DELEGATION_EXEC_PATTERNS_EN:
         match = re.search(pattern, normalized)
         if match:
-            hint = _extract_inline_hint(match)
-            return OwnerDelegationIntent(
-                kind="execution",
-                confidence=0.95,
-                normalized_text=normalized[:200],
-                requires_resolution=hint is None,
-                is_execution_delegation=True,
-                explicit_action_hint=hint,
+            intent = _build_owner_delegation_intent(
+                kind="execution", normalized=normalized, match=match
             )
+            if intent is not None:
+                return intent
 
     for pattern in _OWNER_DELEGATION_DECISION_PATTERNS_ES + _OWNER_DELEGATION_DECISION_PATTERNS_EN:
         match = re.search(pattern, normalized)
         if match:
-            return OwnerDelegationIntent(
-                kind="decision",
-                confidence=0.92,
-                normalized_text=normalized[:200],
-                requires_resolution=True,
-                is_decision_delegation=True,
-                explicit_action_hint=_extract_inline_hint(match),
+            intent = _build_owner_delegation_intent(
+                kind="decision", normalized=normalized, match=match
             )
+            if intent is not None:
+                return intent
 
     for pattern in _OWNER_DELEGATION_NO_MANUAL_PATTERNS_ES + _OWNER_DELEGATION_NO_MANUAL_PATTERNS_EN:
         match = re.search(pattern, normalized)
         if match:
-            hint = _extract_inline_hint(match)
-            return OwnerDelegationIntent(
-                kind="no_manual_work",
-                confidence=0.90,
-                normalized_text=normalized[:200],
-                requires_resolution=hint is None,
-                is_no_manual_work_delegation=True,
-                explicit_action_hint=hint,
+            intent = _build_owner_delegation_intent(
+                kind="no_manual_work", normalized=normalized, match=match
             )
+            if intent is not None:
+                return intent
 
     return None
+
+
+_TELEGRAM_IMPERATIVE_RULES: tuple[dict[str, Any], ...] = (
+    {
+        "intent": "approvals.cleanup_stale_duplicates",
+        "patterns": (
+            r"^\s*(?:limpia|limpiar|depura|depurar|clean\s+up|cleanup)\s*$",
+            r"\b(?:limpia|depura|clean\s+up)\s+(?:las\s+)?(?:aprobaciones|approvals)(?:\s+(?:duplicadas|stale|viejas|pendientes))?\b",
+        ),
+        "needs_context": True,
+    },
+    {
+        "intent": "ui.submit_prompt",
+        "patterns": (
+            r"\b(?:mandalo|mandalo ya|envialo|dale enter|presiona enter|ejecutalo|correlo|run it|submit|send it)\b",
+        ),
+        "requires_ui_write": True,
+        "requires_submit": True,
+        "needs_context": True,
+        "artifact_hint": "prompt",
+    },
+    {
+        "intent": "ui.paste_text",
+        "patterns": (
+            r"\b(?:pegale|pega|pégale)\s+(?:el\s+)?prompt\b",
+            r"\bpaste\s+(?:the\s+)?prompt\b",
+        ),
+        "requires_ui_write": True,
+        "requires_clipboard": True,
+        "needs_context": True,
+        "artifact_hint": "prompt",
+    },
+    {
+        "intent": "ui.set_instructions",
+        "patterns": (
+            r"\bdale\s+las\s+(?:instructions|instrucciones)\b",
+            r"\bgive\s+it\s+the\s+instructions\b",
+        ),
+        "requires_ui_write": True,
+        "requires_clipboard": True,
+        "needs_context": True,
+        "artifact_hint": "instructions",
+    },
+    {
+        "intent": "ui.open_app",
+        "patterns": (
+            r"\babre\s+(?:la\s+)?app(?:\s+de\s+(?P<target_es_app>[a-z0-9 ._-]+))?\b",
+            r"\babre\s+(?P<target_es_bare>codex|chatgpt|chrome|claude)\b",
+            r"\bopen\s+(?:the\s+)?app(?:\s+(?P<target_en_app>[a-z0-9 ._-]+))?\b",
+            r"\bopen\s+(?P<target_en_bare>codex|chatgpt|chrome|claude)\b",
+        ),
+        "requires_ui_write": True,
+        "requires_ui_read": False,
+        "needs_context": False,
+    },
+    {
+        "intent": "ui.inspect_app",
+        "patterns": (
+            r"\brevisa\s+(?:la\s+)?app(?:\s+(?:de\s+)?(?P<target_es_inspect>[a-z0-9 ._-]+))?\b",
+            r"\brevisa\s+(?P<target_es_inspect_bare>codex|chatgpt|chrome|claude)\b",
+            r"\breview\s+(?:the\s+)?app(?:\s+(?P<target_en_inspect>[a-z0-9 ._-]+))?\b",
+            r"\breview\s+(?P<target_en_inspect_bare>codex|chatgpt|chrome|claude)\b",
+        ),
+        "requires_ui_read": True,
+        "needs_context": True,
+    },
+    {
+        "intent": "task.continue_active_mission",
+        "patterns": (
+            r"\b(?:continua|sigue|procede)\b",
+            r"\b(?:continue|proceed)\b",
+        ),
+        "needs_context": True,
+    },
+)
+
+_ACTIONABLE_TELEGRAM_MARKERS: tuple[str, ...] = (
+    "abre",
+    "open",
+    "dale",
+    "pega",
+    "pegale",
+    "paste",
+    "revisa",
+    "review",
+    "corre",
+    "correlo",
+    "ejecuta",
+    "ejecutalo",
+    "encargate",
+    "continua",
+    "sigue",
+    "procede",
+    "orquesta",
+    "orchestrate",
+    "limpia",
+    "limpiar",
+    "depura",
+    "depurar",
+    "clean up",
+    "cleanup",
+    "run",
+    "submit",
+    "send it",
+    "take ownership",
+)
+
+
+def _target_from_match(match: re.Match[str]) -> str | None:
+    for name, value in match.groupdict().items():
+        if not name.startswith("target_"):
+            continue
+        if value:
+            target = value.strip(" .,:;!?")
+            if target:
+                return target[:80]
+    return None
+
+
+def _canonical_target(target: str | None) -> str | None:
+    if not target:
+        return None
+    normalized = _normalize_command_text(target).strip()
+    if "codex" in normalized:
+        return "Codex app"
+    if "chatgpt" in normalized or "chat gpt" in normalized:
+        return "ChatGPT"
+    if "chrome" in normalized:
+        return "Chrome"
+    if "claude" in normalized:
+        return "Claude"
+    if normalized in {"app", "la app", "the app"}:
+        return None
+    return target.strip()[:80]
+
+
+def detect_telegram_imperative(text: str) -> TelegramImperativeIntent | None:
+    """Detect explicit Spanish/English Telegram operator commands.
+
+    This is intentionally separate from the fuzzy task_intent classifier.
+    The global task_intent kill switch may disable weak inference, but it
+    must not disable explicit operator commands.
+    """
+    if not text:
+        return None
+    normalized = _normalize_command_text(text).strip()
+    if not normalized or normalized.startswith("/"):
+        return None
+    for rule in _TELEGRAM_IMPERATIVE_RULES:
+        for pattern in rule["patterns"]:
+            match = re.search(pattern, normalized)
+            if not match:
+                continue
+            return TelegramImperativeIntent(
+                intent=str(rule["intent"]),
+                normalized_text=normalized[:200],
+                confidence=0.94,
+                target_hint=_canonical_target(_target_from_match(match)),
+                artifact_hint=rule.get("artifact_hint"),
+                needs_context=bool(rule.get("needs_context", False)),
+                requires_ui_read=bool(rule.get("requires_ui_read", False)),
+                requires_ui_write=bool(rule.get("requires_ui_write", False)),
+                requires_submit=bool(rule.get("requires_submit", False)),
+                requires_clipboard=bool(rule.get("requires_clipboard", False)),
+                matched_pattern=pattern,
+            )
+    return None
+
+
+def looks_like_actionable_telegram_message(text: str) -> bool:
+    """Broad safety net for imperative-ish Telegram messages.
+
+    A True result is not enough to execute anything. It only means the
+    message must not silently fall into generic brain fallback; callers should
+    map it to a supported intent, block it, or ask one concise clarification.
+    """
+    if not text:
+        return False
+    normalized = _normalize_command_text(text).strip()
+    if not normalized or normalized.startswith("/"):
+        return False
+    if detect_owner_delegation(text) is not None or detect_telegram_imperative(text) is not None:
+        return True
+    return any(re.search(rf"\b{re.escape(marker)}\b", normalized) for marker in _ACTIONABLE_TELEGRAM_MARKERS)
 
 
 def detect_meta_introspection_request(text: str) -> MetaIntrospectionIntent | None:

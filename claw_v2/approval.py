@@ -71,6 +71,20 @@ class ApprovalManager:
     def reject(self, approval_id: str) -> None:
         self._locked_update(approval_id, lambda p: p.__setitem__("status", "rejected"))
 
+    def archive(self, approval_id: str, *, reason: str = "") -> bool:
+        def _do_archive(payload: dict) -> None:
+            if payload.get("status") != "pending":
+                payload["_result"] = False
+                return
+            payload["status"] = "archived"
+            payload["archived_at"] = time.time()
+            if reason:
+                payload["archive_reason"] = reason
+            payload["_result"] = True
+
+        result = self._locked_update(approval_id, _do_archive)
+        return result.pop("_result", False)
+
     def _locked_update(self, approval_id: str, modifier: object) -> dict:
         path = self._path_for(approval_id)
         fd = os.open(str(path), os.O_RDWR)

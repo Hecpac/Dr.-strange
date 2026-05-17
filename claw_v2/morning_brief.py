@@ -11,6 +11,8 @@ from urllib.parse import quote
 from urllib.request import urlopen
 from zoneinfo import ZoneInfo
 
+from claw_v2.redaction import redact_sensitive
+
 logger = logging.getLogger(__name__)
 
 SPANISH_WEEKDAYS = (
@@ -40,6 +42,22 @@ SPANISH_MONTHS = (
 
 ACTIVE_TASK_STATUSES = ("queued", "running")
 ACTIVE_JOB_STATUSES = ("queued", "running", "waiting_approval", "retrying")
+ATTENTION_TASK_STATUSES = ("failed", "timed_out", "lost")
+RECENT_DONE_TASK_STATUSES = ("succeeded", "cancelled")
+ATTENTION_VERIFICATION_STATUSES = ("blocked", "missing_evidence", "pending", "failed")
+ALERT_EVENT_KEYWORDS = (
+    "error",
+    "fail",
+    "failed",
+    "blocked",
+    "lost",
+    "timeout",
+    "quality_guard",
+    "actionable_no_match",
+    "approval_required",
+)
+EMPTY_CALENDAR_MARKERS = ("sin eventos", "sin novedades", "0 eventos")
+EMPTY_EMAIL_MARKERS = ("0 sin leer", "sin correos", "sin novedades")
 
 
 @dataclass(slots=True)
@@ -69,6 +87,8 @@ class MorningBriefService:
         job_service: Any | None = None,
         task_board: Any | None = None,
         pipeline: Any | None = None,
+        approvals: Any | None = None,
+        memory: Any | None = None,
         clock: Callable[[], datetime] | None = None,
         weather_fetcher: Callable[[str, float], str] | None = None,
         command_runner: Callable[[str, float], str] | None = None,
@@ -84,11 +104,16 @@ class MorningBriefService:
         self.job_service = job_service
         self.task_board = task_board
         self.pipeline = pipeline
+        self.approvals = approvals
+        self.memory = memory
         self.clock = clock or self._local_now
         self.weather_fetcher = weather_fetcher or fetch_weather_summary
         self.command_runner = command_runner or run_external_summary_command
         self.email_fetcher = email_fetcher or fetch_mail_summary
         self.calendar_fetcher = calendar_fetcher or fetch_calendar_summary
+        self._source_records: list[dict[str, Any]] = []
+        self._brief_counts: dict[str, int] = {}
+        self._last_brief_diagnostics: dict[str, Any] = {}
 
     def run_if_due(self) -> str | None:
         now = self.clock()
@@ -123,72 +148,145 @@ class MorningBriefService:
                 "weather_location": self.settings.weather_location or "auto",
                 "email_configured": bool(self.settings.email_command),
                 "calendar_configured": bool(self.settings.calendar_command),
+                **self._last_brief_diagnostics,
             },
         )
         return message
 
     def build_message(self, now: datetime) -> str:
+        self._source_records = []
+        self._brief_counts = {
+            "work_items": 0,
+            "approval_items": 0,
+            "context_items": 0,
+            "alert_items": 0,
+        }
         date_line = format_spanish_date(now)
+        weather_line = self._weather_line()
+        calendar_line = self._calendar_line()
+        email_line = self._email_line()
         sections = [
             f"{self.settings.greeting}\nHoy es {date_line}.",
-            f"Clima: {self._weather_line()}",
-            f"Agenda: {self._calendar_line()}",
-            f"Correo: {self._email_line()}",
-            self._pending_work_section(),
+            f"Clima: {weather_line}",
+            f"Agenda: {calendar_line}",
+            f"Correo: {email_line}",
+            self._work_section(),
+            self._approval_section(now),
+            self._session_context_section(),
             self._agent_section(),
             self._system_section(),
+            self._source_section(),
         ]
-        return "\n\n".join(section for section in sections if section.strip())
+        message = "\n\n".join(section for section in sections if section.strip())
+        diagnostics = self._brief_diagnostics()
+        self._last_brief_diagnostics = diagnostics
+        if diagnostics["low_signal"]:
+            message = (
+                f"{message}\n\n"
+                "Diagnostico: brief de baja senal. No encontre tareas activas, "
+                "aprobaciones, contexto de sesion ni alertas recientes; revisa "
+                "conectores si esperabas agenda/correo con contenido."
+            )
+            self._emit(f"{self.settings.report_name}_low_signal", diagnostics)
+        return message
 
     def _local_now(self) -> datetime:
         return datetime.now(ZoneInfo(self.settings.timezone))
 
     def _weather_line(self) -> str:
         try:
-            return self.weather_fetcher(self.settings.weather_location, self.settings.command_timeout_seconds)
+            result = self.weather_fetcher(self.settings.weather_location, self.settings.command_timeout_seconds)
         except Exception as exc:
             logger.warning("morning brief weather unavailable: %s", exc)
+            self._record_source("clima", "wttr.in", "unavailable", type(exc).__name__)
             return f"no disponible ({type(exc).__name__})"
+        status = "empty" if not str(result or "").strip() else "ok"
+        self._record_source("clima", "wttr.in", status, self.settings.weather_location or "auto")
+        return result
 
-    def _external_line(self, command: str | None, *, default: str) -> str:
+    def _external_line(self, command: str | None, *, default: str, name: str) -> str:
         if not command:
+            self._record_source(name, "not_configured", "empty", default)
             return default
         try:
             result = self.command_runner(command, self.settings.command_timeout_seconds)
         except Exception as exc:
             logger.warning("morning brief command failed: %s", exc)
+            self._record_source(name, f"command:{_trim(command, 80)}", "unavailable", type(exc).__name__)
             return f"error consultando conector ({type(exc).__name__})"
-        return result or "sin novedades"
+        value = result or "sin novedades"
+        self._record_source(name, f"command:{_trim(command, 80)}", self._source_status(name, value), "")
+        return value
 
     def _calendar_line(self) -> str:
         if self.settings.calendar_command:
-            return self._external_line(self.settings.calendar_command, default="sin novedades")
+            return self._external_line(self.settings.calendar_command, default="sin novedades", name="agenda")
         try:
-            return self.calendar_fetcher(self.settings.command_timeout_seconds) or "sin eventos hoy"
+            result = self.calendar_fetcher(self.settings.command_timeout_seconds) or "sin eventos hoy"
         except Exception as exc:
             logger.warning("morning brief calendar unavailable: %s", exc)
+            self._record_source("agenda", "apple_calendar", "unavailable", type(exc).__name__)
             return f"no disponible ({type(exc).__name__})"
+        self._record_source("agenda", "apple_calendar", self._source_status("agenda", result), "")
+        return result
 
     def _email_line(self) -> str:
         if self.settings.email_command:
-            return self._external_line(self.settings.email_command, default="sin novedades")
+            return self._external_line(self.settings.email_command, default="sin novedades", name="correo")
         try:
-            return self.email_fetcher(self.settings.command_timeout_seconds) or "sin correos prioritarios"
+            result = self.email_fetcher(self.settings.command_timeout_seconds) or "sin correos prioritarios"
         except Exception as exc:
             logger.warning("morning brief email unavailable: %s", exc)
+            self._record_source("correo", "apple_mail", "unavailable", type(exc).__name__)
             return f"no disponible ({type(exc).__name__})"
+        self._record_source("correo", "apple_mail", self._source_status("correo", result), "")
+        return result
 
     def _pending_work_section(self) -> str:
-        lines: list[str] = ["Pendientes:"]
+        return self._work_section()
+
+    def _work_section(self) -> str:
+        lines: list[str] = ["Trabajo:"]
+        work_items = 0
         if self.task_ledger is not None:
             try:
-                tasks = self.task_ledger.list(statuses=ACTIVE_TASK_STATUSES, limit=5)
+                tasks = self.task_ledger.list(limit=20)
             except Exception:
                 tasks = []
+            active_tasks = [
+                task for task in tasks
+                if str(getattr(task, "status", "")) in ACTIVE_TASK_STATUSES
+            ]
+            attention_tasks = [
+                task for task in tasks
+                if str(getattr(task, "status", "")) in ATTENTION_TASK_STATUSES
+                or str(getattr(task, "verification_status", "")) in ATTENTION_VERIFICATION_STATUSES
+            ]
+            done_tasks = [
+                task for task in tasks
+                if str(getattr(task, "status", "")) in RECENT_DONE_TASK_STATUSES
+            ]
+            if active_tasks:
+                lines.append("Activas:")
             lines.extend(
                 f"- Task {task.task_id}: {task.status} - {_trim(task.objective, 90)}"
-                for task in tasks
+                for task in active_tasks[:5]
             )
+            work_items += min(len(active_tasks), 5)
+            if attention_tasks:
+                lines.append("Atencion:")
+            lines.extend(
+                f"- Task {task.task_id}: {task.status} - {_trim(task.error or task.summary or task.objective, 90)}"
+                for task in attention_tasks[:5]
+            )
+            work_items += min(len(attention_tasks), 5)
+            if done_tasks:
+                lines.append("Cerradas recientes:")
+            lines.extend(
+                f"- Task {task.task_id}: {task.status} - {_trim(task.summary or task.objective, 90)}"
+                for task in done_tasks[:5]
+            )
+            work_items += min(len(done_tasks), 5)
         if self.job_service is not None:
             try:
                 jobs = self.job_service.list(statuses=ACTIVE_JOB_STATUSES, limit=5)
@@ -198,6 +296,7 @@ class MorningBriefService:
                 f"- Job {job.job_id}: {job.status} - {job.kind}"
                 for job in jobs
             )
+            work_items += len(jobs)
         if self.task_board is not None:
             try:
                 board_tasks = [*self.task_board.pending()[:3], *self.task_board.active()[:3]]
@@ -207,6 +306,7 @@ class MorningBriefService:
                 f"- Board {task.id}: {task.status.value} - {_trim(task.title, 90)}"
                 for task in board_tasks
             )
+            work_items += len(board_tasks)
         if self.pipeline is not None:
             try:
                 runs = self.pipeline.list_active()
@@ -216,8 +316,85 @@ class MorningBriefService:
                 f"- Pipeline {run.issue_id}: {run.status} - {run.branch_name}"
                 for run in runs[:5]
             )
+            work_items += min(len(runs), 5)
+        self._brief_counts["work_items"] = work_items
         if len(lines) == 1:
-            lines.append("- Sin tareas activas registradas.")
+            lines.append("- Sin tareas activas ni cambios recientes registrados.")
+        return "\n".join(lines)
+
+    def _approval_section(self, now: datetime) -> str:
+        if self.approvals is None:
+            return ""
+        try:
+            approvals = self.approvals.list_pending()
+        except Exception as exc:
+            logger.warning("morning brief approvals unavailable: %s", exc)
+            return f"Aprobaciones: no disponible ({type(exc).__name__})."
+        self._brief_counts["approval_items"] = len(approvals)
+        if not approvals:
+            return "Aprobaciones: 0 pendientes."
+        audit = self._classify_pending_approvals(approvals, now=now)
+        lines = [
+            (
+                "Aprobaciones: "
+                f"{len(approvals)} pendientes; "
+                f"{audit['still_needed']} activas; "
+                f"{audit['stale']} stale; "
+                f"{audit['expired']} expiradas; "
+                f"{audit['duplicate']} duplicadas."
+            )
+        ]
+        seen_actions: set[str] = set()
+        for item in approvals[:5]:
+            summary = _safe_text(item.get("summary") or item.get("action") or "aprobacion pendiente", 160)
+            age_hours = self._approval_age_hours(item, now=now)
+            classification = self._classify_approval(item, now=now, seen_actions=seen_actions)
+            related = self._approval_related_context(item)
+            suffix = f"; {related}" if related else ""
+            lines.append(
+                f"- {classification}: {summary} (edad ~{age_hours:.1f}h{suffix}). "
+                "No auto-apruebo."
+            )
+        return "\n".join(lines)
+
+    def _session_context_section(self) -> str:
+        if self.memory is None:
+            return ""
+        try:
+            states = self.memory.list_session_states(limit=5)
+        except Exception as exc:
+            logger.warning("morning brief session context unavailable: %s", exc)
+            return f"Contexto activo: no disponible ({type(exc).__name__})."
+        lines = ["Contexto activo:"]
+        for state in states:
+            details: list[str] = []
+            current_goal = _safe_text(state.get("current_goal"), 120)
+            pending_action = _safe_text(state.get("pending_action"), 120)
+            verification = _safe_text(state.get("verification_status"), 60)
+            active_object = state.get("active_object") if isinstance(state.get("active_object"), dict) else {}
+            mission = active_object.get("active_mission") or active_object.get("_mission") or {}
+            mission_goal = ""
+            if isinstance(mission, dict):
+                mission_goal = _safe_text(mission.get("last_user_goal") or mission.get("objective"), 120)
+            task_queue = state.get("task_queue") if isinstance(state.get("task_queue"), list) else []
+            if current_goal:
+                details.append(f"objetivo={current_goal}")
+            if pending_action:
+                details.append(f"pendiente={pending_action}")
+            if mission_goal:
+                details.append(f"mision={mission_goal}")
+            if task_queue:
+                details.append(f"queue={len(task_queue)}")
+            if verification and verification != "unknown":
+                details.append(f"verificacion={verification}")
+            if not details:
+                continue
+            session_id = _safe_text(state.get("session_id"), 40) or "session"
+            lines.append(f"- {session_id}: " + "; ".join(details[:4]))
+        context_items = len(lines) - 1
+        self._brief_counts["context_items"] = context_items
+        if context_items == 0:
+            lines.append("- Sin objetivo, pendiente o mision activa en session_state reciente.")
         return "\n".join(lines)
 
     def _agent_section(self) -> str:
@@ -256,11 +433,141 @@ class MorningBriefService:
                 recent = self.observe.recent_events(limit=50)
             except Exception:
                 recent = []
-            errors = [event for event in recent if "error" in str(event.get("event_type", "")).lower()]
-            parts.append(f"{len(errors)} eventos de error recientes")
+            alert_counts = self._alert_counts(recent)
+            alert_total = sum(alert_counts.values())
+            self._brief_counts["alert_items"] = alert_total
+            if alert_counts:
+                shown = ", ".join(f"{name}={count}" for name, count in list(alert_counts.items())[:5])
+                parts.append(f"Alertas recientes: {shown}")
+            else:
+                parts.append("0 alertas recientes")
         if not parts:
             return ""
         return "Sistema: " + "; ".join(parts) + "."
+
+    def _source_section(self) -> str:
+        if not self._source_records:
+            return ""
+        parts = []
+        for item in self._source_records:
+            detail = str(item.get("detail") or "").strip()
+            source = str(item.get("source") or "unknown").strip()
+            suffix = f" ({_trim(detail, 80)})" if detail else ""
+            parts.append(f"{item['name']}={item['status']}:{source}{suffix}")
+        return "Fuentes: " + "; ".join(parts) + "."
+
+    def _brief_diagnostics(self) -> dict[str, Any]:
+        source_statuses = {item["name"]: item["status"] for item in self._source_records}
+        operational_signal = (
+            int(self._brief_counts.get("work_items", 0))
+            + int(self._brief_counts.get("approval_items", 0))
+            + int(self._brief_counts.get("context_items", 0))
+            + int(self._brief_counts.get("alert_items", 0))
+        )
+        agenda_empty = source_statuses.get("agenda") in {"empty", "unavailable"}
+        correo_empty = source_statuses.get("correo") in {"empty", "unavailable"}
+        low_signal = operational_signal == 0 and agenda_empty and correo_empty
+        return {
+            "source_statuses": source_statuses,
+            "work_items": int(self._brief_counts.get("work_items", 0)),
+            "approval_items": int(self._brief_counts.get("approval_items", 0)),
+            "context_items": int(self._brief_counts.get("context_items", 0)),
+            "alert_items": int(self._brief_counts.get("alert_items", 0)),
+            "low_signal": low_signal,
+        }
+
+    def _record_source(self, name: str, source: str, status: str, detail: str) -> None:
+        self._source_records.append(
+            {
+                "name": name,
+                "source": _safe_text(source, 120),
+                "status": status,
+                "detail": _safe_text(detail, 120),
+            }
+        )
+
+    def _source_status(self, name: str, value: str) -> str:
+        lowered = str(value or "").strip().lower()
+        if not lowered:
+            return "empty"
+        markers = EMPTY_EMAIL_MARKERS if name == "correo" else EMPTY_CALENDAR_MARKERS
+        if any(marker in lowered for marker in markers):
+            return "empty"
+        if lowered.startswith("error ") or lowered.startswith("no disponible"):
+            return "unavailable"
+        return "ok"
+
+    def _alert_counts(self, events: list[dict[str, Any]]) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for event in events:
+            event_type = str(event.get("event_type") or "")
+            lowered = event_type.lower()
+            if not any(keyword in lowered for keyword in ALERT_EVENT_KEYWORDS):
+                continue
+            counts[event_type] = counts.get(event_type, 0) + 1
+        return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
+    def _approval_age_hours(self, item: dict[str, Any], *, now: datetime) -> float:
+        try:
+            created_at = float(item.get("created_at") or 0.0)
+        except (TypeError, ValueError):
+            created_at = 0.0
+        if created_at <= 0:
+            return 0.0
+        return max(0.0, (now.timestamp() - created_at) / 3600.0)
+
+    def _approval_risk_tier(self, item: dict[str, Any]) -> str:
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        raw = str(metadata.get("risk_tier") or item.get("risk_tier") or "").lower()
+        if "critical" in raw or "tier_3" in raw or "tier3" in raw:
+            return "critical"
+        if "medium" in raw or "tier_2" in raw or "tier2" in raw:
+            return "medium"
+        action = str(item.get("action") or item.get("summary") or "").lower()
+        if any(token in action for token in ("deploy", "publish", "publicar", "delete", "borrar", "merge", "push")):
+            return "critical"
+        return "low"
+
+    def _classify_approval(self, item: dict[str, Any], *, now: datetime, seen_actions: set[str]) -> str:
+        status = str(item.get("status") or "")
+        if status == "expired":
+            return "expired"
+        action_key = str(item.get("action") or item.get("summary") or "").strip()
+        if action_key in seen_actions:
+            return "duplicate"
+        seen_actions.add(action_key)
+        age_hours = self._approval_age_hours(item, now=now)
+        risk = self._approval_risk_tier(item)
+        if risk == "low" and age_hours >= 24:
+            return "stale"
+        if risk == "medium" and age_hours >= 72:
+            return "stale"
+        if risk == "critical" and age_hours >= 72:
+            return "stale"
+        return "still_needed"
+
+    def _classify_pending_approvals(self, approvals: list[dict[str, Any]], *, now: datetime) -> dict[str, int]:
+        counts = {
+            "still_needed": 0,
+            "stale": 0,
+            "superseded": 0,
+            "blocked": 0,
+            "expired": 0,
+            "duplicate": 0,
+        }
+        seen_actions: set[str] = set()
+        for item in approvals:
+            classification = self._classify_approval(item, now=now, seen_actions=seen_actions)
+            counts[classification] = counts.get(classification, 0) + 1
+        return counts
+
+    def _approval_related_context(self, item: dict[str, Any]) -> str:
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        for key in ("task_id", "mission_id", "session_id"):
+            value = _safe_text(metadata.get(key) or item.get(key), 80)
+            if value:
+                return f"{key}={value}"
+        return ""
 
     def _mark_sent(self, now: datetime) -> None:
         self.settings.stamp_path.parent.mkdir(parents=True, exist_ok=True)
@@ -406,3 +713,9 @@ def _trim(value: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - 3].rstrip() + "..."
+
+
+def _safe_text(value: Any, limit: int) -> str:
+    if value is None:
+        return ""
+    return str(redact_sensitive(str(value), limit=limit)).strip()

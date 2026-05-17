@@ -6,7 +6,9 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
+from claw_v2.approval import ApprovalManager
 from claw_v2.jobs import JobService
+from claw_v2.memory import MemoryStore
 from claw_v2.metrics import MetricsTracker
 from claw_v2.morning_brief import (
     MorningBriefService,
@@ -116,6 +118,91 @@ class MorningBriefTests(unittest.TestCase):
             self.assertIn("perf-optimizer: pausado", sent[0])
             self.assertEqual((root / "morning.txt").read_text(encoding="utf-8"), "2026-04-27")
             self.assertEqual(observe.recent_events(limit=1)[0]["event_type"], "morning_brief_sent")
+
+    def test_brief_includes_real_operational_context_not_only_active_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            observe = ObserveStream(root / "claw.db")
+            ledger = TaskLedger(root / "claw.db")
+            approvals = ApprovalManager(root / "approvals", "secret")
+            memory = MemoryStore(root / "memory.db")
+            approvals.create(
+                "social_publish",
+                "Publicar post de HealthSherpa",
+                metadata={"risk_tier": "medium", "mission_id": "mission-social"},
+            )
+            ledger.create(
+                task_id="task-failed",
+                session_id="tg-123",
+                objective="Revisar correo de Tatiana sobre HealthSherpa",
+                runtime="coordinator",
+                status="failed",
+            )
+            ledger.create(
+                task_id="task-done",
+                session_id="tg-123",
+                objective="Cerrar auditoria de Telegram router",
+                runtime="coordinator",
+                status="succeeded",
+            )
+            memory.update_session_state(
+                "tg-123",
+                current_goal="Arreglar briefs matutinos",
+                pending_action="Revisar fuentes reales antes del siguiente brief",
+                verification_status="pending",
+            )
+            observe.emit("brain_tooluse_ledger_failed", payload={"task_id": "task-failed"})
+            observe.emit("telegram_actionable_no_match", payload={"candidate_action": "paste_prompt"})
+
+            service = MorningBriefService(
+                settings=MorningBriefSettings(stamp_path=root / "morning.txt"),
+                notify=lambda _: None,
+                observe=observe,
+                task_ledger=ledger,
+                approvals=approvals,
+                memory=memory,
+                clock=lambda: datetime(2026, 5, 16, 5, 0),
+                weather_fetcher=lambda location, timeout: "auto: 70F",
+                calendar_fetcher=lambda timeout: "sin eventos hoy",
+                email_fetcher=lambda timeout: "0 sin leer",
+            )
+
+            message = service.build_message(datetime(2026, 5, 16, 5, 0))
+
+            self.assertIn("Aprobaciones:", message)
+            self.assertIn("Publicar post de HealthSherpa", message)
+            self.assertIn("Atencion:", message)
+            self.assertIn("task-failed", message)
+            self.assertIn("Cerradas recientes:", message)
+            self.assertIn("task-done", message)
+            self.assertIn("Contexto activo:", message)
+            self.assertIn("Arreglar briefs matutinos", message)
+            self.assertIn("Alertas recientes:", message)
+            self.assertIn("brain_tooluse_ledger_failed", message)
+            self.assertIn("telegram_actionable_no_match", message)
+
+    def test_brief_reports_source_provenance_and_low_signal_diagnostic(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            observe = ObserveStream(root / "claw.db")
+            service = MorningBriefService(
+                settings=MorningBriefSettings(stamp_path=root / "morning.txt"),
+                notify=lambda _: None,
+                observe=observe,
+                clock=lambda: datetime(2026, 5, 16, 5, 0),
+                weather_fetcher=lambda location, timeout: "auto: 70F",
+                calendar_fetcher=lambda timeout: "sin eventos hoy",
+                email_fetcher=lambda timeout: "0 sin leer",
+            )
+
+            message = service.build_message(datetime(2026, 5, 16, 5, 0))
+
+            self.assertIn("Fuentes:", message)
+            self.assertIn("clima=ok", message)
+            self.assertIn("agenda=empty", message)
+            self.assertIn("correo=empty", message)
+            self.assertIn("baja senal", message)
+            self.assertEqual(observe.recent_events(limit=1)[0]["event_type"], "morning_brief_low_signal")
 
     def test_missing_connectors_are_explicit_in_message(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
