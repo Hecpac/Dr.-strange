@@ -320,7 +320,7 @@ class CoordinatorService:
     def _write_scratch(self, scratch: Path, phase: str, results: list[WorkerResult]) -> None:
         """Write worker results to scratch directory as JSON."""
         phase_dir = scratch / phase
-        phase_dir.mkdir(exist_ok=True)
+        phase_dir.mkdir(parents=True, exist_ok=True)
         for r in results:
             data = {
                 "task_name": r.task_name,

@@ -43,7 +43,9 @@ from claw_v2.chrome_handler import ChromeHandler
 from claw_v2.computer_handler import ComputerHandler
 from claw_v2.design_handler import DesignHandler
 from claw_v2.nlm_handler import NlmHandler
+from claw_v2.natural_language_renderer import NaturalLanguageRenderer
 from claw_v2.state_handler import StateHandler, _BrainShortcut
+from claw_v2.semantic_turn import SemanticTurn, classify_semantic_turn
 from claw_v2.terminal_handler import TerminalHandler
 from claw_v2.wiki_handler import WikiHandler
 from claw_v2.coordinator import CoordinatorService
@@ -1308,6 +1310,51 @@ class BotService:
                 route,
             )
 
+    def _emit_semantic_turn_trace(
+        self,
+        *,
+        session_id: str,
+        text: str,
+        semantic_turn: SemanticTurn,
+        state_sources_checked: list[str],
+        approval_scope_match: str,
+        decision: str,
+        output_kind: str,
+        response_text: str | None = None,
+    ) -> None:
+        if self.observe is None:
+            return
+        renderer = NaturalLanguageRenderer(mode="normal")
+        leaked = renderer.leaked_internal_labels(response_text or "")
+        try:
+            self.observe.emit(
+                "semantic_turn_trace",
+                payload={
+                    "session_id": session_id,
+                    "semantic_intent": semantic_turn.intent,
+                    "semantic_confidence": semantic_turn.confidence,
+                    "clear_goal": semantic_turn.clear_goal,
+                    "state_sources_checked": list(state_sources_checked),
+                    "approval_scope_match": approval_scope_match,
+                    "decision": decision,
+                    "output_kind": output_kind,
+                    "leaked_internal_labels": leaked,
+                    "text_preview": text[:80],
+                    "text_len": len(text),
+                    "reasons": list(semantic_turn.reasons),
+                },
+            )
+        except Exception:
+            logger.debug("failed to emit semantic_turn_trace", exc_info=True)
+
+    @staticmethod
+    def _semantic_approval_scope_default(semantic_turn: SemanticTurn) -> str:
+        if semantic_turn.intent == "new_task":
+            return "skipped_new_task"
+        if semantic_turn.intent in {"approval_response", "continue_active_mission"}:
+            return "deferred_until_state_scope"
+        return "not_checked"
+
     def _emit_skill_task_event(
         self,
         event_type: str,
@@ -1634,7 +1681,13 @@ class BotService:
             content=content,
             response=response,
         ):
-            corrected = self._unexecuted_start_response()
+            blocker_task_id = self._record_evidence_gate_explicit_blocker(
+                session_id=session_id,
+                source_text=source_text,
+                blocked_content=content,
+                reason="start_claim_without_evidence",
+            )
+            corrected = self._unexecuted_start_response(blocker_task_id)
             self._emit_identity_capability_binding_guard(
                 "evidence_gate_blocked_start_claim",
                 session_id,
@@ -1655,7 +1708,13 @@ class BotService:
             content=content,
             response=response,
         ):
-            corrected = self._pending_evidence_response()
+            blocker_task_id = self._record_evidence_gate_explicit_blocker(
+                session_id=session_id,
+                source_text=source_text,
+                blocked_content=content,
+                reason="completion_claim_without_evidence",
+            )
+            corrected = self._pending_evidence_response(blocker_task_id)
             self._emit_identity_capability_binding_guard(
                 "evidence_gate_blocked_completion_claim",
                 session_id,
@@ -1962,6 +2021,166 @@ class BotService:
             except Exception:
                 logger.debug("failed to emit reply_context_loaded", exc_info=True)
 
+    def _maybe_handle_brain_first_new_task(
+        self,
+        *,
+        semantic_turn: SemanticTurn,
+        session_id: str,
+        text: str,
+        runtime_channel: str | None,
+    ) -> str | None:
+        if (runtime_channel or "").strip().lower() != "telegram":
+            return None
+        if semantic_turn.intent != "new_task" or not semantic_turn.clear_goal:
+            return None
+        if not self._looks_like_durable_mission_request(text):
+            return None
+
+        objective = semantic_turn.objective or text.strip()
+        mission_name = self._extract_requested_mission_name(text)
+        task_id = f"{session_id}:brain-first:{time.time_ns()}"
+        mission_id = f"mission:{session_id}:{self._stable_text_hash(objective)}"
+        now = time.time()
+        state = self.brain.memory.get_session_state(session_id)
+        active_object = dict(state.get("active_object") or {})
+        active_object["active_mission"] = {
+            "mission_id": mission_id,
+            "channel": "telegram",
+            "chat_id": session_id,
+            "active_target": mission_name or "durable mission",
+            "active_artifact": "continuation smoke proposal",
+            "last_user_goal": objective[:240],
+            "pending_action": objective,
+            "proposal_task_id": task_id,
+            "status": "waiting_for_continue",
+            "created_at": now,
+            "updated_at": now,
+            "expires_at": now + 30 * 60,
+        }
+        active_object["last_actionable_proposal"] = {
+            "objective": objective[:500],
+            "source": "brain_first_new_task",
+            "task_id": task_id,
+            "created_at": now,
+        }
+        task_queue = self._task_handler.upsert_task_queue_entry(
+            state.get("task_queue") or [],
+            summary=objective,
+            mode=_infer_session_mode(objective),
+            status="pending",
+            source="brain_first_new_task",
+            priority=0,
+            depends_on=self._task_handler.derive_task_dependencies(
+                state.get("task_queue") or [],
+                summary=objective,
+            ),
+        )
+        if self.task_ledger is not None:
+            artifacts = {
+                "semantic_turn": {
+                    "intent": semantic_turn.intent,
+                    "confidence": semantic_turn.confidence,
+                    "clear_goal": semantic_turn.clear_goal,
+                    "reasons": list(semantic_turn.reasons),
+                },
+                "proposal": {
+                    "status": "waiting_for_continue",
+                    "mission_name": mission_name or "",
+                },
+                "evidence": {"brain_first_semantic_classification": semantic_turn.intent},
+            }
+            self.task_ledger.create(
+                task_id=task_id,
+                session_id=session_id,
+                objective=objective,
+                runtime="brain_first",
+                mode=_infer_session_mode(objective),
+                status="running",
+                notify_policy="none",
+                route={"channel": "telegram", "external_session_id": session_id},
+                metadata={
+                    "origin": "brain_first_semantic",
+                    "semantic_intent": semantic_turn.intent,
+                    "mission_id": mission_id,
+                    "mission_name": mission_name or "",
+                    "source_message": text[:500],
+                    "result_status": "waiting_for_continue",
+                },
+                artifacts=artifacts,
+            )
+            self.task_ledger.mark_running_checkpoint(
+                task_id,
+                summary="Brain-first durable mission proposal created; waiting for explicit continuation.",
+                verification_status="awaiting_continue",
+                artifacts=artifacts,
+            )
+
+        self.brain.memory.update_session_state(
+            session_id,
+            mode="ops",
+            current_goal=objective[:280],
+            pending_action=objective,
+            task_queue=task_queue,
+            verification_status="awaiting_continue",
+            active_object=active_object,
+            last_checkpoint={
+                "summary": "Brain-first durable mission proposal is waiting for continuation.",
+                "verification_status": "awaiting_continue",
+                "task_id": task_id,
+                "mission_id": mission_id,
+            },
+        )
+        self._emit_safe(
+            "brain_first_new_task_created",
+            {
+                "session_id": session_id,
+                "task_id": task_id,
+                "mission_id": mission_id,
+                "mission_name": mission_name or "",
+                "objective_preview": objective[:160],
+            },
+        )
+        name_fragment = f" `{mission_name}`" if mission_name else ""
+        response = (
+            f"Creé la misión durable{name_fragment} y la dejé lista como propuesta. "
+            "Respóndeme \"Procede\" para ejecutarla; si quieres ajustar el alcance, dime el cambio concreto."
+        )
+        rendered = NaturalLanguageRenderer(mode="normal").render(response)
+        self._store_memory_turn(session_id, text, rendered, assistant_limit=2000)
+        self._remember_assistant_turn_state(session_id, text, rendered)
+        self._emit_semantic_turn_trace(
+            session_id=session_id,
+            text=text,
+            semantic_turn=semantic_turn,
+            state_sources_checked=["message_text", "session_state", "task_ledger"],
+            approval_scope_match="skipped_new_task",
+            decision="new_task_proposal_created",
+            output_kind="natural_reply",
+            response_text=rendered,
+        )
+        return rendered
+
+    @staticmethod
+    def _looks_like_durable_mission_request(text: str) -> bool:
+        normalized = _normalize_command_text(text)
+        return (
+            "mision durable" in normalized
+            or "misión durable" in text.lower()
+            or "durable mission" in normalized
+            or "mission durable" in normalized
+        )
+
+    @staticmethod
+    def _extract_requested_mission_name(text: str) -> str | None:
+        match = re.search(
+            r"\b(?:llamada|llamado|called|named)\s+([A-Za-z0-9][A-Za-z0-9_.:-]{1,120})",
+            text,
+            re.IGNORECASE,
+        )
+        if not match:
+            return None
+        return match.group(1).strip(" .,:;!?`'\"") or None
+
     def handle_text(
         self,
         *,
@@ -1978,6 +2197,16 @@ class BotService:
         self._ensure_default_autonomy(session_id)
         self._remember_inbound_context(session_id, context_metadata)
         stripped = text.strip()
+        semantic_turn = classify_semantic_turn(stripped)
+        self._emit_semantic_turn_trace(
+            session_id=session_id,
+            text=stripped,
+            semantic_turn=semantic_turn,
+            state_sources_checked=["message_text"],
+            approval_scope_match=self._semantic_approval_scope_default(semantic_turn),
+            decision="classified_before_state_resolution",
+            output_kind="routing_trace",
+        )
         context = CommandContext(user_id=user_id, session_id=session_id, text=text, stripped=stripped)
         command_response = dispatch_commands(self._pre_state_commands, context)
         if isinstance(command_response, _BrainShortcut):
@@ -1989,7 +2218,19 @@ class BotService:
             )
         if command_response is not None:
             return command_response
-        computer_approval_response = self._handle_pending_computer_approval_response(session_id, stripped)
+        brain_first_new_task_response = self._maybe_handle_brain_first_new_task(
+            semantic_turn=semantic_turn,
+            session_id=session_id,
+            text=stripped,
+            runtime_channel=runtime_channel,
+        )
+        if brain_first_new_task_response is not None:
+            return brain_first_new_task_response
+        computer_approval_response = self._handle_pending_computer_approval_response(
+            session_id,
+            stripped,
+            semantic_turn=semantic_turn,
+        )
         if computer_approval_response is not None:
             self._store_memory_turn(session_id, stripped, computer_approval_response, assistant_limit=2000)
             self._remember_assistant_turn_state(session_id, stripped, computer_approval_response)
@@ -3935,18 +4176,100 @@ class BotService:
             "No marco la accion como completada sin ejecucion verificable."
         )
 
-    def _pending_evidence_response(self) -> str:
+    def _record_evidence_gate_explicit_blocker(
+        self,
+        *,
+        session_id: str,
+        source_text: str,
+        blocked_content: str,
+        reason: str,
+    ) -> str | None:
+        task_id = f"{session_id}:evidence-gate:{time.time_ns()}"
+        objective = _compact_summary(source_text, limit=220) or "Evidence gate blocked an unverified action claim"
+        artifacts = {
+            "action_result": {
+                "status": "explicit_blocker",
+                "reason": reason,
+                "source_message_hash": self._stable_text_hash(source_text),
+            },
+            "evidence": {
+                "gate": {
+                    "reason": reason,
+                    "blocked_response_preview": blocked_content[:500],
+                }
+            },
+        }
+        if self.task_ledger is not None:
+            try:
+                self.task_ledger.create(
+                    task_id=task_id,
+                    session_id=session_id,
+                    objective=objective,
+                    runtime="evidence_gate",
+                    mode=_infer_session_mode(source_text),
+                    status="running",
+                    notify_policy="none",
+                    metadata={
+                        "origin": "evidence_gate",
+                        "reason": reason,
+                        "source_message_hash": self._stable_text_hash(source_text),
+                    },
+                    artifacts=artifacts,
+                )
+                self.task_ledger.mark_terminal(
+                    task_id,
+                    status="failed",
+                    summary=f"Evidence gate explicit blocker: {reason}",
+                    error=reason,
+                    verification_status="blocked",
+                    artifacts=artifacts,
+                )
+            except Exception:
+                logger.debug("failed to record evidence gate explicit blocker", exc_info=True)
+                task_id = None
+        state = self.brain.memory.get_session_state(session_id)
+        active_object = dict(state.get("active_object") or {})
+        active_object["last_action_result"] = {
+            "task_id": task_id,
+            "status": "explicit_blocker",
+            "reason": reason,
+            "updated_at": time.time(),
+        }
+        self.brain.memory.update_session_state(
+            session_id,
+            verification_status="blocked",
+            active_object=active_object,
+            last_checkpoint={
+                "summary": f"Evidence gate blocked unverified action claim: {reason}",
+                "verification_status": "blocked",
+                "task_id": task_id,
+                "reason": reason,
+            },
+        )
+        self._emit_safe(
+            "evidence_gate_explicit_blocker_recorded",
+            {
+                "session_id": session_id,
+                "task_id": task_id,
+                "reason": reason,
+            },
+        )
+        return task_id
+
+    def _pending_evidence_response(self, task_id: str | None = None) -> str:
+        suffix = f"\nTask: `{task_id}`" if task_id else ""
         return (
-            "Necesito ejecutar la acción antes de darte resultado. "
-            "Decime cuál es el siguiente paso concreto que querés que dispare "
-            "(o respondé `te autorizo` si hay una aprobación pendiente) y arranco."
+            "Bloqueé esa respuesta como `explicit_blocker`: no hubo ejecución verificable "
+            "ni aprobación pendiente que la respalde."
+            f"{suffix}"
         )
 
-    def _unexecuted_start_response(self) -> str:
+    def _unexecuted_start_response(self, task_id: str | None = None) -> str:
+        suffix = f"\nTask: `{task_id}`" if task_id else ""
         return (
-            "Antes de avanzar necesito una acción concreta para disparar: "
-            "una tarea, un comando puntual, o tu autorización si hay una aprobación abierta. "
-            "Decime qué disparo y lo ejecuto con evidencia."
+            "Bloqueé el arranque como `explicit_blocker`: la respuesta intentó iniciar trabajo "
+            "sin crear tarea durable, ejecutar acción ni pedir aprobación."
+            f"{suffix}"
         )
 
     def _emit_identity_capability_binding_guard(
@@ -4069,7 +4392,15 @@ class BotService:
             result = self._brain_text_response(session_id, original_text, memory_text=original_text)
         return f"Aprobación registrada. Reintenté la acción original.\n\n{result}"
 
-    def _handle_pending_computer_approval_response(self, session_id: str, text: str) -> str | None:
+    def _handle_pending_computer_approval_response(
+        self,
+        session_id: str,
+        text: str,
+        *,
+        semantic_turn: SemanticTurn | None = None,
+    ) -> str | None:
+        if semantic_turn is not None and semantic_turn.intent == "new_task" and semantic_turn.clear_goal:
+            return None
         pending = self._latest_pending_computer_approval(session_id)
         if pending is None:
             return None
@@ -5474,13 +5805,17 @@ class BotService:
             },
         )
         if intent.intent == "task.continue_active_mission":
-            stateful_followup = self._maybe_resolve_stateful_followup(text, session_id=session_id)
+            stateful_followup, resolution_source = self._maybe_resolve_telegram_continuation(
+                text,
+                session_id=session_id,
+            )
             if stateful_followup is not None:
                 self._emit_safe(
                     "telegram_continuation_stateful_resolved",
                     {
                         "session_id": session_id,
                         "intent": intent.intent,
+                        "resolution_source": resolution_source,
                         "resolution_kind": (
                             "brain_shortcut"
                             if isinstance(stateful_followup, _BrainShortcut)
@@ -5489,8 +5824,412 @@ class BotService:
                     },
                 )
                 return stateful_followup, f"telegram_imperative:{intent.intent}:stateful", intent.matched_pattern
+            self._emit_safe(
+                "telegram_imperative_clarification",
+                {"session_id": session_id, "intent": intent.intent, "reason": "continuation_context_not_found"},
+            )
+            return (
+                "No encontré una misión, propuesta, aprobación o tarea reciente para continuar. "
+                "Respóndeme con el número/opción de la tarea activa o el target específico."
+            ), f"telegram_imperative:{intent.intent}:no_context", intent.matched_pattern
         response = self._handle_telegram_imperative(intent, text, session_id=session_id)
         return response, f"telegram_imperative:{intent.intent}", intent.matched_pattern
+
+    def _maybe_resolve_telegram_continuation(
+        self,
+        text: str,
+        *,
+        session_id: str,
+    ) -> tuple[str | _BrainShortcut | None, str | None]:
+        state = self.brain.memory.get_session_state(session_id)
+        missions = self._telegram_active_mission_candidates(session_id, state)
+        if len(missions) > 1:
+            return self._format_telegram_mission_choice(missions), "active_mission_ambiguous"
+        if len(missions) == 1:
+            objective = self._mission_continuation_objective(missions[0], state)
+            if objective:
+                return self._telegram_continuation_shortcut(
+                    session_id,
+                    text,
+                    objective,
+                    source="active_mission",
+                    state=state,
+                ), "active_mission"
+
+        proposal = self._proposal_from_reply_context(state)
+        if proposal:
+            return self._telegram_continuation_shortcut(
+                session_id,
+                text,
+                proposal,
+                source="reply_context",
+                state=state,
+            ), "reply_context"
+
+        pending_action = str(state.get("pending_action") or "").strip()
+        if pending_action:
+            return self._telegram_continuation_shortcut(
+                session_id,
+                text,
+                pending_action,
+                source="pending_action",
+                state=state,
+            ), "pending_action"
+
+        proposal = self._last_actionable_proposal(state)
+        if proposal:
+            return self._telegram_continuation_shortcut(
+                session_id,
+                text,
+                proposal,
+                source="last_actionable_proposal",
+                state=state,
+            ), "last_actionable_proposal"
+
+        pending_approval = self._latest_pending_approval_context(session_id, state)
+        if pending_approval is not None:
+            approval_id = str(pending_approval.get("approval_id") or "").strip()
+            summary = str(pending_approval.get("summary") or pending_approval.get("action") or "").strip()
+            lines = ["Hay una aprobación pendiente antes de continuar."]
+            if approval_id:
+                lines.append(f"approval_id: `{approval_id}`")
+            if summary:
+                lines.append(f"Acción: {summary[:240]}")
+            lines.append("Usa `/task_pending` para ver el comando de aprobación o responde con autorización explícita.")
+            return "\n".join(lines), "pending_approval"
+
+        waiting_task = self._recent_waiting_for_user_task(session_id)
+        if waiting_task is not None:
+            return self._telegram_continuation_shortcut(
+                session_id,
+                text,
+                waiting_task.objective,
+                source="waiting_for_user_input_task",
+                state=state,
+                task_id=waiting_task.task_id,
+            ), "waiting_for_user_input_task"
+
+        continuable_task = self._recent_continuable_durable_task(session_id)
+        if continuable_task is not None:
+            return self._telegram_continuation_shortcut(
+                session_id,
+                text,
+                continuable_task.objective,
+                source="recent_durable_task",
+                state=state,
+                task_id=continuable_task.task_id,
+            ), "recent_durable_task"
+
+        proposal = self._proposal_from_recent_assistant(session_id)
+        if proposal:
+            return self._telegram_continuation_shortcut(
+                session_id,
+                text,
+                proposal,
+                source="recent_assistant",
+                state=state,
+            ), "recent_assistant"
+
+        if len(missions) == 1:
+            target = self._mission_target(missions[0])
+            if target:
+                objective = f"Continuar misión activa para {target}"
+                return self._telegram_continuation_shortcut(
+                    session_id,
+                    text,
+                    objective,
+                    source="active_mission_target",
+                    state=state,
+                ), "active_mission_target"
+
+        return None, None
+
+    def _telegram_continuation_shortcut(
+        self,
+        session_id: str,
+        user_text: str,
+        objective: str,
+        *,
+        source: str,
+        state: dict[str, Any],
+        task_id: str | None = None,
+    ) -> _BrainShortcut:
+        objective = " ".join(str(objective or "").split()).strip()
+        active_object = dict(state.get("active_object") or {})
+        active_object["last_continuation_resolution"] = {
+            "source": source,
+            "objective": objective[:300],
+            "task_id": task_id,
+            "updated_at": time.time(),
+        }
+        active_object["pending_action_meta"] = {
+            "created_at": time.time(),
+            "source": source,
+            "ttl_seconds": 30 * 60,
+            "tier_hint": "unknown",
+            "topic": objective[:140],
+        }
+        self.brain.memory.update_session_state(
+            session_id,
+            pending_action=objective,
+            active_object=active_object,
+            verification_status="pending",
+        )
+        checkpoint = state.get("last_checkpoint") or {}
+        checkpoint_text = json.dumps(checkpoint, ensure_ascii=True, sort_keys=True) if checkpoint else "{}"
+        task_line = f"\nTask previa: {task_id}" if task_id else ""
+        self._emit_safe(
+            "continuation_resolved",
+            {
+                "session_id": session_id,
+                "source": source,
+                "proposal_preview": objective[:160],
+                "user_text_preview": user_text[:80],
+                "task_id": task_id,
+            },
+        )
+        self._emit_safe(
+            "pending_action_execution_started",
+            {"session_id": session_id, "pending_action_preview": objective[:160]},
+        )
+        return _BrainShortcut(
+            text=(
+                f"Continúa con esta acción pendiente: {objective}\n"
+                f"Mensaje de aprobación del usuario: {user_text}\n"
+                f"Origen del contexto: {source}{task_line}\n"
+                f"Checkpoint actual: {checkpoint_text}"
+            ),
+            memory_text=user_text,
+        )
+
+    def _telegram_active_mission_candidates(
+        self,
+        session_id: str,
+        state: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        candidates: list[dict[str, Any]] = []
+
+        def add_from_state(candidate_state: dict[str, Any], source_session_id: str) -> None:
+            active_object = candidate_state.get("active_object") or {}
+            if not isinstance(active_object, dict):
+                return
+            raw_missions: list[Any] = []
+            for key in ("active_mission", "_mission"):
+                value = active_object.get(key)
+                if isinstance(value, dict):
+                    raw_missions.append(value)
+            for key in ("active_missions", "missions"):
+                value = active_object.get(key)
+                if isinstance(value, list):
+                    raw_missions.extend(item for item in value if isinstance(item, dict))
+            for raw in raw_missions:
+                mission = dict(raw)
+                if not self._telegram_mission_matches_session(mission, session_id, source_session_id):
+                    continue
+                if not self._telegram_mission_is_active(mission):
+                    continue
+                mission["_source_session_id"] = source_session_id
+                key = str(mission.get("mission_id") or f"{source_session_id}:{mission.get('active_target')}")
+                if any(str(existing.get("mission_id") or "") == key for existing in candidates):
+                    continue
+                candidates.append(mission)
+
+        add_from_state(state, session_id)
+        if not candidates:
+            try:
+                recent_states = self.brain.memory.list_session_states(limit=20)
+            except Exception:
+                recent_states = []
+            for item in recent_states:
+                source_session_id = str(item.get("session_id") or "")
+                if source_session_id == session_id:
+                    continue
+                add_from_state(item, source_session_id)
+        return candidates[:5]
+
+    @staticmethod
+    def _telegram_session_aliases(session_id: str) -> set[str]:
+        aliases = {str(session_id)}
+        if session_id.startswith("tg-"):
+            aliases.add(session_id[3:])
+        return {alias for alias in aliases if alias}
+
+    def _telegram_mission_matches_session(
+        self,
+        mission: dict[str, Any],
+        session_id: str,
+        source_session_id: str,
+    ) -> bool:
+        if source_session_id == session_id:
+            return True
+        channel = str(mission.get("channel") or "").strip().lower()
+        if channel and channel != "telegram":
+            return False
+        aliases = self._telegram_session_aliases(session_id)
+        for key in ("chat_id", "user_id", "session_id", "external_session_id", "external_user_id"):
+            value = str(mission.get(key) or "").strip()
+            if value and value in aliases:
+                return True
+        return False
+
+    @staticmethod
+    def _telegram_mission_is_active(mission: dict[str, Any]) -> bool:
+        status = str(mission.get("status") or mission.get("state") or "active").strip().lower()
+        if status in {"completed", "succeeded", "failed", "cancelled", "closed", "done"}:
+            return False
+        expires_at = mission.get("expires_at")
+        try:
+            if expires_at is not None and time.time() > float(expires_at):
+                return False
+        except (TypeError, ValueError):
+            return False
+        return True
+
+    def _mission_continuation_objective(
+        self,
+        mission: dict[str, Any],
+        state: dict[str, Any],
+    ) -> str | None:
+        active_task = mission.get("active_task")
+        if isinstance(active_task, dict):
+            objective = str(active_task.get("objective") or "").strip()
+            if objective:
+                return objective
+        for key in ("pending_action", "objective", "current_goal", "last_user_goal", "summary"):
+            objective = str(mission.get(key) or "").strip()
+            if objective:
+                return objective
+        active_object = state.get("active_object") or {}
+        if isinstance(active_object, dict):
+            active_task = active_object.get("active_task") or {}
+            if isinstance(active_task, dict):
+                objective = str(active_task.get("objective") or "").strip()
+                status = str(active_task.get("status") or "").strip().lower()
+                if objective and status not in {"completed", "succeeded", "done"}:
+                    return objective
+        pending_action = str(state.get("pending_action") or "").strip()
+        if pending_action:
+            return pending_action
+        target = self._mission_target(mission)
+        if target:
+            return f"Continuar misión activa para {target}"
+        return None
+
+    def _format_telegram_mission_choice(self, missions: list[dict[str, Any]]) -> str:
+        lines = ["Tengo varias misiones activas para este chat. ¿Cuál continúo?"]
+        for index, mission in enumerate(missions[:5], start=1):
+            target = self._mission_target(mission) or "target sin nombre"
+            objective = self._mission_continuation_objective(mission, {}) or str(mission.get("summary") or "").strip()
+            if objective:
+                lines.append(f"{index}. {target}: {objective[:180]}")
+            else:
+                lines.append(f"{index}. {target}")
+        return "\n".join(lines)
+
+    def _proposal_from_reply_context(self, state: dict[str, Any]) -> str | None:
+        try:
+            proposal = self._state_handler._extract_proposal_from_reply_context(state)
+        except Exception:
+            proposal = None
+        return str(proposal or "").strip() or None
+
+    def _proposal_from_recent_assistant(self, session_id: str) -> str | None:
+        try:
+            proposal = self._state_handler._extract_proposal_from_recent_assistant(session_id)
+        except Exception:
+            proposal = None
+        return str(proposal or "").strip() or None
+
+    @staticmethod
+    def _last_actionable_proposal(state: dict[str, Any]) -> str | None:
+        active_object = state.get("active_object") or {}
+        if not isinstance(active_object, dict):
+            return None
+        proposal = active_object.get("last_actionable_proposal") or {}
+        if isinstance(proposal, str):
+            return proposal.strip() or None
+        if not isinstance(proposal, dict):
+            return None
+        for key in ("objective", "pending_action", "summary", "text"):
+            value = str(proposal.get(key) or "").strip()
+            if value:
+                return value
+        return None
+
+    def _latest_pending_approval_context(
+        self,
+        session_id: str,
+        state: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        pending = state.get("pending_approvals") or []
+        if isinstance(pending, list):
+            for item in reversed(pending):
+                if isinstance(item, dict) and str(item.get("status") or "pending") == "pending":
+                    return item
+        checkpoint = state.get("last_checkpoint") or {}
+        if isinstance(checkpoint, dict) and checkpoint.get("approval_id"):
+            return {
+                "approval_id": checkpoint.get("approval_id"),
+                "summary": checkpoint.get("summary") or checkpoint.get("pending_action") or "",
+            }
+        if self.approvals is not None:
+            try:
+                approvals = self.approvals.list_pending()
+            except Exception:
+                approvals = []
+            aliases = self._telegram_session_aliases(session_id)
+            for item in reversed(approvals):
+                metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+                item_session = str(metadata.get("session_id") or metadata.get("external_session_id") or "").strip()
+                if item_session and item_session in aliases:
+                    return item
+        return None
+
+    def _recent_waiting_for_user_task(self, session_id: str) -> Any | None:
+        if self.task_ledger is None:
+            return None
+        try:
+            records = self.task_ledger.list(session_id=session_id, limit=20)
+        except Exception:
+            return None
+        for record in records:
+            haystack = " ".join(
+                [
+                    str(getattr(record, "error", "") or ""),
+                    str(getattr(record, "summary", "") or ""),
+                    json.dumps(getattr(record, "metadata", {}) or {}, sort_keys=True),
+                ]
+            ).lower()
+            if "waiting_for_user_input" in haystack and str(getattr(record, "objective", "") or "").strip():
+                return record
+        return None
+
+    def _recent_continuable_durable_task(self, session_id: str) -> Any | None:
+        if self.task_ledger is None:
+            return None
+        try:
+            records = self.task_ledger.list(session_id=session_id, limit=20)
+        except Exception:
+            return None
+        now = time.time()
+        for record in records:
+            try:
+                age = now - float(getattr(record, "updated_at", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                age = 0.0
+            if age > 24 * 3600:
+                continue
+            verification = str(getattr(record, "verification_status", "") or "").strip().lower()
+            status = str(getattr(record, "status", "") or "").strip().lower()
+            metadata = getattr(record, "metadata", {}) or {}
+            metadata_status = str(metadata.get("status") or metadata.get("result_status") or "").strip().lower()
+            if (
+                status in {"running", "queued"}
+                or verification in {"awaiting_continue", "needs_verification", "pending"}
+                or metadata_status in {"awaiting_continue", "needs_verification"}
+            ) and str(getattr(record, "objective", "") or "").strip():
+                return record
+        return None
 
     def _handle_actionable_no_match(self, text: str, *, session_id: str) -> str | None:
         """Telemetry-only emit; returns None so dispatch chain continues to
@@ -6771,12 +7510,44 @@ class BotService:
         objective, source = self._resolve_actionable_task_objective(text, state=state)
         if objective is None:
             if self._looks_like_actionable_followup(text):
+                continuation, continuation_source = self._maybe_resolve_telegram_continuation(
+                    text,
+                    session_id=session_id,
+                )
+                if isinstance(continuation, _BrainShortcut):
+                    self._emit_safe(
+                        "telegram_continuation_stateful_resolved",
+                        {
+                            "session_id": session_id,
+                            "intent": "task.continue_active_mission",
+                            "resolution_source": continuation_source,
+                            "resolution_kind": "brain_shortcut",
+                        },
+                    )
+                    state = self.brain.memory.get_session_state(session_id)
+                    objective, source = self._resolve_actionable_task_objective(text, state=state)
+                elif continuation is not None:
+                    self._emit_safe(
+                        "telegram_continuation_stateful_resolved",
+                        {
+                            "session_id": session_id,
+                            "intent": "task.continue_active_mission",
+                            "resolution_source": continuation_source,
+                            "resolution_kind": "clarification",
+                        },
+                    )
+                    return continuation
+            if objective is None and self._looks_like_actionable_followup(text):
                 self._emit_safe(
                     "clarification_requested_after_context_lookup",
                     {"session_id": session_id, "reason": "actionable_task_context_not_found"},
                 )
-                return "¿Qué acción concreta quieres que ejecute?"
-            return None
+                return (
+                    "No encontré una misión, propuesta, aprobación o tarea reciente para continuar. "
+                    "Respóndeme con el número/opción de la tarea activa o el target específico."
+                )
+            if objective is None:
+                return None
         if os.getenv("CLAW_DISABLE_TELEGRAM_ACTIONABLE_TASK_ROUTER", "0") == "1":
             self._emit_safe(
                 "actionable_task_router_disabled",
@@ -7075,6 +7846,15 @@ class BotService:
         )
         if any(phrase in normalized for phrase in direct_complaints):
             return True
+        if (
+            "ninguna tarea" not in normalized
+            and (
+                "por que no completas" in normalized
+                or "por qué no completas" in normalized
+                or "porque no completas" in normalized
+            )
+        ):
+            return False
         failure_terms = (
             "fallo",
             "fallos",

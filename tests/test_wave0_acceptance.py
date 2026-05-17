@@ -500,10 +500,12 @@ class Wave0GoldenTraceTests(unittest.TestCase):
                 runtime_channel="telegram",
             )
 
-            self.assertIn("Necesito ejecutar la acción", response)
+            self.assertIn("explicit_blocker", response)
+            self.assertIn("Task:", response)
             self.assertNotIn("Cambié el archivo", response)
             events = [event["event_type"] for event in runtime.observe.recent_events(limit=50)]
             self.assertIn("evidence_gate_blocked_completion_claim", events)
+            self.assertIn("evidence_gate_explicit_blocker_recorded", events)
 
     def test_evidence_gate_blocks_start_claim_without_task_or_tool(self) -> None:
         def false_start(request: LLMRequest) -> LLMResponse:
@@ -523,10 +525,12 @@ class Wave0GoldenTraceTests(unittest.TestCase):
                 runtime_channel="telegram",
             )
 
-            self.assertIn("acción concreta para disparar", response)
+            self.assertIn("explicit_blocker", response)
+            self.assertIn("Task:", response)
             self.assertNotIn("Voy a depurar", response)
             events = [event["event_type"] for event in runtime.observe.recent_events(limit=50)]
             self.assertIn("evidence_gate_blocked_start_claim", events)
+            self.assertIn("evidence_gate_explicit_blocker_recorded", events)
 
     def test_evidence_gate_chat_only_exception_allows_conversational_listo(self) -> None:
         def chat_done(request: LLMRequest) -> LLMResponse:

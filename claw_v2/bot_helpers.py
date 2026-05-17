@@ -922,8 +922,10 @@ _TELEGRAM_IMPERATIVE_RULES: tuple[dict[str, Any], ...] = (
         "patterns": (
             r"\brevisa\s+(?:la\s+)?app(?:\s+(?:de\s+)?(?P<target_es_inspect>[a-z0-9 ._-]+))?\b",
             r"\brevisa\s+(?P<target_es_inspect_bare>codex|chatgpt|chrome|claude)\b",
+            r"\brevisa\s+en\s+(?P<target_es_inspect_in>[a-z0-9 ._-]+)\b",
             r"\breview\s+(?:the\s+)?app(?:\s+(?P<target_en_inspect>[a-z0-9 ._-]+))?\b",
             r"\breview\s+(?P<target_en_inspect_bare>codex|chatgpt|chrome|claude)\b",
+            r"\breview\s+in\s+(?P<target_en_inspect_in>[a-z0-9 ._-]+)\b",
         ),
         "requires_ui_read": True,
         "needs_context": True,
@@ -993,6 +995,8 @@ def _canonical_target(target: str | None) -> str | None:
         return "Chrome"
     if "claude" in normalized:
         return "Claude"
+    if "google cloud" in normalized or "gcp" in normalized:
+        return "Google Cloud"
     if normalized in {"app", "la app", "the app"}:
         return None
     return target.strip()[:80]
