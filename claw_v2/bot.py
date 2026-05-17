@@ -3602,6 +3602,7 @@ class BotService:
                 runtime=(runtime_channel or "brain_fallback"),
                 mode="brain_fallback",
                 status="running",
+                notify_policy="none",
                 metadata=metadata,
                 artifacts=brain_artifacts,
             )

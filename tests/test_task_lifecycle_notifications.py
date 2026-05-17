@@ -26,6 +26,22 @@ class TaskLifecycleNotificationTests(unittest.TestCase):
         self.assertIn("needs_verification", message)
         self.assertIn("brain tool-use", message)
 
+    def test_skips_synthetic_brain_tooluse_task(self) -> None:
+        payload = {
+            "task_id": "brain-tooluse:tg-123:999",
+            "session_id": "tg-123",
+            "runtime": "telegram",
+            "status": "succeeded",
+            "verification_status": "needs_verification",
+            "summary": "brain tool-use turn: 8 tool calls (unverified)",
+            "metadata": {
+                "brain_tool_use": True,
+                "created_by": "brain_tool_use_ledger",
+            },
+        }
+
+        self.assertFalse(should_notify_task_ledger_terminal(payload, set()))
+
     def test_skips_regular_coordinator_terminal_task_to_avoid_duplicate(self) -> None:
         payload = {
             "task_id": "task-1",
