@@ -1018,6 +1018,9 @@ class StateHandler:
         text = self._reply_context_text(state)
         if not text:
             return None
+        pending = _extract_pending_action_from_reply(text)
+        if pending:
+            return pending
         if not self._looks_like_proposal_question(text):
             return None
         return self._summarize_proposal(text)
@@ -1034,6 +1037,9 @@ class StateHandler:
             if message.get("role") != "assistant":
                 continue
             content = str(message.get("content") or "")
+            pending = _extract_pending_action_from_reply(content)
+            if pending:
+                return pending
             if self._looks_like_proposal_question(content):
                 return self._summarize_proposal(content)
         return None

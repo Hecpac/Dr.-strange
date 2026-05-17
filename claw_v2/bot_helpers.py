@@ -1306,9 +1306,17 @@ def _compact_summary(text: str, *, limit: int = 240) -> str | None:
 
 def _extract_pending_action_from_reply(text: str) -> str | None:
     for line in text.splitlines():
-        match = re.match(r"^\s*(?:siguiente paso|next step|pendiente|retomo la acci[oó]n)\s*:\s*(.+?)\s*$", line, re.IGNORECASE)
+        normalized_line = re.sub(r"^\s*(?:[-*]\s*)+", "", line.strip())
+        normalized_line = normalized_line.replace("**", "").replace("__", "")
+        match = re.match(
+            r"^\s*(?:siguiente paso|next step|pendiente|retomo la acci[oó]n)\s*:\s*(.+?)\s*$",
+            normalized_line,
+            re.IGNORECASE,
+        )
         if match:
-            return match.group(1).strip()
+            pending = match.group(1).strip()
+            pending = re.split(r"\s+[—-]\s+requiere\b", pending, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+            return pending
     return None
 
 

@@ -378,6 +378,52 @@ def test_continue_uses_recent_contextual_proposal_in_telegram(bot) -> None:
     ), decisions
 
 
+def test_continue_uses_reply_context_markdown_pending_line(bot) -> None:
+    prompts: list[str] = []
+    reply_context = (
+        "**Checkpoint:**\n"
+        "- **Hecho:** inspeccion de observe_stream post-restart.\n"
+        "- **Pendiente:** validacion de la rama nueva (`brain_shortcut`) "
+        "— requiere un \"Procede\"/\"Continua\" pelado de tu parte. Sigo activo esperando."
+    )
+
+    bot.brain.memory.update_session_state(
+        "tg-test",
+        active_object={
+            "reply_context": {
+                "source": "telegram_reply",
+                "text": reply_context,
+                "created_at": time.time(),
+            }
+        },
+    )
+
+    def fake_handle_message(session_id, message, **_kwargs):
+        prompts.append(str(message))
+        return LLMResponse(
+            content="PENDING_LINE_CONTINUATION_HANDLED",
+            lane="brain",
+            provider="anthropic",
+            model="claude-opus-4-7",
+        )
+
+    with patch.object(type(bot.brain), "handle_message", side_effect=fake_handle_message):
+        response, decisions, events = _drive(bot, "Continúa")
+
+    assert response == "PENDING_LINE_CONTINUATION_HANDLED"
+    assert prompts
+    assert "acción propuesta previamente" in prompts[-1]
+    assert "validacion de la rama nueva" in prompts[-1]
+    assert "telegram_continuation_stateful_resolved" in events
+    assert "¿Qué acción concreta" not in response
+    assert any(
+        ev.get("handler") == "telegram_imperative"
+        and ev.get("route") == "intercepted"
+        and ev.get("reason") == "telegram_imperative:task.continue_active_mission:stateful"
+        for ev in decisions
+    ), decisions
+
+
 def test_quality_command_exposes_imperative_router_metrics(bot) -> None:
     _seed_codex_mission(bot)
     _drive(bot, "Pégale el prompt")
