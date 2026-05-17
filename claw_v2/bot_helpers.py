@@ -886,6 +886,7 @@ _TELEGRAM_IMPERATIVE_RULES: tuple[dict[str, Any], ...] = (
         "intent": "ui.paste_text",
         "patterns": (
             r"\b(?:pegale|pega|pégale)\s+(?:el\s+)?prompt\b",
+            r"\b(?:pegalo|pégalo|paste\s+it)\b",
             r"\bpaste\s+(?:the\s+)?prompt\b",
         ),
         "requires_ui_write": True,
@@ -1014,11 +1015,17 @@ def detect_telegram_imperative(text: str) -> TelegramImperativeIntent | None:
             match = re.search(pattern, normalized)
             if not match:
                 continue
+            intent_name = str(rule["intent"])
+            target_hint = _canonical_target(_target_from_match(match))
+            if intent_name in {"ui.open_app", "ui.inspect_app"} and _is_web_target_ambiguous(
+                normalized, target_hint
+            ):
+                return None
             return TelegramImperativeIntent(
-                intent=str(rule["intent"]),
+                intent=intent_name,
                 normalized_text=normalized[:200],
                 confidence=0.94,
-                target_hint=_canonical_target(_target_from_match(match)),
+                target_hint=target_hint,
                 artifact_hint=rule.get("artifact_hint"),
                 needs_context=bool(rule.get("needs_context", False)),
                 requires_ui_read=bool(rule.get("requires_ui_read", False)),
@@ -1028,6 +1035,28 @@ def detect_telegram_imperative(text: str) -> TelegramImperativeIntent | None:
                 matched_pattern=pattern,
             )
     return None
+
+
+def _is_web_target_ambiguous(normalized: str, target_hint: str | None) -> bool:
+    """Return True when the imperative names a web/URL context that cannot
+    be served by a local `open -a <App>` and should fall through to brain.
+
+    Examples that must NOT resolve to the desktop app:
+    - "abre claude/design" → claude.ai/design in browser
+    - "abre claude.ai/projects" → URL
+    - "abre en chrome claude/design" → explicit browser path
+    """
+    if not target_hint:
+        return False
+    if target_hint not in {"Claude", "ChatGPT", "Codex app"}:
+        return False
+    if "claude.ai" in normalized or "chatgpt.com" in normalized or "openai.com" in normalized:
+        return True
+    if re.search(r"\b(?:claude|chatgpt|codex)\s*/\s*\w+", normalized):
+        return True
+    if "en chrome" in normalized or "in chrome" in normalized:
+        return True
+    return False
 
 
 def looks_like_actionable_telegram_message(text: str) -> bool:

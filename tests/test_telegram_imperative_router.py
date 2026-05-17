@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import tempfile
 import time
 from pathlib import Path
@@ -577,57 +578,143 @@ def test_quality_command_exposes_imperative_router_metrics(bot) -> None:
     assert routing["brain_fallback_for_actionable_total"] == 0
 
 
-def test_open_app_imperative_executes_via_computer_when_available(bot) -> None:
-    tasks: list[str] = []
+def test_open_app_imperative_uses_local_open_without_approval(bot) -> None:
     bot.computer = MagicMock()
     bot.browser_use = None
     bot.computer_gate = MagicMock()
 
-    def fake_run_agent_loop(*, session, **_kwargs):
-        tasks.append(session.task)
-        session.status = "done"
-        return "Codex app focused."
-
-    bot.computer.run_agent_loop.side_effect = fake_run_agent_loop
-
-    response, decisions, events = _drive(bot, "Abre la app de Codex")
+    with patch(
+        "claw_v2.bot.subprocess.run",
+        return_value=subprocess.CompletedProcess(["open", "-a", "Claude"], 0, "", ""),
+    ) as run:
+        response, decisions, events = _drive(bot, "Abre Claude")
 
     assert response
     assert "ui.open_app" in response
     assert "succeeded" in response
-    assert "Codex app focused." in response
-    assert tasks
-    assert "Open or focus Codex app" in tasks[0]
-    assert "Do not paste" in tasks[0]
+    assert "pending_approval" not in response
+    assert "Necesito tu autorización" not in response
+    assert "`Claude` abierto/enfocado." in response
+    run.assert_called_once_with(["open", "-a", "Claude"], capture_output=True, text=True, timeout=10)
+    bot.computer.run_agent_loop.assert_not_called()
+    assert bot.approvals.list_pending() == []
     assert "telegram_imperative_executed" in events
     _assert_not_brain_fallback(response, decisions)
 
 
-def test_paste_prompt_imperative_executes_paste_only_via_computer(bot) -> None:
-    tasks: list[str] = []
+def test_open_claude_design_does_not_route_to_desktop_app(bot) -> None:
+    bot.computer = MagicMock()
+    bot.browser_use = None
+    bot.computer_gate = MagicMock()
+
+    with patch("claw_v2.bot.subprocess.run") as run:
+        response, _decisions, events = _drive(bot, "Abre Claude/design")
+
+    run.assert_not_called()
+    assert "ui.open_app" not in (response or "")
+    assert "telegram_imperative_executed" not in events
+
+
+def test_open_chrome_claude_design_does_not_route_to_desktop_app(bot) -> None:
+    bot.computer = MagicMock()
+    bot.browser_use = None
+    bot.computer_gate = MagicMock()
+
+    with patch("claw_v2.bot.subprocess.run") as run:
+        response, _decisions, events = _drive(bot, "Abre en chrome Claude/design")
+
+    run.assert_not_called()
+    assert "ui.open_app" not in (response or "")
+    assert "telegram_imperative_executed" not in events
+
+
+def test_paste_prompt_imperative_executes_local_paste_without_approval(bot) -> None:
     _seed_codex_mission(bot)
     bot.computer = MagicMock()
     bot.browser_use = None
     bot.computer_gate = MagicMock()
 
-    def fake_run_agent_loop(*, session, **_kwargs):
-        tasks.append(session.task)
-        session.status = "done"
-        return "Prompt pasted into Codex."
-
-    bot.computer.run_agent_loop.side_effect = fake_run_agent_loop
-
-    response, decisions, events = _drive(bot, "Pégale el prompt")
+    with (
+        patch(
+            "claw_v2.bot.subprocess.run",
+            return_value=subprocess.CompletedProcess(["ok"], 0, "", ""),
+        ) as run,
+        patch("claw_v2.bot.time.sleep"),
+    ):
+        response, decisions, events = _drive(bot, "Pégale el prompt")
 
     assert response
     assert "ui.paste_text" in response
     assert "ui.submit_prompt" not in response
     assert "succeeded" in response
-    assert tasks
-    assert "Run the phase 3 closeout audit." in tasks[0]
-    assert "Do not press Enter" in tasks[0]
-    assert "Do not" in tasks[0] and "submit" in tasks[0]
+    assert "pending_approval" not in response
+    assert "Texto pegado en `Codex` sin enviar." in response
+    assert run.call_args_list[0].args[0] == ["open", "-a", "Codex"]
+    assert run.call_args_list[1].args[0] == ["pbcopy"]
+    assert run.call_args_list[1].kwargs["input"] == "Run the phase 3 closeout audit."
+    assert run.call_args_list[2].args[0][0] == "osascript"
+    bot.computer.run_agent_loop.assert_not_called()
+    assert bot.approvals.list_pending() == []
     assert "telegram_imperative_executed" in events
+    _assert_not_brain_fallback(response, decisions)
+
+
+def test_pegalo_uses_reply_context_prompt_not_brain(bot) -> None:
+    reply_context = (
+        "Voy con A. Preparando el prompt para Claude/design y lo pego en la ventana abierta sin submit.\n\n"
+        "**Prompt que voy a pegar:**\n\n"
+        "> Build a single-page interactive prototype for an AI Lead Generation product.\n"
+        "> Use Next.js, Tailwind, mock lead cards, and a postal preview.\n"
+    )
+    bot.brain.memory.update_session_state(
+        "tg-test",
+        mode="ops",
+        active_object={
+            "active_mission": {
+                "mission_id": "mission-claude",
+                "channel": "telegram",
+                "chat_id": "tg-test",
+                "active_target": "Claude",
+                "last_user_goal": "create AI lead gen prototype in Claude/design",
+                "created_at": time.time(),
+                "expires_at": time.time() + 1800,
+            },
+            "reply_context": {
+                "source": "telegram_reply",
+                "text": reply_context,
+                "created_at": time.time(),
+            },
+        },
+    )
+    bot.computer = MagicMock()
+    bot.browser_use = None
+    bot.computer_gate = MagicMock()
+
+    with (
+        patch(
+            "claw_v2.bot.subprocess.run",
+            return_value=subprocess.CompletedProcess(["ok"], 0, "", ""),
+        ) as run,
+        patch("claw_v2.bot.time.sleep"),
+    ):
+        response, decisions, events = _drive(bot, "Pégalo y veamos Que nos da y me lo envias Aqui en telegram")
+
+    assert response
+    assert "ui.paste_text" in response
+    assert "succeeded" in response
+    assert "BRAIN_FALLBACK_USED" not in response
+    assert "pending_approval" not in response
+    assert "Texto pegado en `Claude` sin enviar." in response
+    assert run.call_args_list[0].args[0] == ["open", "-a", "Claude"]
+    assert run.call_args_list[1].args[0] == ["pbcopy"]
+    assert "Build a single-page interactive prototype" in run.call_args_list[1].kwargs["input"]
+    assert run.call_args_list[2].args[0][0] == "osascript"
+    bot.computer.run_agent_loop.assert_not_called()
+    assert "telegram_imperative_executed" in events
+    assert any(
+        ev.get("handler") == "telegram_imperative" and ev.get("route") == "intercepted"
+        for ev in decisions
+    ), decisions
     _assert_not_brain_fallback(response, decisions)
 
 
