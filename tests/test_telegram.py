@@ -54,6 +54,28 @@ class TransportStartTests(unittest.IsolatedAsyncioTestCase):
         mock_app.updater.start_polling.assert_awaited_once()
         await transport.stop()
 
+    @patch("claw_v2.telegram.ApplicationBuilder")
+    async def test_start_does_not_send_startup_message_to_chat(self, mock_builder_cls) -> None:
+        """A: startup notification stays in logs, never sent to chat."""
+        mock_app = AsyncMock()
+        mock_app.updater = AsyncMock()
+        mock_app.add_handler = MagicMock()
+        mock_app.bot = AsyncMock()
+        mock_builder = MagicMock()
+        mock_builder.token.return_value = mock_builder
+        mock_builder.build.return_value = mock_app
+        mock_builder_cls.return_value = mock_builder
+
+        transport = TelegramTransport(
+            bot_service=MagicMock(), token="test-token", allowed_user_id="1234",
+        )
+        with self.assertLogs("claw_v2.telegram", level="INFO") as captured:
+            await transport.start()
+        mock_app.bot.send_message.assert_not_called()
+        joined = "\n".join(captured.output)
+        self.assertIn("online", joined.lower())
+        await transport.stop()
+
     async def test_stop_swallows_pool_cleanup_errors_and_emits_observe_event(self) -> None:
         bot_service = MagicMock()
         bot_service.observe = MagicMock()
