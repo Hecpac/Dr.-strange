@@ -5,6 +5,7 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 from claw_v2.approval import ApprovalManager
 from claw_v2.jobs import JobService
@@ -289,6 +290,43 @@ class ConversationalBriefTests(unittest.TestCase):
 
         return _StubRouter()
 
+    @staticmethod
+    def _central_ts(value: datetime | None) -> float | None:
+        if value is None:
+            return None
+        return value.replace(tzinfo=ZoneInfo("America/Chicago")).timestamp()
+
+    @classmethod
+    def _set_task_times(
+        cls,
+        ledger: TaskLedger,
+        task_id: str,
+        *,
+        created_at: datetime,
+        started_at: datetime | None = None,
+        completed_at: datetime | None = None,
+        updated_at: datetime | None = None,
+    ) -> None:
+        with ledger._lock:
+            ledger._conn.execute(
+                """
+                UPDATE agent_tasks
+                SET created_at = ?,
+                    started_at = ?,
+                    completed_at = ?,
+                    updated_at = ?
+                WHERE task_id = ?
+                """,
+                (
+                    cls._central_ts(created_at),
+                    cls._central_ts(started_at),
+                    cls._central_ts(completed_at),
+                    cls._central_ts(updated_at or created_at),
+                    task_id,
+                ),
+            )
+            ledger._conn.commit()
+
     def _service(self, root: Path, **overrides):
         ledger = overrides.pop("ledger", TaskLedger(root / "claw.db"))
         settings_kwargs = {
@@ -320,6 +358,88 @@ class ConversationalBriefTests(unittest.TestCase):
             self.assertEqual(message, "Cierre del día narrativo del LLM.")
             self.assertEqual(len(router.calls), 1)
             self.assertEqual(router.calls[0]["lane"], "judge")
+
+    def test_morning_prompt_continues_previous_day_with_exact_dates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            ledger = TaskLedger(root / "claw.db")
+            ledger.create(
+                task_id="task-brief-continuity",
+                session_id="tg-123",
+                objective="Auditar los briefs recientes y convertirlos en bitácora real",
+                runtime="brain_fallback",
+                status="running",
+            )
+            self._set_task_times(
+                ledger,
+                "task-brief-continuity",
+                created_at=datetime(2026, 5, 16, 14, 30),
+                started_at=datetime(2026, 5, 16, 14, 31),
+                updated_at=datetime(2026, 5, 16, 20, 45),
+            )
+            router = self._stub_router("Apertura narrativa.")
+            service = self._service(
+                root,
+                ledger=ledger,
+                llm_router=router,
+                settings={
+                    "hour": 5,
+                    "stamp_path": root / "morning.txt",
+                    "report_name": "morning_brief",
+                    "greeting": "Buenos dias, Hector.",
+                },
+                clock=lambda: datetime(2026, 5, 17, 5, 0),
+            )
+
+            message = service.build_message(datetime(2026, 5, 17, 5, 0))
+
+            prompt_text = str(router.calls[0]["prompt"])
+            system_text = str(router.calls[0]["system_prompt"] or "")
+            self.assertIn("arrancando el día operativo", system_text)
+            self.assertIn("continuidad precisa desde el día anterior", system_text)
+            self.assertNotIn("cerrando el día operativo", system_text)
+            self.assertIn("domingo 17 de mayo de 2026", prompt_text)
+            self.assertIn("sabado 16 de mayo de 2026", prompt_text)
+            self.assertIn("continuación de ayer", prompt_text)
+            self.assertIn("Auditar los briefs recientes", prompt_text)
+            self.assertTrue(message.startswith("Apertura narrativa."))
+            self.assertIn("Bitácora verificada:", message)
+            self.assertIn("Pendiente para retomar hoy: 1.", message)
+            self.assertIn("Auditar los briefs recientes", message)
+
+    def test_evening_prompt_is_day_cut_and_not_morning_continuation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            ledger = TaskLedger(root / "claw.db")
+            ledger.create(
+                task_id="task-evening-cut",
+                session_id="tg-123",
+                objective="Cerrar auditoría de cambios externos",
+                runtime="brain_fallback",
+                status="succeeded",
+            )
+            self._set_task_times(
+                ledger,
+                "task-evening-cut",
+                created_at=datetime(2026, 5, 16, 10, 0),
+                started_at=datetime(2026, 5, 16, 10, 5),
+                completed_at=datetime(2026, 5, 16, 20, 10),
+                updated_at=datetime(2026, 5, 16, 20, 10),
+            )
+            router = self._stub_router("Corte narrativo.")
+            service = self._service(root, ledger=ledger, llm_router=router)
+
+            message = service.build_message(datetime(2026, 5, 16, 21, 0))
+
+            prompt_text = str(router.calls[0]["prompt"])
+            system_text = str(router.calls[0]["system_prompt"] or "")
+            self.assertIn("cerrando el día operativo", system_text)
+            self.assertIn("corte del día basado en bitácora real", system_text)
+            self.assertNotIn("continuidad precisa desde el día anterior", system_text)
+            self.assertIn("corte de hoy", prompt_text)
+            self.assertIn("sabado 16 de mayo de 2026", prompt_text)
+            self.assertIn("Cerrar auditoría de cambios externos", message)
+            self.assertIn("Pendiente para mañana: 0 registrado.", message)
 
     def test_brief_falls_back_to_template_when_llm_raises(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
