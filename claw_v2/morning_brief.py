@@ -4,7 +4,7 @@ import logging
 import shlex
 import subprocess
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import quote
@@ -45,6 +45,15 @@ ACTIVE_JOB_STATUSES = ("queued", "running", "waiting_approval", "retrying")
 ATTENTION_TASK_STATUSES = ("failed", "timed_out", "lost")
 RECENT_DONE_TASK_STATUSES = ("succeeded", "cancelled")
 ATTENTION_VERIFICATION_STATUSES = ("blocked", "missing_evidence", "pending", "failed")
+OPEN_OR_PROBLEM_VERIFICATION_STATUSES = (
+    "blocked",
+    "failed",
+    "interrupted",
+    "missing_evidence",
+    "pending",
+)
+JOURNAL_TASK_LIMIT = 100
+JOURNAL_DISPLAY_LIMIT = 100
 ALERT_EVENT_KEYWORDS = (
     "error",
     "fail",
@@ -117,6 +126,18 @@ class MorningBriefService:
         self._brief_counts: dict[str, int] = {}
         self._last_brief_diagnostics: dict[str, Any] = {}
 
+    def _reset_brief_capture(self) -> None:
+        self._source_records = []
+        self._brief_counts = {
+            "work_items": 0,
+            "approval_items": 0,
+            "context_items": 0,
+            "alert_items": 0,
+            "journal_tasks": 0,
+            "journal_jobs": 0,
+            "journal_pending": 0,
+        }
+
     def run_if_due(self) -> str | None:
         now = self.clock()
         if not should_send_morning_brief(
@@ -156,6 +177,7 @@ class MorningBriefService:
         return message
 
     def build_message(self, now: datetime) -> str:
+        self._reset_brief_capture()
         if self.llm_router is not None:
             try:
                 rendered = self._render_via_llm(now)
@@ -174,22 +196,18 @@ class MorningBriefService:
         return self._build_template_message(now)
 
     def _build_template_message(self, now: datetime) -> str:
-        self._source_records = []
-        self._brief_counts = {
-            "work_items": 0,
-            "approval_items": 0,
-            "context_items": 0,
-            "alert_items": 0,
-        }
+        self._reset_brief_capture()
         date_line = format_spanish_date(now)
         weather_line = self._weather_line()
         calendar_line = self._calendar_line()
         email_line = self._email_line()
+        journal = self._build_agent_journal(now)
         sections = [
             f"{self.settings.greeting}\nHoy es {date_line}.",
             f"Clima: {weather_line}",
             f"Agenda: {calendar_line}",
             f"Correo: {email_line}",
+            self._journal_section(journal),
             self._work_section(),
             self._approval_section(now),
             self._session_context_section(),
@@ -212,7 +230,7 @@ class MorningBriefService:
 
     def _render_via_llm(self, now: datetime) -> str:
         facts = self._extract_brief_facts(now)
-        system_prompt = self._brief_system_prompt()
+        system_prompt = self._brief_system_prompt(facts)
         user_prompt = self._brief_user_prompt(facts)
         response = self.llm_router.ask(
             user_prompt,
@@ -221,11 +239,19 @@ class MorningBriefService:
             evidence_pack={
                 "report": self.settings.report_name,
                 "date": facts.get("date", ""),
+                "journal": facts.get("journal", {}),
             },
             max_budget=0.10,
             timeout=15.0,
         )
-        return str(getattr(response, "content", "") or "").strip()
+        rendered = str(getattr(response, "content", "") or "").strip()
+        journal_text = self._journal_section(facts.get("journal") or {}, hard_evidence=True)
+        self._last_brief_diagnostics = self._brief_diagnostics()
+        if not journal_text:
+            return rendered
+        if not rendered:
+            return journal_text
+        return f"{rendered}\n\n{journal_text}"
 
     def _extract_brief_facts(self, now: datetime) -> dict[str, Any]:
         """Build a sanitized snapshot for LLM rendering.
@@ -237,6 +263,8 @@ class MorningBriefService:
         facts: dict[str, Any] = {
             "greeting": self.settings.greeting,
             "date": format_spanish_date(now),
+            "report_name": self.settings.report_name,
+            "report_kind": self._report_kind(),
         }
         try:
             weather = self.weather_fetcher(
@@ -259,6 +287,8 @@ class MorningBriefService:
         work = self._safe_work_facts()
         if work:
             facts["work"] = work
+        journal = self._build_agent_journal(now)
+        facts["journal"] = journal
         approvals = self._safe_approval_facts(now)
         if approvals:
             facts["approvals"] = approvals
@@ -346,56 +376,440 @@ class MorningBriefService:
             return None
         return _metrics_total_cost(snapshot)
 
-    @staticmethod
-    def _brief_system_prompt() -> str:
+    def _brief_system_prompt(self, facts: dict[str, Any]) -> str:
+        if str(facts.get("report_kind") or "") == "evening":
+            frame = (
+                "Eres Dr. Strange cerrando el día operativo de Hector por "
+                "Telegram. Es un corte del día basado en bitácora real."
+            )
+            timing = (
+                "Ventana: desde el inicio de hoy hasta este momento. Cierra "
+                "con lo que queda pendiente para mañana si existe evidencia."
+            )
+        else:
+            frame = (
+                "Eres Dr. Strange arrancando el día operativo de Hector por "
+                "Telegram. Es continuidad precisa desde el día anterior."
+            )
+            timing = (
+                "Ventana: ayer completo y el estado abierto al iniciar hoy. "
+                "Debe quedar claro qué se retoma hoy y con qué fecha exacta."
+            )
         return (
-            "Eres Dr. Strange escribiéndole un brief diario a Hector por Telegram. "
-            "Escribe en español neutral (tú, no vos), conversacional, como colaborador "
-            "cercano que reporta de viva voz. NO uses bullets ni tablas ni headers. "
-            "NO menciones IDs internos, paths ni stack traces. Si una fuente está "
-            "ausente o vacía, no la menciones (no escribas 'no disponible'). "
-            "Empieza con el saludo y la fecha en una oración. Menciona 1-3 cosas "
-            "operativas que importan. Cierra con una línea humana corta. "
-            "Total: 4-8 oraciones máximo."
+            f"{frame}\n"
+            f"{timing}\n"
+            "\n"
+            "No escribes un prompt diario ni un boletín inventado: escribes "
+            "pensamiento operacional observable del agente. Eso significa "
+            "objetivo, decisión, evidencia, resultado, bloqueo y siguiente "
+            "acción cuando existan en la bitácora. No reveles cadena interna "
+            "de pensamiento.\n"
+            "\n"
+            "Estilo OBLIGATORIO:\n"
+            "- Tono mensaje de chat, no de boletín. Español neutral LatAm (tú).\n"
+            "- Fechas precisas. No uses 'ayer' o 'hoy' sin que también exista "
+            "la fecha completa en el contexto o la respuesta.\n"
+            "- Usa los NÚMEROS y NOMBRES literales del contexto. Si te digo "
+            "'48492 tokens', escribe '48k tokens' o '48492 tokens'. NO digas "
+            "'tamaño grande' ni 'algunos archivos'. Concreto, no abstracto.\n"
+            "- Si hay tareas en la sección DIARIO OPERACIONAL VERIFICADO, no "
+            "las omitas. Puedes agrupar solo si mantienes conteo y nombres.\n"
+            "\n"
+            "PROHIBIDO:\n"
+            "- Frases de reporte: 'te escribo', 'este brief', 'hoy tuvimos', "
+            "'varios problemas', 'hay que', 'debemos', 'me preocupa'.\n"
+            "- Cierres formulaicos: 'cuídate', 'descansa bien', 'buenas noches'.\n"
+            "- Transiciones de ensayo: 'Además', 'Por otro lado', 'En cuanto a'.\n"
+            "- Bullets, listas, headers, asteriscos, markdown.\n"
+            "- Frases vagas: 'estuvo bien', 'varios', 'sigue siendo', 'problema "
+            "serio'. Demasiado abstracto.\n"
+            "- Inventar datos que no estén en el contexto. Si una fuente está "
+            "vacía o ausente, NO la menciones.\n"
+            "\n"
+            "El ledger manda. Si no hay evidencia de una tarea, no afirmes que "
+            "ocurrió."
+        )
+
+    def _brief_user_prompt(self, facts: dict[str, Any]) -> str:
+        lines: list[str] = [
+            f"Apertura sugerida: {facts.get('greeting', '')}",
+            f"Hoy: {facts.get('date', '')}",
+            f"Tipo de reporte: {facts.get('report_name', '')}",
+        ]
+        journal_text = self._format_journal_for_prompt(facts.get("journal") or {})
+        if journal_text:
+            lines.append(journal_text)
+        if facts.get("weather"):
+            lines.append(f"Clima ahora: {facts['weather']}")
+        if facts.get("calendar"):
+            lines.append(f"Eventos hoy: {facts['calendar']}")
+        if facts.get("email"):
+            lines.append(f"Mail relevante: {facts['email']}")
+        work = facts.get("work") or {}
+        if work.get("attention"):
+            lines.append("Lo que se rompió o quedó pendiente:")
+            for obj in work["attention"]:
+                lines.append(f"  · {obj}")
+        if work.get("recent_done"):
+            if str(facts.get("report_kind") or "") == "evening":
+                lines.append("Lo que cerró durante el corte de hoy:")
+            else:
+                lines.append("Lo que cerró recientemente y afecta la continuidad:")
+            for obj in work["recent_done"]:
+                lines.append(f"  · {obj}")
+        if work.get("active"):
+            lines.append("Sigue corriendo ahora:")
+            for obj in work["active"]:
+                lines.append(f"  · {obj}")
+        approvals = facts.get("approvals") or {}
+        if approvals.get("total"):
+            extras = []
+            if approvals.get("stale"):
+                extras.append(f"{approvals['stale']} stale")
+            if approvals.get("duplicate"):
+                extras.append(f"{approvals['duplicate']} duplicadas")
+            if approvals.get("expired"):
+                extras.append(f"{approvals['expired']} expiradas")
+            qual = f" ({', '.join(extras)})" if extras else ""
+            lines.append(f"Aprobaciones esperando: {approvals['total']}{qual}")
+        if "cost_usd" in facts and facts["cost_usd"] > 0:
+            lines.append(f"Gasto LLM hoy: ${facts['cost_usd']:.2f}")
+        lines.append(
+            "\nRedacta solo con la evidencia anterior. No conviertas esto en "
+            "prompt diario. Si hay pendientes, deben quedar explícitos con "
+            "continuación concreta."
+        )
+        return "\n".join(lines)
+
+    def _report_kind(self) -> str:
+        return "evening" if self.settings.report_name == "evening_brief" else "morning"
+
+    def _localize_datetime(self, value: datetime) -> datetime:
+        tz = ZoneInfo(self.settings.timezone)
+        if value.tzinfo is None:
+            return value.replace(tzinfo=tz)
+        return value.astimezone(tz)
+
+    def _journal_window(self, now: datetime) -> dict[str, Any]:
+        local_now = self._localize_datetime(now)
+        today_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        kind = self._report_kind()
+        if kind == "evening":
+            start = today_start
+            end = local_now
+            label = "corte de hoy"
+            continuation = "mañana"
+        else:
+            start = today_start - timedelta(days=1)
+            end = today_start
+            label = "continuación de ayer"
+            continuation = "retomar hoy"
+        return {
+            "kind": kind,
+            "now": local_now,
+            "start": start,
+            "end": end,
+            "label": label,
+            "continuation_label": continuation,
+            "today_date": format_spanish_date(local_now),
+            "start_date": format_spanish_date(start),
+            "end_date": format_spanish_date(end),
+            "timezone": self.settings.timezone,
+        }
+
+    def _build_agent_journal(self, now: datetime) -> dict[str, Any]:
+        window = self._journal_window(now)
+        start_ts = float(window["start"].timestamp())
+        end_ts = float(window["end"].timestamp())
+        tasks = self._journal_task_records()
+        touched_tasks = [
+            self._task_entry(task, now=window["now"])
+            for task in tasks
+            if self._task_touched_in_window(task, start_ts=start_ts, end_ts=end_ts)
+        ]
+        carryover_tasks = [
+            self._task_entry(task, now=window["now"])
+            for task in tasks
+            if self._task_is_open_or_problem(task)
+        ]
+        jobs = [
+            self._job_entry(job, now=window["now"])
+            for job in self._journal_job_records()
+            if self._job_touched_in_window(job, start_ts=start_ts, end_ts=end_ts)
+            or str(getattr(job, "status", "")) in ACTIVE_JOB_STATUSES
+        ]
+        sessions = self._journal_session_entries()
+        self._brief_counts["journal_tasks"] = len(touched_tasks)
+        self._brief_counts["journal_pending"] = len(carryover_tasks)
+        self._brief_counts["journal_jobs"] = len(jobs)
+        self._brief_counts["work_items"] = max(
+            int(self._brief_counts.get("work_items", 0)),
+            len(touched_tasks) + len(carryover_tasks) + len(jobs),
+        )
+        return {
+            "kind": window["kind"],
+            "label": window["label"],
+            "continuation_label": window["continuation_label"],
+            "today_date": window["today_date"],
+            "start_date": window["start_date"],
+            "end_date": window["end_date"],
+            "timezone": window["timezone"],
+            "window_start": window["start"].isoformat(),
+            "window_end": window["end"].isoformat(),
+            "tasks_touched": touched_tasks[:JOURNAL_DISPLAY_LIMIT],
+            "tasks_touched_total": len(touched_tasks),
+            "tasks_touched_omitted": max(0, len(touched_tasks) - JOURNAL_DISPLAY_LIMIT),
+            "carryover_tasks": carryover_tasks[:JOURNAL_DISPLAY_LIMIT],
+            "carryover_total": len(carryover_tasks),
+            "carryover_omitted": max(0, len(carryover_tasks) - JOURNAL_DISPLAY_LIMIT),
+            "jobs": jobs[:JOURNAL_DISPLAY_LIMIT],
+            "jobs_total": len(jobs),
+            "jobs_omitted": max(0, len(jobs) - JOURNAL_DISPLAY_LIMIT),
+            "session_continuity": sessions,
+        }
+
+    def _journal_task_records(self) -> list[Any]:
+        if self.task_ledger is None:
+            return []
+        try:
+            return self.task_ledger.list(limit=JOURNAL_TASK_LIMIT)
+        except Exception:
+            return []
+
+    def _journal_job_records(self) -> list[Any]:
+        if self.job_service is None:
+            return []
+        try:
+            return self.job_service.list(limit=JOURNAL_TASK_LIMIT)
+        except Exception:
+            return []
+
+    def _task_touched_in_window(self, task: Any, *, start_ts: float, end_ts: float) -> bool:
+        return any(
+            start_ts <= ts < end_ts
+            for ts in self._record_timestamps(
+                task, ("created_at", "started_at", "completed_at", "updated_at")
+            )
+        )
+
+    def _job_touched_in_window(self, job: Any, *, start_ts: float, end_ts: float) -> bool:
+        return any(
+            start_ts <= ts < end_ts
+            for ts in self._record_timestamps(
+                job, ("created_at", "started_at", "completed_at", "updated_at")
+            )
         )
 
     @staticmethod
-    def _brief_user_prompt(facts: dict[str, Any]) -> str:
-        lines: list[str] = [
-            f"Saludo: {facts.get('greeting', '')}",
-            f"Fecha: {facts.get('date', '')}",
-        ]
-        if facts.get("weather"):
-            lines.append(f"Clima: {facts['weather']}")
-        if facts.get("calendar"):
-            lines.append(f"Agenda: {facts['calendar']}")
-        if facts.get("email"):
-            lines.append(f"Correo: {facts['email']}")
-        work = facts.get("work") or {}
-        if work.get("attention"):
-            lines.append("Tareas con problema (objetivos):")
-            for obj in work["attention"]:
-                lines.append(f"  - {obj}")
-        if work.get("recent_done"):
-            lines.append("Cerradas recientemente (objetivos):")
-            for obj in work["recent_done"]:
-                lines.append(f"  - {obj}")
-        if work.get("active"):
-            lines.append("Activas ahora (objetivos):")
-            for obj in work["active"]:
-                lines.append(f"  - {obj}")
-        approvals = facts.get("approvals") or {}
-        if approvals.get("total"):
-            lines.append(
-                f"Aprobaciones pendientes: {approvals['total']} "
-                f"({approvals.get('stale', 0)} stale, "
-                f"{approvals.get('duplicate', 0)} duplicadas, "
-                f"{approvals.get('expired', 0)} expiradas)"
+    def _record_timestamps(record: Any, names: tuple[str, ...]) -> list[float]:
+        values: list[float] = []
+        for name in names:
+            raw = getattr(record, name, None)
+            if raw is None:
+                continue
+            try:
+                ts = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if ts > 0:
+                values.append(ts)
+        return values
+
+    def _task_is_open_or_problem(self, task: Any) -> bool:
+        status = str(getattr(task, "status", "") or "")
+        verification = str(getattr(task, "verification_status", "") or "")
+        return (
+            status in ACTIVE_TASK_STATUSES
+            or status in ATTENTION_TASK_STATUSES
+            or verification in OPEN_OR_PROBLEM_VERIFICATION_STATUSES
+        )
+
+    def _task_entry(self, task: Any, *, now: datetime) -> dict[str, str]:
+        detail = getattr(task, "error", "") or getattr(task, "summary", "")
+        timestamps = self._record_timestamps(
+            task, ("updated_at", "completed_at", "started_at", "created_at")
+        )
+        touched_at = max(timestamps) if timestamps else 0.0
+        return {
+            "objective": _safe_text(getattr(task, "objective", ""), 180),
+            "status": _safe_text(getattr(task, "status", "unknown"), 40),
+            "verification": _safe_text(getattr(task, "verification_status", "unknown"), 60),
+            "runtime": _safe_text(getattr(task, "runtime", "unknown"), 60),
+            "detail": _safe_text(detail, 220),
+            "touched": self._format_local_timestamp(touched_at, now=now),
+        }
+
+    def _job_entry(self, job: Any, *, now: datetime) -> dict[str, str]:
+        detail = getattr(job, "error", "") or getattr(job, "result", "") or getattr(job, "checkpoint", "")
+        timestamps = self._record_timestamps(
+            job, ("updated_at", "completed_at", "started_at", "created_at")
+        )
+        touched_at = max(timestamps) if timestamps else 0.0
+        return {
+            "kind": _safe_text(getattr(job, "kind", "job"), 120),
+            "status": _safe_text(getattr(job, "status", "unknown"), 40),
+            "detail": _safe_text(detail, 180),
+            "touched": self._format_local_timestamp(touched_at, now=now),
+        }
+
+    def _format_local_timestamp(self, ts: float, *, now: datetime) -> str:
+        if ts <= 0:
+            return ""
+        try:
+            value = datetime.fromtimestamp(ts, tz=now.tzinfo)
+        except Exception:
+            return ""
+        return value.strftime("%Y-%m-%d %H:%M")
+
+    def _journal_session_entries(self) -> list[dict[str, str]]:
+        if self.memory is None:
+            return []
+        try:
+            states = self.memory.list_session_states(limit=8)
+        except Exception:
+            return []
+        entries: list[dict[str, str]] = []
+        for state in states:
+            current_goal = _safe_text(state.get("current_goal"), 160)
+            pending_action = _safe_text(state.get("pending_action"), 160)
+            verification = _safe_text(state.get("verification_status"), 60)
+            task_queue = state.get("task_queue") if isinstance(state.get("task_queue"), list) else []
+            if not (current_goal or pending_action or task_queue or verification not in {"", "unknown"}):
+                continue
+            entries.append(
+                {
+                    "goal": current_goal,
+                    "pending": pending_action,
+                    "verification": verification,
+                    "queue": str(len(task_queue)) if task_queue else "",
+                }
             )
-        if "cost_usd" in facts:
-            lines.append(f"Costo estimado hoy: ${facts['cost_usd']:.4f}")
-        lines.append("Escribe el brief siguiendo las instrucciones del system prompt.")
+        return entries[:8]
+
+    def _journal_has_signal(self, journal: dict[str, Any]) -> bool:
+        return bool(
+            journal.get("tasks_touched")
+            or journal.get("carryover_tasks")
+            or journal.get("jobs")
+            or journal.get("session_continuity")
+        )
+
+    def _journal_section(self, journal: dict[str, Any], *, hard_evidence: bool = False) -> str:
+        if not journal:
+            return ""
+        title = "Bitácora verificada" if hard_evidence else "Diario operacional del agente"
+        lines = [
+            f"{title}:",
+            (
+                f"- Fecha exacta: {journal.get('today_date', '')}. "
+                f"Ventana: {journal.get('label', '')} "
+                f"({journal.get('start_date', '')} -> {journal.get('end_date', '')}, "
+                f"{journal.get('timezone', '')})."
+            ),
+        ]
+        touched = list(journal.get("tasks_touched") or [])
+        carryover = list(journal.get("carryover_tasks") or [])
+        jobs = list(journal.get("jobs") or [])
+        if touched:
+            lines.append(f"- Tareas ejecutadas/tocadas en la ventana: {journal.get('tasks_touched_total', len(touched))}.")
+            lines.extend(self._format_task_entries(touched))
+            omitted = int(journal.get("tasks_touched_omitted") or 0)
+            if omitted:
+                lines.append(f"  - ... {omitted} tareas adicionales registradas en la ventana.")
+        else:
+            lines.append("- Tareas ejecutadas/tocadas en la ventana: 0 registradas.")
+        if carryover:
+            lines.append(f"- Pendiente para {journal.get('continuation_label', 'continuar')}: {journal.get('carryover_total', len(carryover))}.")
+            lines.extend(self._format_task_entries(carryover))
+            omitted = int(journal.get("carryover_omitted") or 0)
+            if omitted:
+                lines.append(f"  - ... {omitted} pendientes adicionales.")
+        else:
+            lines.append(f"- Pendiente para {journal.get('continuation_label', 'continuar')}: 0 registrado.")
+        if jobs:
+            lines.append(f"- Jobs/agentes registrados: {journal.get('jobs_total', len(jobs))}.")
+            lines.extend(self._format_job_entries(jobs))
+        sessions = list(journal.get("session_continuity") or [])
+        if sessions:
+            lines.append("- Continuidad de sesión:")
+            for item in sessions[:5]:
+                bits = []
+                if item.get("goal"):
+                    bits.append(f"objetivo={item['goal']}")
+                if item.get("pending"):
+                    bits.append(f"pendiente={item['pending']}")
+                if item.get("queue"):
+                    bits.append(f"cola={item['queue']}")
+                if item.get("verification") and item["verification"] != "unknown":
+                    bits.append(f"verificación={item['verification']}")
+                if bits:
+                    lines.append("  - " + "; ".join(bits[:4]))
+        return "\n".join(lines) if self._journal_has_signal(journal) or not hard_evidence else ""
+
+    def _format_journal_for_prompt(self, journal: dict[str, Any]) -> str:
+        if not journal:
+            return ""
+        lines = [
+            "\nDIARIO OPERACIONAL VERIFICADO",
+            f"Fecha exacta: {journal.get('today_date', '')}",
+            (
+                f"Ventana: {journal.get('label', '')} "
+                f"({journal.get('start_date', '')} -> {journal.get('end_date', '')}, "
+                f"{journal.get('timezone', '')})"
+            ),
+            "Regla: cada tarea listada debe aparecer o quedar agrupada con conteo y nombre.",
+        ]
+        for heading, key, total_key in (
+            ("Tareas ejecutadas/tocadas en la ventana", "tasks_touched", "tasks_touched_total"),
+            ("Pendiente/continuación", "carryover_tasks", "carryover_total"),
+        ):
+            items = list(journal.get(key) or [])
+            lines.append(f"{heading}: {journal.get(total_key, len(items))}")
+            if not items:
+                lines.append("  - ninguna registrada")
+                continue
+            lines.extend(self._format_task_entries(items, indent="  - "))
+        jobs = list(journal.get("jobs") or [])
+        lines.append(f"Jobs/agentes: {journal.get('jobs_total', len(jobs))}")
+        if jobs:
+            lines.extend(self._format_job_entries(jobs, indent="  - "))
+        sessions = list(journal.get("session_continuity") or [])
+        if sessions:
+            lines.append("Continuidad de sesión:")
+            for item in sessions[:5]:
+                bits = [value for value in (item.get("goal"), item.get("pending")) if value]
+                if item.get("queue"):
+                    bits.append(f"cola={item['queue']}")
+                if item.get("verification") and item["verification"] != "unknown":
+                    bits.append(f"verificación={item['verification']}")
+                if bits:
+                    lines.append("  - " + "; ".join(bits[:4]))
         return "\n".join(lines)
+
+    def _format_task_entries(self, entries: list[dict[str, str]], *, indent: str = "  - ") -> list[str]:
+        lines: list[str] = []
+        for entry in entries:
+            objective = entry.get("objective") or "(sin objetivo)"
+            status = entry.get("status") or "unknown"
+            verification = entry.get("verification") or "unknown"
+            detail = entry.get("detail") or ""
+            touched = entry.get("touched") or ""
+            suffix = f"; {detail}" if detail else ""
+            when = f"; tocada {touched}" if touched else ""
+            lines.append(f"{indent}{status} / {verification} - {objective}{suffix}{when}")
+        return lines
+
+    def _format_job_entries(self, entries: list[dict[str, str]], *, indent: str = "  - ") -> list[str]:
+        lines: list[str] = []
+        for entry in entries:
+            kind = entry.get("kind") or "job"
+            status = entry.get("status") or "unknown"
+            detail = entry.get("detail") or ""
+            touched = entry.get("touched") or ""
+            suffix = f"; {detail}" if detail else ""
+            when = f"; tocado {touched}" if touched else ""
+            lines.append(f"{indent}{status} - {kind}{suffix}{when}")
+        return lines
 
     def _local_now(self) -> datetime:
         return datetime.now(ZoneInfo(self.settings.timezone))
@@ -524,7 +938,10 @@ class MorningBriefService:
                 for run in runs[:5]
             )
             work_items += min(len(runs), 5)
-        self._brief_counts["work_items"] = work_items
+        self._brief_counts["work_items"] = max(
+            int(self._brief_counts.get("work_items", 0)),
+            work_items,
+        )
         if len(lines) == 1:
             lines.append("- Sin tareas activas ni cambios recientes registrados.")
         return "\n".join(lines)
@@ -670,6 +1087,9 @@ class MorningBriefService:
             + int(self._brief_counts.get("approval_items", 0))
             + int(self._brief_counts.get("context_items", 0))
             + int(self._brief_counts.get("alert_items", 0))
+            + int(self._brief_counts.get("journal_tasks", 0))
+            + int(self._brief_counts.get("journal_jobs", 0))
+            + int(self._brief_counts.get("journal_pending", 0))
         )
         agenda_empty = source_statuses.get("agenda") in {"empty", "unavailable"}
         correo_empty = source_statuses.get("correo") in {"empty", "unavailable"}
@@ -680,6 +1100,9 @@ class MorningBriefService:
             "approval_items": int(self._brief_counts.get("approval_items", 0)),
             "context_items": int(self._brief_counts.get("context_items", 0)),
             "alert_items": int(self._brief_counts.get("alert_items", 0)),
+            "journal_tasks": int(self._brief_counts.get("journal_tasks", 0)),
+            "journal_jobs": int(self._brief_counts.get("journal_jobs", 0)),
+            "journal_pending": int(self._brief_counts.get("journal_pending", 0)),
             "low_signal": low_signal,
         }
 
