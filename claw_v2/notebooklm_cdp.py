@@ -84,6 +84,32 @@ def _extract_notebook_id(url: str) -> str | None:
     return match.group(1) if match else None
 
 
+def _scan_home_for_new_id(page, before_ids: set[str], *, limit: int = 30) -> str | None:
+    try:
+        page.goto(NLM_HOME, wait_until="domcontentloaded", timeout=20_000)
+    except Exception:
+        return None
+    time.sleep(1.5)
+    try:
+        cards = page.locator('a[href*="/notebook/"]')
+        count = min(cards.count(), limit)
+    except Exception:
+        return None
+    for i in range(count):
+        try:
+            href = cards.nth(i).get_attribute("href") or ""
+        except Exception:
+            continue
+        candidate = _extract_notebook_id(href)
+        if (
+            candidate
+            and candidate not in _TRANSIENT_NOTEBOOK_IDS
+            and candidate not in before_ids
+        ):
+            return candidate
+    return None
+
+
 def list_notebooks(*, cdp_url: str = DEFAULT_CDP_URL, limit: int = 60) -> list[dict]:
     """Enumerate notebooks visible on the NotebookLM home grid.
 
@@ -192,7 +218,7 @@ def create_notebook(title: str, *, cdp_url: str = DEFAULT_CDP_URL) -> dict:
         notebook_id: str | None = None
         new_page = page
         deadline = time.monotonic() + 120
-        reloaded = False
+        reloads_done = 0
         while time.monotonic() < deadline:
             for p in context.pages:
                 try:
@@ -209,18 +235,32 @@ def create_notebook(title: str, *, cdp_url: str = DEFAULT_CDP_URL) -> dict:
                     break
             if notebook_id:
                 break
-            # If stuck at /creating for >45s, reload the page to nudge navigation
             elapsed = 120 - (deadline - time.monotonic())
-            if not reloaded and elapsed > 45:
+            if reloads_done < 2 and elapsed > 30 + 45 * reloads_done:
                 for p in context.pages:
                     if "/notebook/creating" in p.url:
                         try:
                             p.reload(wait_until="domcontentloaded", timeout=15_000)
                         except Exception:
                             pass
-                        reloaded = True
+                        reloads_done += 1
                         break
+                else:
+                    reloads_done += 1
             time.sleep(0.5)
+        if not notebook_id:
+            fallback_id = _scan_home_for_new_id(page, before_ids)
+            if fallback_id:
+                notebook_id = fallback_id
+                target = f"https://notebooklm.google.com/notebook/{fallback_id}"
+                try:
+                    page.goto(target, wait_until="domcontentloaded", timeout=20_000)
+                    new_page = page
+                except Exception:
+                    logger.warning(
+                        "Notebook %s found via home-grid fallback but navigation failed",
+                        fallback_id,
+                    )
         if not notebook_id:
             urls = [p.url for p in context.pages if "notebooklm" in p.url]
             raise CdpNotebookLMError(
