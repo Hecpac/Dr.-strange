@@ -303,6 +303,81 @@ def test_actionable_no_match_falls_through_to_brain(bot) -> None:
     ), decisions
 
 
+def test_continue_prefers_pending_action_over_app_target_clarification(bot) -> None:
+    prompts: list[str] = []
+    bot.brain.memory.update_session_state(
+        "tg-test",
+        mode="ops",
+        current_goal="arreglar continuation imperative router bounce",
+        pending_action="arreglar #6 continuation imperative router bounce en bot.py",
+    )
+
+    def fake_handle_message(session_id, message, **_kwargs):
+        prompts.append(str(message))
+        return LLMResponse(
+            content="CONTINUATION_HANDLED",
+            lane="brain",
+            provider="anthropic",
+            model="claude-opus-4-7",
+        )
+
+    with patch.object(type(bot.brain), "handle_message", side_effect=fake_handle_message):
+        response, decisions, events = _drive(bot, "Continúa")
+
+    assert response == "CONTINUATION_HANDLED"
+    assert prompts
+    assert "Continúa con esta acción pendiente" in prompts[-1]
+    assert "arreglar #6 continuation" in prompts[-1]
+    assert "telegram_continuation_stateful_resolved" in events
+    assert "Necesito una aclaración mínima" not in response
+    assert any(
+        ev.get("handler") == "telegram_imperative"
+        and ev.get("route") == "intercepted"
+        and ev.get("reason") == "telegram_imperative:task.continue_active_mission:stateful"
+        for ev in decisions
+    ), decisions
+
+
+def test_continue_uses_recent_contextual_proposal_in_telegram(bot) -> None:
+    prompts: list[str] = []
+    bot.brain.memory.store_message(
+        "tg-test",
+        "assistant",
+        (
+            "**Estado del check-list:**\n"
+            "- ✅ #3 dispatch_typed migration → `606d648`\n"
+            "- 🟡 #4 política \"default=brain\" en SOUL/AGENTS → siguiente\n"
+            "- 🟡 #6 \"Procede\" / continuation imperative router bounce → bot.py audit\n\n"
+            "¿Sigo con #4 (política en SOUL/AGENTS) o querés que en su lugar arregle #6?"
+        ),
+    )
+
+    def fake_handle_message(session_id, message, **_kwargs):
+        prompts.append(str(message))
+        return LLMResponse(
+            content="CONTEXTUAL_CONTINUATION_HANDLED",
+            lane="brain",
+            provider="anthropic",
+            model="claude-opus-4-7",
+        )
+
+    with patch.object(type(bot.brain), "handle_message", side_effect=fake_handle_message):
+        response, decisions, events = _drive(bot, "Continúa")
+
+    assert response == "CONTEXTUAL_CONTINUATION_HANDLED"
+    assert prompts
+    assert "acción propuesta previamente" in prompts[-1]
+    assert "#4" in prompts[-1]
+    assert "SOUL/AGENTS" in prompts[-1]
+    assert "telegram_continuation_stateful_resolved" in events
+    assert any(
+        ev.get("handler") == "telegram_imperative"
+        and ev.get("route") == "intercepted"
+        and ev.get("reason") == "telegram_imperative:task.continue_active_mission:stateful"
+        for ev in decisions
+    ), decisions
+
+
 def test_quality_command_exposes_imperative_router_metrics(bot) -> None:
     _seed_codex_mission(bot)
     _drive(bot, "Pégale el prompt")

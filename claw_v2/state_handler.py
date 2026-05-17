@@ -988,6 +988,10 @@ class StateHandler:
         r"lo\s+intento|lo\s+pruebo|lo\s+corro)\s*\??\s*[\?!\.]*\s*$",
         re.IGNORECASE | re.MULTILINE,
     )
+    _CONTEXTUAL_PROPOSAL_QUESTION_RE = re.compile(
+        r"¿\s*(?:sigo|contin[uú]o|procedo|avanzo|voy|arranco)\b[^\n?]{1,260}\?\s*$",
+        re.IGNORECASE | re.MULTILINE,
+    )
 
     def _looks_like_proposal_question(self, text: str) -> bool:
         if not text:
@@ -1000,9 +1004,15 @@ class StateHandler:
         tail = lines[-1]
         if self._PROPOSAL_QUESTION_RE.search(tail):
             return True
+        if self._CONTEXTUAL_PROPOSAL_QUESTION_RE.search(tail):
+            return True
         # Some proposals close with the question mid-paragraph; scan the
         # whole tail block too.
-        return bool(self._PROPOSAL_QUESTION_RE.search(text[-400:]))
+        tail_block = text[-500:]
+        return bool(
+            self._PROPOSAL_QUESTION_RE.search(tail_block)
+            or self._CONTEXTUAL_PROPOSAL_QUESTION_RE.search(tail_block)
+        )
 
     def _extract_proposal_from_reply_context(self, state: dict[str, Any]) -> str | None:
         text = self._reply_context_text(state)
@@ -1029,15 +1039,37 @@ class StateHandler:
         return None
 
     def _summarize_proposal(self, text: str) -> str:
+        contextual_question = self._extract_contextual_proposal_question(text)
         # Strip the closing question, keep the substantive body.
         cleaned = self._PROPOSAL_QUESTION_RE.sub("", text).strip()
+        cleaned = self._CONTEXTUAL_PROPOSAL_QUESTION_RE.sub("", cleaned).strip()
         if not cleaned:
             cleaned = text.strip()
         # Collapse whitespace, cap length so it fits inside a brain hint.
         compact = " ".join(cleaned.split())
+        if contextual_question:
+            contextual_compact = " ".join(contextual_question.strip().strip("¿?").split())
+            if compact and compact != " ".join(text.strip().split()):
+                compact = f"{contextual_compact}. Contexto previo: {compact}"
+            else:
+                compact = contextual_compact
         if len(compact) > 320:
             compact = compact[:317] + "..."
         return compact
+
+    def _extract_contextual_proposal_question(self, text: str) -> str | None:
+        if not text:
+            return None
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        candidates = []
+        if lines:
+            candidates.append(lines[-1])
+        candidates.append(text[-500:])
+        for candidate in candidates:
+            match = self._CONTEXTUAL_PROPOSAL_QUESTION_RE.search(candidate)
+            if match:
+                return match.group(0)
+        return None
 
     def _ratio_context_from_state(self, state: dict[str, Any]) -> list[str]:
         active_object = state.get("active_object") or {}
