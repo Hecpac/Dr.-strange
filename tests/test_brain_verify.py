@@ -642,6 +642,27 @@ class PreCriticalActionCheckpointTests(unittest.TestCase):
         self.assertEqual(result.result, "ok")
         self.assertIsNone(result.checkpoint_id)
 
+    def test_checkpoint_failure_emits_pre_snapshot_failed_event(self) -> None:
+        """C6: _maybe_pre_snapshot failure must be visible (pre_snapshot_failed)."""
+        brain = self._brain()
+        with patch.object(
+            self.checkpoint, "create",
+            side_effect=RuntimeError("simulated"),
+        ), patch(
+            "claw_v2.brain.BrainService.verify_critical_action",
+            return_value=_fake_verification(should_proceed=True, risk="low"),
+        ):
+            brain.execute_critical_action(
+                action="dangerous_action", plan="p", diff="d", test_output="t",
+                executor=lambda: "ok", autonomy_mode="autonomous",
+                session_id="sess-pre-snap",
+            )
+        kinds = [e["event_type"] for e in self.observe.recent_events(limit=20)]
+        self.assertIn(
+            "pre_snapshot_failed", kinds,
+            f"Expected pre_snapshot_failed in {kinds}",
+        )
+
 
 class ConsecutiveFailuresTriggerTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -1124,6 +1145,48 @@ class TestSessionIdIsolation(unittest.TestCase):
         outcome_events = [e for e in emitted if e["event_type"] == "cycle_verification_complete"]
         self.assertTrue(outcome_events)
         self.assertEqual(outcome_events[0]["payload"]["session_id"], "brain.critical_action")
+
+
+class AutoRollbackScheduleRestoreFailureTests(unittest.TestCase):
+    """C1: schedule_restore failure must be visible (auto_rollback_failed event)."""
+
+    def setUp(self) -> None:
+        from claw_v2.checkpoint import CheckpointService
+        from claw_v2.learning import LearningLoop
+        tmp = Path(tempfile.mkdtemp())
+        self.memory = MemoryStore(tmp / "claw.db")
+        self.observe = ObserveStream(tmp / "obs.db")
+        self.learning = LearningLoop(memory=self.memory)
+        self.checkpoint = CheckpointService(
+            memory=self.memory, snapshots_dir=tmp / "snapshots",
+        )
+        self.memory.update_session_state(
+            "sess-fail", autonomy_mode="autonomous", mode="coding",
+        )
+        self.checkpoint.create(trigger_reason="seed")
+
+    def test_schedule_restore_failure_emits_auto_rollback_failed(self) -> None:
+        from claw_v2.brain import BrainService
+        brain = BrainService(
+            router=MagicMock(), memory=self.memory, system_prompt="p",
+            learning=self.learning, observe=self.observe, checkpoint=self.checkpoint,
+        )
+        with patch.object(
+            self.checkpoint, "schedule_restore",
+            side_effect=RuntimeError("simulated failure"),
+        ):
+            for i in range(3):
+                brain._emit_verification_outcome(
+                    session_id="sess-fail", task_type="self_heal",
+                    goal=f"g-{i}", action_summary="a",
+                    verification_status="failed", error_snippet="boom",
+                )
+        kinds = [e["event_type"] for e in self.observe.recent_events(limit=20)]
+        self.assertIn("auto_rollback_proposed", kinds)
+        self.assertIn(
+            "auto_rollback_failed", kinds,
+            f"Expected auto_rollback_failed in {kinds}",
+        )
 
 
 if __name__ == "__main__":

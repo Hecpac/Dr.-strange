@@ -634,6 +634,18 @@ class ToolRegistry:
             )
             return claim.claim_id
         except Exception:
+            logger.exception("P0 record_claim failed for %s", definition.name)
+            if self.observe is not None:
+                try:
+                    self.observe.emit(
+                        "p0_telemetry_failed",
+                        payload={"phase": "record_claim", "tool": definition.name},
+                    )
+                except Exception:
+                    logger.debug(
+                        "p0_telemetry_failed emit suppressed",
+                        exc_info=True,
+                    )
             return None
 
     def _emit_p0_tool_event(
@@ -672,6 +684,24 @@ class ToolRegistry:
             )
             return event.event_id
         except Exception:
+            logger.exception(
+                "P0 emit_event %s failed for %s", event_type, definition.name
+            )
+            if self.observe is not None:
+                try:
+                    self.observe.emit(
+                        "p0_telemetry_failed",
+                        payload={
+                            "phase": "emit_event",
+                            "event_type": event_type,
+                            "tool": definition.name,
+                        },
+                    )
+                except Exception:
+                    logger.debug(
+                        "p0_telemetry_failed emit suppressed",
+                        exc_info=True,
+                    )
             return None
 
     def _emit_autonomy_event(

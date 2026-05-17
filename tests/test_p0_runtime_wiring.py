@@ -87,6 +87,74 @@ class P0RuntimeWiringTests(unittest.TestCase):
             self.assertEqual(events[2].originating_event_id, events[0].event_id)
             self.assertEqual(len(load_claims(root / "telemetry")), 1)
 
+    def test_record_claim_failure_emits_p0_telemetry_failed(self) -> None:
+        """C5a: record_claim failure must be visible (p0_telemetry_failed event)."""
+        captured: list[tuple[str, dict]] = []
+
+        class _RecObserve:
+            def emit(self, event: str, **kwargs) -> None:
+                captured.append((event, dict(kwargs)))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            registry = ToolRegistry(
+                workspace_root=root / "workspace",
+                telemetry_root=root / "telemetry",
+                observe=_RecObserve(),
+            )
+            registry.register(
+                ToolDefinition(
+                    name="OkTool",
+                    description="x",
+                    allowed_agent_classes=("operator",),
+                    handler=lambda args: {"ok": True, "path": args.get("path", "")},
+                    mutates_state=True,
+                    tier=TIER_LOCAL_MUTATION,
+                )
+            )
+            with patch("claw_v2.tools.record_claim", side_effect=RuntimeError("claim boom")):
+                result = registry.execute("OkTool", {"path": "out.txt"}, agent_class="operator")
+            self.assertEqual(result["ok"], True)
+            kinds = [name for name, _ in captured]
+            self.assertIn(
+                "p0_telemetry_failed", kinds,
+                f"Expected p0_telemetry_failed in {kinds}",
+            )
+
+    def test_emit_event_failure_emits_p0_telemetry_failed(self) -> None:
+        """C5b: emit_event failure must be visible (p0_telemetry_failed event)."""
+        captured: list[tuple[str, dict]] = []
+
+        class _RecObserve:
+            def emit(self, event: str, **kwargs) -> None:
+                captured.append((event, dict(kwargs)))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            registry = ToolRegistry(
+                workspace_root=root / "workspace",
+                telemetry_root=root / "telemetry",
+                observe=_RecObserve(),
+            )
+            registry.register(
+                ToolDefinition(
+                    name="OkTool",
+                    description="x",
+                    allowed_agent_classes=("operator",),
+                    handler=lambda args: {"ok": True, "path": args.get("path", "")},
+                    mutates_state=True,
+                    tier=TIER_LOCAL_MUTATION,
+                )
+            )
+            with patch("claw_v2.tools.emit_event", side_effect=RuntimeError("event boom")):
+                result = registry.execute("OkTool", {"path": "out.txt"}, agent_class="operator")
+            self.assertEqual(result["ok"], True)
+            kinds = [name for name, _ in captured]
+            self.assertIn(
+                "p0_telemetry_failed", kinds,
+                f"Expected p0_telemetry_failed in {kinds}",
+            )
+
     def test_autonomous_task_populates_p0_jsonl(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
