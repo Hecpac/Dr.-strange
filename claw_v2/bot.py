@@ -2117,6 +2117,27 @@ class BotService:
             captured=telegram_imperative_response is not None,
             matched_pattern=telegram_imperative_pattern,
         )
+        if isinstance(telegram_imperative_response, _BrainShortcut):
+            is_pending_execution = (
+                telegram_imperative_response.text.startswith("Continúa con esta acción pendiente:")
+                or telegram_imperative_response.text.startswith("Continúa con este siguiente paso")
+                or telegram_imperative_response.text.startswith("Continúa con esta acción propuesta previamente:")
+            )
+            result = self._brain_text_response(
+                session_id,
+                telegram_imperative_response.text,
+                memory_text=telegram_imperative_response.memory_text,
+                runtime_channel=runtime_channel,
+            )
+            if is_pending_execution and self.observe is not None:
+                try:
+                    self.observe.emit(
+                        "pending_action_execution_completed",
+                        payload={"session_id": session_id, "response_length": len(result)},
+                    )
+                except Exception:
+                    logger.debug("failed to emit pending_action_execution_completed", exc_info=True)
+            return result
         if telegram_imperative_response is not None:
             telegram_imperative_response = self._quality_guard_response(
                 session_id,
@@ -5290,7 +5311,7 @@ class BotService:
         *,
         session_id: str,
         runtime_channel: str | None,
-    ) -> tuple[str | None, str, str | None]:
+    ) -> tuple[str | _BrainShortcut | None, str, str | None]:
         if (runtime_channel or "").strip().lower() != "telegram":
             return None, "not_telegram_channel", None
         intent = detect_telegram_imperative(text)
@@ -5311,6 +5332,22 @@ class BotService:
                 "requires_submit": intent.requires_submit,
             },
         )
+        if intent.intent == "task.continue_active_mission":
+            stateful_followup = self._maybe_resolve_stateful_followup(text, session_id=session_id)
+            if stateful_followup is not None:
+                self._emit_safe(
+                    "telegram_continuation_stateful_resolved",
+                    {
+                        "session_id": session_id,
+                        "intent": intent.intent,
+                        "resolution_kind": (
+                            "brain_shortcut"
+                            if isinstance(stateful_followup, _BrainShortcut)
+                            else "clarification"
+                        ),
+                    },
+                )
+                return stateful_followup, f"telegram_imperative:{intent.intent}:stateful", intent.matched_pattern
         response = self._handle_telegram_imperative(intent, text, session_id=session_id)
         return response, f"telegram_imperative:{intent.intent}", intent.matched_pattern
 
