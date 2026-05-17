@@ -64,3 +64,6 @@ captures/
 output/
 sgc-video/
 .commit_msg.txt
+
+# Firecrawl scrape cache
+.firecrawl/
