@@ -64,6 +64,7 @@ class _StubBrain:
 
 @dataclass
 class _StubResponse:
+    content: str = ""
     artifacts: dict[str, Any] = field(default_factory=dict)
 
 
@@ -263,6 +264,40 @@ class BrainToolUseLedgerTests(unittest.TestCase):
         self.assertIn("Exit code 127", task.error or "")
         events = [name for name, _ in observe.events]
         self.assertIn("brain_tooluse_ledger_failed", events)
+
+    def test_f2_nonfatal_tool_failure_with_useful_summary_is_not_top_level_failed(self) -> None:
+        observe = _RecordingObserve()
+        observe.canned_trace_events = [
+            _tool_event("Grep", tool_input={"pattern": "Phase 3"}),
+            _tool_failure_event(
+                "Read",
+                error=(
+                    "File content (48492 tokens) exceeds maximum allowed tokens "
+                    "(25000). Use offset and limit parameters."
+                ),
+            ),
+        ]
+        bot = _make_bot(observe, self.ledger)
+        bot._attach_brain_tool_use_ledger(
+            session_id="tg-test",
+            response=_StubResponse(
+                content="Encontré la auditoría y resumí los bloqueos principales.",
+                artifacts={"trace_id": "trace-X"},
+            ),
+            source_text="revisa la auditoria que hizo",
+            runtime_channel="telegram",
+        )
+        task = self.ledger.list(limit=10)[0]
+        self.assertNotEqual(task.status, "failed")
+        self.assertIn(task.status, {"succeeded", "running"})
+        self.assertIn(task.verification_status, {"succeeded_with_warnings", "partial_success", "needs_verification"})
+        substeps = task.artifacts.get("substeps", [])
+        self.assertTrue(
+            any(step.get("status") == "failed" and step.get("reason") == "file_too_large" for step in substeps),
+            substeps,
+        )
+        events = [name for name, _ in observe.events]
+        self.assertIn("brain_tooluse_ledger_completed_with_warnings", events)
 
     # --- G. brain text alone cannot mark passed ------------------------------
 

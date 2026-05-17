@@ -110,9 +110,18 @@ def _database_summary(
                     "perf_optimizer_paused",
                     "pipeline_poll_degraded",
                     "telegram_transport_stop_error",
+                    "computer_session_failed",
+                    "computer_browser_use_timeout",
+                    "computer_screenshot_failed",
+                    "computer_approval_screenshot_failed",
                 ),
                 limit=limit,
                 hours=24,
+            )
+            latest_errors = _merge_events(
+                latest_errors,
+                _latest_computer_use_errors(conn, limit=limit, hours=24),
+                limit=limit,
             )
             actionable_errors, acknowledged_errors = _partition_acknowledged_events(
                 latest_errors,
@@ -194,6 +203,41 @@ def _latest_events(
         params,
     ).fetchall()
     return [_event_row(row) for row in rows]
+
+
+def _latest_computer_use_errors(
+    conn: sqlite3.Connection,
+    *,
+    limit: int,
+    hours: int | None = None,
+) -> list[dict[str, Any]]:
+    params: list[Any] = []
+    age_filter = ""
+    if hours is not None:
+        age_filter = "AND timestamp >= datetime('now', ?)"
+        params.append(f"-{hours} hours")
+    params.append(limit)
+    rows = conn.execute(
+        f"""
+        SELECT id, timestamp, event_type, lane, provider, model, trace_id, job_id, artifact_id, payload
+        FROM observe_stream
+        WHERE event_type = 'error'
+          AND json_extract(payload, '$.source') = 'computer_use'
+          {age_filter}
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        params,
+    ).fetchall()
+    return [_event_row(row) for row in rows]
+
+
+def _merge_events(*event_groups: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    by_id: dict[int, dict[str, Any]] = {}
+    for group in event_groups:
+        for event in group:
+            by_id[int(event["id"])] = event
+    return [by_id[event_id] for event_id in sorted(by_id, reverse=True)[:limit]]
 
 
 def _heartbeat_summary(conn: sqlite3.Connection, *, now: float | None = None) -> dict[str, Any]:

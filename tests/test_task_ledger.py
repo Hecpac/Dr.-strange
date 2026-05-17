@@ -153,6 +153,35 @@ class TaskLedgerTests(unittest.TestCase):
             self.assertEqual(record.status, "lost")
             self.assertEqual(record.verification_status, "failed")
 
+    def test_stale_running_reconciliation_emits_terminal_event_per_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "observe.db")
+            ledger = TaskLedger(Path(tmpdir) / "claw.db", observe=observe)
+            ledger.create(
+                task_id="task-1",
+                session_id="tg-123",
+                objective="long task",
+                runtime="coordinator",
+                status="running",
+            )
+            with ledger._lock:
+                ledger._conn.execute(
+                    "UPDATE agent_tasks SET updated_at = ? WHERE task_id = ?",
+                    (time.time() - 600, "task-1"),
+                )
+                ledger._conn.commit()
+
+            changed = ledger.mark_stale_running_lost(older_than_seconds=300)
+
+            self.assertEqual(changed, 1)
+            terminal_events = [
+                event
+                for event in observe.recent_events(limit=10, event_type="task_ledger_terminal")
+                if event["payload"].get("task_id") == "task-1"
+            ]
+            self.assertEqual(len(terminal_events), 1)
+            self.assertEqual(terminal_events[0]["payload"]["status"], "lost")
+
     def test_reconciles_historical_succeeded_pending_records(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             observe = ObserveStream(Path(tmpdir) / "observe.db")

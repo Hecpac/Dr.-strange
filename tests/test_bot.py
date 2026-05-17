@@ -5,6 +5,7 @@ import json
 import os
 import re
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -1148,14 +1149,181 @@ class BotTests(unittest.TestCase):
                     runtime_channel="telegram",
                 )
 
-                self.assertIn("Aprobaciones pendientes: 1", reply)
+                self.assertIn("Hay 1 aprobacion que si merece decision", reply)
                 self.assertIn("Regenerar lock QTS", reply)
-                self.assertIn("Tareas bloqueadas", reply)
+                self.assertIn("Lo que si necesita accion", reply)
                 self.assertNotIn(pending.approval_id, reply)
                 self.assertNotIn(pending.token, reply)
                 self.assertNotIn("internal-task-1", reply)
                 self.assertNotIn("approval_id", reply)
                 self.assertNotIn("tg-", reply)
+
+    def test_tareas_pendientes_omits_closed_internal_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.task_ledger.create(
+                    task_id="internal-file-too-large",
+                    session_id="s1",
+                    objective="brain fallback tool-use turn",
+                    runtime="telegram",
+                    mode="chat",
+                    status="running",
+                )
+                runtime.task_ledger.mark_terminal(
+                    "internal-file-too-large",
+                    status="failed",
+                    summary="brain tool-use failed: File content exceeds maximum allowed tokens",
+                    error="File content (48492 tokens) exceeds maximum allowed tokens (25000)",
+                    verification_status="failed",
+                )
+                runtime.task_ledger.create(
+                    task_id="lost-runtime",
+                    session_id="s1",
+                    objective="old coordinator task",
+                    runtime="coordinator",
+                    mode="research",
+                    status="running",
+                    metadata={"autonomous": True},
+                )
+                runtime.task_ledger.mark_terminal(
+                    "lost-runtime",
+                    status="lost",
+                    summary="old coordinator task",
+                    error="runtime lost authoritative backing state",
+                    verification_status="failed",
+                )
+
+                reply = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="Tareas pendientes",
+                    runtime_channel="telegram",
+                )
+
+                self.assertIn("Ahora mismo no tengo tareas corriendo", reply)
+                self.assertIn("No veo nada que este esperando de mi ahora mismo", reply)
+                self.assertNotIn("File content", reply)
+                self.assertNotIn("runtime lost authoritative backing state", reply)
+                self.assertNotIn("Fallos cerrados omitidos", reply)
+                self.assertNotIn("Tareas bloqueadas", reply)
+
+    def test_tareas_pendientes_omits_stale_blockers_from_normal_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.task_ledger.create(
+                    task_id="stale-user-blocker",
+                    session_id="s1",
+                    objective="Que queremos communicar en el email?",
+                    runtime="coordinator",
+                    mode="research",
+                    status="running",
+                    metadata={"autonomous": True},
+                )
+                runtime.task_ledger.mark_terminal(
+                    "stale-user-blocker",
+                    status="failed",
+                    summary="waiting on old email context",
+                    error="waiting_for_user_input: confirmar audiencia y CTA",
+                    verification_status="blocked",
+                )
+                with runtime.task_ledger._lock:
+                    runtime.task_ledger._conn.execute(
+                        "UPDATE agent_tasks SET updated_at = ? WHERE task_id = ?",
+                        (time.time() - 72 * 3600, "stale-user-blocker"),
+                    )
+                    runtime.task_ledger._conn.commit()
+
+                reply = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="Tareas pendientes",
+                    runtime_channel="telegram",
+                )
+
+                self.assertIn("Ahora mismo no tengo tareas corriendo", reply)
+                self.assertIn("No veo nada que este esperando de mi ahora mismo", reply)
+                self.assertNotIn("confirmar audiencia", reply)
+                self.assertNotIn("Tareas bloqueadas", reply)
+
+    def test_tareas_pendientes_uses_brain_synthesis_with_memory_evidence(self) -> None:
+        captured_prompts: list[str] = []
+
+        def pending_synth(request: LLMRequest) -> LLMResponse:
+            prompt = request.prompt if isinstance(request.prompt, str) else json.dumps(request.prompt)
+            captured_prompts.append(prompt)
+            return LLMResponse(
+                content=(
+                    "<response>Revisé memoria y ledger. No veo tareas corriendo; "
+                    "lo único vivo es una aprobación sobre Regenerar lock QTS. "
+                    "Las duplicadas no son trabajo pendiente real.</response>"
+                ),
+                lane=request.lane,
+                provider="anthropic",
+                model=request.model,
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=pending_synth)
+                runtime.approvals.create(
+                    action="coordinated_task",
+                    summary="Regenerar lock QTS",
+                )
+                runtime.memory.store_fact(
+                    "pending.project.codex",
+                    "Codex phase closeout is a recent operational thread.",
+                    source="test",
+                    confidence=0.9,
+                )
+
+                reply = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="Cuales son las tareas pendientes",
+                    runtime_channel="telegram",
+                )
+
+                self.assertIn("Revisé memoria", reply)
+                self.assertIn("Regenerar lock QTS", reply)
+                self.assertTrue(captured_prompts)
+                self.assertIn("<evidencia_operativa>", captured_prompts[-1])
+                self.assertIn("pending.project.codex", captured_prompts[-1])
+                self.assertTrue(
+                    any(
+                        event["event_type"] == "pending_tasks_synthesis"
+                        and event["payload"].get("mode") == "brain"
+                        for event in runtime.observe.recent_events(limit=20)
+                    )
+                )
 
     def test_qts_lock_request_creates_blocker_with_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -4128,6 +4296,78 @@ class BotTests(unittest.TestCase):
                 self.assertNotIn("Chrome/CDP", result)
                 self.assertNotIn("terminal bridge", result)
                 self.assertNotIn("Habilita el browser bridge", result)
+                events = [event["event_type"] for event in runtime.observe.recent_events(limit=20)]
+                self.assertIn("capability_binding_guard_triggered", events)
+
+    def test_identity_drift_binding_replaces_provider_identity(self) -> None:
+        def identity_drift(request: LLMRequest) -> LLMResponse:
+            return LLMResponse(
+                content="<response>Soy Claude Code en este CLI, no puedo operar como Dr. Strange.</response>",
+                lane=request.lane,
+                provider="anthropic",
+                model=request.model,
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=identity_drift)
+
+                result = runtime.bot.handle_text(user_id="123", session_id="s1", text="responde prueba")
+
+                self.assertIn("Soy Dr. Strange", result)
+                self.assertIn("proveedores o herramientas locales", result)
+                self.assertIn("ejecuto la accion concreta", result)
+                self.assertNotIn("Soy Claude Code", result)
+                self.assertNotIn("este CLI", result)
+                events = [event["event_type"] for event in runtime.observe.recent_events(limit=20)]
+                self.assertIn("identity_drift_guard_triggered", events)
+
+    def test_operator_handoff_binding_blocks_manual_final_step_for_action(self) -> None:
+        def manual_handoff(request: LLMRequest) -> LLMResponse:
+            return LLMResponse(
+                content=(
+                    "<response>✅ Listo. El prompt está en tu clipboard.\n\n"
+                    "**Pasos finales (vos en la Mac):**\n"
+                    "1. Click en la ventana de Codex 2.\n"
+                    "2. Cmd+V → Enter.\n"
+                    "Por qué no lo pegué yo directo: mi runtime aquí no tiene control del foco.</response>"
+                ),
+                lane=request.lane,
+                provider="anthropic",
+                model=request.model,
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=manual_handoff)
+
+                result = runtime.bot.handle_text(user_id="123", session_id="s1", text="Pégale el prompt a Codex app")
+
+                self.assertIn("No cierro esto con handoff manual", result)
+                self.assertIn("accion operativa", result)
+                self.assertIn("No marco la accion como completada", result)
+                self.assertNotIn("Cmd+V", result)
+                self.assertNotIn("Click en la ventana", result)
+                events = [event["event_type"] for event in runtime.observe.recent_events(limit=20)]
+                self.assertIn("operator_handoff_guard_triggered", events)
 
     @patch("claw_v2.browse_handler._jina_read")
     def test_natural_language_url_uses_isolated_browse(self, mock_jina) -> None:

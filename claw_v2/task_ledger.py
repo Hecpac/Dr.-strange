@@ -292,6 +292,15 @@ class TaskLedger:
         cutoff = time.time() - older_than_seconds
         now = time.time()
         with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT *
+                FROM agent_tasks
+                WHERE status = 'running'
+                  AND updated_at < ?
+                """,
+                (cutoff,),
+            ).fetchall()
             cur = self._conn.execute(
                 """
                 UPDATE agent_tasks
@@ -307,8 +316,12 @@ class TaskLedger:
             )
             self._conn.commit()
             changed = cur.rowcount
+        reconciled = [self.get(str(row["task_id"])) for row in rows]
         if changed:
             self._emit("task_ledger_reconciled_lost", {"count": changed, "older_than_seconds": older_than_seconds})
+            for record in reconciled:
+                if record is not None:
+                    self._emit("task_ledger_terminal", record.to_dict())
         return int(changed or 0)
 
     def reconcile_false_successes(self, *, limit: int = 100) -> int:

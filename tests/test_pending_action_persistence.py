@@ -35,6 +35,7 @@ from claw_v2.bot_helpers import (
 )
 from claw_v2.memory import MemoryStore
 from claw_v2.state_handler import (
+    PENDING_ACTION_MAX_MESSAGE_DELTA,
     PENDING_ACTION_TTL_SECONDS,
     StateHandler,
 )
@@ -303,6 +304,10 @@ class LastOptionsPersistenceTests(unittest.TestCase):
 class StalePendingActionTests(unittest.TestCase):
     """Section F — old pending_action does not auto-resolve."""
 
+    def test_wave0_ttl_is_ten_minutes_and_three_messages(self) -> None:
+        self.assertEqual(PENDING_ACTION_TTL_SECONDS, 10 * 60)
+        self.assertEqual(PENDING_ACTION_MAX_MESSAGE_DELTA, 3)
+
     def test_stale_pending_action_is_ignored(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "claw.db"
@@ -341,6 +346,98 @@ class StalePendingActionTests(unittest.TestCase):
             self.assertIn("resolver_state_stale_ignored", event_names)
             self.assertNotEqual(
                 resolution.resolution_source, "session_state.pending_action"
+            )
+
+    def test_stale_pending_action_is_rejected_for_short_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "claw.db")
+            observe = _RecordingObserve()
+            handler = StateHandler(
+                brain_memory=memory, task_handler=_StubTaskHandler(), observe=observe
+            )
+            handler.remember_assistant_turn_state(
+                "tg-test", "?", "Tengo `make build` listo. ¿Lo ejecuto?"
+            )
+            state = memory.get_session_state("tg-test")
+            active_object = dict(state["active_object"])
+            active_object["pending_action_meta"]["created_at"] = (
+                time.time() - PENDING_ACTION_TTL_SECONDS - 1
+            )
+            memory.update_session_state("tg-test", active_object=active_object)
+
+            response = handler.maybe_resolve_stateful_followup(
+                "dale", session_id="tg-test"
+            )
+
+            self.assertIsInstance(response, str)
+            self.assertIn("ya no está vigente", response)
+            self.assertEqual(memory.get_session_state("tg-test")["pending_action"], "")
+            self.assertIn(
+                "stale_pending_action_rejected",
+                [name for name, _ in observe.events],
+            )
+
+    def test_unrelated_pending_action_fails_coherence_check(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "claw.db")
+            observe = _RecordingObserve()
+            handler = StateHandler(
+                brain_memory=memory, task_handler=_StubTaskHandler(), observe=observe
+            )
+            memory.update_session_state(
+                "tg-test",
+                current_goal="implementar wave 0 para autonomia del bot",
+                pending_action="confirmar que la imagen quedó visible en el chat",
+                active_object={
+                    "pending_action_meta": {
+                        "created_at": time.time(),
+                        "created_message_id": 0,
+                        "ttl_seconds": PENDING_ACTION_TTL_SECONDS,
+                        "topic": "imagen generada ratio 9:16",
+                    }
+                },
+            )
+
+            response = handler.maybe_resolve_stateful_followup(
+                "dale", session_id="tg-test"
+            )
+
+            self.assertIsInstance(response, str)
+            self.assertIn("no coincide", response)
+            event_names = [name for name, _ in observe.events]
+            self.assertIn("pending_action_coherence_checked", event_names)
+            self.assertIn("pending_action_coherence_failed", event_names)
+
+    def test_destructive_pending_action_requires_explicit_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "claw.db")
+            observe = _RecordingObserve()
+            handler = StateHandler(
+                brain_memory=memory, task_handler=_StubTaskHandler(), observe=observe
+            )
+            memory.update_session_state(
+                "tg-test",
+                current_goal="deploy a production y publicar el release",
+                pending_action="deploy a production y publicar el release",
+                active_object={
+                    "pending_action_meta": {
+                        "created_at": time.time(),
+                        "created_message_id": 0,
+                        "ttl_seconds": PENDING_ACTION_TTL_SECONDS,
+                        "topic": "deploy a production y publicar el release",
+                    }
+                },
+            )
+
+            response = handler.maybe_resolve_stateful_followup(
+                "ok", session_id="tg-test"
+            )
+
+            self.assertIsInstance(response, str)
+            self.assertIn("No la ejecuto con un ok corto", response)
+            self.assertIn(
+                "implicit_approval_requires_explicit_approval",
+                [name for name, _ in observe.events],
             )
 
 

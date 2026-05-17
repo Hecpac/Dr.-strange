@@ -2,9 +2,9 @@
 
 Three layers under test:
 
-1. The classifier (`detect_owner_delegation`) — pure regex over a
-   normalized string. Must catch every audit phrase, must NOT
-   false-positive on casual chat.
+1. The classifier (`detect_owner_delegation`) — lexical trigger plus
+   imperative-direction signal. Must catch every audit phrase, must NOT
+   false-positive on casual chat or hypothetical mentions.
 
 2. The resolver (`StateHandler.resolve_delegated_objective`) — uses
    `brain_memory.get_session_state` and the recent message log to derive
@@ -106,7 +106,9 @@ class OwnerDelegationClassifierTests(unittest.TestCase):
                 assert intent is not None
                 self.assertEqual(intent.kind, "execution")
                 self.assertTrue(intent.is_execution_delegation)
-                self.assertGreaterEqual(intent.confidence, 0.9)
+                self.assertGreaterEqual(intent.confidence, 0.7)
+                self.assertGreaterEqual(intent.lexical_score, 0.7)
+                self.assertGreaterEqual(intent.direction_score, 0.7)
 
     def test_execution_delegation_english(self) -> None:
         for phrase in (
@@ -195,6 +197,16 @@ class OwnerDelegationClassifierTests(unittest.TestCase):
                     detect_owner_delegation(benign),
                     f"benign input false-positived: {benign!r}",
                 )
+
+    def test_hypothetical_mentions_do_not_match(self) -> None:
+        for benign in (
+            "¿debería hacerlo tú o yo?",
+            "antes de que hagas algo, dime si decide tú",
+            "what would happen if you decide?",
+            "should you do it or should I?",
+        ):
+            with self.subTest(benign=benign):
+                self.assertIsNone(detect_owner_delegation(benign))
 
     def test_empty_text_returns_none(self) -> None:
         self.assertIsNone(detect_owner_delegation(""))

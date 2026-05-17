@@ -210,6 +210,13 @@ def _find_local_chrome() -> str | None:
     return None
 
 
+def _probe_pyautogui_display() -> tuple[int, int]:
+    import pyautogui
+
+    size = pyautogui.size()
+    return int(getattr(size, "width", 0)), int(getattr(size, "height", 0))
+
+
 def _run_startup_healthchecks(config: AppConfig, observe: ObserveStream) -> StartupHealthReport:
     report = StartupHealthReport()
 
@@ -267,7 +274,26 @@ def _run_startup_healthchecks(config: AppConfig, observe: ObserveStream) -> Star
         )
 
     if config.computer_use_enabled:
-        report.add_ok("computer_use", "desktop control enabled", capability="computer_use")
+        report.add_ok(
+            "computer_use",
+            f"configured: backend={config.computer_use_backend}",
+            capability="computer_use",
+        )
+        try:
+            display_width, display_height = _probe_pyautogui_display()
+        except Exception as exc:
+            report.add_degraded(
+                "computer_display",
+                f"pyautogui display probe failed: {exc}",
+            )
+        else:
+            if display_width <= 0 or display_height <= 0:
+                report.add_degraded(
+                    "computer_display",
+                    f"pyautogui reports unusable display size: {display_width}x{display_height}",
+                )
+            else:
+                report.add_ok("computer_display", f"{display_width}x{display_height}")
     else:
         report.add_degraded(
             "computer_use",
@@ -285,12 +311,20 @@ def _run_startup_healthchecks(config: AppConfig, observe: ObserveStream) -> Star
             )
         else:
             report.add_ok("codex_cli", codex_path, capability="computer_control")
-    elif config.computer_use_enabled and not sys.modules.get("openai") and importlib.util.find_spec("openai") is None:
-        report.add_degraded(
-            "openai_sdk",
-            "OpenAI SDK no está instalado; el control de escritorio asistido quedará degradado",
-            capability="computer_control",
-        )
+    elif config.computer_use_backend == "openai":
+        if config.computer_use_enabled and not config.openai_api_key:
+            report.add_degraded(
+                "openai_api_key",
+                "OPENAI_API_KEY no está configurado; el backend openai fallará al ejecutar acciones reales",
+            )
+        if config.computer_use_enabled and not sys.modules.get("openai") and importlib.util.find_spec("openai") is None:
+            report.add_degraded(
+                "openai_sdk",
+                "OpenAI SDK no está instalado; el control de escritorio asistido quedará degradado",
+                capability="computer_control",
+            )
+        else:
+            report.add_ok("computer_control", config.computer_use_backend, capability="computer_control")
     else:
         report.add_ok("computer_control", config.computer_use_backend, capability="computer_control")
 
@@ -839,6 +873,7 @@ def _setup_scheduler(
     task_board: TaskBoard,
     sub_agents: SubAgentService,
     bot: BotService,
+    task_ledger: TaskLedger,
     pipeline: PipelineService,
     startup_health: StartupHealthReport,
 ) -> tuple[CronScheduler, AutoDreamService, WikiService, SkillRegistry, A2AService]:
@@ -978,6 +1013,18 @@ def _setup_scheduler(
             state["experiments_today"] = 0
             agent_store.save_state(name, state)
 
+    def _task_lifecycle_watchdog_handler() -> None:
+        resumed = bot.resume_interrupted_tasks()
+        reconciled = task_ledger.reconcile_false_successes()
+        if resumed or reconciled:
+            observe.emit(
+                "task_lifecycle_watchdog",
+                payload={
+                    "resumed_tasks": resumed,
+                    "reconciled_false_successes": reconciled,
+                },
+            )
+
     def _perf_optimizer_handler() -> None:
         agent_name = "perf-optimizer"
         if not agent_store.state_path(agent_name).exists():
@@ -1037,6 +1084,7 @@ def _setup_scheduler(
         )
 
     scheduler.register(ScheduledJob(name="heartbeat", interval_seconds=config.heartbeat_interval, handler=heartbeat.emit))
+    scheduler.register(ScheduledJob(name="task_lifecycle_watchdog", interval_seconds=300, handler=_task_lifecycle_watchdog_handler))
     scheduler.register(ScheduledJob(name="kairos_tick", interval_seconds=600, handler=kairos.tick))
     scheduler.register(ScheduledJob(name="buddy_tick", interval_seconds=600, handler=lambda: buddy.tick(observe)))
     if config.eval_on_self_improve:
@@ -1285,6 +1333,7 @@ def build_runtime(
         task_board=task_board,
         sub_agents=sub_agents,
         bot=bot,
+        task_ledger=task_ledger,
         pipeline=pipeline,
         startup_health=startup_health,
     )

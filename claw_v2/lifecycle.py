@@ -24,6 +24,53 @@ logger = logging.getLogger(__name__)
 _DEFAULT_PID_PATH = Path.home() / ".claw" / "claw.pid"
 
 
+def should_notify_task_ledger_terminal(payload: dict, notified_task_ids: set[str]) -> bool:
+    session_id = str(payload.get("session_id") or "")
+    task_id = str(payload.get("task_id") or "")
+    status = str(payload.get("status") or "")
+    runtime = str(payload.get("runtime") or "")
+    notify_policy = str(payload.get("notify_policy") or "done_only")
+    if not session_id.startswith("tg-") or not task_id:
+        return False
+    if task_id in notified_task_ids or notify_policy == "none":
+        return False
+    if status not in {"succeeded", "failed", "timed_out", "cancelled", "lost"}:
+        return False
+    # Coordinator tasks emit richer autonomous_task_completed/failed events.
+    # Stale/lost coordinator tasks are created by daemon reconciliation and
+    # otherwise have no per-session completion event, so notify them here.
+    if runtime == "coordinator" and status != "lost":
+        return False
+    return True
+
+
+def format_task_ledger_terminal_message(payload: dict) -> str:
+    task_id = str(payload.get("task_id") or "")
+    status = str(payload.get("status") or "unknown")
+    verification = str(payload.get("verification_status") or "unknown")
+    summary = str(payload.get("summary") or "").strip()
+    error = str(payload.get("error") or "").strip()
+    objective = str(payload.get("objective") or "").strip()
+    if status == "succeeded":
+        if verification in {"passed", "succeeded", "succeeded_with_warnings"}:
+            header = f"Cerré la tarea `{task_id}`."
+        else:
+            header = f"Registré resultado para `{task_id}`; falta verificación final."
+        lines = [header, f"Verificación: {verification}"]
+    else:
+        lines = [
+            f"No pude cerrar la tarea `{task_id}`.",
+            f"Estado: {status}",
+            f"Verificación: {verification}",
+        ]
+    detail = summary or error or objective
+    if detail:
+        lines.extend(["", detail[:2500]])
+    if error and error != detail:
+        lines.extend(["", f"Error: {error[:1200]}"])
+    return "\n".join(lines)
+
+
 def load_soul(soul_path: Path | None = None) -> str:
     if soul_path is None:
         soul_path = Path(__file__).parent / "SOUL.md"
@@ -157,22 +204,44 @@ async def run() -> int:
                     _loop,
                 )
 
+        _notified_task_ids: set[str] = set()
+
         def _autonomous_task_complete_consumer(payload: dict) -> None:
             session_id = str(payload.get("session_id") or "")
             task_id = str(payload.get("task_id") or "")
+            if task_id in _notified_task_ids:
+                return
             status = str(payload.get("verification_status") or "unknown")
             response = str(payload.get("response") or "").strip()
             header = f"Cerré la tarea `{task_id}`.\nVerificación: {status}\n\n"
             _send_session_telegram_message(session_id, header + response)
+            if task_id:
+                _notified_task_ids.add(task_id)
 
         def _autonomous_task_failed_consumer(payload: dict) -> None:
             session_id = str(payload.get("session_id") or "")
             task_id = str(payload.get("task_id") or "")
+            if task_id in _notified_task_ids:
+                return
             response = str(payload.get("response") or payload.get("error") or "unknown error")
             _send_session_telegram_message(session_id, f"No pude cerrar la tarea `{task_id}`.\n{response}")
+            if task_id:
+                _notified_task_ids.add(task_id)
+
+        def _task_ledger_terminal_consumer(payload: dict) -> None:
+            if not should_notify_task_ledger_terminal(payload, _notified_task_ids):
+                return
+            task_id = str(payload.get("task_id") or "")
+            _send_session_telegram_message(
+                str(payload.get("session_id") or ""),
+                format_task_ledger_terminal_message(payload),
+            )
+            if task_id:
+                _notified_task_ids.add(task_id)
 
         runtime.observe.subscribe("autonomous_task_completed", _autonomous_task_complete_consumer)
         runtime.observe.subscribe("autonomous_task_failed", _autonomous_task_failed_consumer)
+        runtime.observe.subscribe("task_ledger_terminal", _task_ledger_terminal_consumer)
 
         def _nlm_notify(message: str) -> None:
             try:
@@ -197,6 +266,8 @@ async def run() -> int:
             job_service=runtime.job_service,
             task_board=runtime.task_board,
             pipeline=runtime.bot.pipeline,
+            approvals=runtime.approvals,
+            memory=runtime.memory,
         )
         evening_brief = MorningBriefService(
             settings=MorningBriefSettings(
@@ -218,6 +289,8 @@ async def run() -> int:
             job_service=runtime.job_service,
             task_board=runtime.task_board,
             pipeline=runtime.bot.pipeline,
+            approvals=runtime.approvals,
+            memory=runtime.memory,
         )
 
         from claw_v2.cron import ScheduledJob as _SJ
