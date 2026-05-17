@@ -173,6 +173,14 @@ class TotalCostTodayTests(unittest.TestCase):
             self.assertEqual(spending["by_provider"], {"anthropic": 2.0, "openai": 0.25})
             self.assertEqual(len(spending["rows"]), 2)
 
+    def test_total_cost_today_can_filter_providers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "test.db")
+            observe.emit("llm_response", lane="worker_heavy", provider="codex", model="gpt-5.5", payload={"cost_estimate": 99.0})
+            observe.emit("llm_response", lane="brain", provider="anthropic", model="opus", payload={"cost_estimate": 2.0})
+            self.assertEqual(observe.total_cost_today(providers={"anthropic"}), 2.0)
+            self.assertEqual(observe.total_cost_today(providers={"openai"}), 0.0)
+
 
 class DailyCostGateTests(unittest.TestCase):
     def _make_request(self) -> LLMRequest:
@@ -254,6 +262,21 @@ class DailyCostGateTests(unittest.TestCase):
             result = gate(self._make_request())
             self.assertIsNone(result)
             self.assertIn("daily_cost_limit_exceeded", gate.block_reason)
+
+    def test_gate_ignores_non_billable_provider_costs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "test.db")
+            observe.emit(
+                "llm_response",
+                lane="worker_heavy",
+                provider="codex",
+                model="gpt-5.5",
+                payload={"cost_estimate": 99.0},
+            )
+            request = self._make_request()
+            request.provider = "openai"
+            gate = make_daily_cost_gate(observe, daily_limit=1.0, billable_providers={"openai"})
+            self.assertIsNotNone(gate(request))
 
 
 class DecisionLoggerTests(unittest.TestCase):

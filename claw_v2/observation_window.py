@@ -31,6 +31,7 @@ class ObservationWindowConfig:
     tool_calls_per_minute_threshold: int = 10
     daily_budget_cap: float | None = None
     stale_freeze_seconds: float = 3600.0
+    notional_cost_providers: tuple[str, ...] = ()
 
 
 def hard_denylist_reason(tool_name: str, args: dict[str, Any]) -> str | None:
@@ -196,6 +197,18 @@ class ObservationWindowState:
         action = str(event.get("action") or "llm_event")
         cost = _coerce_float(event.get("cost_estimate"), 0.0)
         now = self._clock()
+        provider = str(event.get("provider") or "")
+        if cost > 0 and provider in set(self.config.notional_cost_providers):
+            self._emit(
+                "llm_notional_cost_ignored",
+                {
+                    "lane": event.get("lane"),
+                    "provider": provider,
+                    "model": event.get("model"),
+                    "cost_estimate": cost,
+                },
+            )
+            cost = 0.0
         if cost > 0:
             with self._lock:
                 self._llm_costs.append((now, cost))
@@ -203,14 +216,14 @@ class ObservationWindowState:
                 cost_per_hour = sum(item_cost for _, item_cost in self._llm_costs)
             if cost_per_hour > self.config.cost_per_hour_threshold:
                 lane = str(event.get("lane")) if event.get("lane") is not None else None
-                provider = str(event.get("provider")) if event.get("provider") is not None else None
+                provider_for_event = str(event.get("provider")) if event.get("provider") is not None else None
                 self.trip_breaker(
                     "cost_per_hour",
                     value=cost_per_hour,
                     threshold=self.config.cost_per_hour_threshold,
                     actor=lane or "llm",
                     lane=lane,
-                    provider=provider,
+                    provider=provider_for_event,
                 )
         if bool(event.get("degraded_mode")):
             self._notify_stream(
@@ -319,6 +332,14 @@ class ObservationWindowState:
             return 0.0
         try:
             spending = self.observe.spending_today()  # type: ignore[attr-defined]
+            notional = set(self.config.notional_cost_providers)
+            if notional:
+                rows = spending.get("rows") or []
+                return sum(
+                    float(row.get("cost") or 0.0)
+                    for row in rows
+                    if str(row.get("provider") or "") not in notional
+                )
             return float(spending.get("total") or 0.0)
         except Exception:
             try:

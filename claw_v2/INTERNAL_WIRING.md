@@ -115,13 +115,19 @@ Telegram → BotService.handle_text
 ```yaml
 lanes:
   brain:    { tool_capable: true,  default: anthropic }
-  worker:   { tool_capable: true,  default: codex_or_anthropic }
-  verifier: { tool_capable: false, default: multi_vote }
-  research: { tool_capable: false, default: openai_or_google }
-  judge:    { tool_capable: false, default: anthropic }
+  worker:   { tool_capable: true,  default: anthropic }
+  worker_heavy:
+    tool_capable: true
+    default: codex/gpt-5.5
+    purpose: terminal/debugging/long tool runs
+  verifier: { tool_capable: false, default: codex/gpt-5.5 read-only unless overridden }
+  research: { tool_capable: false, default: codex/gpt-5.5 read-only }
+  judge:    { tool_capable: false, default: codex/gpt-5.5 read-only }
 
 NON_TOOL_LANES: [verifier, research, judge]
-enforced_by: LLMRouter._validate_lane_input  # claw_v2/llm.py
+enforced_by:
+  - LLMRouter._validate_lane_input  # blocks tool-loop config
+  - CodexAdapter read-only sandbox for advisory lanes
 ```
 
 ### resilience
@@ -136,12 +142,14 @@ enforced_by: LLMRouter._validate_lane_input  # claw_v2/llm.py
     fallback_provider: null  # explicit — codex is ChatGPT subscription
   ```
 - ObservationWindowState (`claw_v2/observation_window.py`) is an additional
-  gate over LLM and tool execution: rolling 1h cost, rolling 1min tool-call
-  rate, hard denylist (git push -f, vercel --prod, gh release create, dynamic
-  rm -rf). Frozen state persists between restarts; `circuit_breaker:*`
-  freezes auto-clear after `stale_freeze_seconds` (default 3600s) since the
-  rolling-window evidence has decayed by then. Manual freezes (manual_*)
-  always require explicit unfreeze.
+  gate over LLM and tool execution: rolling 1h billable API cost, rolling 1min
+  tool-call rate, hard denylist (git push -f, vercel --prod, gh release create,
+  dynamic rm -rf). Subscription/local providers (`codex`, `ollama`, and
+  `anthropic` when `CLAUDE_AUTH_MODE=subscription`) report notional costs only;
+  those are ignored for budget freezes. Frozen state persists between restarts;
+  `circuit_breaker:*` freezes auto-clear after `stale_freeze_seconds` (default
+  3600s) since the rolling-window evidence has decayed by then. Manual freezes
+  (manual_*) always require explicit unfreeze.
 
 ### provider-aware sessions
 
@@ -418,7 +426,7 @@ Self-improvement loop must reject these even if tests pass.
 do_not:
   - change: Grant tool access to verifier, research, or judge lanes
     why: Breaks advisory-only invariant.
-    enforced_by: LLMRouter._validate_lane_input
+    enforced_by: LLMRouter._validate_lane_input + CodexAdapter advisory sandbox
 
   - change: Add fallback codex → anthropic
     why: Codex is ChatGPT subscription. Silent fallback hides provider switch.
@@ -443,6 +451,12 @@ do_not:
     why: Manual freezes are explicit operator decisions; only circuit_breaker:*
          freezes are evidence-backed by rolling windows and safe to TTL out.
     enforced_by: ObservationWindowState._load_state stale-freeze TTL guard.
+
+  - change: Count subscription/local provider notional costs as billable budget
+    why: Subscription usage is an operational run-budget signal, not API spend;
+         blocking the bot on it makes the agent unavailable while paid
+         subscription lanes are still usable.
+    enforced_by: AppConfig.notional_cost_providers + ObservationWindowState
 
   - change: Call adapter.publish, subprocess git push, or any other direct
             external-state mutation from a Kairos handler without going

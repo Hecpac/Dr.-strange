@@ -49,19 +49,22 @@ def make_daily_cost_gate(
     daily_limit: float = 10.0,
     *,
     auth_mode: str = "auto",
+    billable_providers: set[str] | None = None,
 ) -> PreLLMHook:
     """Daily cost gate.
 
     Subscription mode (Claude Pro/Max + ChatGPT Pro etc.) does NOT bill
     per-call: SDK still reports `total_cost_usd` for parity, but it is not
-    real spend. We skip the gate entirely in subscription mode to avoid
-    blocking real work after the SDK's notional total crosses the limit.
+    real spend. The gate therefore applies only to providers known to be
+    API-billed in this runtime.
     """
+    billable = set(billable_providers) if billable_providers is not None else _default_billable_providers(auth_mode)
+
     def daily_cost_gate(request: LLMRequest) -> LLMRequest | None:
-        if auth_mode == "subscription":
+        if request.provider not in billable:
             daily_cost_gate.block_reason = None
             return request
-        total_today = observe.total_cost_today()
+        total_today = observe.total_cost_today(providers=billable)
         if total_today >= daily_limit:
             logger.warning("Daily cost limit reached: $%.2f >= $%.2f", total_today, daily_limit)
             daily_cost_gate.block_reason = (
@@ -74,6 +77,12 @@ def make_daily_cost_gate(
     daily_cost_gate.__name__ = "daily_cost_gate"
     daily_cost_gate.block_reason = None
     return daily_cost_gate
+
+
+def _default_billable_providers(auth_mode: str) -> set[str]:
+    if auth_mode == "subscription":
+        return {"openai", "google"}
+    return {"anthropic", "openai", "google"}
 
 
 def make_decision_logger(observe: ObserveStream) -> PostLLMHook:

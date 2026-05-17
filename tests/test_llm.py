@@ -235,6 +235,19 @@ class LLMRouterTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 router.ask("do work", lane="worker", provider="openai")
 
+    def test_worker_heavy_lane_rejects_non_tool_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            router = LLMRouter(
+                config=config,
+                adapters={
+                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=echo_response("anthropic")),
+                    "google": StaticAdapter("google", tool_capable=False, responder=echo_response("google")),
+                },
+            )
+            with self.assertRaises(ValueError):
+                router.ask("debug this", lane="worker_heavy", provider="google")
+
     def test_invalid_request_fails_before_adapter_call(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = make_config(Path(tmpdir))
@@ -253,6 +266,40 @@ class LLMRouterTests(unittest.TestCase):
                 router.ask("do work", lane="brain", timeout=0)
             self.assertEqual(calls, 0)
 
+    def test_subscription_brain_budget_uses_lane_floor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            config.claude_auth_mode = "subscription"
+            seen: dict[str, float] = {}
+
+            def responder(request: LLMRequest) -> LLMResponse:
+                seen["max_budget"] = request.max_budget
+                return echo_response("anthropic")(request)
+
+            router = LLMRouter(
+                config=config,
+                adapters={"anthropic": StaticAdapter("anthropic", tool_capable=True, responder=responder)},
+            )
+            router.ask("think", lane="brain", max_budget=0.05)
+            self.assertEqual(seen["max_budget"], 1.0)
+
+    def test_api_brain_budget_keeps_requested_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            config.claude_auth_mode = "api_key"
+            seen: dict[str, float] = {}
+
+            def responder(request: LLMRequest) -> LLMResponse:
+                seen["max_budget"] = request.max_budget
+                return echo_response("anthropic")(request)
+
+            router = LLMRouter(
+                config=config,
+                adapters={"anthropic": StaticAdapter("anthropic", tool_capable=True, responder=responder)},
+            )
+            router.ask("think", lane="brain", max_budget=0.05)
+            self.assertEqual(seen["max_budget"], 0.05)
+
     def test_codex_worker_lane_routes_to_codex_adapter(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = make_config(Path(tmpdir))
@@ -268,6 +315,20 @@ class LLMRouterTests(unittest.TestCase):
             )
             response = router.ask("write a function", lane="worker")
             self.assertEqual(response.provider, "codex")
+
+    def test_worker_heavy_lane_defaults_to_codex_adapter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            router = LLMRouter(
+                config=config,
+                adapters={
+                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=echo_response("anthropic")),
+                    "codex": StaticAdapter("codex", tool_capable=True, responder=echo_response("codex")),
+                },
+            )
+            response = router.ask("debug terminal failure", lane="worker_heavy")
+            self.assertEqual(response.provider, "codex")
+            self.assertEqual(response.model, "gpt-5.5")
 
     def test_codex_worker_lane_does_not_fallback_to_anthropic_on_adapter_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -54,6 +54,12 @@ OPEN_OR_PROBLEM_VERIFICATION_STATUSES = (
 )
 JOURNAL_TASK_LIMIT = 100
 JOURNAL_DISPLAY_LIMIT = 100
+INTERNAL_RUNTIMES = {"brain_fallback", "brain_tooluse", "brain_tool_use"}
+INTERNAL_OBJECTIVE_PREFIXES = (
+    "brain fallback tool-use turn",
+    "brain tool-use turn",
+    "brain fallback turn",
+)
 ALERT_EVENT_KEYWORDS = (
     "error",
     "fail",
@@ -204,11 +210,11 @@ class MorningBriefService:
         journal = self._build_agent_journal(now)
         sections = [
             f"{self.settings.greeting}\nHoy es {date_line}.",
-            f"Clima: {weather_line}",
-            f"Agenda: {calendar_line}",
-            f"Correo: {email_line}",
+            f"Clima: {weather_line}" if weather_line else "",
+            f"Agenda: {calendar_line}" if calendar_line else "",
+            f"Correo: {email_line}" if email_line else "",
             self._journal_section(journal),
-            self._work_section(),
+            self._work_section(now=now),
             self._approval_section(now),
             self._session_context_section(),
             self._agent_section(),
@@ -241,8 +247,8 @@ class MorningBriefService:
                 "date": facts.get("date", ""),
                 "journal": facts.get("journal", {}),
             },
-            max_budget=0.10,
-            timeout=15.0,
+            max_budget=0.40,
+            timeout=60.0,
         )
         rendered = str(getattr(response, "content", "") or "").strip()
         journal_text = self._journal_section(facts.get("journal") or {}, hard_evidence=True)
@@ -521,7 +527,7 @@ class MorningBriefService:
         window = self._journal_window(now)
         start_ts = float(window["start"].timestamp())
         end_ts = float(window["end"].timestamp())
-        tasks = self._journal_task_records()
+        tasks = [task for task in self._journal_task_records() if self._task_is_user_visible(task)]
         touched_tasks = [
             self._task_entry(task, now=window["now"])
             for task in tasks
@@ -624,6 +630,13 @@ class MorningBriefService:
             or verification in OPEN_OR_PROBLEM_VERIFICATION_STATUSES
         )
 
+    @staticmethod
+    def _task_is_user_visible(task: Any) -> bool:
+        objective = str(getattr(task, "objective", "") or "").strip().lower()
+        if any(objective.startswith(prefix) for prefix in INTERNAL_OBJECTIVE_PREFIXES):
+            return False
+        return True
+
     def _task_entry(self, task: Any, *, now: datetime) -> dict[str, str]:
         detail = getattr(task, "error", "") or getattr(task, "summary", "")
         timestamps = self._record_timestamps(
@@ -697,54 +710,55 @@ class MorningBriefService:
     def _journal_section(self, journal: dict[str, Any], *, hard_evidence: bool = False) -> str:
         if not journal:
             return ""
+        if hard_evidence and not self._journal_has_signal(journal):
+            return ""
         title = "Bitácora verificada" if hard_evidence else "Diario operacional del agente"
         lines = [
             f"{title}:",
             (
-                f"- Fecha exacta: {journal.get('today_date', '')}. "
-                f"Ventana: {journal.get('label', '')} "
-                f"({journal.get('start_date', '')} -> {journal.get('end_date', '')}, "
-                f"{journal.get('timezone', '')})."
+                f"- Fecha: {journal.get('today_date', '')}. "
+                f"Ventana: {journal.get('label', '')}."
             ),
         ]
         touched = list(journal.get("tasks_touched") or [])
         carryover = list(journal.get("carryover_tasks") or [])
-        jobs = list(journal.get("jobs") or [])
-        if touched:
-            lines.append(f"- Tareas ejecutadas/tocadas en la ventana: {journal.get('tasks_touched_total', len(touched))}.")
-            lines.extend(self._format_task_entries(touched))
-            omitted = int(journal.get("tasks_touched_omitted") or 0)
-            if omitted:
-                lines.append(f"  - ... {omitted} tareas adicionales registradas en la ventana.")
-        else:
-            lines.append("- Tareas ejecutadas/tocadas en la ventana: 0 registradas.")
-        if carryover:
-            lines.append(f"- Pendiente para {journal.get('continuation_label', 'continuar')}: {journal.get('carryover_total', len(carryover))}.")
-            lines.extend(self._format_task_entries(carryover))
-            omitted = int(journal.get("carryover_omitted") or 0)
-            if omitted:
-                lines.append(f"  - ... {omitted} pendientes adicionales.")
-        else:
-            lines.append(f"- Pendiente para {journal.get('continuation_label', 'continuar')}: 0 registrado.")
-        if jobs:
-            lines.append(f"- Jobs/agentes registrados: {journal.get('jobs_total', len(jobs))}.")
-            lines.extend(self._format_job_entries(jobs))
         sessions = list(journal.get("session_continuity") or [])
+        touched_total = int(journal.get("tasks_touched_total", len(touched)))
+        carryover_total = int(journal.get("carryover_total", len(carryover)))
+        if touched_total:
+            preview = self._summarize_task_objectives(touched, limit=4)
+            extra = touched_total - min(len(preview), 4) if preview else touched_total
+            suffix = f" y {extra} más" if extra > 0 else ""
+            preview_text = ("; ".join(preview) + suffix) if preview else f"{touched_total} en total"
+            lines.append(f"- Ejecutadas en la ventana ({touched_total}): {preview_text}.")
+        if carryover_total:
+            preview = self._summarize_task_objectives(carryover, limit=4)
+            extra = carryover_total - min(len(preview), 4) if preview else carryover_total
+            suffix = f" y {extra} más" if extra > 0 else ""
+            preview_text = ("; ".join(preview) + suffix) if preview else f"{carryover_total} en total"
+            label = journal.get("continuation_label", "continuar")
+            lines.append(f"- Para {label} ({carryover_total}): {preview_text}.")
         if sessions:
-            lines.append("- Continuidad de sesión:")
-            for item in sessions[:5]:
-                bits = []
-                if item.get("goal"):
-                    bits.append(f"objetivo={item['goal']}")
-                if item.get("pending"):
-                    bits.append(f"pendiente={item['pending']}")
-                if item.get("queue"):
-                    bits.append(f"cola={item['queue']}")
-                if item.get("verification") and item["verification"] != "unknown":
-                    bits.append(f"verificación={item['verification']}")
-                if bits:
-                    lines.append("  - " + "; ".join(bits[:4]))
-        return "\n".join(lines) if self._journal_has_signal(journal) or not hard_evidence else ""
+            session_goals = [s.get("goal", "") for s in sessions if s.get("goal")]
+            if session_goals:
+                lines.append("- Hilos abiertos: " + "; ".join(session_goals[:3]) + ".")
+        if len(lines) <= 2:
+            return ""
+        return "\n".join(lines)
+
+    @staticmethod
+    def _summarize_task_objectives(entries: list[dict[str, str]], *, limit: int) -> list[str]:
+        seen: list[str] = []
+        for entry in entries:
+            objective = (entry.get("objective") or "").strip()
+            if not objective:
+                continue
+            if objective in seen:
+                continue
+            seen.append(objective)
+            if len(seen) >= limit:
+                break
+        return seen
 
     def _format_journal_for_prompt(self, journal: dict[str, Any]) -> str:
         if not journal:
@@ -820,131 +834,151 @@ class MorningBriefService:
         except Exception as exc:
             logger.warning("morning brief weather unavailable: %s", exc)
             self._record_source("clima", "wttr.in", "unavailable", type(exc).__name__)
-            return f"no disponible ({type(exc).__name__})"
+            return ""
         status = "empty" if not str(result or "").strip() else "ok"
         self._record_source("clima", "wttr.in", status, self.settings.weather_location or "auto")
-        return result
+        return result or ""
 
     def _external_line(self, command: str | None, *, default: str, name: str) -> str:
         if not command:
             self._record_source(name, "not_configured", "empty", default)
-            return default
+            return ""
         try:
             result = self.command_runner(command, self.settings.command_timeout_seconds)
         except Exception as exc:
             logger.warning("morning brief command failed: %s", exc)
             self._record_source(name, f"command:{_trim(command, 80)}", "unavailable", type(exc).__name__)
-            return f"error consultando conector ({type(exc).__name__})"
-        value = result or "sin novedades"
+            return ""
+        value = (result or "").strip()
+        if not value:
+            self._record_source(name, f"command:{_trim(command, 80)}", "empty", "")
+            return ""
         self._record_source(name, f"command:{_trim(command, 80)}", self._source_status(name, value), "")
         return value
 
     def _calendar_line(self) -> str:
         if self.settings.calendar_command:
-            return self._external_line(self.settings.calendar_command, default="sin novedades", name="agenda")
+            return self._external_line(self.settings.calendar_command, default="", name="agenda")
         try:
-            result = self.calendar_fetcher(self.settings.command_timeout_seconds) or "sin eventos hoy"
+            result = self.calendar_fetcher(self.settings.command_timeout_seconds) or ""
         except Exception as exc:
             logger.warning("morning brief calendar unavailable: %s", exc)
             self._record_source("agenda", "apple_calendar", "unavailable", type(exc).__name__)
-            return f"no disponible ({type(exc).__name__})"
-        self._record_source("agenda", "apple_calendar", self._source_status("agenda", result), "")
+            return ""
+        status = self._source_status("agenda", result)
+        self._record_source("agenda", "apple_calendar", status, "")
+        if status != "ok":
+            return ""
         return result
 
     def _email_line(self) -> str:
         if self.settings.email_command:
-            return self._external_line(self.settings.email_command, default="sin novedades", name="correo")
+            return self._external_line(self.settings.email_command, default="", name="correo")
         try:
-            result = self.email_fetcher(self.settings.command_timeout_seconds) or "sin correos prioritarios"
+            result = self.email_fetcher(self.settings.command_timeout_seconds) or ""
         except Exception as exc:
             logger.warning("morning brief email unavailable: %s", exc)
             self._record_source("correo", "apple_mail", "unavailable", type(exc).__name__)
-            return f"no disponible ({type(exc).__name__})"
-        self._record_source("correo", "apple_mail", self._source_status("correo", result), "")
+            return ""
+        status = self._source_status("correo", result)
+        self._record_source("correo", "apple_mail", status, "")
+        if status != "ok":
+            return ""
         return result
 
     def _pending_work_section(self) -> str:
         return self._work_section()
 
-    def _work_section(self) -> str:
-        lines: list[str] = ["Trabajo:"]
+    def _work_section(self, *, now: datetime | None = None) -> str:
+        cutoff_ts = 0.0
+        if now is not None:
+            cutoff_ts = float(now.timestamp()) - (48 * 3600)
+        lines: list[str] = []
         work_items = 0
+        active_descriptions: list[str] = []
+        attention_descriptions: list[str] = []
+        done_descriptions: list[str] = []
         if self.task_ledger is not None:
             try:
                 tasks = self.task_ledger.list(limit=20)
             except Exception:
                 tasks = []
-            active_tasks = [
-                task for task in tasks
-                if str(getattr(task, "status", "")) in ACTIVE_TASK_STATUSES
-            ]
-            attention_tasks = [
-                task for task in tasks
-                if str(getattr(task, "status", "")) in ATTENTION_TASK_STATUSES
-                or str(getattr(task, "verification_status", "")) in ATTENTION_VERIFICATION_STATUSES
-            ]
-            done_tasks = [
-                task for task in tasks
-                if str(getattr(task, "status", "")) in RECENT_DONE_TASK_STATUSES
-            ]
-            if active_tasks:
-                lines.append("Activas:")
-            lines.extend(
-                f"- Task {task.task_id}: {task.status} - {_trim(task.objective, 90)}"
-                for task in active_tasks[:5]
-            )
-            work_items += min(len(active_tasks), 5)
-            if attention_tasks:
-                lines.append("Atencion:")
-            lines.extend(
-                f"- Task {task.task_id}: {task.status} - {_trim(task.error or task.summary or task.objective, 90)}"
-                for task in attention_tasks[:5]
-            )
-            work_items += min(len(attention_tasks), 5)
-            if done_tasks:
-                lines.append("Cerradas recientes:")
-            lines.extend(
-                f"- Task {task.task_id}: {task.status} - {_trim(task.summary or task.objective, 90)}"
-                for task in done_tasks[:5]
-            )
-            work_items += min(len(done_tasks), 5)
+            for task in tasks:
+                if not self._task_is_user_visible(task):
+                    continue
+                status = str(getattr(task, "status", ""))
+                verification = str(getattr(task, "verification_status", ""))
+                objective = _safe_text(getattr(task, "objective", ""), 90)
+                if not objective:
+                    continue
+                if status in ACTIVE_TASK_STATUSES:
+                    active_descriptions.append(objective)
+                    continue
+                touched = max(self._record_timestamps(task, ("updated_at", "completed_at", "started_at", "created_at")) or [0.0])
+                if touched < cutoff_ts:
+                    continue
+                if status in ATTENTION_TASK_STATUSES or verification in ATTENTION_VERIFICATION_STATUSES:
+                    attention_descriptions.append(objective)
+                elif status in RECENT_DONE_TASK_STATUSES:
+                    done_descriptions.append(objective)
+            active_descriptions = active_descriptions[:5]
+            attention_descriptions = attention_descriptions[:5]
+            done_descriptions = done_descriptions[:5]
+        if active_descriptions:
+            lines.append("Corriendo ahora: " + "; ".join(active_descriptions) + ".")
+            work_items += len(active_descriptions)
+        if attention_descriptions:
+            lines.append("Quedaron sin cerrar en las últimas 48h: " + "; ".join(attention_descriptions) + ".")
+            work_items += len(attention_descriptions)
+        if done_descriptions:
+            lines.append("Cerradas recientes: " + "; ".join(done_descriptions) + ".")
+            work_items += len(done_descriptions)
         if self.job_service is not None:
             try:
                 jobs = self.job_service.list(statuses=ACTIVE_JOB_STATUSES, limit=5)
             except Exception:
                 jobs = []
-            lines.extend(
-                f"- Job {job.job_id}: {job.status} - {job.kind}"
+            job_descriptions = [
+                _safe_text(getattr(job, "kind", "job"), 90)
                 for job in jobs
-            )
-            work_items += len(jobs)
+                if _safe_text(getattr(job, "kind", "job"), 90)
+            ]
+            if job_descriptions:
+                lines.append("Jobs en curso: " + "; ".join(job_descriptions) + ".")
+                work_items += len(job_descriptions)
         if self.task_board is not None:
             try:
                 board_tasks = [*self.task_board.pending()[:3], *self.task_board.active()[:3]]
             except Exception:
                 board_tasks = []
-            lines.extend(
-                f"- Board {task.id}: {task.status.value} - {_trim(task.title, 90)}"
+            board_descriptions = [
+                _safe_text(getattr(task, "title", ""), 90)
                 for task in board_tasks
-            )
-            work_items += len(board_tasks)
+                if _safe_text(getattr(task, "title", ""), 90)
+            ]
+            if board_descriptions:
+                lines.append("En board: " + "; ".join(board_descriptions) + ".")
+                work_items += len(board_descriptions)
         if self.pipeline is not None:
             try:
                 runs = self.pipeline.list_active()
             except Exception:
                 runs = []
-            lines.extend(
-                f"- Pipeline {run.issue_id}: {run.status} - {run.branch_name}"
+            pipeline_descriptions = [
+                _safe_text(getattr(run, "branch_name", "") or getattr(run, "issue_id", ""), 90)
                 for run in runs[:5]
-            )
-            work_items += min(len(runs), 5)
+                if _safe_text(getattr(run, "branch_name", "") or getattr(run, "issue_id", ""), 90)
+            ]
+            if pipeline_descriptions:
+                lines.append("Pipelines activos: " + "; ".join(pipeline_descriptions) + ".")
+                work_items += len(pipeline_descriptions)
         self._brief_counts["work_items"] = max(
             int(self._brief_counts.get("work_items", 0)),
             work_items,
         )
-        if len(lines) == 1:
-            lines.append("- Sin tareas activas ni cambios recientes registrados.")
-        return "\n".join(lines)
+        if not lines:
+            return ""
+        return "Trabajo:\n" + "\n".join(lines)
 
     def _approval_section(self, now: datetime) -> str:
         if self.approvals is None:

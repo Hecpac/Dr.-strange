@@ -116,6 +116,35 @@ class ObservationWindowTests(unittest.TestCase):
             )
             self.assertTrue(any("circuit_breaker=cost_per_hour" in line for line in diagnostic_stream))
 
+    def test_notional_subscription_cost_does_not_freeze(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = _RecordingObserve()
+            window = ObservationWindowState(
+                observe=observe,
+                state_path=Path(tmpdir) / "window.json",
+                config=ObservationWindowConfig(
+                    cost_per_hour_threshold=0.05,
+                    notional_cost_providers=("anthropic", "codex"),
+                ),
+            )
+
+            window.handle_llm_audit_event(
+                {
+                    "action": "llm_response",
+                    "lane": "brain",
+                    "provider": "anthropic",
+                    "model": "claude-opus-4-7",
+                    "cost_estimate": 9.99,
+                    "degraded_mode": False,
+                    "metadata": {},
+                }
+            )
+
+            self.assertFalse(window.frozen)
+            event_names = [name for name, _ in observe.events]
+            self.assertIn("llm_notional_cost_ignored", event_names)
+            self.assertNotIn("circuit_breaker_tripped", event_names)
+
     def test_cost_per_hour_is_not_diagnostic_only(self) -> None:
         # Regression: budget breaker must escape the diagnostic-silence path so it
         # reaches Telegram. Other circuit_breaker:* reasons stay silent.

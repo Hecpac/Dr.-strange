@@ -72,7 +72,7 @@ class LLMRequest:
 
     def validate(self) -> None:
         """Fail fast on malformed cross-provider requests before adapter calls."""
-        if self.lane not in {"brain", "worker", "verifier", "research", "judge"}:
+        if self.lane not in {"brain", "worker", "worker_heavy", "verifier", "research", "judge"}:
             raise ValueError(f"Invalid lane: {self.lane!r}")
         if not isinstance(self.provider, str) or not self.provider.strip():
             raise ValueError("LLM provider must be a non-empty string.")

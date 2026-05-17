@@ -2538,7 +2538,7 @@ class BotService:
         c = self.config
         overrides = model_overrides_from_state(self.brain.memory.get_session_state(context.session_id))
         lanes = {}
-        for lane in ("brain", "worker", "verifier", "research", "judge"):
+        for lane in ("brain", "worker", "worker_heavy", "verifier", "research", "judge"):
             override = overrides.get(lane)
             provider = override.provider if override else c.provider_for_lane(lane)
             model = override.model if override else c.model_for_lane(lane)
@@ -2617,7 +2617,7 @@ class BotService:
             return {"error": "config not available"}
         overrides = model_overrides_from_state(self.brain.memory.get_session_state(session_id))
         lanes: dict[str, Any] = {}
-        for lane in ("brain", "worker", "research", "verifier", "judge"):
+        for lane in ("brain", "worker", "worker_heavy", "research", "verifier", "judge"):
             override = overrides.get(lane)
             if override is not None:
                 lanes[lane] = {
@@ -2918,23 +2918,25 @@ class BotService:
                 f"Effort actual:\n"
                 f"  brain: {self.config.brain_effort}\n"
                 f"  worker: {self.config.worker_effort}\n"
+                f"  worker_heavy: {self.config.worker_heavy_effort}\n"
                 f"  judge: {self.config.judge_effort}\n"
                 f"\nUso: /effort <level> [lane]\n"
                 f"Niveles: {', '.join(self._VALID_EFFORTS)}\n"
-                f"Lanes: brain, worker, judge (omitir = todas)"
+                f"Lanes: brain, worker, worker_heavy, judge (omitir = todas)"
             )
         parts = context.stripped.split()
         level = parts[1].lower() if len(parts) >= 2 else ""
         if level not in self._VALID_EFFORTS:
             return f"Nivel inválido: {level}\nVálidos: {', '.join(self._VALID_EFFORTS)}"
         lane = parts[2].lower() if len(parts) >= 3 else None
-        if lane and lane not in ("brain", "worker", "judge"):
-            return f"Lane inválido: {lane}\nVálidos: brain, worker, judge"
+        if lane and lane not in ("brain", "worker", "worker_heavy", "judge"):
+            return f"Lane inválido: {lane}\nVálidos: brain, worker, worker_heavy, judge"
         if lane:
             setattr(self.config, f"{lane}_effort", level)
         else:
             self.config.brain_effort = level
             self.config.worker_effort = level
+            self.config.worker_heavy_effort = level
             self.config.judge_effort = level
         applied = lane or "todas las lanes"
         return f"Effort → **{level}** para {applied}"

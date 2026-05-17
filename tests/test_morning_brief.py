@@ -112,10 +112,13 @@ class MorningBriefTests(unittest.TestCase):
             self.assertIn("Clima: Dallas, TX: 72F despejado", sent[0])
             self.assertIn("Agenda: 2 eventos hoy", sent[0])
             self.assertIn("Correo: 3 correos importantes", sent[0])
-            self.assertIn("Task task-1: running", sent[0])
-            self.assertIn("Job job-1: queued - notebooklm.research", sent[0])
-            self.assertIn("Board", sent[0])
-            self.assertIn("Pipeline HEC-1: awaiting_approval", sent[0])
+            self.assertIn("Cerrar auditoria del agente", sent[0])
+            self.assertNotIn("task-1", sent[0])
+            self.assertIn("notebooklm.research", sent[0])
+            self.assertNotIn("job-1", sent[0])
+            self.assertIn("Revisar propuesta", sent[0])
+            self.assertIn("feat/hec-1", sent[0])
+            self.assertNotIn("HEC-1: awaiting_approval", sent[0])
             self.assertIn("perf-optimizer: pausado", sent[0])
             self.assertEqual((root / "morning.txt").read_text(encoding="utf-8"), "2026-04-27")
             self.assertEqual(observe.recent_events(limit=1)[0]["event_type"], "morning_brief_sent")
@@ -172,10 +175,12 @@ class MorningBriefTests(unittest.TestCase):
 
             self.assertIn("Aprobaciones:", message)
             self.assertIn("Publicar post de HealthSherpa", message)
-            self.assertIn("Atencion:", message)
-            self.assertIn("task-failed", message)
+            self.assertIn("Quedaron sin cerrar", message)
+            self.assertIn("Revisar correo de Tatiana sobre HealthSherpa", message)
+            self.assertNotIn("task-failed", message)
             self.assertIn("Cerradas recientes:", message)
-            self.assertIn("task-done", message)
+            self.assertIn("Cerrar auditoria de Telegram router", message)
+            self.assertNotIn("task-done", message)
             self.assertIn("Contexto activo:", message)
             self.assertIn("Arreglar briefs matutinos", message)
             self.assertIn("Alertas recientes:", message)
@@ -205,7 +210,7 @@ class MorningBriefTests(unittest.TestCase):
             self.assertIn("baja senal", message)
             self.assertEqual(observe.recent_events(limit=1)[0]["event_type"], "morning_brief_low_signal")
 
-    def test_missing_connectors_are_explicit_in_message(self) -> None:
+    def test_missing_connectors_are_omitted_from_message_and_recorded_in_sources(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             service = MorningBriefService(
                 settings=MorningBriefSettings(stamp_path=Path(tmpdir) / "morning.txt"),
@@ -218,8 +223,11 @@ class MorningBriefTests(unittest.TestCase):
 
             message = service.build_message(datetime(2026, 4, 27, 8, 0))
 
-            self.assertIn("Agenda: no disponible (RuntimeError)", message)
-            self.assertIn("Correo: no disponible (RuntimeError)", message)
+            self.assertNotIn("Agenda:", message)
+            self.assertNotIn("Correo:", message)
+            self.assertNotIn("no disponible (RuntimeError)", message)
+            self.assertIn("agenda=unavailable", message)
+            self.assertIn("correo=unavailable", message)
 
     def test_calendar_and_email_collectors_are_automatic_when_no_command_is_configured(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -404,7 +412,7 @@ class ConversationalBriefTests(unittest.TestCase):
             self.assertIn("Auditar los briefs recientes", prompt_text)
             self.assertTrue(message.startswith("Apertura narrativa."))
             self.assertIn("Bitácora verificada:", message)
-            self.assertIn("Pendiente para retomar hoy: 1.", message)
+            self.assertIn("Para retomar hoy (1):", message)
             self.assertIn("Auditar los briefs recientes", message)
 
     def test_evening_prompt_is_day_cut_and_not_morning_continuation(self) -> None:
@@ -439,7 +447,7 @@ class ConversationalBriefTests(unittest.TestCase):
             self.assertIn("corte de hoy", prompt_text)
             self.assertIn("sabado 16 de mayo de 2026", prompt_text)
             self.assertIn("Cerrar auditoría de cambios externos", message)
-            self.assertIn("Pendiente para mañana: 0 registrado.", message)
+            self.assertNotIn("Para mañana", message)
 
     def test_brief_falls_back_to_template_when_llm_raises(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

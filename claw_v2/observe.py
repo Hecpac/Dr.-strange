@@ -165,15 +165,26 @@ class ObserveStream:
             "estimated_savings_pct": estimated_savings_pct,
         }
 
-    def total_cost_today(self) -> float:
+    def total_cost_today(self, *, providers: set[str] | None = None) -> float:
+        provider_filter = ""
+        params: tuple[object, ...] = ()
+        if providers is not None:
+            normalized = sorted(provider for provider in providers if provider)
+            if not normalized:
+                return 0.0
+            placeholders = ",".join("?" for _ in normalized)
+            provider_filter = f" AND provider IN ({placeholders})"
+            params = tuple(normalized)
         with self._lock:
             row = self._conn.execute(
-                """
+                f"""
                 SELECT COALESCE(SUM(json_extract(payload, '$.cost_estimate')), 0.0)
                 FROM observe_stream
                 WHERE event_type = 'llm_response'
                   AND timestamp >= date('now', 'start of day')
+                  {provider_filter}
                 """,
+                params,
             ).fetchone()
         return float(row[0]) if row else 0.0
 
