@@ -5442,6 +5442,7 @@ class BotTests(unittest.TestCase):
                 self.assertIn("max", reply)
                 self.assertEqual(runtime.bot.config.brain_effort, "max")
                 self.assertEqual(runtime.bot.config.worker_effort, "max")
+                self.assertEqual(runtime.bot.config.worker_heavy_effort, "max")
                 self.assertEqual(runtime.bot.config.judge_effort, "max")
 
     def test_models_command_lists_subscription_and_api_models(self) -> None:

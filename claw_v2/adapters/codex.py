@@ -8,6 +8,7 @@ import time
 from typing import Callable
 
 from claw_v2.adapters.base import (
+    ADVISORY_LANES,
     AdapterError,
     AdapterUnavailableError,
     LLMRequest,
@@ -31,7 +32,8 @@ class CodexAdapter(ProviderAdapter):
 
     Uses the ChatGPT Pro subscription — cost_estimate is always 0.0.
     tool_capable=True because Codex CLI handles its own internal tool loop
-    (file edits, shell execution, etc.).
+    (file edits, shell execution, etc.). Advisory lanes are forced into
+    read-only sandbox mode before invoking the CLI.
     """
 
     provider_name = "codex"
@@ -75,12 +77,15 @@ class CodexAdapter(ProviderAdapter):
 
         full_prompt = f"{system}\n\n{prompt}" if system else str(prompt)
 
+        sandbox = _sandbox_for_request(request)
         cmd = [
             resolved, "exec",
             "--model", model,
-            "--full-auto",
+            "--sandbox", sandbox,
             "--color", "never",
         ]
+        if request.lane in ADVISORY_LANES:
+            cmd.append("--ephemeral")
         if request.cwd:
             cmd += ["-C", request.cwd]
 
@@ -129,6 +134,8 @@ class CodexAdapter(ProviderAdapter):
                 "stderr": result.stderr.strip()[:200],
                 "codex_version": preflight.version,
                 "auth_status": preflight.auth_status[:200],
+                "codex_sandbox": sandbox,
+                "codex_ephemeral": request.lane in ADVISORY_LANES,
             },
         )
 
@@ -218,6 +225,12 @@ def _codex_confidence(content: str) -> float:
     if structured >= 1:
         return 0.7
     return 0.55
+
+
+def _sandbox_for_request(request: LLMRequest) -> str:
+    if request.lane in ADVISORY_LANES:
+        return "read-only"
+    return "workspace-write"
 
 
 def _is_retryable_startup_failure(result: subprocess.CompletedProcess[str]) -> bool:

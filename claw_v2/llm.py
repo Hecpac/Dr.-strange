@@ -67,7 +67,12 @@ class LLMRouter:
             if thinking_tokens is not None
             else self.config.thinking_tokens_for_lane(lane)
         )
-        budget = max_budget if max_budget is not None else self.config.max_budget_usd
+        requested_budget = max_budget if max_budget is not None else self.config.max_budget_usd
+        budget = self.config.effective_max_budget_for_request(
+            lane=lane,
+            provider=selected_provider,
+            requested_budget=requested_budget,
+        )
         request = LLMRequest(
             prompt=prompt,
             system_prompt=system_prompt,

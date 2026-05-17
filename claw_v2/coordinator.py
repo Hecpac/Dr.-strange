@@ -186,7 +186,7 @@ class CoordinatorService:
                     ))
         return results
 
-    _RETRY_LANES: frozenset[str] = frozenset({"worker"})
+    _RETRY_LANES: frozenset[str] = frozenset({"worker", "worker_heavy"})
 
     def _execute_worker(
         self,

@@ -252,6 +252,17 @@ class RetryAndContextTests(unittest.TestCase):
         retry_calls = [c for c in observe.emit.call_args_list if c.args and c.args[0] == "coordinator_worker_retry"]
         self.assertEqual(len(retry_calls), 1)
 
+    def test_worker_heavy_lane_retries_once_on_adapter_error(self) -> None:
+        from claw_v2.adapters.base import AdapterError
+        svc, router, observe, _ = _make_service()
+        router.ask.side_effect = [AdapterError("terminal failure"), MagicMock(content="done")]
+        task = WorkerTask(name="debug", instruction="debug", lane="worker_heavy")
+        result = svc._execute_worker(task)
+        self.assertEqual(result.content, "done")
+        self.assertEqual(router.ask.call_count, 2)
+        retry_calls = [c for c in observe.emit.call_args_list if c.args and c.args[0] == "coordinator_worker_retry"]
+        self.assertEqual(len(retry_calls), 1)
+
     def test_worker_lane_gives_up_after_two_attempts(self) -> None:
         from claw_v2.adapters.base import AdapterError
         svc, router, *_ = _make_service()

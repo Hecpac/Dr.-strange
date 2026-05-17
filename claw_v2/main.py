@@ -428,11 +428,24 @@ def _setup_llm_stack(
         anthropic_executor = create_claude_sdk_executor(config, observe=observe, approvals=approvals)
 
     auth_mode = getattr(config, "claude_auth_mode", "auto")
+    billable_providers = config.billable_cost_providers()
     if config.daily_cost_limit is None:
-        pre_hooks: list = [make_daily_cost_gate(observe, 10.0, auth_mode=auth_mode)]
+        pre_hooks: list = [
+            make_daily_cost_gate(
+                observe,
+                10.0,
+                auth_mode=auth_mode,
+                billable_providers=billable_providers,
+            )
+        ]
     elif config.daily_cost_limit > 0:
         pre_hooks = [
-            make_daily_cost_gate(observe, config.daily_cost_limit, auth_mode=auth_mode)
+            make_daily_cost_gate(
+                observe,
+                config.daily_cost_limit,
+                auth_mode=auth_mode,
+                billable_providers=billable_providers,
+            )
         ]
     else:
         raise ValueError("daily_cost_limit must be positive or None")
@@ -1238,6 +1251,7 @@ def build_runtime(
             cost_per_hour_threshold=config.observation_cost_per_hour_threshold,
             tool_calls_per_minute_threshold=config.observation_tool_calls_per_minute_threshold,
             daily_budget_cap=config.daily_cost_limit,
+            notional_cost_providers=tuple(sorted(config.notional_cost_providers())),
         ),
     )
     agent_workspace = AgentWorkspace(config.workspace_root, template_root=Path(__file__).parent)
