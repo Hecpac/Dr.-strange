@@ -154,6 +154,33 @@ class ContinuationResolverTests(unittest.TestCase):
         self.assertIn("smoke test de Inworld", shortcut.text)
         self.assertIn("recent_assistant", shortcut.text)
 
+    def test_resolves_markdown_pending_line_from_reply_context(self) -> None:
+        memory, handler = self._handler()
+        memory.update_session_state(
+            "s1",
+            active_object={
+                "reply_context": {
+                    "source": "telegram_reply",
+                    "text": (
+                        "**Checkpoint:**\n"
+                        "- **Hecho:** inspeccion de observe_stream post-restart.\n"
+                        "- **Pendiente:** validacion de la rama nueva (`brain_shortcut`) "
+                        "— requiere un \"Procede\"/\"Continua\" pelado de tu parte.\n"
+                        "Sigo activo esperando."
+                    ),
+                    "created_at": time.time(),
+                }
+            },
+        )
+
+        shortcut = handler.maybe_resolve_stateful_followup("Continúa", session_id="s1")
+
+        self.assertIsInstance(shortcut, _BrainShortcut)
+        assert isinstance(shortcut, _BrainShortcut)
+        self.assertIn("acción propuesta previamente", shortcut.text)
+        self.assertIn("validacion de la rama nueva", shortcut.text)
+        self.assertNotIn("requiere un", shortcut.text)
+
 
 if __name__ == "__main__":
     unittest.main()
