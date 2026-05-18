@@ -4,12 +4,12 @@
     "memory.read": {
       "risk_level": "low",
       "read_only": true,
-      "allowed_contexts": ["telegram", "daemon", "brain", "research", "operator"]
+      "allowed_contexts": ["telegram", "daemon", "brain", "research", "researcher", "operator"]
     },
     "wiki.search": {
       "risk_level": "low",
       "read_only": true,
-      "allowed_contexts": ["telegram", "daemon", "brain", "research", "operator"]
+      "allowed_contexts": ["telegram", "daemon", "brain", "research", "researcher", "operator"]
     },
     "task_ledger.read": {
       "risk_level": "low",
@@ -19,12 +19,17 @@
     "git.status": {
       "risk_level": "low",
       "read_only": true,
-      "allowed_contexts": ["telegram", "daemon", "operator"]
+      "allowed_contexts": ["telegram", "daemon", "operator", "deployer"]
     },
     "observe.recent_events_redacted": {
       "risk_level": "low",
       "read_only": true,
       "allowed_contexts": ["telegram", "daemon", "brain", "operator"]
+    },
+    "observe.recent_events": {
+      "risk_level": "medium",
+      "read_only": true,
+      "allowed_contexts": ["telegram", "operator"]
     },
     "file.read_workspace_nonsecret": {
       "risk_level": "low",
@@ -33,50 +38,342 @@
       "allowed_paths": ["WORKSPACE_ROOT"],
       "blocked_path_patterns": "SECRET_PATH_PATTERNS"
     },
+    "file.read": {
+      "risk_level": "medium",
+      "read_only": true,
+      "allowed_contexts": ["telegram", "operator", "researcher"],
+      "blocked_path_patterns": "SECRET_PATH_PATTERNS"
+    },
+    "file.write": {
+      "risk_level": "medium",
+      "read_only": false,
+      "allowed_contexts": ["telegram", "operator", "deployer"],
+      "allowed_paths": ["WORKSPACE_ROOT"],
+      "blocked_path_patterns": "SECRET_PATH_PATTERNS"
+    },
+    "file.delete": {
+      "risk_level": "high",
+      "read_only": false,
+      "allowed_contexts": ["telegram", "operator"],
+      "allowed_paths": ["WORKSPACE_ROOT"],
+      "blocked_path_patterns": "SECRET_PATH_PATTERNS",
+      "requires_human": true
+    },
+
     "Read": {
       "risk_level": "medium",
       "read_only": true,
       "allowed_contexts": ["telegram", "operator", "researcher"],
       "blocked_path_patterns": "SECRET_PATH_PATTERNS"
     },
-    "file.read": {
-      "risk_level": "medium",
-      "read_only": true,
-      "allowed_contexts": ["telegram", "operator"],
-      "blocked_path_patterns": "SECRET_PATH_PATTERNS"
-    },
-    "observe.recent_events": {
-      "risk_level": "medium",
-      "read_only": true,
-      "allowed_contexts": ["telegram", "operator"]
-    },
     "Write": {
       "risk_level": "medium",
       "read_only": false,
-      "allowed_contexts": ["telegram", "operator"],
-      "allowed_paths": ["WORKSPACE_ROOT"]
+      "allowed_contexts": ["telegram", "operator", "deployer"],
+      "allowed_paths": ["WORKSPACE_ROOT"],
+      "blocked_path_patterns": "SECRET_PATH_PATTERNS"
     },
     "Edit": {
       "risk_level": "medium",
       "read_only": false,
-      "allowed_contexts": ["telegram", "operator"],
-      "allowed_paths": ["WORKSPACE_ROOT"]
+      "allowed_contexts": ["telegram", "operator", "deployer"],
+      "allowed_paths": ["WORKSPACE_ROOT"],
+      "blocked_path_patterns": "SECRET_PATH_PATTERNS"
     },
-    "file.write": {
+    "MultiEdit": {
+      "risk_level": "medium",
+      "read_only": false,
+      "allowed_contexts": ["telegram", "operator", "deployer"],
+      "allowed_paths": ["WORKSPACE_ROOT"],
+      "blocked_path_patterns": "SECRET_PATH_PATTERNS"
+    },
+    "mcp__claw_tools__write_file": {
+      "risk_level": "medium",
+      "read_only": false,
+      "allowed_contexts": ["telegram", "operator", "deployer"],
+      "allowed_paths": ["WORKSPACE_ROOT"],
+      "blocked_path_patterns": "SECRET_PATH_PATTERNS"
+    },
+    "Glob": {
+      "risk_level": "low",
+      "read_only": true,
+      "allowed_contexts": ["telegram", "operator", "researcher", "deployer"],
+      "blocked_path_patterns": "SECRET_PATH_PATTERNS"
+    },
+    "Grep": {
+      "risk_level": "low",
+      "read_only": true,
+      "allowed_contexts": ["telegram", "operator", "researcher", "deployer"],
+      "blocked_path_patterns": "SECRET_PATH_PATTERNS"
+    },
+    "LS": {
+      "risk_level": "low",
+      "read_only": true,
+      "allowed_contexts": ["telegram", "operator", "researcher", "deployer"],
+      "blocked_path_patterns": "SECRET_PATH_PATTERNS"
+    },
+    "NotebookRead": {
+      "risk_level": "medium",
+      "read_only": true,
+      "allowed_contexts": ["telegram", "operator", "researcher"],
+      "allowed_paths": ["WORKSPACE_ROOT"],
+      "blocked_path_patterns": "SECRET_PATH_PATTERNS"
+    },
+    "NotebookEdit": {
       "risk_level": "medium",
       "read_only": false,
       "allowed_contexts": ["telegram", "operator"],
-      "allowed_paths": ["WORKSPACE_ROOT"]
+      "allowed_paths": ["WORKSPACE_ROOT"],
+      "blocked_path_patterns": "SECRET_PATH_PATTERNS"
     },
     "Bash": {
       "risk_level": "high",
       "read_only": false,
-      "allowed_contexts": ["telegram", "operator"]
+      "allowed_contexts": ["telegram", "operator", "deployer"]
     },
+    "BashOutput": {
+      "risk_level": "medium",
+      "read_only": true,
+      "allowed_contexts": ["telegram", "operator", "deployer"]
+    },
+    "KillBash": {
+      "risk_level": "high",
+      "read_only": false,
+      "allowed_contexts": ["telegram", "operator", "deployer"],
+      "requires_human": true
+    },
+    "TodoWrite": {
+      "risk_level": "medium",
+      "read_only": false,
+      "allowed_contexts": ["telegram", "operator", "deployer"]
+    },
+    "Task": {
+      "risk_level": "high",
+      "read_only": false,
+      "allowed_contexts": ["telegram", "operator", "deployer"]
+    },
+    "ExitPlanMode": {
+      "risk_level": "low",
+      "read_only": true,
+      "allowed_contexts": ["telegram", "operator", "deployer"]
+    },
+
+    "WebSearch": {
+      "risk_level": "low",
+      "read_only": true,
+      "allowed_contexts": ["telegram", "brain", "research", "researcher", "operator"],
+      "allowed_domains": []
+    },
+    "WebFetch": {
+      "risk_level": "low",
+      "read_only": true,
+      "allowed_contexts": ["telegram", "brain", "research", "researcher", "operator"],
+      "allowed_domains": []
+    },
+    "SearchMemory": {
+      "risk_level": "low",
+      "read_only": true,
+      "allowed_contexts": ["telegram", "brain", "research", "researcher", "operator", "deployer"]
+    },
+    "WikiSearch": {
+      "risk_level": "low",
+      "read_only": true,
+      "allowed_contexts": ["telegram", "brain", "research", "researcher", "operator", "deployer"]
+    },
+    "WikiLint": {
+      "risk_level": "medium",
+      "read_only": false,
+      "allowed_contexts": ["telegram", "operator", "researcher", "deployer"]
+    },
+    "WikiGraph": {
+      "risk_level": "low",
+      "read_only": true,
+      "allowed_contexts": ["telegram", "brain", "research", "researcher", "operator", "deployer"]
+    },
+    "WikiDelete": {
+      "risk_level": "high",
+      "read_only": false,
+      "allowed_contexts": ["telegram", "operator", "deployer"],
+      "requires_human": true
+    },
+
+    "SkillList": {
+      "risk_level": "low",
+      "read_only": true,
+      "allowed_contexts": ["telegram", "brain", "research", "researcher", "operator", "deployer"]
+    },
+    "SkillGenerate": {
+      "risk_level": "medium",
+      "read_only": false,
+      "allowed_contexts": ["telegram", "operator", "deployer"],
+      "allowed_paths": ["WORKSPACE_ROOT"],
+      "blocked_path_patterns": "SECRET_PATH_PATTERNS"
+    },
+    "SkillExecute": {
+      "risk_level": "high",
+      "read_only": false,
+      "allowed_contexts": ["telegram", "operator", "deployer"],
+      "requires_human": true
+    },
+
+    "A2ACard": {
+      "risk_level": "low",
+      "read_only": true,
+      "allowed_contexts": ["telegram", "daemon", "operator", "researcher", "deployer"]
+    },
+    "A2APeers": {
+      "risk_level": "low",
+      "read_only": true,
+      "allowed_contexts": ["telegram", "daemon", "operator", "researcher", "deployer"]
+    },
+    "A2ASend": {
+      "risk_level": "high",
+      "read_only": false,
+      "allowed_contexts": ["telegram", "daemon", "operator", "deployer"],
+      "requires_human": true
+    },
+
+    "HeyGenVideo": {
+      "risk_level": "critical",
+      "read_only": false,
+      "allowed_contexts": ["telegram", "daemon", "operator", "deployer"],
+      "allowed_domains": ["api.heygen.com"],
+      "requires_human": true
+    },
+    "GPTImage": {
+      "risk_level": "critical",
+      "read_only": false,
+      "allowed_contexts": ["telegram", "operator", "deployer"],
+      "allowed_paths": ["WORKSPACE_ROOT"],
+      "allowed_domains": ["api.openai.com"],
+      "requires_human": true
+    },
+    "AnalyzeImage": {
+      "risk_level": "medium",
+      "read_only": false,
+      "allowed_contexts": ["telegram", "operator", "researcher", "deployer"],
+      "allowed_paths": ["WORKSPACE_ROOT"],
+      "blocked_path_patterns": "SECRET_PATH_PATTERNS",
+      "allowed_domains": []
+    },
+    "FirecrawlScrape": {
+      "risk_level": "low",
+      "read_only": true,
+      "allowed_contexts": ["telegram", "research", "researcher", "operator", "deployer"],
+      "allowed_domains": []
+    },
+    "FirecrawlSearch": {
+      "risk_level": "low",
+      "read_only": true,
+      "allowed_contexts": ["telegram", "research", "researcher", "operator", "deployer"],
+      "allowed_domains": []
+    },
+    "FirecrawlExtract": {
+      "risk_level": "low",
+      "read_only": true,
+      "allowed_contexts": ["telegram", "research", "researcher", "operator", "deployer"],
+      "allowed_domains": []
+    },
+
+    "notebooklm.list": {
+      "risk_level": "medium",
+      "read_only": true,
+      "allowed_contexts": ["telegram", "daemon", "operator", "researcher"],
+      "allowed_domains": ["notebooklm.google.com"]
+    },
+    "notebooklm.status": {
+      "risk_level": "medium",
+      "read_only": true,
+      "allowed_contexts": ["telegram", "daemon", "operator", "researcher"],
+      "allowed_domains": ["notebooklm.google.com"]
+    },
+    "notebooklm.chat": {
+      "risk_level": "medium",
+      "read_only": true,
+      "allowed_contexts": ["telegram", "operator", "researcher"],
+      "allowed_domains": ["notebooklm.google.com"]
+    },
+    "notebooklm.create": {
+      "risk_level": "high",
+      "read_only": false,
+      "allowed_contexts": ["telegram", "operator"],
+      "allowed_domains": ["notebooklm.google.com"]
+    },
+    "notebooklm.delete": {
+      "risk_level": "high",
+      "read_only": false,
+      "allowed_contexts": ["telegram", "operator"],
+      "allowed_domains": ["notebooklm.google.com"],
+      "requires_human": true
+    },
+    "notebooklm.add_sources": {
+      "risk_level": "high",
+      "read_only": false,
+      "allowed_contexts": ["telegram", "operator"],
+      "allowed_domains": []
+    },
+    "notebooklm.add_text": {
+      "risk_level": "high",
+      "read_only": false,
+      "allowed_contexts": ["telegram", "operator"],
+      "allowed_domains": ["notebooklm.google.com"]
+    },
+    "notebooklm.start_research": {
+      "risk_level": "high",
+      "read_only": false,
+      "allowed_contexts": ["telegram", "operator"],
+      "allowed_domains": ["notebooklm.google.com"]
+    },
+    "notebooklm.start_artifact": {
+      "risk_level": "high",
+      "read_only": false,
+      "allowed_contexts": ["telegram", "operator"],
+      "allowed_domains": ["notebooklm.google.com"]
+    },
+
+    "terminal.list": {
+      "risk_level": "medium",
+      "read_only": true,
+      "allowed_contexts": ["telegram", "operator"],
+      "allowed_paths": ["CLAW_HOME/terminal_bridge"]
+    },
+    "terminal.status": {
+      "risk_level": "medium",
+      "read_only": true,
+      "allowed_contexts": ["telegram", "operator"],
+      "allowed_paths": ["CLAW_HOME/terminal_bridge"]
+    },
+    "terminal.read": {
+      "risk_level": "medium",
+      "read_only": true,
+      "allowed_contexts": ["telegram", "operator"],
+      "allowed_paths": ["CLAW_HOME/terminal_bridge"]
+    },
+    "terminal.open": {
+      "risk_level": "critical",
+      "read_only": false,
+      "allowed_contexts": ["telegram", "operator"],
+      "allowed_paths": ["WORKSPACE_ROOT", "CLAW_HOME/terminal_bridge"],
+      "requires_human": true
+    },
+    "terminal.send": {
+      "risk_level": "critical",
+      "read_only": false,
+      "allowed_contexts": ["telegram", "operator"],
+      "requires_human": true
+    },
+    "terminal.close": {
+      "risk_level": "high",
+      "read_only": false,
+      "allowed_contexts": ["telegram", "operator"],
+      "requires_human": true
+    },
+
     "social.publish": {
       "risk_level": "critical",
       "read_only": false,
-      "allowed_contexts": ["telegram"],
+      "allowed_contexts": ["telegram", "daemon", "operator"],
+      "allowed_domains": ["api.x.com", "api.linkedin.com", "graph.facebook.com"],
       "requires_human": true
     },
     "pipeline.merge": {
@@ -91,46 +388,17 @@
       "allowed_contexts": ["telegram"],
       "requires_human": true
     },
-    "file.delete": {
-      "risk_level": "high",
-      "read_only": false,
-      "allowed_contexts": ["telegram", "operator"],
-      "requires_human": true
-    },
     "git.force_push": {
       "risk_level": "critical",
       "read_only": false,
       "allowed_contexts": ["telegram"],
       "requires_human": true
     },
-    "WikiDelete": {
-      "risk_level": "high",
+    "heygen.video.generate": {
+      "risk_level": "critical",
       "read_only": false,
-      "allowed_contexts": ["telegram", "operator"],
-      "requires_human": true
-    },
-    "A2ASend": {
-      "risk_level": "high",
-      "read_only": false,
-      "allowed_contexts": ["telegram", "operator"],
-      "requires_human": true
-    },
-    "HeyGenVideo": {
-      "risk_level": "medium",
-      "read_only": false,
-      "allowed_contexts": ["telegram", "operator"],
-      "requires_human": true
-    },
-    "GPTImage": {
-      "risk_level": "medium",
-      "read_only": false,
-      "allowed_contexts": ["telegram", "operator"],
-      "requires_human": true
-    },
-    "SkillExecute": {
-      "risk_level": "high",
-      "read_only": false,
-      "allowed_contexts": ["telegram", "operator"],
+      "allowed_contexts": ["telegram", "daemon", "operator"],
+      "allowed_domains": ["api.heygen.com"],
       "requires_human": true
     }
   }

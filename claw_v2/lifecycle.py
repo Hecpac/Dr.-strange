@@ -11,7 +11,7 @@ from pathlib import Path
 
 from claw_v2.chrome import ManagedChrome
 from claw_v2.chat_api import LocalChatAPI
-from claw_v2.main import build_runtime
+from claw_v2.main import build_runtime, build_runtime_policy_engine
 from claw_v2.morning_brief import MorningBriefService, MorningBriefSettings
 from claw_v2.notebooklm import NotebookLMService
 from claw_v2.observability_dashboard import ObservabilityDashboard
@@ -337,6 +337,8 @@ async def run() -> int:
             observe=runtime.observe,
             job_service=runtime.job_service,
             research_fallback=_nlm_research_fallback,
+            runtime_policy=build_runtime_policy_engine(runtime.config, runtime.approvals),
+            policy_context="telegram",
         )
         runtime.bot.notebooklm = nlm_service
 

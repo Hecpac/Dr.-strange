@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable, Iterator
 
+from claw_v2.approval_gate import ApprovalPending
 from claw_v2.bot_commands import BotCommand, CommandContext
 from claw_v2.bot_helpers import _extract_nlm_artifact_kind, _extract_nlm_create_topic
 from claw_v2.nlm_context import NotebookContext, resolve_latest_notebook_context
@@ -72,6 +73,8 @@ class NlmHandler:
                 response = f"Error: {exc}"
                 recorder.fail(response)
                 return response
+            except ApprovalPending:
+                raise
             except Exception as exc:
                 logger.exception("NLM natural language error")
                 response = f"Error en NotebookLM: {exc}"
@@ -248,6 +251,8 @@ class NlmHandler:
             return "Comando NLM no reconocido. Disponibles: /nlm_list, /nlm_create, /nlm_delete, /nlm_status, /nlm_sources, /nlm_text, /nlm_research, /nlm_podcast, /nlm_chat"
         except ValueError as exc:
             return f"Error: {exc}"
+        except ApprovalPending:
+            raise
         except Exception as exc:
             logger.exception("NLM command error")
             return f"Error en NotebookLM: {exc}"

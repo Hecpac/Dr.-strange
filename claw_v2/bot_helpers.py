@@ -2242,7 +2242,7 @@ def _is_tweet_url(url: str) -> bool:
 def _looks_like_tweet_followup_request(normalized_text: str) -> bool:
     if not any(token in normalized_text for token in _BROWSE_SHORTCUT_TOKENS):
         return False
-    if not any(token in normalized_text for token in ("tweet", "tweets", "tuit", "tuits", "post")):
+    if not any(token in normalized_text for token in ("tweet", "tweets", "tuit", "tuits", "post", "hilo", "hilos", "thread")):
         return False
     # Only reuse the prior tweet when the user clearly points back to it.
     return any(
@@ -2262,6 +2262,31 @@ def _looks_like_tweet_followup_request(normalized_text: str) -> bool:
             "tuit de arriba",
             "tweet pasado",
             "tuit pasado",
+            "tweet que te acabo",
+            "tuit que te acabo",
+            "post que te acabo",
+            "hilo que te acabo",
+            "thread que te acabo",
+            "tweet que te di",
+            "tuit que te di",
+            "post que te di",
+            "hilo que te di",
+            "tweet que te mande",
+            "tuit que te mande",
+            "post que te mande",
+            "hilo que te mande",
+            "tweet que te envie",
+            "tuit que te envie",
+            "post que te envie",
+            "hilo que te envie",
+            "tweet que te pase",
+            "tuit que te pase",
+            "post que te pase",
+            "hilo que te pase",
+            "que te acabo de dar",
+            "que acabo de darte",
+            "que te acabo de pasar",
+            "que acabo de pasarte",
         )
     )
 

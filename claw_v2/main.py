@@ -52,6 +52,7 @@ from claw_v2.llm import LLMRouter
 from claw_v2.memory import MemoryStore
 from claw_v2.metrics import MetricsTracker
 from claw_v2.model_registry import ModelRegistry
+from claw_v2.network_proxy import DomainAllowlistEnforcer
 from claw_v2.observation_window import ObservationWindowConfig, ObservationWindowState
 from claw_v2.observe import ObserveStream
 from claw_v2.orchestration import OrchestrationStore
@@ -60,6 +61,7 @@ from claw_v2.skills import SkillRegistry
 from claw_v2.social import SocialPublisher
 from claw_v2.content import ContentEngine
 from claw_v2.sandbox import SandboxPolicy
+from claw_v2.runtime_policy import RuntimePolicyEngine
 from claw_v2.task_board import TaskBoard
 from claw_v2.task_ledger import TaskLedger
 from claw_v2.terminal_bridge import TerminalBridgeService
@@ -136,6 +138,48 @@ class ClawRuntime:
     tool_registry: object | None = None
     openai_tool_executor: object | None = None
     observation_window: ObservationWindowState | None = None
+
+
+def build_runtime_approval_gate(approvals: ApprovalManager) -> Callable[[object, dict], None]:
+    from claw_v2.tool_policy import daemon_can_auto_approve
+
+    telegram_gate = build_telegram_approval_gate(approvals)
+
+    def gate(definition: object, args: dict) -> None:
+        tool_name = str(getattr(definition, "name", ""))
+        daemon_reason = current_daemon_reason()
+        if daemon_reason is not None and daemon_can_auto_approve(tool_name):
+            return build_system_auto_approve_gate(approvals, reason=daemon_reason)(definition, args)  # type: ignore[arg-type]
+        return telegram_gate(definition, args)  # type: ignore[arg-type]
+
+    return gate
+
+
+def build_runtime_policy_engine(config: AppConfig, approvals: ApprovalManager) -> RuntimePolicyEngine:
+    sandbox_policy = SandboxPolicy(
+        workspace_root=config.workspace_root,
+        allowed_paths=[
+            *config.allowed_read_paths,
+            *config.extra_workspace_roots,
+            *config.allowed_paths,
+        ],
+        writable_paths=[
+            config.workspace_root,
+            Path("/private/tmp"),
+            Path.home() / ".claw",
+            *config.extra_workspace_roots,
+        ],
+        network_policy="allow",
+        credential_scope="external",
+        capability_profile=config.sandbox_capability_profile,
+    )
+    return RuntimePolicyEngine(
+        workspace_root=config.workspace_root,
+        sandbox_policy=sandbox_policy,
+        network_enforcer=DomainAllowlistEnforcer(),
+        approval_gate=build_runtime_approval_gate(approvals),
+        autoexec_max_tier=config.tier_autoexec_max,
+    )
 
 
 def _noop_experiment_runner(agent_name: str, experiment_number: int, state: dict) -> object:
@@ -608,6 +652,7 @@ def _setup_agent_services(
         auto_research=auto_research,
         task_board=task_board,
         monitored_sites=config.monitored_sites,
+        runtime_policy=build_runtime_policy_engine(config, approvals),
         agent_loop_factory=_build_kairos_agent_loop_factory(
             sub_agents=sub_agents,
             observe=observe,
@@ -737,7 +782,12 @@ def _setup_operational_services(
         browsers_path=config.dev_browser_browsers_path,
         timeout=config.dev_browser_timeout,
     )
-    terminal_bridge = TerminalBridgeService()
+    runtime_policy = build_runtime_policy_engine(config, approvals)
+    terminal_bridge = TerminalBridgeService(
+        policy_engine=runtime_policy,
+        policy_context="telegram",
+        default_cwd=config.workspace_root,
+    )
     codex_computer_backend: CodexComputerBackend | None = None
     if config.computer_use_backend == "codex":
         codex_computer_backend = CodexComputerBackend(
@@ -802,7 +852,11 @@ def _setup_operational_services(
 
     content_engine = ContentEngine(router=router, accounts_root=config.social_accounts_root)
     bot.content_engine = content_engine
-    bot.social_publisher = SocialPublisher(adapters={})
+    bot.social_publisher = SocialPublisher(
+        adapters={},
+        runtime_policy=runtime_policy,
+        policy_context="telegram",
+    )
 
     return daemon, bot, pipeline, browser, browser_use, computer
 

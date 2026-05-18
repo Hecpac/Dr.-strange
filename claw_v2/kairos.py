@@ -117,6 +117,7 @@ class KairosService:
         action_budget: float = DEFAULT_ACTION_BUDGET,
         brief: bool = True,
         agent_loop_factory: Any | None = None,
+        runtime_policy: Any | None = None,
     ) -> None:
         self.router = router
         self.heartbeat = heartbeat
@@ -131,6 +132,7 @@ class KairosService:
         self.a2a: A2AService | None = None
         self.nlm_service: Any | None = None
         self.monitored_sites = list(monitored_sites or [])
+        self.runtime_policy = runtime_policy
         self.action_budget = action_budget
         self.brief = brief
         # Wave 2.6: lets Kairos drive an AgentLoop on a goal_id when it
@@ -861,6 +863,17 @@ class KairosService:
             logger.info("KAIROS auto_publish_social: pending approval=%s", pending.approval_id)
             return
 
+        self._enforce_runtime_policy(
+            "social.publish",
+            {
+                "account": "PachanoDesign",
+                "platform": "x",
+                "text": tweet_text,
+                "endpoint": "https://api.x.com/2/tweets",
+            },
+            mutates_state=True,
+            requires_network=True,
+        )
         from claw_v2.social import x_adapter_from_keychain
         adapter = x_adapter_from_keychain(handle="PachanoDesign")
         result = adapter.publish(tweet_text)
@@ -998,6 +1011,12 @@ class KairosService:
             params = json.loads(decision.detail) if decision.detail else {}
         except (json.JSONDecodeError, TypeError):
             params = {"to_agent": str(decision.detail), "action": "generic", "payload": {}}
+        self._enforce_runtime_policy(
+            "A2ASend",
+            params,
+            mutates_state=True,
+            requires_network=True,
+        )
         result = self.a2a.send_task(
             to_agent=params.get("to_agent", ""),
             action=params.get("action", ""),
@@ -1024,6 +1043,12 @@ class KairosService:
         if isinstance(brief_text, dict):
             brief_text = brief_text.get("result", brief_text.get("content", str(brief_text)))
         brief_text = str(brief_text)[:4500]  # HeyGen limit is 5000 chars
+        self._enforce_runtime_policy(
+            "HeyGenVideo",
+            {"text": brief_text, "title": "Morning Brief"},
+            mutates_state=True,
+            requires_network=True,
+        )
 
         # 2. Get HeyGen API key from Keychain
         key_result = subprocess.run(
@@ -1096,6 +1121,24 @@ class KairosService:
 
         import threading
         threading.Thread(target=_poll_heygen, daemon=True, name=f"heygen-poll-{video_id[:8]}").start()
+
+    def _enforce_runtime_policy(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        *,
+        mutates_state: bool,
+        requires_network: bool,
+    ) -> None:
+        if self.runtime_policy is None:
+            return
+        self.runtime_policy.enforce(
+            tool_name,
+            args,
+            context="daemon",
+            mutates_state=mutates_state,
+            requires_network=requires_network,
+        )
 
     def run_health_check(self) -> TickDecision:
         """Trigger a daemon health check as a scheduler-driven autonomous action.
