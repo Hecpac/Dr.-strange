@@ -10,6 +10,7 @@ import threading
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from claw_v2.sqlite_runtime import connect_runtime_sqlite
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,13 @@ CREATE TABLE IF NOT EXISTS provider_sessions (
     last_message_id INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (app_session_id, provider)
+);
+
+CREATE TABLE IF NOT EXISTS provider_session_resets (
+    app_session_id TEXT PRIMARY KEY,
+    reason TEXT NOT NULL,
+    summary_only_context INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS fact_embeddings (
@@ -344,10 +352,7 @@ class MemoryStore:
             _apply_pending_restore(self.db_path)
         except Exception:
             logger.debug("Pending restore check failed", exc_info=True)
-        self._conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=10)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA busy_timeout=10000")
+        self._conn = connect_runtime_sqlite(self.db_path)
         self._conn.executescript(SCHEMA)
         self._lock = threading.Lock()
         self._migrate()
@@ -480,7 +485,7 @@ class MemoryStore:
         compact: bool = False,
         max_messages: int = 80,
         preserve_recent: int = 40,
-    ) -> None:
+    ) -> int:
         # Wave 3.5: defense-in-depth — strip system-reminder markers before
         # they hit the messages table. The chat-output sanitizer is the
         # primary line of defense; this is the secondary so a leak that
@@ -497,11 +502,12 @@ class MemoryStore:
             )
             self._conn.commit()
         if compact:
-            self.compact_session_messages(
+            return self.compact_session_messages(
                 session_id,
                 max_messages=max_messages,
                 preserve_recent=preserve_recent,
             )
+        return 0
 
     def compact_session_messages(
         self,
@@ -548,6 +554,12 @@ class MemoryStore:
             ids = [row["id"] for row in rows]
             placeholders = ",".join("?" for _ in ids)
             self._conn.execute(f"DELETE FROM messages WHERE id IN ({placeholders})", ids)
+            self._clear_provider_sessions_for_app_locked(session_id)
+            self._mark_provider_session_reset_locked(
+                session_id,
+                reason="memory_compaction",
+                summary_only_context=True,
+            )
             self._conn.commit()
             return len(ids)
 
@@ -1097,12 +1109,87 @@ class MemoryStore:
             )
             self._conn.commit()
 
+    def _clear_provider_sessions_for_app_locked(self, app_session_id: str) -> int:
+        cursor = self._conn.execute(
+            "DELETE FROM provider_sessions WHERE app_session_id = ?",
+            (app_session_id,),
+        )
+        return int(cursor.rowcount or 0)
+
+    def clear_provider_sessions_for_app(self, app_session_id: str) -> int:
+        """Drop all provider-side handles for one app session only."""
+        with self._lock:
+            cleared = self._clear_provider_sessions_for_app_locked(app_session_id)
+            self._conn.commit()
+            return cleared
+
     def clear_provider_sessions(self) -> int:
         """Drop provider-side conversation handles without deleting local memory."""
         with self._lock:
             cursor = self._conn.execute("DELETE FROM provider_sessions")
             self._conn.commit()
             return int(cursor.rowcount)
+
+    def _mark_provider_session_reset_locked(
+        self,
+        app_session_id: str,
+        *,
+        reason: str,
+        summary_only_context: bool,
+    ) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO provider_session_resets (app_session_id, reason, summary_only_context)
+            VALUES (?, ?, ?)
+            ON CONFLICT(app_session_id)
+            DO UPDATE SET
+                reason = excluded.reason,
+                summary_only_context = excluded.summary_only_context,
+                created_at = CURRENT_TIMESTAMP
+            """,
+            (app_session_id, reason, 1 if summary_only_context else 0),
+        )
+
+    def mark_provider_session_reset(
+        self,
+        app_session_id: str,
+        *,
+        reason: str,
+        summary_only_context: bool = True,
+    ) -> None:
+        with self._lock:
+            self._mark_provider_session_reset_locked(
+                app_session_id,
+                reason=reason,
+                summary_only_context=summary_only_context,
+            )
+            self._conn.commit()
+
+    def get_provider_session_reset(self, app_session_id: str) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            """
+            SELECT reason, summary_only_context, created_at
+            FROM provider_session_resets
+            WHERE app_session_id = ?
+            """,
+            (app_session_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "reason": row["reason"],
+            "summary_only_context": bool(row["summary_only_context"]),
+            "created_at": row["created_at"],
+        }
+
+    def clear_provider_session_reset(self, app_session_id: str) -> bool:
+        with self._lock:
+            cursor = self._conn.execute(
+                "DELETE FROM provider_session_resets WHERE app_session_id = ?",
+                (app_session_id,),
+            )
+            self._conn.commit()
+            return bool(cursor.rowcount)
 
     # --- Cron state ---
 

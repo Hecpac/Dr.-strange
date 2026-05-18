@@ -425,8 +425,14 @@ def _setup_llm_stack(
             degraded_mode=event["degraded_mode"],
         )
 
+    injected_anthropic_executor = anthropic_executor is not None
     if anthropic_executor is None:
         anthropic_executor = create_claude_sdk_executor(config, observe=observe, approvals=approvals)
+    elif injected_anthropic_executor:
+        openai_transport = openai_transport or anthropic_executor
+        google_transport = google_transport or anthropic_executor
+        ollama_transport = ollama_transport or anthropic_executor
+        codex_transport = codex_transport or anthropic_executor
 
     auth_mode = getattr(config, "claude_auth_mode", "auto")
     billable_providers = config.billable_cost_providers()
@@ -806,6 +812,7 @@ def _register_site_monitor_jobs(
     scheduler: CronScheduler,
     observe: ObserveStream,
     sites: list[MonitoredSiteConfig],
+    skip_if: Callable[[], str | None] | None = None,
 ) -> None:
     import httpx
 
@@ -829,7 +836,12 @@ def _register_site_monitor_jobs(
             ScheduledJob(
                 name=job_name,
                 interval_seconds=site.interval_seconds,
-                handler=_wrap_job_handler(name=job_name, observe=observe, handler=lambda s=site: _site_monitor_handler(s)),
+                handler=_wrap_job_handler(
+                    name=job_name,
+                    observe=observe,
+                    handler=lambda s=site: _site_monitor_handler(s),
+                    skip_if=skip_if,
+                ),
             )
         )
 
@@ -840,6 +852,7 @@ def _register_sub_agent_jobs(
     observe: ObserveStream,
     sub_agents: SubAgentService,
     scheduled_jobs: list[ScheduledSubAgentConfig],
+    skip_if: Callable[[], str | None] | None = None,
 ) -> None:
     def _sub_agent_handler(agent: str, skill: str, lane: str) -> None:
         result = sub_agents.run_skill(agent, skill, lane=lane)
@@ -849,6 +862,10 @@ def _register_sub_agent_jobs(
         job_name = f"{_sanitize_job_name(job.agent)}_{_sanitize_job_name(job.skill)}"
 
         def _skip_reason(agent: str = job.agent, skill: str = job.skill) -> str | None:
+            if skip_if is not None:
+                reason = skip_if()
+                if reason:
+                    return reason
             definition = sub_agents.get_agent(agent)
             if definition is None:
                 return f"sub-agent '{agent}' not found"
@@ -1101,7 +1118,18 @@ def _setup_scheduler(
 
     scheduler.register(ScheduledJob(name="heartbeat", interval_seconds=config.heartbeat_interval, handler=heartbeat.emit))
     scheduler.register(ScheduledJob(name="task_lifecycle_watchdog", interval_seconds=300, handler=_task_lifecycle_watchdog_handler))
-    scheduler.register(ScheduledJob(name="kairos_tick", interval_seconds=600, handler=kairos.tick))
+    scheduler.register(
+        ScheduledJob(
+            name="kairos_tick",
+            interval_seconds=600,
+            handler=_wrap_job_handler(
+                name="kairos_tick",
+                observe=observe,
+                handler=kairos.tick,
+                skip_if=_maintenance_skip,
+            ),
+        )
+    )
     scheduler.register(ScheduledJob(name="buddy_tick", interval_seconds=600, handler=lambda: buddy.tick(observe)))
     if config.eval_on_self_improve:
         scheduler.register(
@@ -1149,8 +1177,30 @@ def _setup_scheduler(
     wiki = WikiService(router=router, observe=observe)
     bot.wiki = wiki
     kairos.wiki = wiki
-    scheduler.register(ScheduledJob(name="wiki_lint", interval_seconds=86400, handler=wiki.lint))
-    scheduler.register(ScheduledJob(name="wiki_confidence", interval_seconds=604800, handler=wiki.recompute_confidence))
+    scheduler.register(
+        ScheduledJob(
+            name="wiki_lint",
+            interval_seconds=86400,
+            handler=_wrap_job_handler(
+                name="wiki_lint",
+                observe=observe,
+                handler=wiki.lint,
+                skip_if=_maintenance_skip,
+            ),
+        )
+    )
+    scheduler.register(
+        ScheduledJob(
+            name="wiki_confidence",
+            interval_seconds=604800,
+            handler=_wrap_job_handler(
+                name="wiki_confidence",
+                observe=observe,
+                handler=wiki.recompute_confidence,
+                skip_if=_maintenance_skip,
+            ),
+        )
+    )
     scheduler.register(
         ScheduledJob(
             name="wiki_research",
@@ -1170,7 +1220,12 @@ def _setup_scheduler(
         )
     )
 
-    _register_site_monitor_jobs(scheduler=scheduler, observe=observe, sites=config.monitored_sites)
+    _register_site_monitor_jobs(
+        scheduler=scheduler,
+        observe=observe,
+        sites=config.monitored_sites,
+        skip_if=_maintenance_skip,
+    )
 
     skill_registry = SkillRegistry(router=router)
     a2a = A2AService(router=router)
@@ -1216,6 +1271,7 @@ def _setup_scheduler(
         observe=observe,
         sub_agents=sub_agents,
         scheduled_jobs=config.scheduled_sub_agents,
+        skip_if=_maintenance_skip,
     )
     scheduler.register(
         ScheduledJob(
