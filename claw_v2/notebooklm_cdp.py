@@ -400,6 +400,125 @@ def _focus_notebook(browser, notebook_id: str) -> "Page":
     return page
 
 
+# Deep Research lifecycle states observable on the source-discovery panel.
+DR_STATE_READY_TO_IMPORT = "ready_to_import"
+DR_STATE_IN_PROGRESS = "in_progress"
+DR_STATE_SUBMITTABLE = "submittable"
+DR_STATE_COMPLETED = "completed"
+DR_STATE_UNKNOWN = "unknown"
+
+
+def detect_deep_research_state(page) -> str:
+    """Read the notebook DOM and classify the Deep Research panel state.
+
+    Returns one of DR_STATE_*. This is the gate that prevents premature
+    re-submission when a previous DR run is still in flight or finished
+    and only waiting on the Importar click. Today's failure mode was
+    misreading a disabled textarea (aria-label says "consulta enviada",
+    i.e. past tense) as "not submitted yet" and starting over.
+    """
+    try:
+        body = page.locator("body").inner_text(timeout=4_000)
+    except Exception:
+        body = ""
+    body_low = body.lower()
+
+    # 1. If sources already imported, we are done.
+    count = _parse_source_count(body)
+    if count is not None and count > 0:
+        return DR_STATE_COMPLETED
+
+    # 2. Results panel surfaced — "Deep Research finalizó la búsqueda".
+    if "deep research finalizó" in body_low or "deep research finished" in body_low:
+        return DR_STATE_READY_TO_IMPORT
+
+    # 3. Mid-flight indicators visible.
+    progress_markers = (
+        "planificando",
+        "investigando",
+        "no salgas de esta página",
+        "do not leave this page",
+    )
+    if any(m in body_low for m in progress_markers):
+        return DR_STATE_IN_PROGRESS
+
+    # 4. Query textarea state: aria-label "consulta enviada" + disabled means
+    # a query is already submitted (mid-flight or pending results render).
+    try:
+        ta = page.locator(
+            'mat-dialog-container textarea[aria-label*="consulta enviada"], '
+            'source-discovery-query-box textarea[aria-label*="consulta enviada"]'
+        ).first
+        if ta.is_visible(timeout=1_500):
+            disabled = ta.evaluate(
+                "el => el.disabled || el.readOnly || el.getAttribute('aria-disabled')==='true'"
+            )
+            if disabled:
+                return DR_STATE_IN_PROGRESS
+    except Exception:
+        pass
+
+    # 5. Importar button visible without explicit "finalizó" text — treat as ready.
+    try:
+        importar = page.locator('button:has-text("Importar")').first
+        if importar.is_visible(timeout=1_500):
+            return DR_STATE_READY_TO_IMPORT
+    except Exception:
+        pass
+
+    # 6. Empty notebook welcome with no DR markers means we can submit fresh.
+    if "iniciemos tu cuaderno" in body_low or "let's get started" in body_low:
+        return DR_STATE_SUBMITTABLE
+
+    return DR_STATE_UNKNOWN
+
+
+def _click_importar(page) -> bool:
+    """Click the Importar button if visible. Returns True if clicked."""
+    for sel in (
+        'button:has-text("Importar")',
+        '[role="button"]:has-text("Importar")',
+        'mat-dialog-container button:has-text("Importar")',
+    ):
+        try:
+            loc = page.locator(sel)
+            n = loc.count()
+        except Exception:
+            continue
+        for i in range(n):
+            try:
+                btn = loc.nth(i)
+                if not btn.is_visible(timeout=1_500):
+                    continue
+                disabled = False
+                try:
+                    disabled = btn.evaluate(
+                        "el => el.disabled || el.getAttribute('aria-disabled')==='true'"
+                    )
+                except Exception:
+                    pass
+                if disabled:
+                    continue
+                btn.click()
+                return True
+            except Exception:
+                continue
+    return False
+
+
+def _wait_for_deep_research_completion(page, *, poll_timeout: float) -> None:
+    """Poll until 'Deep Research finalizó' or Importar surfaces."""
+    deadline = time.monotonic() + poll_timeout
+    while time.monotonic() < deadline:
+        state = detect_deep_research_state(page)
+        if state in (DR_STATE_READY_TO_IMPORT, DR_STATE_COMPLETED):
+            return
+        time.sleep(15)
+    raise CdpNotebookLMError(
+        f"Deep Research did not complete within {poll_timeout:.0f}s"
+    )
+
+
 def deep_research(
     notebook_id: str,
     query: str,
@@ -432,6 +551,28 @@ def deep_research(
     try:
         page = _focus_notebook(browser, notebook_id)
         before_source_count = _notebook_source_count(page)
+
+        # 0. Idempotency gate: if a previous DR run for this notebook is mid-flight
+        # or already finished and waiting on Importar, do NOT re-submit.
+        # Re-submitting would either fail silently (textarea is disabled while
+        # aria-label is "consulta enviada") or destroy completed results.
+        state = detect_deep_research_state(page)
+        if state == DR_STATE_COMPLETED:
+            count = _notebook_source_count(page) or 0
+            logger.info("deep_research: notebook already has %s sources, skipping", count)
+            return count
+        if state in (DR_STATE_IN_PROGRESS, DR_STATE_READY_TO_IMPORT):
+            logger.info(
+                "deep_research: prior run detected (state=%s); skipping submit and resuming",
+                state,
+            )
+            if state == DR_STATE_IN_PROGRESS:
+                _wait_for_deep_research_completion(page, poll_timeout=poll_timeout)
+            if not _click_importar(page):
+                raise CdpNotebookLMError(
+                    "Could not click 'Importar' on existing Deep Research results"
+                )
+            return _wait_for_verified_sources(page, before_count=before_source_count)
 
         # 1. Open the source-mode dropdown and switch to Deep Research.
         try:
@@ -477,50 +618,56 @@ def deep_research(
         except Exception as exc:
             raise CdpNotebookLMError(f"Could not click Enviar: {exc}") from exc
 
-        # 4. Poll for completion (up to poll_timeout seconds).
-        deadline = time.monotonic() + poll_timeout
-        completed = False
-        while time.monotonic() < deadline:
-            try:
-                if page.locator("text=Deep Research finalizó la búsqueda").first.is_visible(
-                    timeout=2_000
-                ):
-                    completed = True
-                    break
-            except Exception:
-                pass
-            time.sleep(15)
-        if not completed:
-            raise CdpNotebookLMError(
-                f"Deep Research did not complete within {poll_timeout:.0f}s"
-            )
+        # 4. Poll for completion using the shared state detector.
+        _wait_for_deep_research_completion(page, poll_timeout=poll_timeout)
 
-        # 5. Click Importar.
-        try:
-            buttons = page.locator("button")
-            count = buttons.count()
-            clicked = False
-            for i in range(count):
-                btn = buttons.nth(i)
-                try:
-                    if btn.is_visible() and "Importar" in btn.inner_text():
-                        btn.click()
-                        clicked = True
-                        break
-                except Exception:
-                    continue
-            if not clicked:
-                raise CdpNotebookLMError("Could not find 'Importar' button after research")
-        except CdpNotebookLMError:
-            raise
-        except Exception as exc:
-            raise CdpNotebookLMError(f"Could not click Importar: {exc}") from exc
+        # 5. Click Importar via shared helper.
+        if not _click_importar(page):
+            raise CdpNotebookLMError("Could not find 'Importar' button after research")
 
         # 6. Completion is not enough: verify that sources actually landed in
         # the notebook. This prevents transient "planning/completed" UI states
         # from being reported as a successful research run while the notebook
         # remains empty.
         return _wait_for_verified_sources(page, before_count=before_source_count)
+    finally:
+        try:
+            browser.close()
+        except Exception:
+            pass
+        pw.stop()
+
+
+def resume_deep_research(
+    notebook_id: str,
+    *,
+    cdp_url: str = DEFAULT_CDP_URL,
+    poll_timeout: float = 600.0,
+) -> dict:
+    """Inspect an existing notebook's Deep Research panel and finish whatever
+    step is pending: wait → click Importar → verify sources.
+
+    Idempotent: callable repeatedly. Never submits a new query. Returns
+    {"state": <DR_STATE_*>, "sources_imported": int|None}.
+    """
+    pw, browser = _connect(cdp_url)
+    try:
+        page = _focus_notebook(browser, notebook_id)
+        before = _notebook_source_count(page)
+        state = detect_deep_research_state(page)
+        if state == DR_STATE_COMPLETED:
+            return {"state": state, "sources_imported": before or 0}
+        if state == DR_STATE_IN_PROGRESS:
+            _wait_for_deep_research_completion(page, poll_timeout=poll_timeout)
+            state = DR_STATE_READY_TO_IMPORT
+        if state == DR_STATE_READY_TO_IMPORT:
+            if not _click_importar(page):
+                raise CdpNotebookLMError(
+                    "Could not click 'Importar' on existing Deep Research results"
+                )
+            count = _wait_for_verified_sources(page, before_count=before)
+            return {"state": DR_STATE_COMPLETED, "sources_imported": count}
+        return {"state": state, "sources_imported": before}
     finally:
         try:
             browser.close()
