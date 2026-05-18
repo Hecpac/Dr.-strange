@@ -8,8 +8,8 @@
 ## meta
 
 ```yaml
-describes_commit: 917d80c+meta-skip-context-var
-doc_version: 1.4
+describes_commit: 6d43148+final-render-funnel
+doc_version: 1.5
 last_verified: 2026-05-17
 verification_method: manual + grep cross-check
 anchor_strategy: symbol_only  # path:symbol, no line numbers
@@ -88,6 +88,39 @@ invariants:
          reads it. Hector's complaints then become failed evidence_gate
          tasks again and the user sees the explicit_blocker template with
          internal IDs exposed (the exact 2026-05-17 P0-1 regression).
+
+  final_render_brain_path_inside_meta_context:
+    rule: When `_final_render` (claw_v2/bot.py) is applied to the brain
+          path, it MUST run inside `_brain_text_response`, which itself
+          runs inside the `with meta_introspection_context(...)` block
+          opened by the meta_introspection_guard branch of
+          `BotService.handle_text` (the one that captures
+          `detect_meta_introspection_request` matches). Calling it from
+          a caller frame after `_brain_text_response` returns is allowed
+          for non-brain handlers (own ContextVar lifetime not relevant),
+          but NEVER for the brain path on a meta turn.
+    contract:
+      - `_final_render` is render-then-sanitize only: NaturalLanguageRenderer.render
+        followed by _sanitize_visible_chat_response.
+      - It must NOT call _record_evidence_gate_explicit_blocker, touch
+        task_ledger, emit evidence_gate_* events, or read
+        current_meta_introspection_kind.
+      - Both inner ops are idempotent regex transforms; the helper itself
+        is idempotent (proven by tests/test_final_render_idempotency.py
+        with adversarial inputs).
+    enforced_by:
+      - tests/test_final_render_idempotency.py
+        (test_final_render_is_idempotent_on_adversarial_inputs +
+         test_final_render_does_not_touch_evidence_gate +
+         test_final_render_preserves_meta_skip_invariant)
+    why: If gate logic creeps into `_final_render`, the gate would read
+         the ContextVar from a caller frame outside the
+         meta_introspection_context `with` block (ContextVar already
+         reset in __exit__) and re-introduce the P0-1 regression — meta
+         turns would create failed evidence_gate ledger rows again.
+         Keeping the helper a pure formatter prevents that whole class
+         of bug; the placement rule ensures the brain-path migration
+         (P1-6 funnel) never breaks `evidence_gate_meta_skip_sync_path`.
 ```
 
 ---
@@ -501,6 +534,21 @@ do_not:
          (reopens P0-1).
     enforced_by: invariant evidence_gate_meta_skip_sync_path (§1) +
                  tests/test_meta_introspection_integration.py.
+
+  - change: Add evidence-gate logic, task_ledger writes, observe emits of
+            evidence_gate_*, or reads of current_meta_introspection_kind
+            inside _final_render (claw_v2/bot.py). Or apply _final_render
+            to the brain path from a caller frame outside the
+            `with meta_introspection_context(...)` block.
+    why: _final_render is the funnel for the incremental P1-6 migration
+         (render+sanitize across the 17 return points of the Telegram
+         path). If gate logic creeps in, or the helper is moved outside
+         the meta-context `with` for the brain path, the ContextVar
+         lifetime invariant breaks and meta complaints regress to failed
+         evidence_gate rows + explicit_blocker templates (reopens P0-1
+         through a different door).
+    enforced_by: invariant final_render_brain_path_inside_meta_context
+                 (§1) + tests/test_final_render_idempotency.py.
 ```
 
 ---
