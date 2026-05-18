@@ -54,6 +54,7 @@ from claw_v2.metrics import MetricsTracker
 from claw_v2.model_registry import ModelRegistry
 from claw_v2.observation_window import ObservationWindowConfig, ObservationWindowState
 from claw_v2.observe import ObserveStream
+from claw_v2.orchestration import OrchestrationStore
 from claw_v2.pipeline import PipelineService
 from claw_v2.skills import SkillRegistry
 from claw_v2.social import SocialPublisher
@@ -571,11 +572,13 @@ def _setup_agent_services(
     discovered = sub_agents.discover()
     if discovered:
         observe.emit("sub_agents_discovered", payload={"agents": discovered})
+    orchestration_store = OrchestrationStore(config.db_path, observe=observe)
     coordinator = CoordinatorService(
         router=router,
         observe=observe,
         scratch_root=config.agent_state_root / "_scratch",
         agent_registry=sub_agents.registry(),
+        orchestration_store=orchestration_store,
     )
     task_board = TaskBoard(board_root=config.agent_state_root / "_board")
     registry_path = config.agent_state_root / "AGENTS.md"
