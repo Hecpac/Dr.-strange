@@ -64,6 +64,25 @@ def test_semantic_classifier_prioritizes_clear_new_task_over_audit_word() -> Non
     assert turn.objective
 
 
+def test_semantic_classifier_recognizes_operational_tasks_and_option_picks() -> None:
+    task_samples = [
+        "Crea un cuaderno y un podcasts sobre los agentes autonomos",
+        "Crear el\nCuaderno",
+        "Verifica que el daemon Levanto",
+        "Haz un barrido por X de las noticias",
+    ]
+
+    for text in task_samples:
+        turn = classify_semantic_turn(text)
+        assert turn.intent == "new_task", text
+        assert turn.clear_goal is True
+        assert turn.objective == text
+
+    option_turn = classify_semantic_turn("Opción 1")
+    assert option_turn.intent == "continue_active_mission"
+    assert option_turn.explicit_continuation is True
+
+
 def test_natural_language_renderer_hides_internal_labels_in_normal_mode() -> None:
     raw = (
         "approval_id: `abc123`\n"
@@ -171,6 +190,6 @@ def test_live_smoke_sequence_resolves_procede_continua_dale_without_generic_loop
                 assert traces[0]["semantic_intent"] == "continue_active_mission"
 
             records = runtime.task_ledger.list(session_id="tg-smoke", limit=10)
-            assert len(records) >= 4
+            assert len(records) >= 1
             assert any(record.runtime == "brain_first" for record in records)
-            assert sum(1 for record in records if record.runtime == "telegram_preflight") >= 3
+            assert not any(record.runtime == "telegram_preflight" for record in records)

@@ -106,6 +106,21 @@ class BotHelperRegressionTests(unittest.TestCase):
                 self.assertNotIn("user:", lowered)
                 self.assertNotIn("system-reminder", lowered)
 
+    def test_visible_chat_response_redacts_system_reminder_marker_without_nuking_reply(self) -> None:
+        text = (
+            "Barrido útil de noticias.\n"
+            "Nota: un resultado web traía [redacted: system-reminder] como ruido.\n"
+            "Conclusión: el reporte sigue siendo válido."
+        )
+
+        sanitized = _sanitize_chat_response(text)
+        lowered = sanitized.lower()
+
+        self.assertNotIn("Tuve un error preparando la respuesta", sanitized)
+        self.assertIn("Barrido útil de noticias", sanitized)
+        self.assertIn("Conclusión: el reporte sigue siendo válido", sanitized)
+        self.assertNotIn("system-reminder", lowered)
+
     def test_legit_technical_reference_is_inlined_not_nuked(self) -> None:
         """Discussing the runtime by name should redact phrases inline, not
         nuke the whole reply with the generic error fallback. This is the
