@@ -9,6 +9,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
+from claw_v2.sqlite_runtime import connect_runtime_sqlite
+
 
 JOB_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 JOB_ACTIVE_STATUSES = frozenset({"queued", "running", "waiting_approval", "retrying"})
@@ -82,8 +84,7 @@ class JobService:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.observe = observe
-        self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
+        self._conn = connect_runtime_sqlite(self.db_path)
         self._lock = threading.Lock()
         with self._lock:
             self._conn.executescript(JOBS_TABLE_SCHEMA)

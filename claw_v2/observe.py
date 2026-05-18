@@ -7,6 +7,8 @@ import threading
 from pathlib import Path
 from typing import Callable
 
+from claw_v2.sqlite_runtime import connect_runtime_sqlite
+
 logger = logging.getLogger(__name__)
 
 EventCallback = Callable[[dict], None]
@@ -46,7 +48,7 @@ class ObserveStream:
     def __init__(self, db_path: Path | str) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self._conn = connect_runtime_sqlite(self.db_path, row_factory=False)
         self._conn.executescript(OBSERVE_SCHEMA)
         self._lock = threading.Lock()
         self._subscribers: dict[str, list[EventCallback]] = {}
