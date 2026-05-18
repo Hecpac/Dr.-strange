@@ -160,10 +160,36 @@ class InstagramAdapter:
 
 
 class SocialPublisher:
-    def __init__(self, adapters: dict[str, dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        adapters: dict[str, dict[str, Any]],
+        *,
+        runtime_policy: Any | None = None,
+        policy_context: str = "telegram",
+    ) -> None:
         self.adapters = adapters
+        self._runtime_policy = runtime_policy
+        self._policy_context = policy_context
 
     def publish(self, draft: Any) -> PublishResult:
+        if self._runtime_policy is not None:
+            endpoint = {
+                "x": "https://api.x.com/2/tweets",
+                "linkedin": "https://api.linkedin.com/v2/ugcPosts",
+                "instagram": "https://graph.facebook.com/",
+            }.get(str(draft.platform).lower())
+            self._runtime_policy.enforce(
+                "social.publish",
+                {
+                    "account": draft.account,
+                    "platform": draft.platform,
+                    "text": draft.text,
+                    **({"endpoint": endpoint} if endpoint else {}),
+                },
+                context=self._policy_context,
+                mutates_state=True,
+                requires_network=True,
+            )
         adapter = self.adapters[draft.account][draft.platform]
         return adapter.publish(draft.text, media_path=None)
 

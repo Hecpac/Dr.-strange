@@ -143,7 +143,10 @@ DAEMON_AUTO_APPROVE: frozenset[str] = frozenset({
 
 
 def policy_for(name: str) -> ToolPolicy:
-    return TOOL_POLICIES.get(name, _DEFAULT_POLICY)
+    policy = TOOL_POLICIES.get(name)
+    if policy is None:
+        raise KeyError(f"unknown tool policy: {name}")
+    return policy
 
 
 def daemon_can_auto_approve(name: str) -> bool:

@@ -158,6 +158,15 @@ class SafetyTests(unittest.TestCase):
             decision = sandbox_hook("Write", {"path": str(Path(tmpdir) / "outside.txt")}, policy=policy)
             self.assertFalse(decision.allowed)
 
+    def test_sandbox_fails_closed_for_unknown_tool(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            policy = SandboxPolicy(workspace_root=workspace)
+            decision = sandbox_hook("UnknownTool", {}, policy=policy)
+            self.assertFalse(decision.allowed)
+            self.assertIn("not declared", decision.reason)
+
     def test_sandbox_blocks_env_wrapped_rm(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir) / "workspace"

@@ -2260,7 +2260,15 @@ class BotService:
             output_kind="routing_trace",
         )
         context = CommandContext(user_id=user_id, session_id=session_id, text=text, stripped=stripped)
-        command_response = dispatch_commands(self._pre_state_commands, context)
+        try:
+            command_response = dispatch_commands(self._pre_state_commands, context)
+        except ApprovalPending as exc:
+            self._record_pending_tool_approval(
+                session_id=session_id,
+                user_text=stripped,
+                exc=exc,
+            )
+            return _format_approval_pending(exc)
         if isinstance(command_response, _BrainShortcut):
             return self._brain_text_response(
                 session_id,
@@ -2664,7 +2672,15 @@ class BotService:
             return shortcut_response
         # NlmHandler owns its own narrow classifier and kill switch; keeping it
         # here prevents explicit NotebookLM commands from falling into autonomy.
-        nlm_response = self._nlm_handler.natural_language_response(session_id, stripped)
+        try:
+            nlm_response = self._nlm_handler.natural_language_response(session_id, stripped)
+        except ApprovalPending as exc:
+            self._record_pending_tool_approval(
+                session_id=session_id,
+                user_text=stripped,
+                exc=exc,
+            )
+            return _format_approval_pending(exc)
         if nlm_response is not None:
             nlm_reason = "nlm_intent_classifier_matched"
         elif os.getenv("CLAW_DISABLE_NLM_NATURAL_LANGUAGE", "0") == "1":
@@ -2705,7 +2721,15 @@ class BotService:
             if not is_start_ack:
                 self._remember_assistant_turn_state(session_id, stripped, coordinated_response)
             return coordinated_response
-        command_response = dispatch_commands(self._post_shortcut_commands, context)
+        try:
+            command_response = dispatch_commands(self._post_shortcut_commands, context)
+        except ApprovalPending as exc:
+            self._record_pending_tool_approval(
+                session_id=session_id,
+                user_text=stripped,
+                exc=exc,
+            )
+            return _format_approval_pending(exc)
         if command_response is not None:
             return command_response
 
@@ -3590,7 +3614,14 @@ class BotService:
                     )
                     for d in drafts_meta
                 ]
-                results = [self.social_publisher.publish(d) for d in drafts]
+                results = []
+                for draft in drafts:
+                    with approved_tool_invocation(
+                        tool="social.publish",
+                        approval_id=approval_id,
+                        reason="social_publish_confirmed",
+                    ):
+                        results.append(self.social_publisher.publish(draft))
                 return json.dumps(
                     [{"platform": r.platform, "post_id": r.post_id, "url": r.url} for r in results],
                     indent=2,
@@ -5112,6 +5143,7 @@ class BotService:
                 and not _looks_like_standalone_url(text, extracted_url)
                 and any(token in normalized for token in _TWEET_ANALYSIS_SHORTCUT_TOKENS)
             ):
+                self._browse_handler.remember_recent_browse_url(session_id, normalized_url)
                 return _BrainShortcut(text)
             if "chrome" in normalized and (any(token in normalized for token in _BROWSE_SHORTCUT_TOKENS) or _looks_like_standalone_url(text, extracted_url)):
                 return self._chrome_handler.browse_response(extracted_url, session_id=session_id)
@@ -5128,7 +5160,7 @@ class BotService:
         if _looks_like_tweet_followup_request(normalized):
             recent_tweet_url = self._browse_handler.recent_tweet_url(session_id)
             if recent_tweet_url is not None:
-                return _BrainShortcut(f"{text}\n\n{recent_tweet_url}")
+                return _BrainShortcut(f"{text}\n\n{recent_tweet_url}", memory_text=text)
 
         chatgpt_response = self._maybe_handle_chatgpt_browser_request(
             text,

@@ -4637,6 +4637,62 @@ class BotTests(unittest.TestCase):
                 self.assertIn("## Aplicación sugerida", args[1])
                 self.assertEqual(kwargs["memory_text"], f"Revisa este tweet {tweet_url}")
 
+    @patch("claw_v2.bot_helpers._tweet_fxtwitter_read")
+    def test_tweet_followup_reuses_tweet_url_from_direct_brain_shortcut(self, mock_tweet_read) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                tweet_url = "https://x.com/trq212/status/2056415973125796184?s=46"
+                mock_tweet_read.return_value = (
+                    f"**Thariq (@trq212) on X** ({tweet_url})\n\n"
+                    "a prompt I've been using a lot recently: implement <SPEC>..."
+                )
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.browser = MagicMock()
+
+                def brain_response(session_id: str, prompt: str, **kwargs) -> LLMResponse:
+                    content = (
+                        "## Fuente\n- Tweet analizado.\n\n## Aplicación sugerida\n- Usar implementation notes."
+                        if tweet_url in prompt
+                        else "I am Dr. Strange"
+                    )
+                    return LLMResponse(
+                        content=content,
+                        lane="brain",
+                        provider="anthropic",
+                        model="claude-opus-4-7",
+                    )
+
+                with patch.object(type(runtime.bot.brain), "handle_message", side_effect=brain_response) as mock_handle_message:
+                    first = runtime.bot.handle_text(
+                        user_id="123",
+                        session_id="s1",
+                        text=f"Revisa este hilo {tweet_url}",
+                    )
+                    second = runtime.bot.handle_text(
+                        user_id="123",
+                        session_id="s1",
+                        text="Revisa el Tweet que te acabo de dar",
+                    )
+
+                self.assertIn("Tweet analizado", first)
+                self.assertIn("Tweet analizado", second)
+                self.assertNotEqual(second, "I am Dr. Strange")
+                runtime.bot.browser.chrome_navigate.assert_not_called()
+                self.assertGreaterEqual(mock_tweet_read.call_count, 2)
+                args, kwargs = mock_handle_message.call_args
+                self.assertEqual(args[0], "s1")
+                self.assertIn(tweet_url, args[1])
+                self.assertEqual(kwargs["memory_text"], "Revisa el Tweet que te acabo de dar")
+
     def test_runtime_capability_question_uses_conservative_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
