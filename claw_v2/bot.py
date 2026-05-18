@@ -1509,6 +1509,36 @@ class BotService:
             )
         return sanitized
 
+    def _final_render(self, session_id: str, content: str) -> str:
+        """Single funnel for user-visible text on the Telegram brain path.
+
+        Contract — keep narrow:
+        1. Apply ``NaturalLanguageRenderer(mode="normal").render`` to drop
+           internal labels (approval_id, /task_*, explicit_blocker, …) and
+           replace internal tokens with natural Spanish copy.
+        2. Apply ``_sanitize_visible_chat_response`` to redact runtime IDs
+           and local paths.
+
+        Forbidden inside this helper (enforced by tests):
+        - Touching ``_record_evidence_gate_explicit_blocker`` or any
+          evidence-gate / task ledger logic.
+        - Reading ``current_meta_introspection_kind`` to alter behaviour.
+        - Mutating session_state, observe, or approvals state.
+
+        Both inner ops are idempotent regex transforms: ``_final_render(_final_render(x)) == _final_render(x)``
+        is exercised by ``tests/test_final_render_idempotency.py``.
+
+        Placement invariant when applied to the brain path: must run INSIDE
+        ``_brain_text_response`` so it stays inside the
+        ``with meta_introspection_context(...)`` set by the
+        ``meta_introspection_guard``. See INTERNAL_WIRING.md §1
+        ``final_render_brain_path_inside_meta_context``.
+        """
+        if not content:
+            return content
+        rendered = NaturalLanguageRenderer(mode="normal").render(content)
+        return self._sanitize_visible_chat_response(session_id, rendered)
+
     def _emit_sanitizer_recovery_event(self, event_type: str, session_id: str, **payload: Any) -> None:
         if self.observe is None:
             return
@@ -3633,6 +3663,12 @@ class BotService:
             content,
             source="brain_fallback",
         )
+        # Slice 2 of P0-3+P0-2+P1-6 block: apply the central render+sanitize
+        # funnel to the brain path. Must stay inside _brain_text_response so
+        # it runs inside the `with meta_introspection_context(...)` set by
+        # the meta_introspection_guard caller (bot.py:2570). See
+        # INTERNAL_WIRING.md §1 final_render_brain_path_inside_meta_context.
+        content = self._final_render(session_id, content)
         if content != raw_content:
             self.brain.memory.replace_latest_assistant_message(session_id, raw_content, content)
         if content == "Recibido. ¿Qué quieres que haga con esto?":
