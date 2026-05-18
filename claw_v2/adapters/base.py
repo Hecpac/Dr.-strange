@@ -131,6 +131,7 @@ def _finite_number(value: Any) -> bool:
 
 
 ADVISORY_LANES: frozenset[Lane] = frozenset({"verifier", "research", "judge"})
+ADVISORY_EVIDENCE_PACK_MAX_CHARS = 12_000
 
 ADVISORY_SYSTEM_PROMPTS: dict[Lane, str] = {
     "verifier": (
@@ -164,10 +165,65 @@ def build_effective_input(request: LLMRequest) -> UserPrompt:
     if request.evidence_pack:
         sections.append(
             "# Evidence Pack\n"
-            + json.dumps(request.evidence_pack, indent=2, sort_keys=True, default=str)
+            + render_bounded_evidence_pack(request.evidence_pack)
         )
     sections.append(f"# Task\n{request.prompt}")
     return "\n\n".join(sections)
+
+
+def render_bounded_evidence_pack(
+    evidence_pack: dict[str, Any],
+    *,
+    max_chars: int = ADVISORY_EVIDENCE_PACK_MAX_CHARS,
+) -> str:
+    rendered = json.dumps(evidence_pack, indent=2, sort_keys=True, default=str)
+    if len(rendered) <= max_chars:
+        return rendered
+    compact = {
+        "__truncated__": True,
+        "original_chars": len(rendered),
+        "max_chars": max_chars,
+        "data": _compact_json_value(evidence_pack),
+    }
+    compact_rendered = json.dumps(compact, indent=2, sort_keys=True, default=str)
+    if len(compact_rendered) <= max_chars:
+        return compact_rendered
+    suffix = "\n... [evidence_pack truncated]"
+    return compact_rendered[: max(max_chars - len(suffix), 0)] + suffix
+
+
+def evidence_pack_serialized_chars(evidence_pack: dict[str, Any] | None) -> int:
+    if not evidence_pack:
+        return 0
+    return len(json.dumps(evidence_pack, indent=2, sort_keys=True, default=str))
+
+
+def _compact_json_value(value: Any, *, depth: int = 0) -> Any:
+    if depth >= 4:
+        return _compact_scalar(value)
+    if isinstance(value, dict):
+        items = list(value.items())
+        compacted = {
+            str(key): _compact_json_value(item, depth=depth + 1)
+            for key, item in items[:30]
+        }
+        if len(items) > 30:
+            compacted["__omitted_keys__"] = len(items) - 30
+        return compacted
+    if isinstance(value, list):
+        compacted_list = [_compact_json_value(item, depth=depth + 1) for item in value[:10]]
+        if len(value) > 10:
+            compacted_list.append({"__omitted_items__": len(value) - 10})
+        return compacted_list
+    return _compact_scalar(value)
+
+
+def _compact_scalar(value: Any) -> Any:
+    if isinstance(value, str):
+        if len(value) <= 1_000:
+            return value
+        return value[:1_000] + "... [truncated]"
+    return value
 
 
 def coerce_usage_dict(value: Any) -> dict[str, Any]:

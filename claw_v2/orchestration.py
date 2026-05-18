@@ -17,6 +17,7 @@ from claw_v2.tracing import TRACE_KEYS
 RUN_STATUSES = frozenset({"running", "blocked", "failed", "succeeded", "alarm"})
 PHASE_STATUSES = frozenset({"running", "blocked", "failed", "succeeded", "alarm"})
 ACK_STATUSES = frozenset({"received", "rejected"})
+ARTIFACT_REF_KEYS = frozenset({"artifact_ref", "artifact_refs", "artifact_path", "artifact_paths"})
 
 ARTIFACT_ENVELOPE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -162,6 +163,10 @@ class OrchestrationVersionConflict(OrchestrationError):
 
 
 class OrchestrationValidationError(OrchestrationError):
+    pass
+
+
+class OrchestrationGateError(OrchestrationError):
     pass
 
 
@@ -327,7 +332,25 @@ class OrchestrationStore:
         *,
         expected_version: int | None = None,
         trace_context: dict[str, Any] | None = None,
+        max_phase_attempts: int | None = None,
     ) -> OrchestrationRun:
+        if max_phase_attempts is not None:
+            if max_phase_attempts < 1:
+                raise ValueError("max_phase_attempts must be >= 1")
+            attempts = self.phase_attempt_count(run_id, phase)
+            if attempts >= max_phase_attempts:
+                self.alarm_run(
+                    run_id,
+                    reason="max_phase_attempts_exceeded",
+                    phase=phase,
+                    payload={
+                        "attempts": attempts,
+                        "max_phase_attempts": max_phase_attempts,
+                    },
+                )
+                raise OrchestrationGateError(
+                    f"phase {phase} exceeded max_phase_attempts={max_phase_attempts}"
+                )
         return self._transition_run(
             run_id,
             event_type="phase_started",
@@ -369,9 +392,28 @@ class OrchestrationStore:
         reason: str = "",
         expected_version: int | None = None,
         trace_context: dict[str, Any] | None = None,
+        required_artifact_types: list[str] | tuple[str, ...] | None = None,
     ) -> OrchestrationRun:
         if status not in RUN_STATUSES - {"running"}:
             raise ValueError(f"terminal status required, got {status!r}")
+        if status == "succeeded" and required_artifact_types:
+            missing = self.missing_required_artifact_types(
+                run_id,
+                required_artifact_types=required_artifact_types,
+            )
+            if missing:
+                self.alarm_run(
+                    run_id,
+                    reason="final_gate_missing_required_artifacts",
+                    payload={
+                        "requested_status": status,
+                        "missing_artifact_types": missing,
+                    },
+                )
+                raise OrchestrationGateError(
+                    "final gate rejected success; missing artifacts: "
+                    + ",".join(missing)
+                )
         return self._transition_run(
             run_id,
             event_type="run_completed",
@@ -400,6 +442,7 @@ class OrchestrationStore:
         now = time.time()
         artifact_id = f"art:{uuid.uuid4().hex[:12]}"
         clean_payload = _clean_dict(payload)
+        _validate_artifact_refs(clean_payload)
         payload_hash = _sha256_json(clean_payload)
         envelope = {
             "schema_version": "orchestration_artifact.v1",
@@ -551,6 +594,44 @@ class OrchestrationStore:
         )
         return self.get_ack(ack_id)  # type: ignore[return-value]
 
+    def require_ack_received(
+        self,
+        artifact_id: str,
+        *,
+        consumer_role: str | None = None,
+    ) -> OrchestrationAck:
+        artifact = self.get_artifact(artifact_id)
+        if artifact is None:
+            raise KeyError(artifact_id)
+        clauses = ["artifact_id = ?", "status = 'received'"]
+        params: list[Any] = [artifact_id]
+        if consumer_role:
+            clauses.append("consumer_role = ?")
+            params.append(consumer_role)
+        with self._lock:
+            row = self._conn.execute(
+                f"""
+                SELECT *
+                FROM orchestration_acks
+                WHERE {' AND '.join(clauses)}
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                params,
+            ).fetchone()
+        if row is not None:
+            return _ack_from_row(row)
+        self.alarm_run(
+            artifact.run_id,
+            reason="missing_required_ack",
+            phase=artifact.phase,
+            payload={
+                "artifact_id": artifact_id,
+                "consumer_role": consumer_role or artifact.consumer_role,
+            },
+        )
+        raise OrchestrationGateError(f"missing required ack for artifact {artifact_id}")
+
     def checkpoint(
         self,
         run_id: str,
@@ -597,6 +678,24 @@ class OrchestrationStore:
         self._emit("orchestration_checkpoint_created", run_id=run_id, payload={"checkpoint_id": checkpoint_id})
         return checkpoint_id
 
+    def alarm_run(
+        self,
+        run_id: str,
+        *,
+        reason: str,
+        phase: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> OrchestrationRun:
+        return self._transition_run(
+            run_id,
+            event_type="orchestration_alarm",
+            status="alarm",
+            phase=phase,
+            expected_version=None,
+            trace_context=None,
+            payload={"reason": reason, **dict(payload or {})},
+        )
+
     def get_run(self, run_id: str) -> OrchestrationRun | None:
         with self._lock:
             row = self._conn.execute(
@@ -633,6 +732,52 @@ class OrchestrationStore:
                 (run_id,),
             ).fetchall()
         return [_event_from_row(row) for row in rows]
+
+    def phase_attempt_count(self, run_id: str, phase: str) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM orchestration_events
+                WHERE run_id = ?
+                  AND phase = ?
+                  AND event_type = 'phase_started'
+                """,
+                (run_id, phase),
+            ).fetchone()
+        return int(row[0] if row is not None else 0)
+
+    def missing_required_artifact_types(
+        self,
+        run_id: str,
+        *,
+        required_artifact_types: list[str] | tuple[str, ...],
+    ) -> list[str]:
+        missing: list[str] = []
+        with self._lock:
+            for artifact_type in required_artifact_types:
+                row = self._conn.execute(
+                    """
+                    SELECT a.artifact_id
+                    FROM orchestration_artifacts a
+                    WHERE a.run_id = ?
+                      AND a.artifact_type = ?
+                      AND (
+                          a.ack_required = 0
+                          OR EXISTS (
+                              SELECT 1
+                              FROM orchestration_acks k
+                              WHERE k.artifact_id = a.artifact_id
+                                AND k.status = 'received'
+                          )
+                      )
+                    LIMIT 1
+                    """,
+                    (run_id, str(artifact_type)),
+                ).fetchone()
+                if row is None:
+                    missing.append(str(artifact_type))
+        return missing
 
     def audit_report(self, run_id: str) -> dict[str, Any]:
         run = self.get_run(run_id)
@@ -708,7 +853,11 @@ class OrchestrationStore:
                 created_at=now,
             )
             self._conn.commit()
-        self._emit(f"orchestration_{event_type}", run_id=run_id, payload=payload)
+        emit_event_type = (
+            event_type if event_type.startswith("orchestration_")
+            else f"orchestration_{event_type}"
+        )
+        self._emit(emit_event_type, run_id=run_id, payload=payload)
         return self.get_run(run_id)  # type: ignore[return-value]
 
     def _next_version_unlocked(
@@ -828,6 +977,40 @@ def _validate_ack_envelope(envelope: dict[str, Any]) -> None:
         raise OrchestrationValidationError("invalid ack schema_version")
     if envelope.get("status") not in ACK_STATUSES:
         raise OrchestrationValidationError("invalid ack status")
+
+
+def _validate_artifact_refs(value: Any, *, key: str | None = None) -> None:
+    if key in ARTIFACT_REF_KEYS:
+        _validate_artifact_ref_value(value, key=key)
+        return
+    if isinstance(value, dict):
+        for child_key, child_value in value.items():
+            _validate_artifact_refs(child_value, key=str(child_key))
+        return
+    if isinstance(value, list):
+        for item in value:
+            _validate_artifact_refs(item, key=key)
+        return
+
+
+def _validate_artifact_ref_value(value: Any, *, key: str | None) -> None:
+    if isinstance(value, list):
+        for item in value:
+            _validate_artifact_ref_value(item, key=key)
+        return
+    if isinstance(value, dict):
+        for path_key in ("path", "file_path", "artifact_ref"):
+            if path_key in value:
+                _validate_artifact_ref_value(value[path_key], key=key)
+                return
+        raise OrchestrationValidationError(f"invalid_artifact_ref:{key}")
+    if not isinstance(value, str) or not value:
+        raise OrchestrationValidationError(f"invalid_artifact_ref:{key}")
+    if value.startswith("art:") or "://" in value:
+        return
+    path = Path(value).expanduser()
+    if not path.exists():
+        raise OrchestrationValidationError(f"missing_artifact_ref:{value}")
 
 
 def _validate_envelope(envelope: dict[str, Any], schema: dict[str, Any]) -> None:

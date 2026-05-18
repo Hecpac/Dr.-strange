@@ -13,6 +13,9 @@ from claw_v2.tracing import attach_trace, child_trace_context, new_trace_context
 
 logger = logging.getLogger(__name__)
 
+WORKER_RESULT_SUMMARY_CHARS = 900
+PHASE_INPUT_SUMMARY_CHARS = 1_500
+
 
 @dataclass(slots=True)
 class WorkerTask:
@@ -123,6 +126,7 @@ class CoordinatorService:
                 trace_context=trace,
             )
             self._orchestration_ack(research_artifact_id, consumer_role="coordinator_synthesis")
+            self._orchestration_require_ack(research_artifact_id, consumer_role="coordinator_synthesis")
             self._orchestration_checkpoint(
                 orchestration_run_id,
                 phase="research",
@@ -157,6 +161,9 @@ class CoordinatorService:
                 trace_context=trace,
             )
             self._orchestration_ack(synthesis_artifact_id, consumer_role=synthesis_consumer)
+            self._orchestration_require_ack(synthesis_artifact_id, consumer_role=synthesis_consumer)
+            synthesis_artifact_ref = synthesis_artifact_id or str(scratch / "synthesis.md")
+            synthesis_summary = _compact_text(synthesis, limit=PHASE_INPUT_SUMMARY_CHARS)
             self._orchestration_checkpoint(
                 orchestration_run_id,
                 phase="synthesis",
@@ -172,9 +179,15 @@ class CoordinatorService:
 
             # Phase 3: Implementation (optional)
             impl_results: list[WorkerResult] = []
+            impl_artifact_id: str | None = None
             if implementation_tasks:
                 self._orchestration_begin_phase(orchestration_run_id, "implementation", trace)
-                impl_tasks = self._inject_context(implementation_tasks, synthesis)
+                impl_tasks = self._inject_context(
+                    implementation_tasks,
+                    objective=objective,
+                    input_artifact_ref=synthesis_artifact_ref,
+                    input_summary=synthesis_summary,
+                )
                 impl_results = self._dispatch_parallel(impl_tasks, trace, lane_overrides=lane_overrides)
                 result.phase_results["implementation"] = impl_results
                 self._write_scratch(scratch, "implementation", impl_results)
@@ -187,6 +200,7 @@ class CoordinatorService:
                     trace_context=trace,
                 )
                 self._orchestration_ack(impl_artifact_id, consumer_role="verification_workers")
+                self._orchestration_require_ack(impl_artifact_id, consumer_role="verification_workers")
                 self._orchestration_checkpoint(
                     orchestration_run_id,
                     phase="implementation",
@@ -203,15 +217,20 @@ class CoordinatorService:
             # Phase 4: Verification (optional)
             if verification_tasks:
                 self._orchestration_begin_phase(orchestration_run_id, "verification", trace)
-                verify_context = synthesis
+                verification_input_ref = synthesis_artifact_ref
+                verification_input_summary = synthesis_summary
                 if impl_results:
-                    impl_evidence = "\n\n".join(
-                        f"### {r.task_name}\n[ERROR: {r.error}]" if r.error
-                        else f"### {r.task_name}\n{r.content}"
-                        for r in impl_results
+                    verification_input_ref = impl_artifact_id or str(scratch / "implementation")
+                    verification_input_summary = _phase_results_summary(
+                        impl_results,
+                        limit=PHASE_INPUT_SUMMARY_CHARS,
                     )
-                    verify_context = f"{synthesis}\n\n## Implementation Results\n{impl_evidence}"
-                verify_tasks = self._inject_context(verification_tasks, verify_context)
+                verify_tasks = self._inject_context(
+                    verification_tasks,
+                    objective=objective,
+                    input_artifact_ref=verification_input_ref,
+                    input_summary=verification_input_summary,
+                )
                 verify_results = self._dispatch_parallel(verify_tasks, trace, lane_overrides=lane_overrides)
                 result.phase_results["verification"] = verify_results
                 self._write_scratch(scratch, "verification", verify_results)
@@ -224,6 +243,7 @@ class CoordinatorService:
                     trace_context=trace,
                 )
                 self._orchestration_ack(verification_artifact_id, consumer_role="coordinator_result")
+                self._orchestration_require_ack(verification_artifact_id, consumer_role="coordinator_result")
                 self._orchestration_checkpoint(
                     orchestration_run_id,
                     phase="verification",
@@ -373,10 +393,9 @@ class CoordinatorService:
         lane_overrides: dict[str, dict[str, Any]] | None = None,
     ) -> str:
         """Merge research findings into a coherent plan."""
-        findings = "\n\n".join(
-            f"### {r.task_name}\n{r.content}" if not r.error
-            else f"### {r.task_name}\n[ERROR: {r.error}]"
-            for r in research_results
+        findings = _phase_results_summary(
+            research_results,
+            limit=PHASE_INPUT_SUMMARY_CHARS,
         )
 
         agent_context = ""
@@ -389,9 +408,10 @@ class CoordinatorService:
 
         prompt = (
             "You are a coordinator agent. Synthesize the research findings below "
-            "into a clear, actionable plan.\n\n"
+            "into a clear, actionable plan. The findings are compact summaries; "
+            "do not assume omitted details are verified facts.\n\n"
             f"## Objective\n{objective}{agent_context}\n\n"
-            f"## Research Findings\n{findings}\n\n"
+            f"## Research Result Summaries\n{findings}\n\n"
             "Output a structured plan with numbered steps. "
             "For each step, assign it to the most appropriate agent based on their domains and skills. "
             "Use the format: **Step N [agent_name]:** description"
@@ -416,12 +436,27 @@ class CoordinatorService:
             return ""
 
     @staticmethod
-    def _inject_context(tasks: list[WorkerTask], synthesis: str) -> list[WorkerTask]:
-        """Prepend synthesis context to each task's instruction."""
+    def _inject_context(
+        tasks: list[WorkerTask],
+        *,
+        objective: str,
+        input_artifact_ref: str | None,
+        input_summary: str,
+    ) -> list[WorkerTask]:
+        """Prepend compact artifact-mediated context to each task's instruction."""
+        ref = input_artifact_ref or "none"
+        summary = _compact_text(input_summary, limit=PHASE_INPUT_SUMMARY_CHARS)
         return [
             WorkerTask(
                 name=t.name,
-                instruction=f"## Context from coordinator\n{synthesis}\n\n## Your task\n{t.instruction}",
+                instruction=(
+                    "## Task Context\n"
+                    f"objective: {objective}\n"
+                    f"input_artifact_ref: {ref}\n"
+                    f"input_summary: {summary or 'none'}\n\n"
+                    "## Your task\n"
+                    f"{t.instruction}"
+                ),
                 lane=t.lane,
                 assigned_agent=t.assigned_agent,
             )
@@ -544,6 +579,14 @@ class CoordinatorService:
             consumer_role=consumer_role,
         )
 
+    def _orchestration_require_ack(self, artifact_id: str | None, *, consumer_role: str) -> None:
+        if self.orchestration_store is None or not artifact_id:
+            return
+        self.orchestration_store.require_ack_received(
+            artifact_id,
+            consumer_role=consumer_role,
+        )
+
     def _orchestration_checkpoint(
         self,
         run_id: str,
@@ -570,6 +613,9 @@ class CoordinatorService:
         trace_context: dict[str, Any],
     ) -> None:
         if self.orchestration_store is None:
+            return
+        existing = self.orchestration_store.get_run(run_id)
+        if status == "failed" and existing is not None and existing.status in {"alarm", "blocked"}:
             return
         try:
             self.orchestration_store.complete_run(
@@ -609,6 +655,34 @@ def _worker_result_payload(result: WorkerResult) -> dict[str, Any]:
         "duration_seconds": result.duration_seconds,
         "error": result.error,
     }
+
+
+def _phase_results_summary(results: list[WorkerResult], *, limit: int) -> str:
+    if not results:
+        return "none"
+    lines: list[str] = []
+    for result in results:
+        lines.append(
+            f"- {result.task_name}: "
+            f"{_worker_result_summary(result, limit=WORKER_RESULT_SUMMARY_CHARS)}"
+        )
+    return _compact_text("\n".join(lines), limit=limit)
+
+
+def _worker_result_summary(result: WorkerResult, *, limit: int) -> str:
+    if result.error:
+        return _compact_text(f"ERROR: {result.error}", limit=limit)
+    if not result.content:
+        return "empty result"
+    return _compact_text(result.content, limit=limit)
+
+
+def _compact_text(text: str, *, limit: int) -> str:
+    clean = " ".join(str(text or "").split())
+    if len(clean) <= limit:
+        return clean
+    suffix = "... [truncated]"
+    return clean[: max(limit - len(suffix), 0)].rstrip() + suffix
 
 
 def _phase_counts(results: list[WorkerResult]) -> dict[str, Any]:

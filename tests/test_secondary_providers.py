@@ -36,6 +36,16 @@ class SecondaryProviderAdapterTests(unittest.TestCase):
         self.assertIn("\"diff\": \"print('x')\"", rendered)
         self.assertIn("# Task", rendered)
 
+    def test_build_effective_input_truncates_large_evidence_pack(self) -> None:
+        request = make_request()
+        request.evidence_pack = {"large": "x" * 50_000, "small": "keep"}
+
+        rendered = build_effective_input(request)
+
+        self.assertIn("\"__truncated__\": true", rendered)
+        self.assertIn("\"small\": \"keep\"", rendered)
+        self.assertLess(len(rendered), 13_000)
+
     def test_openai_adapter_uses_responses_api(self) -> None:
         recorded: dict[str, object] = {}
         fake_response = SimpleNamespace(

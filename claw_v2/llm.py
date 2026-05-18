@@ -4,7 +4,20 @@ from dataclasses import asdict
 from typing import Callable
 
 from claw_v2.adapters.anthropic import AnthropicAgentAdapter
-from claw_v2.adapters.base import AdapterError, AdapterUnavailableError, LLMRequest, PostLLMHook, PreLLMHook, ProviderAdapter, UserPrompt
+from claw_v2.adapters.base import (
+    ADVISORY_EVIDENCE_PACK_MAX_CHARS,
+    ADVISORY_LANES,
+    AdapterError,
+    AdapterUnavailableError,
+    LLMRequest,
+    PostLLMHook,
+    PreLLMHook,
+    ProviderAdapter,
+    UserPrompt,
+    build_effective_input,
+    build_effective_system_prompt,
+    evidence_pack_serialized_chars,
+)
 from claw_v2.adapters.codex import CodexAdapter
 from claw_v2.adapters.google import GoogleAdapter
 from claw_v2.adapters.ollama import OllamaAdapter
@@ -119,6 +132,7 @@ class LLMRouter:
                         "blocked_by": hook_name,
                         "block_reason": block_reason,
                         "session_id": session_id,
+                        "prompt_size": _prompt_size_metadata(request),
                     },
                     request=request,
                 )
@@ -161,6 +175,7 @@ class LLMRouter:
                     "requested_provider": selected_provider,
                     "fallback_provider": fallback_provider,
                     "response_text": redact_sensitive(response.content),
+                    "prompt_size": _prompt_size_metadata(fallback_request),
                 },
                 request=fallback_request,
             )
@@ -174,7 +189,11 @@ class LLMRouter:
         self._audit(
             "llm_response",
             response,
-            {"session_id": session_id, "response_text": redact_sensitive(response.content)},
+            {
+                "session_id": session_id,
+                "response_text": redact_sensitive(response.content),
+                "prompt_size": _prompt_size_metadata(request),
+            },
             request=request,
         )
         return response
@@ -375,3 +394,47 @@ def _fallback_session_id(request: LLMRequest, fallback_provider: str) -> str | N
 
 def _looks_like_openai_response_id(session_id: str) -> bool:
     return session_id.startswith("resp_") or session_id.startswith("resp-")
+
+
+def _prompt_size_metadata(request: LLMRequest) -> dict[str, int | str | bool]:
+    effective_input = build_effective_input(request)
+    effective_system_prompt = build_effective_system_prompt(request)
+    raw_evidence_chars = evidence_pack_serialized_chars(request.evidence_pack)
+    effective_input_chars = _prompt_chars(effective_input)
+    effective_system_chars = len(effective_system_prompt or "")
+    return {
+        "lane": request.lane,
+        "provider": request.provider,
+        "prompt_chars": _prompt_chars(request.prompt),
+        "system_prompt_chars": len(request.system_prompt or ""),
+        "evidence_pack_chars": raw_evidence_chars,
+        "effective_input_chars": effective_input_chars,
+        "effective_system_prompt_chars": effective_system_chars,
+        "estimated_prompt_tokens": _estimated_tokens(_prompt_chars(request.prompt)),
+        "estimated_system_prompt_tokens": _estimated_tokens(len(request.system_prompt or "")),
+        "estimated_evidence_pack_tokens": _estimated_tokens(raw_evidence_chars),
+        "estimated_effective_input_tokens": _estimated_tokens(effective_input_chars),
+        "estimated_total_input_tokens": _estimated_tokens(effective_input_chars + effective_system_chars),
+        "evidence_pack_truncated": (
+            raw_evidence_chars > ADVISORY_EVIDENCE_PACK_MAX_CHARS
+            and request.lane in ADVISORY_LANES
+        ),
+    }
+
+
+def _prompt_chars(prompt: UserPrompt) -> int:
+    if isinstance(prompt, str):
+        return len(prompt)
+    total = 0
+    for block in prompt:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") in {"text", "input_text"}:
+            total += len(str(block.get("text") or ""))
+        else:
+            total += len(str(block))
+    return total
+
+
+def _estimated_tokens(chars: int) -> int:
+    return max(int(chars) // 4, 1) if chars else 0

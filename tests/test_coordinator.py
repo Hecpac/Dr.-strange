@@ -78,6 +78,24 @@ class SynthesizeTests(unittest.TestCase):
         self.assertEqual(call_kwargs.kwargs["lane"], "research")
         self.assertIn("evidence_pack", call_kwargs.kwargs)
 
+    def test_synthesis_uses_compact_worker_summaries(self) -> None:
+        svc, router, *_ = _make_service()
+        router.ask.return_value = MagicMock(content="plan")
+        from claw_v2.coordinator import WorkerResult
+        tail_marker = "FULL_CONTENT_TAIL_SHOULD_NOT_APPEAR"
+        svc._synthesize("build feature", [
+            WorkerResult(
+                task_name="r1",
+                content=("important " * 200) + tail_marker,
+                duration_seconds=1.0,
+            ),
+        ])
+
+        prompt_arg = router.ask.call_args.args[0]
+        self.assertIn("Research Result Summaries", prompt_arg)
+        self.assertIn("important", prompt_arg)
+        self.assertNotIn(tail_marker, prompt_arg)
+
     def test_synthesis_handles_error(self) -> None:
         svc, router, *_ = _make_service()
         router.ask.side_effect = RuntimeError("oops")
@@ -89,17 +107,29 @@ class SynthesizeTests(unittest.TestCase):
 
 
 class InjectContextTests(unittest.TestCase):
-    def test_prepends_synthesis(self) -> None:
+    def test_prepends_artifact_reference_and_summary(self) -> None:
         tasks = [WorkerTask(name="impl1", instruction="write code")]
-        result = CoordinatorService._inject_context(tasks, "the plan")
+        result = CoordinatorService._inject_context(
+            tasks,
+            objective="ship feature",
+            input_artifact_ref="art:abc123",
+            input_summary="the plan",
+        )
         self.assertEqual(len(result), 1)
+        self.assertIn("objective: ship feature", result[0].instruction)
+        self.assertIn("input_artifact_ref: art:abc123", result[0].instruction)
         self.assertIn("the plan", result[0].instruction)
         self.assertIn("write code", result[0].instruction)
         self.assertEqual(result[0].name, "impl1")
 
     def test_preserves_assigned_agent(self) -> None:
         tasks = [WorkerTask(name="impl1", instruction="write code", assigned_agent="hex")]
-        result = CoordinatorService._inject_context(tasks, "the plan")
+        result = CoordinatorService._inject_context(
+            tasks,
+            objective="ship feature",
+            input_artifact_ref="art:abc123",
+            input_summary="the plan",
+        )
         self.assertEqual(result[0].assigned_agent, "hex")
 
 
@@ -298,8 +328,9 @@ class RetryAndContextTests(unittest.TestCase):
 
         verify_prompts = [p for p in responses if "## Your task" in p and "check" in p]
         self.assertEqual(len(verify_prompts), 1)
-        self.assertIn("Implementation Results", verify_prompts[0])
-        self.assertIn("### i1", verify_prompts[0])
+        self.assertIn("input_artifact_ref:", verify_prompts[0])
+        self.assertIn("input_summary:", verify_prompts[0])
+        self.assertIn("i1: result", verify_prompts[0])
 
     def test_verification_surfaces_implementation_errors(self) -> None:
         from claw_v2.adapters.base import AdapterError
@@ -321,7 +352,8 @@ class RetryAndContextTests(unittest.TestCase):
 
         verify_prompts = [p for p in captured if "## Your task" in p and "check" in p]
         self.assertEqual(len(verify_prompts), 1)
-        self.assertIn("ERROR: Codex CLI timed out after 120s", verify_prompts[0])
+        self.assertIn("input_artifact_ref:", verify_prompts[0])
+        self.assertIn("i1: ERROR: Codex CLI timed out after 120s", verify_prompts[0])
 
 
 if __name__ == "__main__":

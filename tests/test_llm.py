@@ -112,6 +112,34 @@ class LLMRouterTests(unittest.TestCase):
             self.assertEqual(response.provider, "ollama")
             self.assertEqual(response.model, "gemma4")
 
+    def test_llm_response_audit_includes_prompt_size_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            audit_events: list[dict] = []
+            router = LLMRouter(
+                config=config,
+                adapters={
+                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=echo_response("anthropic")),
+                },
+                audit_sink=audit_events.append,
+            )
+
+            router.ask(
+                "verify this",
+                lane="verifier",
+                provider="anthropic",
+                system_prompt="extra verifier rule",
+                evidence_pack={"diff": "x"},
+            )
+
+            prompt_size = audit_events[-1]["metadata"]["prompt_size"]
+            self.assertEqual(prompt_size["lane"], "verifier")
+            self.assertEqual(prompt_size["provider"], "anthropic")
+            self.assertGreater(prompt_size["prompt_chars"], 0)
+            self.assertGreater(prompt_size["effective_input_chars"], prompt_size["prompt_chars"])
+            self.assertGreater(prompt_size["effective_system_prompt_chars"], 0)
+            self.assertFalse(prompt_size["evidence_pack_truncated"])
+
     def test_secondary_fallback_uses_anthropic_worker_model(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = make_config(Path(tmpdir))
