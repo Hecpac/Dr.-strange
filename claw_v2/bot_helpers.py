@@ -1275,7 +1275,7 @@ _INTERNAL_LEAK_PATTERNS: tuple[re.Pattern[str], ...] = (
 # verbatim prompt echoes. Soft phrases ("respuesta bloqueada", "trazas internas",
 # "circuit breaker", etc.) are inline-redacted further below so legitimate
 # technical references do not nuke an otherwise valid reply.
-_NUKE_PATTERN_INDICES: tuple[int, ...] = (4, 5, 6, 20, 21, 22, 23, 24, 25, 30, 31)
+_NUKE_PATTERN_INDICES: tuple[int, ...] = (4, 5, 6, 20, 21, 22, 23, 24, 25)
 
 
 def _chat_response_has_internal_leak(text: str) -> bool:
@@ -1292,6 +1292,9 @@ def _sanitize_chat_response(text: str) -> str:
         )
 
     sanitized = text
+    sanitized = re.sub(r"\[redacted:\s*system-reminder\]", "[redacted: internal marker]", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"&lt;/?\s*system-reminder\s*&gt;", "[redacted: internal marker]", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"</?\s*system-reminder\s*>", "[redacted: internal marker]", sanitized, flags=re.IGNORECASE)
     sanitized = re.sub(r"\bMessage ID\s+\d+\b", "Mensaje enviado", sanitized, flags=re.IGNORECASE)
     sanitized = re.sub(r"\bmessage_id\s*[:#]?\s*\d+\b", "mensaje enviado", sanitized, flags=re.IGNORECASE)
     sanitized = re.sub(r"\bchat_id\s*[:#]?\s*-?\d+\b", "chat", sanitized, flags=re.IGNORECASE)

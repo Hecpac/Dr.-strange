@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from claw_v2.bot_helpers import (
+    _extract_option_reference,
     _looks_like_proceed_request,
     _normalize_command_text,
     detect_meta_introspection_request,
@@ -104,8 +105,9 @@ _CORRECTION_MARKERS = (
 _NEW_TASK_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(pattern)
     for pattern in (
-        r"\b(?:crea|crear|creame|créame|genera|generame|haz|hazme|prepara|armame|arma)\b.+\b(?:mision|misión|tarea|task|smoke|prueba|test|plan|replay)\b",
+        r"\b(?:crea|crear|creame|créame|genera|generame|haz|hazme|prepara|armame|arma)\b.+\b(?:mision|misión|tarea|task|smoke|prueba|test|plan|replay|cuaderno|notebook|notebooklm|podcast|noticias|barrido|research)\b",
         r"\b(?:implementa|parchea|corrige|arregla|agrega|modifica|actualiza|regenera|completa|termina|finaliza)\b",
+        r"\b(?:verifica|comprueba|valida)\b.+\b(?:daemon|servicio|launchd|runtime|bot|cuaderno|notebook|notebooklm|tarea|task)\b",
         r"\b(?:investiga|revisa|audita)\b.+\b(?:bug|fallo|falla|logs?|trazas?|router|runtime|telegram|test|smoke)\b",
         r"\b(?:create|generate|prepare|implement|patch|fix|add|modify|update|complete|finish|review|investigate|audit)\b",
     )
@@ -134,6 +136,7 @@ def classify_semantic_turn(text: str) -> SemanticTurn:
     debug_mode = _asks_for_debug_or_audit(normalized)
     explicit_continuation = _looks_like_proceed_request(stripped)
     explicit_authorization = _is_explicit_authorization(compact)
+    option_reference = _extract_option_reference(stripped)
     telegram_intent = detect_telegram_imperative(stripped)
     owner_delegation = detect_owner_delegation(stripped)
     meta_intent = detect_meta_introspection_request(stripped)
@@ -163,6 +166,18 @@ def classify_semantic_turn(text: str) -> SemanticTurn:
             explicit_continuation=explicit_continuation,
             debug_mode=debug_mode,
             reasons=("approval_phrase",),
+        )
+
+    if option_reference is not None:
+        return SemanticTurn(
+            intent="continue_active_mission",
+            objective=None,
+            confidence=0.9,
+            clear_goal=False,
+            explicit_authorization=False,
+            explicit_continuation=True,
+            debug_mode=debug_mode,
+            reasons=("option_reference",),
         )
 
     if (
@@ -232,6 +247,7 @@ def classify_semantic_turn(text: str) -> SemanticTurn:
 def _looks_like_new_task(normalized: str, original: str) -> bool:
     if not normalized or original.startswith("/"):
         return False
+    normalized = re.sub(r"\s+", " ", normalized).strip()
     if "mision durable" in normalized or "mission durable" in normalized or "durable mission" in normalized:
         return True
     if has_explicit_implementation_request(original):

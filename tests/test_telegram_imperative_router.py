@@ -468,7 +468,7 @@ def test_actionable_no_match_falls_through_to_brain(bot) -> None:
     ), decisions
 
 
-def test_continue_prefers_pending_action_over_app_target_clarification(bot) -> None:
+def test_continue_sends_pending_action_context_to_brain_without_autonomous_task(bot) -> None:
     bot.brain.memory.update_session_state(
         "tg-test",
         mode="ops",
@@ -479,13 +479,12 @@ def test_continue_prefers_pending_action_over_app_target_clarification(bot) -> N
     response, decisions, events = _drive(bot, "Continúa")
 
     assert response
-    assert "Creé la tarea" in response
+    assert response == "BRAIN_FALLBACK_USED"
     assert "Necesito una aclaración mínima" not in response
     assert "telegram_continuation_stateful_resolved" in events
-    assert "stateful_continuation_routed_to_actionable_task" in events
+    assert "stateful_continuation_routed_to_actionable_task" not in events
     records = bot.task_ledger.list(session_id="tg-test", limit=5)
-    assert records
-    assert records[0].objective == "arreglar #6 continuation imperative router bounce en bot.py"
+    assert records == []
     assert any(
         ev.get("handler") == "telegram_imperative"
         and ev.get("route") == "intercepted"
@@ -510,13 +509,11 @@ def test_continue_uses_recent_contextual_proposal_in_telegram(bot) -> None:
     response, decisions, events = _drive(bot, "Continúa")
 
     assert response
-    assert "Creé la tarea" in response
+    assert response == "BRAIN_FALLBACK_USED"
     assert "telegram_continuation_stateful_resolved" in events
-    assert "stateful_continuation_routed_to_actionable_task" in events
+    assert "stateful_continuation_routed_to_actionable_task" not in events
     records = bot.task_ledger.list(session_id="tg-test", limit=5)
-    assert records
-    assert "#4" in records[0].objective
-    assert "SOUL/AGENTS" in records[0].objective
+    assert records == []
     assert any(
         ev.get("handler") == "telegram_imperative"
         and ev.get("route") == "intercepted"
@@ -547,13 +544,12 @@ def test_continue_uses_reply_context_markdown_pending_line(bot) -> None:
     response, decisions, events = _drive(bot, "Continúa")
 
     assert response
-    assert "Creé la tarea" in response
+    assert response == "BRAIN_FALLBACK_USED"
     assert "telegram_continuation_stateful_resolved" in events
-    assert "stateful_continuation_routed_to_actionable_task" in events
+    assert "stateful_continuation_routed_to_actionable_task" not in events
     assert "¿Qué acción concreta" not in response
     records = bot.task_ledger.list(session_id="tg-test", limit=5)
-    assert records
-    assert records[0].objective == "validacion de la rama nueva (`brain_shortcut`)"
+    assert records == []
     assert any(
         ev.get("handler") == "telegram_imperative"
         and ev.get("route") == "intercepted"
@@ -580,12 +576,10 @@ def test_replay_voy_con_numero_procede_creates_durable_task(bot) -> None:
     response, decisions, events = _drive(bot, "Procede")
 
     _assert_valid_continuation_output(response)
-    assert "Creé la tarea" in response
+    assert response == "BRAIN_FALLBACK_USED"
     assert "telegram_continuation_stateful_resolved" in events
     records = bot.task_ledger.list(session_id="tg-test", limit=5)
-    assert records
-    assert "#3" in records[0].objective
-    assert "router de continuaciones" in records[0].objective
+    assert records == []
     assert any(
         ev.get("handler") == "telegram_imperative"
         and ev.get("reason") == "telegram_imperative:task.continue_active_mission:stateful"
@@ -603,11 +597,10 @@ def test_replay_contextual_choice_continua_chooses_single_proposal(bot) -> None:
     response, _decisions, events = _drive(bot, "Continúa")
 
     _assert_valid_continuation_output(response)
-    assert "Creé la tarea" in response
+    assert response == "BRAIN_FALLBACK_USED"
     assert "telegram_continuation_stateful_resolved" in events
     records = bot.task_ledger.list(session_id="tg-test", limit=5)
-    assert records
-    assert "#4" in records[0].objective
+    assert records == []
 
 
 def test_replay_pegalo_y_enviamelo_uses_active_prompt_or_blocks_explicitly(bot) -> None:
@@ -690,11 +683,12 @@ def test_replay_waiting_for_user_input_task_continua_resumes_task(bot) -> None:
     response, _decisions, events = _drive(bot, "Continúa")
 
     _assert_valid_continuation_output(response)
-    assert "Creé la tarea" in response
+    assert response == "BRAIN_FALLBACK_USED"
     assert "telegram_continuation_stateful_resolved" in events
     records = bot.task_ledger.list(session_id="tg-test", limit=5)
     assert records
     assert records[0].objective == "terminar auditoría P0 de Telegram continuation"
+    assert not any(record.runtime == "telegram_preflight" for record in records)
 
 
 def test_multiple_active_missions_asks_specific_choice_not_generic_action(bot) -> None:

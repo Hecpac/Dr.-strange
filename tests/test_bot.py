@@ -1077,7 +1077,7 @@ class BotTests(unittest.TestCase):
                 self.assertIn("/task_run", reply)
                 self.assertEqual(runtime.task_ledger.list(session_id="s1", limit=5), [])
 
-    def test_hazlo_with_executable_pending_action_creates_blocked_task(self) -> None:
+    def test_hazlo_with_executable_pending_action_goes_to_brain_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             env = {
@@ -1103,11 +1103,8 @@ class BotTests(unittest.TestCase):
                     runtime_channel="telegram",
                 )
 
-                self.assertIn("Creé la tarea", reply)
-                records = runtime.task_ledger.list(session_id="s1", limit=5)
-                self.assertEqual(records[0].objective, "Regenera el lock del PR QTS")
-                self.assertEqual(records[0].verification_status, "blocked")
-                self.assertEqual(records[0].metadata["task_kind"], "qts_lock_regeneration")
+                self.assertEqual(reply, "handled")
+                self.assertEqual(runtime.task_ledger.list(session_id="s1", limit=5), [])
 
     def test_tareas_pendientes_summarizes_backlog_without_internal_ids(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

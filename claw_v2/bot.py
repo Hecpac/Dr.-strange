@@ -2457,6 +2457,7 @@ class BotService:
             stripped,
             session_id=session_id,
             runtime_channel=runtime_channel,
+            semantic_turn=semantic_turn,
         )
         self._emit_dispatch_decision(
             handler="telegram_actionable_task",
@@ -5063,23 +5064,10 @@ class BotService:
     ) -> str | None:
         is_pending_execution = self._stateful_shortcut_is_pending_execution(shortcut)
         if is_pending_execution and (runtime_channel or "").strip().lower() == "telegram":
-            actionable_response = self._maybe_handle_actionable_task_request(
-                user_text,
-                session_id=session_id,
-                runtime_channel=runtime_channel,
+            self._emit_safe(
+                "stateful_continuation_sent_to_brain",
+                {"session_id": session_id, "source_text": user_text[:80]},
             )
-            if actionable_response is not None:
-                self._emit_safe(
-                    "stateful_continuation_routed_to_actionable_task",
-                    {
-                        "session_id": session_id,
-                        "source_text": user_text[:80],
-                        "response_length": len(actionable_response),
-                    },
-                )
-                self._store_memory_turn(session_id, user_text, actionable_response, assistant_limit=2000)
-                self._remember_assistant_turn_state(session_id, user_text, actionable_response)
-                return actionable_response
         result = self._brain_text_response(
             session_id,
             shortcut.text,
@@ -7565,10 +7553,25 @@ class BotService:
         *,
         session_id: str,
         runtime_channel: str | None,
+        semantic_turn: SemanticTurn | None = None,
     ) -> str | None:
         if (runtime_channel or "").strip().lower() != "telegram":
             return None
         if not text or text.startswith("/"):
+            return None
+        if (
+            semantic_turn is not None
+            and semantic_turn.intent in {"continue_active_mission", "approval_response"}
+            and not self._looks_like_direct_actionable_task(text)
+        ):
+            self._emit_safe(
+                "actionable_task_router_skipped_semantic_continuation",
+                {
+                    "session_id": session_id,
+                    "semantic_intent": semantic_turn.intent,
+                    "text_preview": text[:80],
+                },
+            )
             return None
         state = self.brain.memory.get_session_state(session_id)
         objective, source = self._resolve_actionable_task_objective(text, state=state)

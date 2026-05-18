@@ -24,6 +24,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_CDP_URL = "http://localhost:9250"
 NLM_HOME = "https://notebooklm.google.com/"
 _NOTEBOOK_URL_RE = re.compile(r"notebooklm\.google\.com/notebook/([A-Za-z0-9_-]+)")
+_SOURCE_COUNT_PATTERNS = (
+    re.compile(r"\b(?:fuentes|sources)\s*[\n\r: ]+\(?\s*(\d{1,4})\s*\)?", re.IGNORECASE),
+    re.compile(r"\(?\s*(\d{1,4})\s*\)?\s+(?:fuentes|sources)\b", re.IGNORECASE),
+)
 # IDs that NotebookLM uses transiently while a notebook is being provisioned.
 # We must wait for the URL to settle past these before capturing the real id.
 _TRANSIENT_NOTEBOOK_IDS = {"creating", "loading", "new"}
@@ -82,6 +86,87 @@ def _open_nlm_page(browser) -> "Page":
 def _extract_notebook_id(url: str) -> str | None:
     match = _NOTEBOOK_URL_RE.search(url)
     return match.group(1) if match else None
+
+
+def _parse_source_count(text: str) -> int | None:
+    collapsed = re.sub(r"[ \t]+", " ", str(text or ""))
+    if not collapsed.strip():
+        return None
+    for pattern in _SOURCE_COUNT_PATTERNS:
+        match = pattern.search(collapsed)
+        if not match:
+            continue
+        try:
+            return int(match.group(1))
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _notebook_source_count(page) -> int | None:
+    try:
+        body_text = page.locator("body").inner_text(timeout=2_000)
+    except Exception:
+        return None
+    return _parse_source_count(body_text)
+
+
+def _wait_for_verified_sources(page, *, before_count: int | None, timeout: float = 60.0) -> int:
+    baseline = before_count if before_count is not None else -1
+    deadline = time.monotonic() + timeout
+    last_count: int | None = None
+    while time.monotonic() < deadline:
+        count = _notebook_source_count(page)
+        if count is not None:
+            last_count = count
+            if count > 0 and count > baseline:
+                return count
+        time.sleep(2)
+    raise CdpNotebookLMError(
+        "Deep Research import did not verify imported sources "
+        f"(before={before_count}, after={last_count})."
+    )
+
+
+def _notebook_ids_from_home_grid(page, *, limit: int = 60) -> set[str]:
+    ids: set[str] = set()
+    try:
+        cards = page.locator('a[href*="/notebook/"]')
+        count = min(cards.count(), limit)
+    except Exception:
+        return ids
+    for i in range(count):
+        try:
+            href = cards.nth(i).get_attribute("href") or ""
+        except Exception:
+            continue
+        nb_id = _extract_notebook_id(href)
+        if nb_id and nb_id not in _TRANSIENT_NOTEBOOK_IDS:
+            ids.add(nb_id)
+    return ids
+
+
+def _click_create_notebook(page) -> None:
+    factories = (
+        lambda: page.get_by_role(
+            "button",
+            name=re.compile(r"(crear cuaderno nuevo|create new notebook)", re.IGNORECASE),
+        ),
+        lambda: page.locator('button:has-text("Crear cuaderno nuevo")'),
+        lambda: page.locator('button:has-text("Create new notebook")'),
+        lambda: page.locator("text=Crear cuaderno nuevo"),
+        lambda: page.locator("text=Create new notebook"),
+    )
+    last_exc: Exception | None = None
+    for factory in factories:
+        try:
+            factory().first.click(timeout=8_000)
+            return
+        except Exception as exc:
+            last_exc = exc
+    raise CdpNotebookLMError(
+        f"Could not find NotebookLM create button: {last_exc}"
+    )
 
 
 def _scan_home_for_new_id(page, before_ids: set[str], *, limit: int = 30) -> str | None:
@@ -205,13 +290,14 @@ def create_notebook(title: str, *, cdp_url: str = DEFAULT_CDP_URL) -> dict:
                     before_ids.add(nb_id)
             except Exception:
                 continue
+        before_ids.update(_notebook_ids_from_home_grid(page))
 
+        _click_create_notebook(page)
         try:
-            page.locator("text=Crear cuaderno nuevo").first.click(timeout=15_000)
-        except Exception as exc:
-            raise CdpNotebookLMError(
-                f"Could not find 'Crear cuaderno nuevo' button: {exc}"
-            ) from exc
+            page.wait_for_load_state("domcontentloaded", timeout=5_000)
+        except Exception:
+            pass
+        time.sleep(1)
 
         # Find the new notebook by scanning ALL tabs for a real id we haven't
         # seen before. Handles in-place navigation and new-tab creation alike.
@@ -345,6 +431,7 @@ def deep_research(
     pw, browser = _connect(cdp_url)
     try:
         page = _focus_notebook(browser, notebook_id)
+        before_source_count = _notebook_source_count(page)
 
         # 1. Open the source-mode dropdown and switch to Deep Research.
         try:
@@ -429,12 +516,11 @@ def deep_research(
         except Exception as exc:
             raise CdpNotebookLMError(f"Could not click Importar: {exc}") from exc
 
-        # 6. Best-effort source count: brief settle then return 0 if not parseable.
-        # NotebookLM doesn't expose a stable count selector; the caller already gets
-        # a "Deep Research completado" notification with the notebook URL, so the
-        # exact count is informational.
-        time.sleep(2)
-        return 0
+        # 6. Completion is not enough: verify that sources actually landed in
+        # the notebook. This prevents transient "planning/completed" UI states
+        # from being reported as a successful research run while the notebook
+        # remains empty.
+        return _wait_for_verified_sources(page, before_count=before_source_count)
     finally:
         try:
             browser.close()

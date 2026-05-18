@@ -727,6 +727,29 @@ class TaskHandler:
                 response=response,
                 verification_status=verification_status,
             )
+            if (
+                verification_status == "passed"
+                and self._response_contradicts_passed_verification(response, completed_checkpoint)
+            ):
+                verification_status = "unknown"
+                completed_checkpoint = {
+                    **completed_checkpoint,
+                    "verification_status": "unknown",
+                    "reason": "contradictory_verification_claim",
+                }
+                self._update_session_state(
+                    session_id,
+                    verification_status="unknown",
+                    last_checkpoint=completed_checkpoint,
+                )
+                self._emit(
+                    "verification_pass_rejected",
+                    {
+                        "session_id": session_id,
+                        "task_id": task_id,
+                        "reason": "contradictory_verification_claim",
+                    },
+                )
             terminal_status = (
                 "succeeded" if verification_status == "passed"
                 else "failed" if verification_status == "failed"
@@ -1573,6 +1596,39 @@ class TaskHandler:
             return ""
         detail = pending_action or summary or error
         return f"waiting_for_user_input: {detail[:500]}"
+
+    @staticmethod
+    def _response_contradicts_passed_verification(
+        response: str,
+        checkpoint: dict[str, Any],
+    ) -> bool:
+        summary = str(checkpoint.get("summary") or "")
+        error = str(checkpoint.get("error") or "")
+        verification = str(checkpoint.get("verification_status") or "")
+        normalized = _normalize_command_text(
+            f"{response or ''}\n{summary}\n{error}\n{verification}"
+        )
+        if not normalized:
+            return False
+        contradiction_markers = (
+            "no verificado",
+            "sin verificar",
+            "not verified",
+            "verification failed",
+            "verification pending",
+            "verificacion pendiente",
+            "falta evidencia",
+            "falta de evidencia",
+            "no hay evidencia",
+            "sin evidencia",
+            "evidencia disponible no incluye",
+            "no incluye pid",
+            "no incluye launchd",
+            "no incluye logs",
+            "no incluye db",
+            "no incluye evento",
+        )
+        return any(marker in normalized for marker in contradiction_markers)
 
 
     def _outcome_artifacts(
