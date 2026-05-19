@@ -60,6 +60,7 @@ scripts/close_chrome_tabs.py
 scripts/_*.py
 
 # Session-scratch artifacts (do not contaminate architecture branches)
+.staging/
 captures/
 output/
 sgc-video/
