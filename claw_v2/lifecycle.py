@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import signal
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from claw_v2.chrome import ManagedChrome
 from claw_v2.chat_api import LocalChatAPI
@@ -53,7 +55,6 @@ def should_notify_task_ledger_terminal(payload: dict, notified_task_ids: set[str
 
 
 def format_task_ledger_terminal_message(payload: dict) -> str:
-    task_id = str(payload.get("task_id") or "")
     status = str(payload.get("status") or "unknown")
     verification = str(payload.get("verification_status") or "unknown")
     summary = str(payload.get("summary") or "").strip()
@@ -61,22 +62,53 @@ def format_task_ledger_terminal_message(payload: dict) -> str:
     objective = str(payload.get("objective") or "").strip()
     if status == "succeeded":
         if verification in {"passed", "succeeded", "succeeded_with_warnings"}:
-            header = f"Cerré la tarea `{task_id}`."
+            header = "Cerré una tarea."
         else:
-            header = f"Registré resultado para `{task_id}`; falta verificación final."
-        lines = [header, f"Verificación: {verification}"]
+            header = "Registré resultado de una tarea; falta verificación final."
+        lines = [header, f"Verificación: {_public_task_state(verification)}"]
     else:
         lines = [
-            f"No pude cerrar la tarea `{task_id}`.",
-            f"Estado: {status}",
-            f"Verificación: {verification}",
+            "No pude cerrar una tarea.",
+            f"Estado: {_public_task_state(status)}",
+            f"Verificación: {_public_task_state(verification)}",
         ]
     detail = summary or error or objective
     if detail:
-        lines.extend(["", detail[:2500]])
+        lines.extend(["", _sanitize_public_notification_detail(detail[:2500])])
     if error and error != detail:
-        lines.extend(["", f"Error: {error[:1200]}"])
+        lines.extend(["", f"Error: {_sanitize_public_notification_detail(error[:1200])}"])
     return "\n".join(lines)
+
+
+def _public_task_state(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    return {
+        "needs_verification": "pendiente de verificacion",
+        "running_needs_verification": "en verificacion",
+        "passed": "verificada",
+        "succeeded": "completada",
+        "succeeded_with_warnings": "completada con advertencias",
+        "failed": "fallida",
+        "blocked": "bloqueada",
+        "lost": "sin estado ejecutable",
+        "timed_out": "agotada por tiempo",
+        "cancelled": "cancelada",
+        "not_applicable": "no aplica",
+        "unknown": "desconocida",
+    }.get(normalized, normalized or "desconocida")
+
+
+def _sanitize_public_notification_detail(value: str) -> str:
+    from claw_v2.bot_helpers import _sanitize_chat_response
+
+    sanitized = _sanitize_chat_response(str(value or ""))
+    sanitized = re.sub(
+        r"\bbrain[_ -]?tool(?:[_ -]?use)?(?:[_ -]?\w+)*\b",
+        "ejecucion con herramientas",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    return sanitized
 
 
 def load_soul(soul_path: Path | None = None) -> str:
@@ -205,12 +237,20 @@ async def run() -> int:
             except ValueError:
                 logger.warning("Cannot notify non-numeric Telegram session id: %s", session_id)
                 return
-            for start in range(0, len(message), 3500):
-                chunk = message[start:start + 3500]
-                asyncio.run_coroutine_threadsafe(
-                    transport._app.bot.send_message(chat_id=chat_id, text=chunk),
-                    _loop,
-                )
+            future = asyncio.run_coroutine_threadsafe(
+                transport.send_text(chat_id=chat_id, text=message),
+                _loop,
+            )
+            future.add_done_callback(_log_session_telegram_failure)
+
+        def _log_session_telegram_failure(done: Any) -> None:
+            try:
+                exc = done.exception()
+            except Exception as callback_exc:
+                logger.warning("Telegram session notification callback failed: %s", callback_exc)
+                return
+            if exc is not None:
+                logger.warning("Telegram session notification failed: %s", exc)
 
         _notified_task_ids: set[str] = set()
 

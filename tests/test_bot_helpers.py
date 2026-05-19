@@ -71,6 +71,24 @@ class BotHelperRegressionTests(unittest.TestCase):
         self.assertFalse(_chat_response_has_internal_leak(sanitized))
         self.assertNotIn("to=functions", sanitized)
 
+    def test_visible_chat_response_redacts_task_ledger_internals(self) -> None:
+        text = (
+            "Task: tg-574707975:evidence-gate:1779207757786634000 "
+            "brain-tooluse:tg-574707975:1779208007773945000 "
+            "status=running_needs_verification "
+            "reason=brain_tooluse_with_manifest_pending_verification "
+            "error=runtime lost authoritative backing state"
+        )
+
+        sanitized = _sanitize_chat_response(text)
+
+        self.assertFalse(_chat_response_has_internal_leak(sanitized))
+        self.assertNotIn("evidence-gate", sanitized)
+        self.assertNotIn("brain-tooluse", sanitized)
+        self.assertNotIn("needs_verification", sanitized)
+        self.assertNotIn("runtime lost authoritative backing state", sanitized)
+        self.assertIn("pendiente de verificacion", sanitized)
+
     def test_loopback_endpoint_mention_is_inlined_not_nuked(self) -> None:
         text = (
             "Para que hablemos en tiempo real podemos abrir un endpoint local "
