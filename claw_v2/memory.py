@@ -84,6 +84,7 @@ CREATE TABLE IF NOT EXISTS session_state (
     pending_approvals_json TEXT NOT NULL DEFAULT '[]',
     last_checkpoint_json TEXT NOT NULL DEFAULT '{}',
     rolling_summary TEXT,
+    last_turn_summary TEXT,
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -313,6 +314,10 @@ _MIGRATION_ADD_SESSION_STATE_LAST_CHECKPOINT = """
 ALTER TABLE session_state ADD COLUMN last_checkpoint_json TEXT NOT NULL DEFAULT '{}';
 """
 
+_MIGRATION_ADD_SESSION_STATE_LAST_TURN_SUMMARY = """
+ALTER TABLE session_state ADD COLUMN last_turn_summary TEXT;
+"""
+
 _MIGRATION_ADD_SESSION_STATE_PENDING_APPROVALS = """
 ALTER TABLE session_state ADD COLUMN pending_approvals_json TEXT NOT NULL DEFAULT '[]';
 """
@@ -418,6 +423,7 @@ class MemoryStore:
             ("task_queue_json", _MIGRATION_ADD_SESSION_STATE_TASK_QUEUE),
             ("pending_approvals_json", _MIGRATION_ADD_SESSION_STATE_PENDING_APPROVALS),
             ("last_checkpoint_json", _MIGRATION_ADD_SESSION_STATE_LAST_CHECKPOINT),
+            ("last_turn_summary", _MIGRATION_ADD_SESSION_STATE_LAST_TURN_SUMMARY),
         ]:
             if col not in session_state_cols:
                 try:
@@ -665,7 +671,7 @@ class MemoryStore:
             """
             SELECT autonomy_mode, mode, current_goal, pending_action, step_budget, steps_taken,
                    verification_status, active_object_json, last_options_json, task_queue_json, pending_approvals_json,
-                   last_checkpoint_json, rolling_summary
+                   last_checkpoint_json, rolling_summary, last_turn_summary
             FROM session_state
             WHERE session_id = ?
             """,
@@ -686,6 +692,7 @@ class MemoryStore:
                 "pending_approvals": [],
                 "last_checkpoint": {},
                 "rolling_summary": None,
+                "last_turn_summary": None,
             }
         return {
             "autonomy_mode": row["autonomy_mode"] or "assisted",
@@ -701,6 +708,7 @@ class MemoryStore:
             "pending_approvals": _loads_json_object(row["pending_approvals_json"], default=[]),
             "last_checkpoint": _loads_json_object(row["last_checkpoint_json"], default={}),
             "rolling_summary": row["rolling_summary"],
+            "last_turn_summary": row["last_turn_summary"],
         }
 
     def list_session_states(self, *, limit: int = 5) -> list[dict]:
@@ -708,7 +716,7 @@ class MemoryStore:
             """
             SELECT session_id, autonomy_mode, mode, current_goal, pending_action,
                    verification_status, active_object_json, task_queue_json,
-                   pending_approvals_json, last_checkpoint_json, rolling_summary,
+                   pending_approvals_json, last_checkpoint_json, rolling_summary, last_turn_summary,
                    updated_at
             FROM session_state
             ORDER BY updated_at DESC
@@ -733,6 +741,7 @@ class MemoryStore:
                     "pending_approvals": _loads_json_object(row["pending_approvals_json"], default=[]),
                     "last_checkpoint": _loads_json_object(row["last_checkpoint_json"], default={}),
                     "rolling_summary": row["rolling_summary"],
+                    "last_turn_summary": row["last_turn_summary"],
                     "updated_at": row["updated_at"],
                 }
             )
@@ -755,6 +764,7 @@ class MemoryStore:
         pending_approvals: list[dict] | None = None,
         last_checkpoint: dict | None = None,
         rolling_summary: str | None = None,
+        last_turn_summary: str | None = None,
     ) -> dict:
         with self._lock:
             current = self.get_session_state(session_id)
@@ -766,6 +776,7 @@ class MemoryStore:
                 active_object=active_object, last_options=last_options,
                 task_queue=task_queue, pending_approvals=pending_approvals,
                 last_checkpoint=last_checkpoint, rolling_summary=rolling_summary,
+                last_turn_summary=last_turn_summary,
             )
 
     def _update_session_state_locked(
@@ -797,15 +808,17 @@ class MemoryStore:
             "pending_approvals_json": json.dumps(_clean(_pick("pending_approvals"))),
             "last_checkpoint_json": json.dumps(_clean(_pick("last_checkpoint"))),
             "rolling_summary": _clean(_pick("rolling_summary")),
+            "last_turn_summary": _clean(_pick("last_turn_summary")),
         }
         self._conn.execute(
             """
             INSERT INTO session_state (
                 session_id, autonomy_mode, mode, current_goal, pending_action,
                 step_budget, steps_taken, verification_status,
-                active_object_json, last_options_json, task_queue_json, pending_approvals_json, last_checkpoint_json, rolling_summary
+                active_object_json, last_options_json, task_queue_json, pending_approvals_json,
+                last_checkpoint_json, rolling_summary, last_turn_summary
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(session_id)
             DO UPDATE SET
                 autonomy_mode = excluded.autonomy_mode,
@@ -821,6 +834,7 @@ class MemoryStore:
                 pending_approvals_json = excluded.pending_approvals_json,
                 last_checkpoint_json = excluded.last_checkpoint_json,
                 rolling_summary = excluded.rolling_summary,
+                last_turn_summary = excluded.last_turn_summary,
                 updated_at = CURRENT_TIMESTAMP
             """,
             (
@@ -838,6 +852,7 @@ class MemoryStore:
                 payload["pending_approvals_json"],
                 payload["last_checkpoint_json"],
                 payload["rolling_summary"],
+                payload["last_turn_summary"],
             ),
         )
         self._conn.commit()
@@ -972,7 +987,9 @@ class MemoryStore:
         if last_checkpoint:
             state_lines.append(f"last_checkpoint={json.dumps(last_checkpoint, ensure_ascii=True, sort_keys=True)}")
         if session_state.get("rolling_summary"):
-            state_lines.append(f"summary={session_state['rolling_summary']}")
+            state_lines.append(f"rolling_summary={session_state['rolling_summary']}")
+        if session_state.get("last_turn_summary"):
+            state_lines.append(f"last_turn_summary={session_state['last_turn_summary']}")
         if state_lines:
             sections.extend(["# Session state", *state_lines])
 

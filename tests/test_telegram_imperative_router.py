@@ -410,6 +410,21 @@ def test_submit_prompt_is_distinct_from_paste(bot, text: str) -> None:
     _assert_not_brain_fallback(response, decisions)
 
 
+@pytest.mark.parametrize("text", ["Descarga el prototipo y Envialo", "El prototipo Envialo Aqui"])
+def test_contextual_submit_without_resolved_target_falls_through_to_brain(bot, text: str) -> None:
+    response, decisions, events = _drive(bot, text)
+
+    assert response == "BRAIN_FALLBACK_USED"
+    assert "Necesito una aclaración mínima" not in response
+    assert "telegram_imperative_contextual_fallthrough" in events
+    assert any(
+        ev.get("handler") == "telegram_imperative"
+        and ev.get("route") == "fall_through"
+        and ev.get("reason") == "telegram_imperative:ui.submit_prompt:contextual_fallthrough"
+        for ev in decisions
+    ), decisions
+
+
 @pytest.mark.parametrize("text", ["Córrelo tú", "Correlo tu", "Hazlo tú", "Encárgate tú"])
 def test_owner_delegation_never_falls_back(bot, text: str) -> None:
     _seed_codex_mission(bot)

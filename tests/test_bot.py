@@ -4366,6 +4366,44 @@ class BotTests(unittest.TestCase):
                 events = [event["event_type"] for event in runtime.observe.recent_events(limit=20)]
                 self.assertIn("operator_handoff_guard_triggered", events)
 
+    def test_operator_handoff_guard_allows_long_tool_backed_result(self) -> None:
+        useful_body = (
+            "Resultado de Claude Design:\n"
+            + "\n".join(f"- Decisión {i}: ajustar el prototipo con evidencia de herramienta." for i in range(45))
+            + "\n\nPasos finales: revisé el material generado y dejé el resumen accionable arriba."
+        )
+
+        def tool_backed_handoff(request: LLMRequest) -> LLMResponse:
+            return LLMResponse(
+                content=f"<response>{useful_body}</response>",
+                lane=request.lane,
+                provider="anthropic",
+                model=request.model,
+                artifacts={"tool_calls": [{"name": "ClaudeDesign"}]},
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=tool_backed_handoff)
+
+                result = runtime.bot.handle_text(user_id="123", session_id="s1", text="Pégale el prompt a Codex app")
+
+                self.assertIn("Resultado de Claude Design", result)
+                self.assertIn("Pasos finales", result)
+                self.assertNotIn("No cierro esto con handoff manual", result)
+                events = [event["event_type"] for event in runtime.observe.recent_events(limit=20)]
+                self.assertIn("operator_handoff_guard_allowed_tool_backed", events)
+                self.assertNotIn("operator_handoff_guard_triggered", events)
+
     @patch("claw_v2.browse_handler._jina_read")
     def test_natural_language_url_uses_isolated_browse(self, mock_jina) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

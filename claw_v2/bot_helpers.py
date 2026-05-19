@@ -1268,6 +1268,8 @@ _INTERNAL_LEAK_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"/Users/hector/"),
     re.compile(r"</?\s*system-reminder\s*>", re.IGNORECASE),
     re.compile(r"&lt;/?\s*system-reminder\s*&gt;", re.IGNORECASE),
+    re.compile(r"\bReply\s+ONLY\b", re.IGNORECASE),
+    re.compile(r"\bReply\s+ONLY\b[\s\S]{0,500}\bI\s+am\s+Dr\.?\s+Strange\b", re.IGNORECASE),
 )
 
 # Indices in _INTERNAL_LEAK_PATTERNS that bump the entire reply to the error
@@ -1275,7 +1277,7 @@ _INTERNAL_LEAK_PATTERNS: tuple[re.Pattern[str], ...] = (
 # verbatim prompt echoes. Soft phrases ("respuesta bloqueada", "trazas internas",
 # "circuit breaker", etc.) are inline-redacted further below so legitimate
 # technical references do not nuke an otherwise valid reply.
-_NUKE_PATTERN_INDICES: tuple[int, ...] = (4, 5, 6, 20, 21, 22, 23, 24, 25)
+_NUKE_PATTERN_INDICES: tuple[int, ...] = (4, 5, 6, 20, 21, 22, 23, 24, 25, 32, 33)
 
 
 def _chat_response_has_internal_leak(text: str) -> bool:
@@ -1285,13 +1287,16 @@ def _chat_response_has_internal_leak(text: str) -> bool:
 def _sanitize_chat_response(text: str) -> str:
     if not text:
         return text
-    if any(_INTERNAL_LEAK_PATTERNS[i].search(text) for i in _NUKE_PATTERN_INDICES):
+    from claw_v2.leak_scrub import redact_system_reminders
+
+    precleaned = redact_system_reminders(text)
+    if any(_INTERNAL_LEAK_PATTERNS[i].search(precleaned) for i in _NUKE_PATTERN_INDICES):
         return (
             "Tuve un error preparando la respuesta. "
             "Retomo la acción con el contexto disponible o te diré el bloqueo verificado."
         )
 
-    sanitized = text
+    sanitized = precleaned
     sanitized = re.sub(r"\[redacted:\s*system-reminder\]", "[redacted: internal marker]", sanitized, flags=re.IGNORECASE)
     sanitized = re.sub(r"&lt;/?\s*system-reminder\s*&gt;", "[redacted: internal marker]", sanitized, flags=re.IGNORECASE)
     sanitized = re.sub(r"</?\s*system-reminder\s*>", "[redacted: internal marker]", sanitized, flags=re.IGNORECASE)

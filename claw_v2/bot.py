@@ -1690,21 +1690,30 @@ class BotService:
         elif _looks_like_pre_hook_block(content):
             content = self._maybe_augment_pre_hook_block(content)
         elif _looks_like_manual_handoff(content) and _looks_like_operator_action_request(source_text):
-            corrected = self._operator_handoff_binding_response()
-            self._emit_identity_capability_binding_guard(
-                "operator_handoff_guard_triggered",
-                session_id,
-                reason="manual_handoff_for_action_request",
-                original=content,
-                sanitized=corrected,
-            )
-            self._emit_internal_chat_suppressed(
-                session_id,
-                reason="manual_handoff_for_action_request",
-                original=content,
-                sanitized=corrected,
-            )
-            content = corrected
+            if self._should_allow_tool_backed_handoff_response(response, content):
+                self._emit_identity_capability_binding_guard(
+                    "operator_handoff_guard_allowed_tool_backed",
+                    session_id,
+                    reason="tool_backed_long_result",
+                    original=content,
+                    sanitized=content,
+                )
+            else:
+                corrected = self._operator_handoff_binding_response()
+                self._emit_identity_capability_binding_guard(
+                    "operator_handoff_guard_triggered",
+                    session_id,
+                    reason="manual_handoff_for_action_request",
+                    original=content,
+                    sanitized=corrected,
+                )
+                self._emit_internal_chat_suppressed(
+                    session_id,
+                    reason="manual_handoff_for_action_request",
+                    original=content,
+                    sanitized=corrected,
+                )
+                content = corrected
         elif self._start_claim_lacks_evidence(
             session_id=session_id,
             source_text=source_text,
@@ -1884,6 +1893,13 @@ class BotService:
                 for event in events
             )
         return False
+
+    def _should_allow_tool_backed_handoff_response(self, response: Any | None, content: str) -> bool:
+        if len(content or "") < 1200:
+            return False
+        if not self._response_has_evidence_signal(response):
+            return False
+        return self._brain_response_has_useful_result(response)
 
     def _session_has_fresh_evidence(self, session_id: str) -> bool:
         if self.task_ledger is None:
@@ -3751,17 +3767,13 @@ class BotService:
         Decision matrix:
           - 0 tool events                  → emit noop, no task created
           - any tool event + active task   → attach (no second task)
-          - any tool event + no active task→ create synthetic task; mark
-                                              terminal with verification
-                                              status derived from
-                                              failures + evidence
+          - any tool event + no active task→ create synthetic task; keep it
+                                              running until verification passes
           - approval-gated tool blocked    → recorded as
                                               brain_tooluse_ledger_skipped_sensitive
 
-        Never marks verification_status="passed" on a brain fallback —
-        the brain has no evidence pack, so the defense-in-depth
-        `task_completion.validate_completion` gate would downgrade
-        success-without-evidence anyway.
+        Never marks an unverified brain fallback as succeeded. The manifest is
+        activity evidence, not a verifier pass.
         """
         if self.task_ledger is None or self.observe is None:
             return
@@ -3963,12 +3975,11 @@ class BotService:
         if tool_failure_events:
             useful_result = self._brain_response_has_useful_result(response)
             if useful_result:
-                evidence_manifest["completed_at"] = time.time()
+                evidence_manifest["checkpointed_at"] = time.time()
                 evidence_manifest["verification_result"] = "succeeded_with_warnings"
                 evidence_manifest["blockers"] = [first_error[:200] or "nonfatal tool failure"]
-                self.task_ledger.mark_terminal(
+                self.task_ledger.mark_running_checkpoint(
                     task_id,
-                    status="succeeded",
                     summary=f"brain tool-use completed with warnings: {len(tool_failure_events)} substep failure(s)",
                     error=first_error[:300],
                     verification_status="needs_verification",
@@ -3981,7 +3992,7 @@ class BotService:
                             "task_id": task_id,
                             "error_count": len(tool_failure_events),
                             "first_error_kind": first_error[:60],
-                            "task_status": "succeeded_with_warnings",
+                            "task_status": "running_needs_verification",
                         },
                     )
                 except Exception:
@@ -4010,19 +4021,12 @@ class BotService:
             except Exception:
                 logger.debug("brain_tooluse_ledger_failed emit failed", exc_info=True)
             return
-        # PR 0F: tools ran without failure AND we have an
-        # evidence_manifest → the row closes terminally as succeeded +
-        # needs_verification (no out-of-band verifier rerun required).
-        # The PR 0F branch in task_completion.validate_completion
-        # recognizes the manifest and accepts the close. Without a
-        # manifest the existing false-success guard would still
-        # downgrade to running+missing_evidence — that's why we attach
-        # the manifest unconditionally above.
-        evidence_manifest["completed_at"] = time.time()
+        # Tools ran without failure, but no verifier has passed yet. Keep the
+        # ledger row running so `succeeded` remains reserved for passed evidence.
+        evidence_manifest["checkpointed_at"] = time.time()
         evidence_manifest["verification_result"] = "needs_verification"
-        self.task_ledger.mark_terminal(
+        self.task_ledger.mark_running_checkpoint(
             task_id,
-            status="succeeded",
             summary=f"brain tool-use turn: {len(tool_events)} tool calls (unverified)",
             verification_status="needs_verification",
             artifacts=brain_artifacts,
@@ -4030,12 +4034,9 @@ class BotService:
         try:
             self.observe.emit(
                 "brain_tooluse_ledger_needs_verification",
-                payload={"task_id": task_id, "tools_count": len(tool_events)},
-            )
-            self.observe.emit(
-                "brain_tooluse_ledger_completed",
                 payload={
                     "task_id": task_id,
+                    "task_status": "running",
                     "verification_status": "needs_verification",
                     "tools_count": len(tool_events),
                 },
@@ -5888,6 +5889,18 @@ class BotService:
                 "requires_submit": intent.requires_submit,
             },
         )
+        if self._telegram_ui_imperative_should_fallthrough(intent, text, session_id=session_id):
+            self._emit_safe(
+                "telegram_imperative_contextual_fallthrough",
+                {
+                    "session_id": session_id,
+                    "intent": intent.intent,
+                    "reason": "contextual_ui_target_or_artifact_unresolved",
+                    "target_hint": intent.target_hint,
+                    "artifact_hint": intent.artifact_hint,
+                },
+            )
+            return None, f"telegram_imperative:{intent.intent}:contextual_fallthrough", intent.matched_pattern
         if intent.intent == "task.continue_active_mission":
             stateful_followup, resolution_source = self._maybe_resolve_telegram_continuation(
                 text,
@@ -5918,6 +5931,46 @@ class BotService:
             ), f"telegram_imperative:{intent.intent}:no_context", intent.matched_pattern
         response = self._handle_telegram_imperative(intent, text, session_id=session_id)
         return response, f"telegram_imperative:{intent.intent}", intent.matched_pattern
+
+    def _telegram_ui_imperative_should_fallthrough(
+        self,
+        intent: TelegramImperativeIntent,
+        text: str,
+        *,
+        session_id: str,
+    ) -> bool:
+        if intent.intent not in {"ui.submit_prompt", "ui.paste_text"}:
+            return False
+        normalized = _normalize_command_text(text)
+        contextual_terms = (
+            "esto",
+            "eso",
+            "aqui",
+            "aca",
+            "lo",
+            "la",
+            "prototipo",
+            "prompt",
+            "envialo",
+            "mandalo",
+            "pegalo",
+            "descarga",
+        )
+        if not any(re.search(rf"\b{re.escape(term)}\b", normalized) for term in contextual_terms):
+            return False
+        try:
+            state = self.brain.memory.get_session_state(session_id)
+            mission = self._active_mission_context(state)
+            target = self._resolve_telegram_target(intent, mission)
+            artifact = self._resolve_telegram_artifact(intent, state, mission)
+            artifact_text = self._resolve_telegram_artifact_text(intent, state, mission)
+        except Exception:
+            return True
+        if not target:
+            return True
+        if intent.artifact_hint and not (artifact or artifact_text):
+            return True
+        return False
 
     def _maybe_resolve_telegram_continuation(
         self,
