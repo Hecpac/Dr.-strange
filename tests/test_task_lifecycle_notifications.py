@@ -23,8 +23,10 @@ class TaskLifecycleNotificationTests(unittest.TestCase):
         self.assertTrue(should_notify_task_ledger_terminal(payload, notified))
         message = format_task_ledger_terminal_message(payload)
         self.assertIn("Registré resultado", message)
-        self.assertIn("needs_verification", message)
-        self.assertIn("brain tool-use", message)
+        self.assertIn("pendiente de verificacion", message)
+        self.assertIn("ejecucion con herramientas", message)
+        self.assertNotIn("needs_verification", message)
+        self.assertNotIn("task-1", message)
 
     def test_skips_synthetic_brain_tooluse_task(self) -> None:
         payload = {
@@ -66,7 +68,9 @@ class TaskLifecycleNotificationTests(unittest.TestCase):
         self.assertTrue(should_notify_task_ledger_terminal(payload, set()))
         message = format_task_ledger_terminal_message(payload)
         self.assertIn("No pude cerrar", message)
-        self.assertIn("lost", message)
+        self.assertIn("sin estado ejecutable", message)
+        self.assertNotIn("runtime lost authoritative backing state", message)
+        self.assertNotIn("task-1", message)
 
     def test_dedupes_already_notified_task(self) -> None:
         payload = {

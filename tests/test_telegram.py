@@ -658,6 +658,27 @@ class SendPhotoTests(unittest.IsolatedAsyncioTestCase):
 
         transport._app.bot.send_message.assert_awaited_once()
 
+    async def test_send_text_sanitizes_proactive_internal_details(self) -> None:
+        transport = TelegramTransport(
+            bot_service=MagicMock(), token="t", allowed_user_id="123",
+        )
+        transport._app = MagicMock()
+        transport._app.bot = AsyncMock()
+
+        await transport.send_text(
+            chat_id=574707975,
+            text=(
+                "Task brain-tooluse:tg-574707975:1779208007773945000 "
+                "failed: runtime lost authoritative backing state"
+            ),
+        )
+
+        sent_text = transport._app.bot.send_message.call_args.kwargs["text"]
+        self.assertNotIn("brain-tooluse", sent_text)
+        self.assertNotIn("tg-574707975", sent_text)
+        self.assertNotIn("runtime lost authoritative backing state", sent_text)
+        self.assertIn("se perdio el estado ejecutable", sent_text)
+
 
 if __name__ == "__main__":
     unittest.main()

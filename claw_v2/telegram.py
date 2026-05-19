@@ -906,7 +906,8 @@ class TelegramTransport:
         """Send a proactive text message, split to Telegram's message limit."""
         if self._app is None:
             return
-        for part in _split_message(text):
+        response = self._sanitize_outbound_response(f"tg-{chat_id}", text)
+        for part in _split_message(response):
             try:
                 await self._app.bot.send_message(
                     chat_id=chat_id,

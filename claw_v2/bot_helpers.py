@@ -1270,6 +1270,11 @@ _INTERNAL_LEAK_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"&lt;/?\s*system-reminder\s*&gt;", re.IGNORECASE),
     re.compile(r"\bReply\s+ONLY\b", re.IGNORECASE),
     re.compile(r"\bReply\s+ONLY\b[\s\S]{0,500}\bI\s+am\s+Dr\.?\s+Strange\b", re.IGNORECASE),
+    re.compile(r"\bbrain-tooluse:[^\s`]+", re.IGNORECASE),
+    re.compile(r"(?:\[id interno omitido\]|tg-[A-Za-z0-9_-]+):evidence-gate:\d+", re.IGNORECASE),
+    re.compile(r"\b(?:needs_verification|running_needs_verification)\b", re.IGNORECASE),
+    re.compile(r"\bbrain_tooluse_with_manifest_pending_verification\b", re.IGNORECASE),
+    re.compile(r"\bruntime lost authoritative backing state\b", re.IGNORECASE),
 )
 
 # Indices in _INTERNAL_LEAK_PATTERNS that bump the entire reply to the error
@@ -1300,14 +1305,56 @@ def _sanitize_chat_response(text: str) -> str:
     sanitized = re.sub(r"\[redacted:\s*system-reminder\]", "[redacted: internal marker]", sanitized, flags=re.IGNORECASE)
     sanitized = re.sub(r"&lt;/?\s*system-reminder\s*&gt;", "[redacted: internal marker]", sanitized, flags=re.IGNORECASE)
     sanitized = re.sub(r"</?\s*system-reminder\s*>", "[redacted: internal marker]", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(
+        r"\bbrain-tooluse:[^\s`]+",
+        "[tarea interna omitida]",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"(?:\[id interno omitido\]|tg-[A-Za-z0-9_-]+):evidence-gate:\d+",
+        "[tarea interna omitida]",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
     sanitized = re.sub(r"\bMessage ID\s+\d+\b", "Mensaje enviado", sanitized, flags=re.IGNORECASE)
     sanitized = re.sub(r"\bmessage_id\s*[:#]?\s*\d+\b", "mensaje enviado", sanitized, flags=re.IGNORECASE)
     sanitized = re.sub(r"\bchat_id\s*[:#]?\s*-?\d+\b", "chat", sanitized, flags=re.IGNORECASE)
     sanitized = re.sub(r"\btg-[A-Za-z0-9_-]+\b", "[id interno omitido]", sanitized)
+    sanitized = re.sub(
+        r"\[id interno omitido\]:evidence-gate:\d+",
+        "[tarea interna omitida]",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
     sanitized = re.sub(r"\bnlm-[A-Za-z0-9_-]+\b", "[id interno omitido]", sanitized)
     sanitized = re.sub(r"\bPID\s*[:#]?\s*\d+\b", "proceso local", sanitized, flags=re.IGNORECASE)
     sanitized = re.sub(r"\blocalhost(?::\d+)?\b", "[endpoint local interno]", sanitized, flags=re.IGNORECASE)
     sanitized = re.sub(r"\b127\.0\.0\.1(?::\d+)?\b", "[endpoint local interno]", sanitized)
+    sanitized = re.sub(
+        r"\bbrain_tooluse_with_manifest_pending_verification\b",
+        "pendiente de verificacion con evidencia local",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"\brunning_needs_verification\b",
+        "en verificacion",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"\bneeds_verification\b",
+        "pendiente de verificacion",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"\bruntime lost authoritative backing state\b",
+        "se perdio el estado ejecutable de la tarea",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
     sanitized = re.sub(r"\bpuerto\s+\d{2,5}\b", "puerto interno", sanitized, flags=re.IGNORECASE)
     sanitized = re.sub(r"\ben\s+:\d{2,5}\b", "en un puerto interno", sanitized, flags=re.IGNORECASE)
     sanitized = re.sub(r"\bterminal bridge\b", "herramienta local", sanitized, flags=re.IGNORECASE)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import shlex
 import subprocess
 from dataclasses import dataclass
@@ -60,6 +61,7 @@ INTERNAL_OBJECTIVE_PREFIXES = (
     "brain tool-use turn",
     "brain fallback turn",
 )
+INTERNAL_TASK_ID_PREFIXES = ("brain-tooluse:",)
 ALERT_EVENT_KEYWORDS = (
     "error",
     "fail",
@@ -192,14 +194,14 @@ class MorningBriefService:
                         f"{self.settings.report_name}_llm_rendered",
                         {"chars": len(rendered)},
                     )
-                    return rendered
+                    return _sanitize_public_brief_text(rendered)
             except Exception as exc:
                 logger.exception("brief LLM render failed; falling back to template")
                 self._emit(
                     f"{self.settings.report_name}_llm_failed",
                     {"reason": "llm_render_failed", "error": str(exc)[:300]},
                 )
-        return self._build_template_message(now)
+        return _sanitize_public_brief_text(self._build_template_message(now))
 
     def _build_template_message(self, now: datetime) -> str:
         self._reset_brief_capture()
@@ -632,8 +634,20 @@ class MorningBriefService:
 
     @staticmethod
     def _task_is_user_visible(task: Any) -> bool:
+        task_id = str(getattr(task, "task_id", "") or "").strip().lower()
+        if any(task_id.startswith(prefix) for prefix in INTERNAL_TASK_ID_PREFIXES):
+            return False
+        metadata = getattr(task, "metadata", {}) or {}
+        if isinstance(metadata, dict) and (
+            metadata.get("brain_tool_use") is True
+            or metadata.get("created_by") == "brain_tool_use_ledger"
+        ):
+            return False
         objective = str(getattr(task, "objective", "") or "").strip().lower()
         if any(objective.startswith(prefix) for prefix in INTERNAL_OBJECTIVE_PREFIXES):
+            return False
+        redacted_objective = str(redact_sensitive(objective, limit=0)).strip().lower()
+        if redacted_objective in {"[redacted:phone]", "[redacted]"}:
             return False
         return True
 
@@ -644,11 +658,11 @@ class MorningBriefService:
         )
         touched_at = max(timestamps) if timestamps else 0.0
         return {
-            "objective": _safe_text(getattr(task, "objective", ""), 180),
-            "status": _safe_text(getattr(task, "status", "unknown"), 40),
-            "verification": _safe_text(getattr(task, "verification_status", "unknown"), 60),
-            "runtime": _safe_text(getattr(task, "runtime", "unknown"), 60),
-            "detail": _safe_text(detail, 220),
+            "objective": _sanitize_public_brief_text(_safe_text(getattr(task, "objective", ""), 180)),
+            "status": _public_task_state(getattr(task, "status", "unknown")),
+            "verification": _public_task_state(getattr(task, "verification_status", "unknown")),
+            "runtime": _public_runtime_name(getattr(task, "runtime", "unknown")),
+            "detail": _sanitize_public_brief_text(_safe_text(detail, 220)),
             "touched": self._format_local_timestamp(touched_at, now=now),
         }
 
@@ -659,9 +673,9 @@ class MorningBriefService:
         )
         touched_at = max(timestamps) if timestamps else 0.0
         return {
-            "kind": _safe_text(getattr(job, "kind", "job"), 120),
-            "status": _safe_text(getattr(job, "status", "unknown"), 40),
-            "detail": _safe_text(detail, 180),
+            "kind": _sanitize_public_brief_text(_safe_text(getattr(job, "kind", "job"), 120)),
+            "status": _public_task_state(getattr(job, "status", "unknown")),
+            "detail": _sanitize_public_brief_text(_safe_text(detail, 180)),
             "touched": self._format_local_timestamp(touched_at, now=now),
         }
 
@@ -683,9 +697,9 @@ class MorningBriefService:
             return []
         entries: list[dict[str, str]] = []
         for state in states:
-            current_goal = _safe_text(state.get("current_goal"), 160)
-            pending_action = _safe_text(state.get("pending_action"), 160)
-            verification = _safe_text(state.get("verification_status"), 60)
+            current_goal = _sanitize_public_brief_text(_safe_text(state.get("current_goal"), 160))
+            pending_action = _sanitize_public_brief_text(_safe_text(state.get("pending_action"), 160))
+            verification = _public_task_state(state.get("verification_status"))
             task_queue = state.get("task_queue") if isinstance(state.get("task_queue"), list) else []
             if not (current_goal or pending_action or task_queue or verification not in {"", "unknown"}):
                 continue
@@ -1370,6 +1384,64 @@ def _metrics_total_cost(snapshot: dict[str, Any]) -> float:
             if isinstance(raw, (int, float)):
                 total += float(raw)
     return total
+
+
+def _public_task_state(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    return {
+        "queued": "en cola",
+        "running": "en curso",
+        "succeeded": "completada",
+        "failed": "fallida",
+        "timed_out": "agotada por tiempo",
+        "cancelled": "cancelada",
+        "lost": "sin estado ejecutable",
+        "blocked": "bloqueada",
+        "passed": "verificada",
+        "pending": "pendiente",
+        "needs_verification": "pendiente de verificacion",
+        "running_needs_verification": "en verificacion",
+        "missing_evidence": "sin evidencia suficiente",
+        "not_applicable": "no aplica",
+        "unknown": "desconocida",
+    }.get(normalized, normalized or "desconocida")
+
+
+def _public_runtime_name(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in INTERNAL_RUNTIMES or normalized in {"telegram", "brain_fallback"}:
+        return "ejecucion local"
+    if normalized == "coordinator":
+        return "coordinador"
+    if normalized == "telegram_imperative":
+        return "accion Telegram"
+    return _safe_text(value, 60)
+
+
+def _sanitize_public_brief_text(value: Any) -> str:
+    from claw_v2.bot_helpers import _sanitize_chat_response
+
+    text = str(redact_sensitive(str(value or ""), limit=0))
+    text = _sanitize_chat_response(text)
+    replacements: tuple[tuple[re.Pattern[str], str], ...] = (
+        (
+            re.compile(r"\bbrain[_ -]?tool(?:[_ -]?use)?(?:[_ -]?\w+)*\b", re.IGNORECASE),
+            "ejecucion con herramientas",
+        ),
+        (
+            re.compile(r"\bruntime lost authoritative backing state\b", re.IGNORECASE),
+            "se perdio el estado ejecutable de la tarea",
+        ),
+        (
+            re.compile(r"\bbrain_tooluse_with_manifest_pending_verification\b", re.IGNORECASE),
+            "pendiente de verificacion con evidencia local",
+        ),
+        (re.compile(r"\brunning_needs_verification\b", re.IGNORECASE), "en verificacion"),
+        (re.compile(r"\bneeds_verification\b", re.IGNORECASE), "pendiente de verificacion"),
+    )
+    for pattern, replacement in replacements:
+        text = pattern.sub(replacement, text)
+    return text.strip()
 
 
 def _trim(value: str, limit: int) -> str:

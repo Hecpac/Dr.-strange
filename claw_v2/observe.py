@@ -82,8 +82,9 @@ class ObserveStream:
         # payload BEFORE we persist or fan out to subscribers, so a leak that
         # bypassed the chat sanitizer still doesn't end up on disk.
         from claw_v2.leak_scrub import scrub_for_persistence
+        from claw_v2.redaction import redact_sensitive
 
-        clean_payload = scrub_for_persistence(payload or {})
+        clean_payload = redact_sensitive(scrub_for_persistence(payload or {}), limit=0)
         with self._lock:
             self._conn.execute(
                 """

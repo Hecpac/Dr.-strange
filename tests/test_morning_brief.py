@@ -184,7 +184,8 @@ class MorningBriefTests(unittest.TestCase):
             self.assertIn("Contexto activo:", message)
             self.assertIn("Arreglar briefs matutinos", message)
             self.assertIn("Alertas recientes:", message)
-            self.assertIn("brain_tooluse_ledger_failed", message)
+            self.assertIn("ejecucion con herramientas", message)
+            self.assertNotIn("brain_tooluse_ledger_failed", message)
             self.assertIn("telegram_actionable_no_match", message)
 
     def test_brief_reports_source_provenance_and_low_signal_diagnostic(self) -> None:
@@ -485,6 +486,35 @@ class ConversationalBriefTests(unittest.TestCase):
             combined = prompt_text + "\n" + system_text
             self.assertNotIn(secret_id, combined)
             self.assertIn("Cerrar la auditoría del agente", combined)
+
+    def test_brief_filters_synthetic_brain_tooluse_and_sanitizes_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            ledger = TaskLedger(root / "claw.db")
+            ledger.create(
+                task_id="brain-tooluse:tg-574707975:1779208007773945000",
+                session_id="tg-574707975",
+                objective="+1 2035439768",
+                runtime="telegram",
+                status="running",
+                metadata={"created_by": "brain_tool_use_ledger", "brain_tool_use": True},
+            )
+            router = self._stub_router(
+                "Cierre: brain_tooluse_with_manifest_pending_verification; "
+                "runtime lost authoritative backing state; +1 2035439768"
+            )
+            service = self._service(root, ledger=ledger, llm_router=router)
+
+            message = service.build_message(datetime(2026, 5, 16, 21, 0))
+            prompt_text = str(router.calls[0]["prompt"])
+
+            self.assertNotIn("brain-tooluse:", prompt_text)
+            self.assertNotIn("+1 2035439768", prompt_text)
+            self.assertNotIn("brain_tooluse", message)
+            self.assertNotIn("runtime lost authoritative backing state", message)
+            self.assertNotIn("+1 2035439768", message)
+            self.assertIn("[REDACTED:phone]", message)
+            self.assertIn("se perdio el estado ejecutable", message)
 
     def test_no_llm_router_preserves_existing_template_behavior(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
