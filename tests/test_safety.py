@@ -207,6 +207,9 @@ class SafetyTests(unittest.TestCase):
             self.assertIsNone(check_command("ps -p 123", policy))
             self.assertIsNone(check_command("lsof -nP -iTCP:8765 -sTCP:LISTEN", policy))
             self.assertIsNone(check_command("chmod +x scripts/install-hooks.sh", policy))
+            self.assertIsNone(check_command("brew --version", policy))
+            self.assertIsNone(check_command("gemini --version", policy))
+            self.assertIsNone(check_command("osascript -e 'id of app \"Codex\"'", policy))
 
     def test_engineer_profile_allows_explicit_workspace_shell_scripts(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

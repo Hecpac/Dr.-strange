@@ -1275,6 +1275,11 @@ _INTERNAL_LEAK_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\b(?:needs_verification|running_needs_verification)\b", re.IGNORECASE),
     re.compile(r"\bbrain_tooluse_with_manifest_pending_verification\b", re.IGNORECASE),
     re.compile(r"\bruntime lost authoritative backing state\b", re.IGNORECASE),
+    re.compile(r"\bbinary\s+'[^']+'\s+requires higher privilege level\b", re.IGNORECASE),
+    re.compile(r"\b(?:allowed whitelist|sandbox\.excludedCommands|Seatbelt OS-level|runtime host|CLI host|Bash tool|tool Bash)\b", re.IGNORECASE),
+    re.compile(r"\bsandbox\s+(?:embebido|del entorno local|que est[aá] bloqueando|carga policies)\b", re.IGNORECASE),
+    re.compile(r"(?:~|/Users/hector)/\.claude/settings\.json(?:\.[A-Za-z0-9_.-]+)?", re.IGNORECASE),
+    re.compile(r"\bclaw_v2/sandbox\.py\b", re.IGNORECASE),
 )
 
 # Indices in _INTERNAL_LEAK_PATTERNS that bump the entire reply to the error
@@ -1355,6 +1360,41 @@ def _sanitize_chat_response(text: str) -> str:
         sanitized,
         flags=re.IGNORECASE,
     )
+    sanitized = re.sub(
+        r"\bbinary\s+'([^']+)'\s+requires higher privilege level\s+\(not in the allowed whitelist\)",
+        r"el comando '\1' está bloqueado por la política de ejecución local",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"\bsandbox\.excludedCommands\b",
+        "configuración local de permisos",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"`?(?:~|/Users/hector)/\.claude/settings\.json(?:\.[A-Za-z0-9_.-]+)?`?",
+        "[configuración local omitida]",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(r"\ballowed whitelist\b", "política de ejecución", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bel allowlist real\b", "la política efectiva", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\ballowlist real\b", "política efectiva", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bSeatbelt OS-level\b", "política del sistema", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bClaude Code\s+\(CLI host\)", "el entorno local", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bCLI host\b", "entorno local", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bruntime host\b", "entorno local", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bBash tool\b|\btool Bash\b", "herramienta local", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bsub-runtime\b", "entorno local", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bsandbox que est[aá] bloqueando\b", "política de ejecución que está bloqueando", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bsandbox embebido\b", "política de ejecución embebida", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bsandbox del entorno local\b", "política de ejecución local", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bsandbox carga policies\b", "la política de ejecución carga reglas", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bruntime de la herramienta local\b", "entorno de ejecución local", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bclaw_v2/sandbox\.py\b", "política local del agente", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bconfig de el entorno local\b", "config del entorno local", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bel política\b", "la política", sanitized, flags=re.IGNORECASE)
     sanitized = re.sub(r"\bpuerto\s+\d{2,5}\b", "puerto interno", sanitized, flags=re.IGNORECASE)
     sanitized = re.sub(r"\ben\s+:\d{2,5}\b", "en un puerto interno", sanitized, flags=re.IGNORECASE)
     sanitized = re.sub(r"\bterminal bridge\b", "herramienta local", sanitized, flags=re.IGNORECASE)
