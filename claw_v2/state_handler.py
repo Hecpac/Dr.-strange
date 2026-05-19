@@ -40,6 +40,80 @@ _TOPIC_STOPWORDS = {
     "a", "al", "and", "de", "del", "el", "en", "for", "la", "las", "lo",
     "los", "me", "mi", "que", "the", "to", "tu", "un", "una", "y", "yo",
 }
+_PROFILE_CORRECTION_TAGS = ("profile", "correction", "user_direct")
+
+
+def _profile_fact_slug(value: str) -> str:
+    normalized = _normalize_command_text(value)
+    tokens = re.findall(r"[a-z0-9]+", normalized)
+    return "_".join(tokens[:8]) or "unknown"
+
+
+def _clean_profile_fact_value(value: str) -> str:
+    cleaned = re.sub(r"\s+", " ", str(value)).strip(" .,:;!?¿¡")
+    return cleaned[:180]
+
+
+def _extract_direct_profile_corrections(text: str) -> list[tuple[str, str, tuple[str, ...]]]:
+    """Detect direct user corrections that should survive beyond task outcome memory."""
+    if not text or _contains_sensitive_redaction(text):
+        return []
+    facts: list[tuple[str, str, tuple[str, ...]]] = []
+    for match in re.finditer(
+        r"(?<!\w)(?P<object>[A-Za-z0-9][A-Za-z0-9_.-]*(?:\s+[A-Za-z0-9][A-Za-z0-9_.-]*){0,5})"
+        r"\s+no\s+es\s+mi\s+(?P<kind>proyecto|p[aá]gina|web|sitio)\b",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        object_name = _clean_profile_fact_value(match.group("object"))
+        if not object_name:
+            continue
+        kind = _normalize_command_text(match.group("kind"))
+        domain = "project" if kind == "proyecto" else "website"
+        key = f"profile.{domain}.not_{_profile_fact_slug(object_name)}"
+        facts.append(
+            (
+                key,
+                f"{object_name} no es mi {match.group('kind').lower()}.",
+                (*_PROFILE_CORRECTION_TAGS, domain),
+            )
+        )
+
+    repo_match = re.search(
+        r"\brepo(?:sitorio)?(?:\s+de\s+mi\s+(?:p[aá]gina|web|sitio))?\s+es\s+"
+        r"(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+|[A-Za-z0-9][^.;\n]{1,120})",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if repo_match:
+        repo = _clean_profile_fact_value(repo_match.group("repo"))
+        if repo:
+            facts.append(
+                (
+                    "profile.website.repo",
+                    f"El repo de mi página es {repo}.",
+                    (*_PROFILE_CORRECTION_TAGS, "website", "repo"),
+                )
+            )
+
+    for match in re.finditer(
+        r"\bmi\s+(?P<kind>proyecto|p[aá]gina|web|sitio)\s+es\s+(?P<value>[^.;\n]{2,120})",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        kind = _normalize_command_text(match.group("kind"))
+        domain = "project" if kind == "proyecto" else "website"
+        value = _clean_profile_fact_value(match.group("value"))
+        if value:
+            facts.append(
+                (
+                    f"profile.{domain}.current",
+                    f"Mi {match.group('kind').lower()} es {value}.",
+                    (*_PROFILE_CORRECTION_TAGS, domain),
+                )
+            )
+
+    return facts
 
 
 def _contains_sensitive_redaction(text: str) -> bool:
@@ -132,6 +206,7 @@ class StateHandler:
 
     def remember_assistant_turn_state(self, session_id: str, user_text: str, reply_text: str) -> None:
         state = self._memory.get_session_state(session_id)
+        self._persist_direct_profile_corrections(session_id, user_text)
         options = _extract_numbered_options(reply_text)
         pending_action = state.get("pending_action")
         extracted_pending_action = _extract_pending_action_from_reply(reply_text)
@@ -197,7 +272,7 @@ class StateHandler:
             # Clear stale meta when pending_action is cleared, otherwise the
             # next reload would resurrect an orphaned meta block.
             active_object.pop("pending_action_meta", None)
-        rolling_summary = _compact_summary(reply_text)
+        last_turn_summary = _compact_summary(reply_text)
         verification_status = _extract_verification_status(reply_text) or state.get("verification_status", "unknown")
         checkpoint = _build_checkpoint(reply_text, pending_action=pending_action, verification_status=verification_status)
         steps_taken = state.get("steps_taken", 0)
@@ -240,7 +315,7 @@ class StateHandler:
             verification_status=verification_status,
             last_options=options if options else state.get("last_options"),
             last_checkpoint=checkpoint,
-            rolling_summary=rolling_summary,
+            last_turn_summary=last_turn_summary,
             active_object=active_object,
         )
         # PR 0D: emit per-slot persistence telemetry so audits can detect
@@ -263,6 +338,35 @@ class StateHandler:
             self._emit(
                 "last_options_persisted",
                 {"session_id": session_id, "options": len(options)},
+            )
+
+    def _persist_direct_profile_corrections(self, session_id: str, user_text: str) -> None:
+        facts = _extract_direct_profile_corrections(user_text)
+        if not facts:
+            return
+        persisted = 0
+        for key, value, tags in facts:
+            try:
+                self._memory.delete_fact(key)
+                self._memory.store_fact(
+                    key,
+                    value,
+                    source="direct_user_correction",
+                    source_trust="trusted",
+                    confidence=0.98,
+                    entity_tags=tags,
+                    agent_name="profile",
+                )
+                persisted += 1
+            except Exception:
+                self._emit(
+                    "profile_correction_persist_failed",
+                    {"session_id": session_id, "key": key},
+                )
+        if persisted:
+            self._emit(
+                "profile_correction_persisted",
+                {"session_id": session_id, "facts": persisted},
             )
 
     def maybe_resolve_stateful_followup(self, text: str, *, session_id: str) -> str | _BrainShortcut | None:

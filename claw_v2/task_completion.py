@@ -16,10 +16,9 @@ SUCCESS_STATUSES = {"succeeded", "completed", "done", "closed"}
 PASSED_VERIFICATION = {"ok", "passed", "verified"}
 FAILED_VERIFICATION = {"failed", "blocked", "denied"}
 COMPLETION_CANDIDATES = SUCCESS_STATUSES
-# PR 0F: brain_fallback tool-use can earn a terminal close with this
-# verification status when a full evidence_manifest is attached. The
-# manifest itself is the proof; verification didn't run an explicit
-# pass-check yet, but the row is closed (not running, not reaped).
+# Brain-fallback tool-use can attach a full evidence_manifest, but the manifest
+# itself is not a verifier pass. A row may close terminally only when the
+# manifest explicitly reports a passed result and has no blockers.
 NEEDS_VERIFICATION_STATUSES = {"needs_verification", "needs_verify"}
 
 
@@ -122,12 +121,9 @@ def validate_completion(record: dict[str, Any]) -> CompletionDecision:
             missing_evidence=["actions_taken", "tool_result_or_artifact"],
         )
 
-    # PR 0F: brain_fallback rows with a substantive evidence_manifest
-    # close terminally on the first call — they do not need to live in
-    # `running` waiting for an out-of-band verifier. If the manifest's
-    # own `verification_result` already passed AND no blockers remain,
-    # promote to verification_status="passed"; otherwise close as
-    # succeeded + needs_verification (terminal, not reaped).
+    # Runtime invariant: no row may persist as succeeded while its verification
+    # status still says needs_verification. A brain tool-use manifest is
+    # evidence of activity, not a passed verifier result.
     if (
         status in SUCCESS_STATUSES
         and verification in NEEDS_VERIFICATION_STATUSES
@@ -143,10 +139,10 @@ def validate_completion(record: dict[str, Any]) -> CompletionDecision:
                 missing_evidence=[],
             )
         return CompletionDecision(
-            final_status="succeeded",
+            final_status="pending",
             verification_status="needs_verification",
             reason="brain_tooluse_with_manifest_pending_verification",
-            missing_evidence=[],
+            missing_evidence=["passed_verification"],
         )
 
     if status in SUCCESS_STATUSES and verification not in PASSED_VERIFICATION:

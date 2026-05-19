@@ -368,8 +368,8 @@ class TaskLedger:
                 self._conn.execute(
                     """
                     UPDATE agent_tasks
-                    SET status = 'failed',
-                        completed_at = COALESCE(completed_at, ?),
+                    SET status = 'running',
+                        completed_at = NULL,
                         error = ?,
                         verification_status = ?,
                         metadata_json = ?,
@@ -377,7 +377,6 @@ class TaskLedger:
                     WHERE task_id = ?
                     """,
                     (
-                        now,
                         error,
                         verification_status,
                         json.dumps(metadata, sort_keys=True),

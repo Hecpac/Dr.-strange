@@ -290,8 +290,8 @@ class BrainToolUseLedgerTests(unittest.TestCase):
         )
         task = self.ledger.list(limit=10)[0]
         self.assertNotEqual(task.status, "failed")
-        self.assertIn(task.status, {"succeeded", "running"})
-        self.assertIn(task.verification_status, {"succeeded_with_warnings", "partial_success", "needs_verification"})
+        self.assertEqual(task.status, "running")
+        self.assertEqual(task.verification_status, "needs_verification")
         substeps = task.artifacts.get("substeps", [])
         self.assertTrue(
             any(step.get("status") == "failed" and step.get("reason") == "file_too_large" for step in substeps),
@@ -332,10 +332,9 @@ class BrainToolUseLedgerTests(unittest.TestCase):
         task = self.ledger.list(limit=10)[0]
         self.assertEqual(task.notify_policy, "none")
         self.assertNotEqual(task.verification_status, "passed")
-        # PR 0F: with evidence_manifest attached, the row closes
-        # terminally as succeeded + needs_verification (no longer
-        # downgraded to running by the false-success guard).
-        self.assertEqual(task.status, "succeeded")
+        # Runtime invariant: a manifest records tool activity, but the row stays
+        # running until a verifier promotes it to passed success.
+        self.assertEqual(task.status, "running")
         self.assertEqual(task.verification_status, "needs_verification")
         events = [name for name, _ in observe.events]
         self.assertIn("brain_tooluse_ledger_needs_verification", events)

@@ -175,6 +175,51 @@ class StateHandlerRegressionTests(unittest.TestCase):
         self.assertEqual(state["task_queue"][0]["status"], "blocked")
         self.assertEqual(state["verification_status"], "blocked")
 
+    def test_assistant_turn_summary_does_not_overwrite_rolling_summary(self) -> None:
+        memory, handler = self._handler()
+        memory.update_session_state("s1", rolling_summary="resumen acumulado anterior")
+
+        handler.remember_assistant_turn_state(
+            "s1",
+            "continua con el fix",
+            "Apliqué el cambio y queda pendiente verificar.",
+        )
+
+        state = memory.get_session_state("s1")
+        self.assertEqual(state["rolling_summary"], "resumen acumulado anterior")
+        self.assertIn("Apliqué el cambio", state["last_turn_summary"])
+
+    def test_direct_user_project_correction_persists_as_profile_fact(self) -> None:
+        memory, handler = self._handler()
+
+        handler.remember_assistant_turn_state(
+            "s1",
+            "PHD no es mi proyecto",
+            "Entendido, corrijo el contexto.",
+        )
+
+        facts = memory.get_profile_facts()
+        fact_by_key = {fact["key"]: fact for fact in facts}
+        self.assertIn("profile.project.not_phd", fact_by_key)
+        self.assertIn("PHD no es mi proyecto", fact_by_key["profile.project.not_phd"]["value"])
+        self.assertEqual(fact_by_key["profile.project.not_phd"]["source_trust"], "trusted")
+
+    def test_direct_repo_correction_persists_as_profile_fact(self) -> None:
+        memory, handler = self._handler()
+
+        handler.remember_assistant_turn_state(
+            "s1",
+            "El repo de mi página es Hecpac/hector-services-site",
+            "Entendido.",
+        )
+
+        facts = memory.get_profile_facts()
+        fact_by_key = {fact["key"]: fact for fact in facts}
+        self.assertEqual(
+            fact_by_key["profile.website.repo"]["value"],
+            "El repo de mi página es Hecpac/hector-services-site.",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

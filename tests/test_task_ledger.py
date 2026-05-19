@@ -212,7 +212,8 @@ class TaskLedgerTests(unittest.TestCase):
 
             self.assertEqual(changed, 1)
             record = ledger.get("task-false-success")
-            self.assertEqual(record.status, "failed")
+            self.assertEqual(record.status, "running")
+            self.assertIsNone(record.completed_at)
             self.assertEqual(record.verification_status, "pending")
             self.assertTrue(record.metadata["reconciled_false_success"])
             self.assertEqual(record.metadata["reconciled_from_status"], "succeeded")

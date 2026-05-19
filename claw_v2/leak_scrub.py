@@ -12,7 +12,15 @@ import re
 from typing import Any
 
 
-_SYSTEM_REMINDER_PATTERNS: tuple[re.Pattern[str], ...] = (
+_SYSTEM_REMINDER_BLOCK_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"<\s*system-reminder\s*>[\s\S]*?</\s*system-reminder\s*>", re.IGNORECASE),
+    re.compile(r"&lt;\s*system-reminder\s*&gt;[\s\S]*?&lt;/\s*system-reminder\s*&gt;", re.IGNORECASE),
+    re.compile(
+        r"\[redacted:\s*system-reminder\][\s\S]*?\[redacted:\s*system-reminder\]",
+        re.IGNORECASE,
+    ),
+)
+_SYSTEM_REMINDER_MARKER_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"</?\s*system-reminder\s*>", re.IGNORECASE),
     re.compile(r"&lt;/?\s*system-reminder\s*&gt;", re.IGNORECASE),
 )
@@ -21,11 +29,15 @@ _REDACTION = "[redacted: system-reminder]"
 
 
 def redact_system_reminders(value: str) -> str:
-    """Replace ``<system-reminder>`` / ``</system-reminder>`` markers (and
-    their HTML-entity-encoded variants) with a stable redaction tag.
+    """Replace system-reminder blocks and standalone markers with a stable tag.
+
+    Paired blocks are removed as a unit so the hidden payload cannot survive as
+    persisted memory after only the markers are stripped.
     Idempotent — running twice is a no-op."""
     redacted = value
-    for pattern in _SYSTEM_REMINDER_PATTERNS:
+    for pattern in _SYSTEM_REMINDER_BLOCK_PATTERNS:
+        redacted = pattern.sub(_REDACTION, redacted)
+    for pattern in _SYSTEM_REMINDER_MARKER_PATTERNS:
         redacted = pattern.sub(_REDACTION, redacted)
     return redacted
 

@@ -2,16 +2,16 @@
 
 PR 0E created the brain tool-use ledger row but couldn't close it cleanly
 because there was no evidence schema. The row landed in
-`running + verification_status=needs_verification`, which the stale-running
-reaper would eventually reclassify as `lost`.
+    `running + verification_status=needs_verification`, which is the correct
+    state until a verifier actually passes it.
 
 PR 0F fixes that:
 
   - `task_completion.validate_completion` recognises the
     `artifacts.evidence_manifest` shape and lets a brain_fallback row
-    close terminally as `succeeded + needs_verification` (or `succeeded
-    + passed` when the manifest reports a verified result with no
-    blockers).
+    remain running as `needs_verification` unless the manifest reports a
+    verified result with no blockers, in which case it can close as
+    `succeeded + passed`.
   - `BotService._attach_brain_tool_use_ledger` always emits the
     manifest with tools_run / commands_run / files_read / files_written
     / files_touched / grep_patterns / glob_patterns / trace_id /
@@ -149,7 +149,7 @@ class ValidateCompletionBrainManifestTests(unittest.TestCase):
         }
         self.assertTrue(_has_brain_tooluse_evidence_manifest(record))
 
-    def test_succeeded_needs_verification_with_manifest_closes_terminally(self) -> None:
+    def test_succeeded_needs_verification_with_manifest_stays_pending(self) -> None:
         decision = validate_completion(
             {
                 "status": "succeeded",
@@ -158,7 +158,7 @@ class ValidateCompletionBrainManifestTests(unittest.TestCase):
                 "artifacts": {"evidence_manifest": self._manifest()},
             }
         )
-        self.assertEqual(decision.final_status, "succeeded")
+        self.assertEqual(decision.final_status, "pending")
         self.assertEqual(decision.verification_status, "needs_verification")
         self.assertEqual(decision.reason, "brain_tooluse_with_manifest_pending_verification")
 
@@ -189,7 +189,8 @@ class ValidateCompletionBrainManifestTests(unittest.TestCase):
                 },
             }
         )
-        # Blockers present → must NOT promote.
+        # Blockers present → must NOT promote or close terminally.
+        self.assertEqual(decision.final_status, "pending")
         self.assertEqual(decision.verification_status, "needs_verification")
 
     def test_text_only_succeeded_without_manifest_still_blocked(self) -> None:
@@ -234,9 +235,9 @@ class BrainToolUseEvidencePackTests(unittest.TestCase):
             Path(self._tmp.name) / "claw.db", observe=self._ledger_observe
         )
 
-    # --- A. completed with manifest closes (not running, not passed) --------
+    # --- A. completed with manifest stays running until verified ------------
 
-    def test_a_completed_brain_tooluse_with_manifest_closes_needs_verification(self) -> None:
+    def test_a_completed_brain_tooluse_with_manifest_stays_running_needs_verification(self) -> None:
         observe = _RecordingObserve()
         observe.canned_trace_events = [
             _tool_event("Read", tool_input={"file_path": "/etc/hosts"}),
@@ -249,14 +250,14 @@ class BrainToolUseEvidencePackTests(unittest.TestCase):
             runtime_channel="telegram",
         )
         task = self.ledger.list(limit=10)[0]
-        self.assertEqual(task.status, "succeeded")
+        self.assertEqual(task.status, "running")
         self.assertEqual(task.verification_status, "needs_verification")
         manifest = task.artifacts.get("evidence_manifest") or {}
         self.assertEqual(manifest.get("origin"), "brain_fallback")
         self.assertEqual(manifest.get("trace_id"), "trace-X")
         self.assertEqual(manifest.get("verification_result"), "needs_verification")
         self.assertIn("started_at", manifest)
-        self.assertIn("completed_at", manifest)
+        self.assertIn("checkpointed_at", manifest)
 
     # --- B. completed without tools never marks passed (no row created) ----
 
@@ -272,9 +273,9 @@ class BrainToolUseEvidencePackTests(unittest.TestCase):
         )
         self.assertEqual(self.ledger.list(limit=10), [])
 
-    # --- C. stale-running reaper does NOT reap closed brain_fallback rows --
+    # --- C. stale-running reaper can reap unverified brain_fallback rows ----
 
-    def test_c_terminal_brain_fallback_row_is_not_reaped(self) -> None:
+    def test_c_unverified_brain_fallback_row_is_reapable(self) -> None:
         observe = _RecordingObserve()
         observe.canned_trace_events = [_tool_event("Read", tool_input={"file_path": "/x"})]
         bot = _make_bot(observe, self.ledger)
@@ -285,14 +286,14 @@ class BrainToolUseEvidencePackTests(unittest.TestCase):
             runtime_channel="telegram",
         )
         task_before = self.ledger.list(limit=10)[0]
-        self.assertEqual(task_before.status, "succeeded")
-        # Reaper sweeps anything still 'running' past the TTL — should
-        # not touch our terminal row even with TTL=0.
+        self.assertEqual(task_before.status, "running")
+        # Reaper sweeps unverified running rows. That is intentional: they are
+        # not allowed to masquerade as terminal success.
         reaped = self.ledger.mark_stale_running_lost(older_than_seconds=0.0)
-        self.assertEqual(reaped, 0)
+        self.assertEqual(reaped, 1)
         task_after = self.ledger.list(limit=10)[0]
-        self.assertEqual(task_after.status, "succeeded")
-        self.assertEqual(task_after.verification_status, "needs_verification")
+        self.assertEqual(task_after.status, "lost")
+        self.assertEqual(task_after.verification_status, "failed")
 
     # --- D. _has_evidence recognises the manifest shape ---------------------
 

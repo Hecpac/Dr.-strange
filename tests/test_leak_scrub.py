@@ -27,6 +27,7 @@ class RedactSystemRemindersTests(unittest.TestCase):
         out = redact_system_reminders(value)
         self.assertNotIn("<system-reminder>", out)
         self.assertNotIn("</system-reminder>", out)
+        self.assertNotIn("secret", out)
         self.assertIn("[redacted: system-reminder]", out)
 
     def test_redacts_html_entity_encoded_markers(self) -> None:
@@ -34,6 +35,7 @@ class RedactSystemRemindersTests(unittest.TestCase):
         out = redact_system_reminders(value)
         self.assertNotIn("&lt;system-reminder&gt;", out)
         self.assertNotIn("&lt;/system-reminder&gt;", out)
+        self.assertNotIn("hidden", out)
 
     def test_idempotent_on_clean_text(self) -> None:
         value = "completely normal text without markers"
