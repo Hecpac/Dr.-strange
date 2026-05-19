@@ -89,6 +89,30 @@ class BotHelperRegressionTests(unittest.TestCase):
         self.assertNotIn("runtime lost authoritative backing state", sanitized)
         self.assertIn("pendiente de verificacion", sanitized)
 
+    def test_visible_chat_response_redacts_raw_sandbox_host_diagnostics(self) -> None:
+        text = (
+            "Sigue bloqueado. El error es `binary 'brew' requires higher privilege level "
+            "(not in the allowed whitelist)`. El edit a `~/.claude/settings.json` "
+            "con `sandbox.excludedCommands` no era la capa correcta. Probablemente "
+            "Seatbelt OS-level o el runtime host de la Bash tool; tampoco en "
+            "`claw_v2/sandbox.py`."
+        )
+
+        sanitized = _sanitize_chat_response(text)
+        lowered = sanitized.lower()
+
+        self.assertFalse(_chat_response_has_internal_leak(sanitized))
+        self.assertNotIn("allowed whitelist", lowered)
+        self.assertNotIn("sandbox.excludedcommands", lowered)
+        self.assertNotIn("~/.claude/settings.json", lowered)
+        self.assertNotIn("seatbelt os-level", lowered)
+        self.assertNotIn("runtime host", lowered)
+        self.assertNotIn("cli host", lowered)
+        self.assertNotIn("sandbox embebido", lowered)
+        self.assertNotIn("bash tool", lowered)
+        self.assertNotIn("claw_v2/sandbox.py", lowered)
+        self.assertIn("política de ejecución local", lowered)
+
     def test_loopback_endpoint_mention_is_inlined_not_nuked(self) -> None:
         text = (
             "Para que hablemos en tiempo real podemos abrir un endpoint local "

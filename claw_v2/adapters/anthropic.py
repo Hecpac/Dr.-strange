@@ -338,7 +338,10 @@ class ClaudeSDKExecutor:
             except ApprovalPending as exc:
                 return sdk_types.PermissionResultDeny(message=str(exc), interrupt=True)
             except PermissionError as exc:
-                return sdk_types.PermissionResultDeny(message=str(exc), interrupt=True)
+                return sdk_types.PermissionResultDeny(
+                    message=_safe_runtime_policy_reason(str(exc)),
+                    interrupt=True,
+                )
             return sdk_types.PermissionResultAllow(updated_input=input_data)
 
         return can_use_tool
@@ -355,8 +358,18 @@ class ClaudeSDKExecutor:
                     input_data.get("tool_input", {}),
                     context=request.lane,
                 )
-            except (ApprovalPending, PermissionError) as exc:
+            except ApprovalPending as exc:
                 reason = str(exc)
+                return {
+                    "systemMessage": f"Tool invocation blocked: {reason}",
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": reason,
+                    },
+                }
+            except PermissionError as exc:
+                reason = _safe_runtime_policy_reason(str(exc))
                 return {
                     "systemMessage": f"Tool invocation blocked: {reason}",
                     "hookSpecificOutput": {
@@ -493,6 +506,21 @@ class ClaudeSDKExecutor:
         if self.config.claude_auth_mode == "auto":
             return _resolve_anthropic_api_key() is not None
         return False
+
+
+def _safe_runtime_policy_reason(reason: str) -> str:
+    text = str(reason or "runtime policy blocked the command")
+    text = re.sub(
+        r"\bbinary\s+'([^']+)'\s+requires higher privilege level\s+\(not in the allowed whitelist\)",
+        r"command '\1' is blocked by local execution policy",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"\ballowed whitelist\b", "local execution policy", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bwhitelist\b", "policy", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bruntime host\b", "local runtime", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bBash tool\b|\btool Bash\b", "local tool", text, flags=re.IGNORECASE)
+    return text
 
 
 def create_claude_sdk_executor(

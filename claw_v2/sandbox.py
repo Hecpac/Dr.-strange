@@ -44,13 +44,16 @@ DEVELOPMENT_ALLOWED_BINARIES = frozenset(
 
 OPERATIONAL_ALLOWED_BINARIES = frozenset(
     {
+        "brew",
         "chmod",
         "date",
+        "gemini",
         "gh",
         "head",
         "id",
         "launchctl",
         "lsof",
+        "osascript",
         "pgrep",
         "ps",
         "readlink",
