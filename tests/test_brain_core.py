@@ -262,7 +262,7 @@ class HandleMessageTests(unittest.TestCase):
         session = self.memory.get_provider_session("s1", "anthropic")
         self.assertEqual(session, "sdk-abc-123")
 
-    def test_compaction_reset_starts_next_provider_call_from_summary_only_context(self) -> None:
+    def test_compaction_preserves_provider_session_resume(self) -> None:
         for idx in range(6):
             self.memory.store_message("s1", "user", f"old-provider-context-{idx}")
         self.memory.link_provider_session("s1", "anthropic", "sdk-old")
@@ -277,17 +277,14 @@ class HandleMessageTests(unittest.TestCase):
 
         prompt = self.router.ask.call_args.args[0]
         call_kwargs = self.router.ask.call_args.kwargs
-        self.assertIsNone(call_kwargs["session_id"])
-        self.assertIn("summary=", prompt)
-        self.assertIn("old-provider-context-0", prompt)
-        self.assertNotIn("old-provider-context-4", prompt)
-        self.assertNotIn("old-provider-context-5", prompt)
+        self.assertEqual(call_kwargs["session_id"], "sdk-old")
+        self.assertNotIn("summary=", prompt)
         self.assertEqual(self.memory.get_provider_session("s1", "anthropic"), "sdk-new")
         self.assertIsNone(self.memory.get_provider_session_reset("s1"))
 
-    def test_current_turn_compaction_does_not_relink_stale_provider_session(self) -> None:
+    def test_current_turn_compaction_relinks_returned_provider_session(self) -> None:
         self.router.config.use_compaction = True
-        for idx in range(79):
+        for idx in range(199):
             self.memory.store_message("s1", "user", f"history-{idx}")
         self.memory.link_provider_session("s1", "anthropic", "sdk-old")
         resp = LLMResponse(
@@ -299,9 +296,8 @@ class HandleMessageTests(unittest.TestCase):
         self.brain.handle_message("s1", "trigger compaction")
 
         self.assertEqual(self.router.ask.call_args.kwargs["session_id"], "sdk-old")
-        self.assertIsNone(self.memory.get_provider_session("s1", "anthropic"))
-        reset = self.memory.get_provider_session_reset("s1")
-        self.assertEqual(reset["reason"], "memory_compaction")
+        self.assertEqual(self.memory.get_provider_session("s1", "anthropic"), "sdk-old-returned")
+        self.assertIsNone(self.memory.get_provider_session_reset("s1"))
 
     def test_preserves_unwrapped_sdk_output_as_visible_reply(self) -> None:
         self.router.ask.return_value = LLMResponse(

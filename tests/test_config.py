@@ -159,6 +159,28 @@ class AppConfigDefaultsTests(unittest.TestCase):
         self.assertEqual(config.provider_for_lane("judge"), "codex")
         self.assertEqual(config.model_for_lane("judge"), "gpt-5.5")
         self.assertEqual(config.provider_for_lane("verifier"), "codex")
+        self.assertEqual(config.claw_worker_summary_limit, 16_000)
+        self.assertEqual(config.claw_phase_input_limit, 48_000)
+
+    def test_coordinator_context_limits_accept_env_overrides(self) -> None:
+        previous_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.chdir(tmpdir)
+            try:
+                with patch.dict(
+                    os.environ,
+                    {
+                        "CLAW_WORKER_SUMMARY_LIMIT": "4000",
+                        "CLAW_PHASE_INPUT_LIMIT": "12000",
+                    },
+                    clear=True,
+                ):
+                    config = AppConfig.from_env()
+            finally:
+                os.chdir(previous_cwd)
+
+        self.assertEqual(config.claw_worker_summary_limit, 4_000)
+        self.assertEqual(config.claw_phase_input_limit, 12_000)
 
     def test_lane_distribution_env_overrides_still_win(self) -> None:
         previous_cwd = Path.cwd()
@@ -331,6 +353,16 @@ class CodexConfigTests(unittest.TestCase):
             config.research_model = None
             self.assertEqual(config.provider_for_lane("research"), "anthropic")
             self.assertEqual(config.model_for_lane("research"), "claude-sonnet-4-6")
+
+    def test_validate_rejects_incompatible_provider_model_pairs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from tests.helpers import make_config
+            config = make_config(Path(tmpdir))
+            config.verifier_provider = "anthropic"
+            config.verifier_model = "gpt-5.5"
+
+            with self.assertRaisesRegex(ValueError, "verifier"):
+                config.validate()
 
 
 class PerLaneThinkingAndEffortTests(unittest.TestCase):

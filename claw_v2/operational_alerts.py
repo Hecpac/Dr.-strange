@@ -14,6 +14,7 @@ class AlertRule:
     title: str
     severity: str = "warning"
     cooldown_seconds: float = 3600.0
+    notify_user: bool = True
 
 
 DEFAULT_ALERT_RULES: dict[str, AlertRule] = {
@@ -21,7 +22,11 @@ DEFAULT_ALERT_RULES: dict[str, AlertRule] = {
     "wiki_scrape_skipped": AlertRule("Wiki scrape skipped", cooldown_seconds=3600),
     "scheduled_job_error": AlertRule("Scheduled job failed", severity="critical", cooldown_seconds=1800),
     "daemon_tick_error": AlertRule("Daemon tick failed", severity="critical", cooldown_seconds=1800),
-    "daemon_task_reconciliation": AlertRule("Stale task reconciliation", cooldown_seconds=1800),
+    "daemon_task_reconciliation": AlertRule(
+        "Stale task reconciliation",
+        cooldown_seconds=1800,
+        notify_user=False,
+    ),
     "session_resume_failed": AlertRule("Provider session resume failed", cooldown_seconds=1800),
     "llm_circuit_open": AlertRule("LLM provider circuit opened", severity="critical", cooldown_seconds=1800),
     "auto_research_adapter_error": AlertRule("Auto-research provider failure", severity="critical", cooldown_seconds=1800),
@@ -63,6 +68,9 @@ class OperationalAlertRouter:
             return False
         if event_payload.get("user_notified") is True:
             self._emit_status("operational_alert_suppressed", event_type, event_payload, reason="user_notified")
+            return False
+        if not rule.notify_user:
+            self._emit_status("operational_alert_suppressed", event_type, event_payload, reason="observe_only")
             return False
         dedupe_key = _dedupe_key(event_type, event_payload)
         now = self.clock()

@@ -500,9 +500,9 @@ class Wave0GoldenTraceTests(unittest.TestCase):
                 runtime_channel="telegram",
             )
 
-            self.assertIn("bloqueo verificado", response)
+            self.assertIn("No lo marco como hecho todavía", response)
             self.assertNotIn("explicit_blocker", response)
-            self.assertIn("Task:", response)
+            self.assertNotIn("Task:", response)
             self.assertNotIn("Cambié el archivo", response)
             events = [event["event_type"] for event in runtime.observe.recent_events(limit=50)]
             self.assertIn("evidence_gate_blocked_completion_claim", events)
@@ -526,9 +526,9 @@ class Wave0GoldenTraceTests(unittest.TestCase):
                 runtime_channel="telegram",
             )
 
-            self.assertIn("bloqueo verificado", response)
+            self.assertIn("No arranqué nada todavía", response)
             self.assertNotIn("explicit_blocker", response)
-            self.assertIn("Task:", response)
+            self.assertNotIn("Task:", response)
             self.assertNotIn("Voy a depurar", response)
             events = [event["event_type"] for event in runtime.observe.recent_events(limit=50)]
             self.assertIn("evidence_gate_blocked_start_claim", events)

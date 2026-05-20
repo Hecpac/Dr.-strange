@@ -629,6 +629,8 @@ def _setup_agent_services(
         scratch_root=config.agent_state_root / "_scratch",
         agent_registry=sub_agents.registry(),
         orchestration_store=orchestration_store,
+        worker_result_summary_chars=config.claw_worker_summary_limit,
+        phase_input_summary_chars=config.claw_phase_input_limit,
     )
     task_board = TaskBoard(board_root=config.agent_state_root / "_board")
     registry_path = config.agent_state_root / "AGENTS.md"

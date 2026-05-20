@@ -2722,6 +2722,81 @@ class BotTests(unittest.TestCase):
                 self.assertEqual(lifecycle["outcome"]["status"], "failed")
                 self.assertEqual(lifecycle["job"]["lifecycle_status"], "failed")
 
+    def test_critical_worker_error_never_marks_ledger_succeeded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.coordinator = MagicMock()
+                runtime.bot.coordinator.run.return_value = CoordinatorResult(
+                    task_id="internal-critical-id",
+                    phase_results={
+                        "research": [WorkerResult(task_name="scope_and_risks", content="scope ok", duration_seconds=0.1)],
+                        "implementation": [
+                            WorkerResult(
+                                task_name="implement_change",
+                                content="CRITICAL ERROR EN WORKER\nTraceback: local env missing dependency",
+                                duration_seconds=0.1,
+                            )
+                        ],
+                        "verification": [
+                            WorkerResult(
+                                task_name="verify_change",
+                                content="Verification Status: passed",
+                                duration_seconds=0.1,
+                            )
+                        ],
+                    },
+                    synthesis="should not be treated as success",
+                    error="critical_worker_error:implement_change",
+                    audit={
+                        "critical_worker_error": True,
+                        "phase": "implementation",
+                        "task_name": "implement_change",
+                        "raw_error": "CRITICAL ERROR EN WORKER\nTraceback: local env missing dependency",
+                    },
+                )
+
+                runtime.bot.handle_text(user_id="123", session_id="s1", text="/autonomy autonomous")
+                reply = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="corrige el bug del login",
+                )
+
+                self.assertIn("Tarea autónoma iniciada", reply)
+                task_id = re.search(r"`([^`]+)`", reply).group(1)
+                self.assertTrue(runtime.bot._task_handler.wait_for_task(task_id, timeout=2))
+
+                state = runtime.memory.get_session_state("s1")
+                self.assertEqual(state["verification_status"], "failed")
+                self.assertTrue(state["last_checkpoint"]["critical_worker_error"])
+                self.assertEqual(state["last_checkpoint"]["coordinator_audit"]["phase"], "implementation")
+
+                record = runtime.task_ledger.get(task_id)
+                self.assertIsNotNone(record)
+                self.assertEqual(record.status, "failed")
+                self.assertEqual(record.verification_status, "failed")
+                self.assertNotEqual(record.status, "succeeded")
+                self.assertTrue(record.artifacts["critical_worker_error"])
+                self.assertEqual(record.artifacts["coordinator_audit"]["phase"], "implementation")
+
+                messages = runtime.memory.get_recent_messages("s1", limit=10)
+                assistant_text = "\n".join(
+                    message["content"] for message in messages if message["role"] == "assistant"
+                )
+                self.assertIn("No pude avanzar la tarea porque el subagente experimentó un error crítico", assistant_text)
+                self.assertNotIn("internal-critical-id", assistant_text)
+                self.assertNotIn("critical_worker_error:", assistant_text)
+
     def test_task_resume_command_restarts_lost_autonomous_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -4547,6 +4622,89 @@ class BotTests(unittest.TestCase):
                 self.assertIn("contenido del post", result)
                 self.assertNotEqual(result.strip(), url)
 
+    @patch("claw_v2.browse_handler._jina_read")
+    def test_natural_language_url_prefetches_nested_urls(self, mock_jina) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                parent_url = "https://example.com/post"
+                nested_url = "https://example.com/nested"
+                mock_jina.side_effect = [
+                    "# Parent\n\nMain content links to https://example.com/nested for the example output.",
+                    "# Nested\n\nNested output details were fetched autonomously.",
+                ]
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                with patch.object(type(runtime.bot.brain), "handle_message") as mock_handle_message:
+                    mock_handle_message.return_value = LLMResponse(
+                        content="handled",
+                        lane="brain",
+                        provider="anthropic",
+                        model="claude-opus-4-7",
+                    )
+                    result = runtime.bot.handle_text(
+                        user_id="123",
+                        session_id="s1",
+                        text=parent_url,
+                    )
+
+                self.assertIn("handled", result)
+                self.assertEqual([call.args[0] for call in mock_jina.call_args_list], [parent_url, nested_url])
+                args, kwargs = mock_handle_message.call_args
+                self.assertIn("[URL anidada analizada]: https://example.com/nested", args[1])
+                self.assertIn("Nested output details were fetched autonomously", args[1])
+                self.assertEqual(kwargs["memory_text"], parent_url)
+
+    @patch("claw_v2.browse_handler._jina_read")
+    def test_url_autonomy_guard_removes_permission_deferrals(self, mock_jina) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                mock_jina.return_value = "# Parent\n\nMain content was fetched successfully."
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                with patch.object(type(runtime.bot.brain), "handle_message") as mock_handle_message:
+                    mock_handle_message.return_value = LLMResponse(
+                        content=(
+                            "## Fuente\n"
+                            "Limitación: el enlace `flow.google` no se abrió. "
+                            "Si quieres confirmación de acceso/quota en flow.google, te lo verifico cuando me digas.\n\n"
+                            "## Aplicación sugerida\n"
+                            "- Vale verificar la URL anidada `x.com/i/status/2056813606595949014`; si quieres lo abro y te traigo el ejemplo.\n"
+                            "- Señal útil: probar coherencia narrativa."
+                        ),
+                        lane="brain",
+                        provider="anthropic",
+                        model="claude-opus-4-7",
+                    )
+                    result = runtime.bot.handle_text(
+                        user_id="123",
+                        session_id="s1",
+                        text="https://example.com/post",
+                    )
+
+                lowered = result.lower()
+                self.assertNotIn("si quieres", lowered)
+                self.assertNotIn("cuando me digas", lowered)
+                self.assertNotIn("lo abro", lowered)
+                self.assertIn("Señal útil", result)
+                events = [event["event_type"] for event in runtime.observe.recent_events(limit=20)]
+                self.assertIn("url_autonomy_guard_triggered", events)
+
     @patch("claw_v2.browse_handler._tweet_fxtwitter_read")
     def test_natural_language_review_tweet_reuses_recent_tweet_url(self, mock_tweet_read) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -4673,6 +4831,48 @@ class BotTests(unittest.TestCase):
                 self.assertEqual(args[0], "s1")
                 self.assertIn("## Fuente", args[1])
                 self.assertIn("## Aplicación sugerida", args[1])
+                self.assertEqual(kwargs["memory_text"], f"Revisa este tweet {tweet_url}")
+
+    @patch("claw_v2.bot_helpers._tweet_fxtwitter_read")
+    def test_tweet_analysis_prefetches_nested_tweet_urls(self, mock_tweet_read) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                tweet_url = "https://x.com/acme/status/2044708010506541998?s=46"
+                nested_url = "https://x.com/i/status/2056813606595949014"
+                mock_tweet_read.side_effect = [
+                    f"**Acme (@acme) on X** ({tweet_url})\n\nQuote example: {nested_url}",
+                    f"**Nested (@nested) on X** ({nested_url})\n\nNested tweet output.",
+                ]
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.browser = MagicMock()
+                with patch.object(type(runtime.bot.brain), "handle_message") as mock_handle_message:
+                    mock_handle_message.return_value = LLMResponse(
+                        content="handled",
+                        lane="brain",
+                        provider="anthropic",
+                        model="claude-opus-4-7",
+                    )
+
+                    result = runtime.bot.handle_text(
+                        user_id="123",
+                        session_id="s1",
+                        text=f"Revisa este tweet {tweet_url}",
+                    )
+
+                self.assertEqual(result, "handled")
+                self.assertEqual([call.args[0] for call in mock_tweet_read.call_args_list], [tweet_url, nested_url])
+                args, kwargs = mock_handle_message.call_args
+                self.assertIn("[URL anidada analizada]: https://x.com/i/status/2056813606595949014", args[1])
+                self.assertIn("Nested tweet output", args[1])
                 self.assertEqual(kwargs["memory_text"], f"Revisa este tweet {tweet_url}")
 
     @patch("claw_v2.bot_helpers._tweet_fxtwitter_read")

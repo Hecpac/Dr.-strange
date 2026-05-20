@@ -153,6 +153,38 @@ class TaskLedgerTests(unittest.TestCase):
             self.assertEqual(record.status, "lost")
             self.assertEqual(record.verification_status, "failed")
 
+    def test_completed_unverified_is_terminal_and_not_reaped_lost(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ledger = TaskLedger(Path(tmpdir) / "claw.db")
+            ledger.create(
+                task_id="task-1",
+                session_id="s1",
+                objective="brain tool use",
+                runtime="brain_fallback",
+                status="running",
+            )
+            terminal = ledger.mark_terminal(
+                "task-1",
+                status="completed_unverified",
+                summary="tool calls finished without verifier pass",
+                verification_status="needs_verification",
+                artifacts={"evidence_manifest": {"origin": "brain_fallback", "tools_run": ["Read"], "trace_id": "t"}},
+            )
+            self.assertEqual(terminal.status, "completed_unverified")
+            with ledger._lock:
+                ledger._conn.execute(
+                    "UPDATE agent_tasks SET updated_at = ? WHERE task_id = ?",
+                    (time.time() - 600, "task-1"),
+                )
+                ledger._conn.commit()
+
+            changed = ledger.mark_stale_running_lost(older_than_seconds=300)
+
+            self.assertEqual(changed, 0)
+            record = ledger.get("task-1")
+            self.assertEqual(record.status, "completed_unverified")
+            self.assertEqual(record.verification_status, "needs_verification")
+
     def test_stale_running_reconciliation_emits_terminal_event_per_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             observe = ObserveStream(Path(tmpdir) / "observe.db")

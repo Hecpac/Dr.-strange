@@ -13,6 +13,7 @@ from claw_v2.bot_helpers import (
     _is_tweet_url,
     _is_usable_browse_content,
     _jina_read,
+    _nested_url_candidates,
     _normalize_url,
     _select_navigation_strategy,
     _tweet_fxtwitter_read,
@@ -418,9 +419,33 @@ class BrowseHandler:
         except ValueError:
             normalized_url = url
         fetched_content = self.browse_response(url, session_id=session_id)
+        fetched_content = self._append_nested_url_reviews(
+            fetched_content,
+            parent_url=normalized_url,
+        )
         return _BrainShortcut(
             text=_format_link_analysis_prompt(text, normalized_url, fetched_content),
             memory_text=text,
+        )
+
+    def _append_nested_url_reviews(self, fetched_content: str, *, parent_url: str) -> str:
+        nested_urls = _nested_url_candidates(fetched_content, skip_urls=(parent_url,), max_urls=3)
+        if not nested_urls:
+            return fetched_content
+        blocks: list[str] = []
+        for nested_url in nested_urls:
+            nested_content = self.browse_response(nested_url, session_id=None)
+            if nested_content and nested_content.strip() and not nested_content.lower().startswith("browse error"):
+                blocks.append(f"[URL anidada analizada]: {nested_url}\n{nested_content[:3000]}")
+            else:
+                reason = nested_content.strip() if nested_content and nested_content.strip() else "No se pudo extraer contenido útil."
+                blocks.append(f"[URL anidada intentada]: {nested_url}\n{reason[:1000]}")
+        if not blocks:
+            return fetched_content
+        return (
+            f"{fetched_content}\n\n---\n"
+            "[URLs anidadas revisadas autónomamente]\n"
+            + "\n\n---\n".join(blocks)
         )
 
     def remember_recent_browse_url(self, session_id: str | None, url: str) -> None:

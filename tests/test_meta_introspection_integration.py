@@ -160,7 +160,9 @@ def test_non_meta_operator_request_still_trips_evidence_gate() -> None:
     assert response is not None
     # The original brain content must be replaced by the blocker template.
     assert _BRAIN_START_CLAIM not in response
-    assert "Bloqueé" in response
+    assert "No arranqué nada todavía" in response
+    assert "explicit_blocker" not in response
+    assert "Task:" not in response
 
     types = _event_types(events)
     assert "evidence_gate_blocked_start_claim" in types
@@ -291,7 +293,9 @@ def test_non_meta_operator_request_still_trips_evidence_gate_via_asyncio_to_thre
 
     assert response is not None
     assert _BRAIN_START_CLAIM not in response
-    assert "Bloqueé" in response
+    assert "No arranqué nada todavía" in response
+    assert "explicit_blocker" not in response
+    assert "Task:" not in response
 
     types = _event_types(events)
     assert "evidence_gate_blocked_start_claim" in types

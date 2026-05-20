@@ -9,12 +9,19 @@ from pathlib import Path
 from typing import Any
 
 from claw_v2.adapters.base import AdapterError
+from claw_v2.redaction import redact_text
 from claw_v2.tracing import attach_trace, child_trace_context, new_trace_context
 
 logger = logging.getLogger(__name__)
 
-WORKER_RESULT_SUMMARY_CHARS = 900
-PHASE_INPUT_SUMMARY_CHARS = 1_500
+DEFAULT_WORKER_RESULT_SUMMARY_CHARS = 16_000
+DEFAULT_PHASE_INPUT_SUMMARY_CHARS = 48_000
+CRITICAL_WORKER_MARKER = "CRITICAL ERROR EN WORKER"
+MECHANICAL_TRUNCATION_SIGNATURE = (
+    "... [CRITICAL: Contenido truncado mecánicamente por falla en destilación semántica. "
+    "Los datos intermedios fueron omitidos]"
+)
+HEAD_TAIL_PRESERVE_CHARS = 2_000
 
 
 @dataclass(slots=True)
@@ -35,6 +42,7 @@ class WorkerResult:
     content: str
     duration_seconds: float
     error: str = ""
+    degraded_compaction: bool = False
 
 
 @dataclass(slots=True)
@@ -46,6 +54,7 @@ class CoordinatorResult:
     synthesis: str = ""
     duration_seconds: float = 0.0
     error: str = ""
+    audit: dict[str, Any] = field(default_factory=dict)
 
 
 class CoordinatorService:
@@ -64,6 +73,8 @@ class CoordinatorService:
         max_workers: int = 4,
         agent_registry: dict | None = None,
         orchestration_store: Any | None = None,
+        worker_result_summary_chars: int = DEFAULT_WORKER_RESULT_SUMMARY_CHARS,
+        phase_input_summary_chars: int = DEFAULT_PHASE_INPUT_SUMMARY_CHARS,
     ) -> None:
         self.router = router
         self.observe = observe
@@ -71,6 +82,8 @@ class CoordinatorService:
         self.max_workers = max_workers
         self.agent_registry = agent_registry or {}
         self.orchestration_store = orchestration_store
+        self.worker_result_summary_chars = max(1, int(worker_result_summary_chars))
+        self.phase_input_summary_chars = max(1, int(phase_input_summary_chars))
 
     def run(
         self,
@@ -139,6 +152,20 @@ class CoordinatorService:
                 trace,
                 results=research_results,
             )
+            critical = _critical_worker_result(research_results)
+            if critical is not None:
+                return self._complete_critical_worker_run(
+                    result=result,
+                    objective=objective,
+                    phase="research",
+                    critical_result=critical,
+                    collected_results=research_results,
+                    scratch=scratch,
+                    orchestration_run_id=orchestration_run_id,
+                    trace_context=trace,
+                    lane_overrides=lane_overrides,
+                    start_time=start,
+                )
 
             # Phase 2: Synthesis
             self._orchestration_begin_phase(orchestration_run_id, "synthesis", trace)
@@ -163,7 +190,7 @@ class CoordinatorService:
             self._orchestration_ack(synthesis_artifact_id, consumer_role=synthesis_consumer)
             self._orchestration_require_ack(synthesis_artifact_id, consumer_role=synthesis_consumer)
             synthesis_artifact_ref = synthesis_artifact_id or str(scratch / "synthesis.md")
-            synthesis_summary = _compact_text(synthesis, limit=PHASE_INPUT_SUMMARY_CHARS)
+            synthesis_summary = _compact_text(synthesis, limit=self.phase_input_summary_chars)
             self._orchestration_checkpoint(
                 orchestration_run_id,
                 phase="synthesis",
@@ -187,6 +214,7 @@ class CoordinatorService:
                     objective=objective,
                     input_artifact_ref=synthesis_artifact_ref,
                     input_summary=synthesis_summary,
+                    phase_input_summary_chars=self.phase_input_summary_chars,
                 )
                 impl_results = self._dispatch_parallel(impl_tasks, trace, lane_overrides=lane_overrides)
                 result.phase_results["implementation"] = impl_results
@@ -213,6 +241,20 @@ class CoordinatorService:
                     trace,
                     results=impl_results,
                 )
+                critical = _critical_worker_result(impl_results)
+                if critical is not None:
+                    return self._complete_critical_worker_run(
+                        result=result,
+                        objective=objective,
+                        phase="implementation",
+                        critical_result=critical,
+                        collected_results=research_results + impl_results,
+                        scratch=scratch,
+                        orchestration_run_id=orchestration_run_id,
+                        trace_context=trace,
+                        lane_overrides=lane_overrides,
+                        start_time=start,
+                    )
 
             # Phase 4: Verification (optional)
             if verification_tasks:
@@ -221,15 +263,18 @@ class CoordinatorService:
                 verification_input_summary = synthesis_summary
                 if impl_results:
                     verification_input_ref = impl_artifact_id or str(scratch / "implementation")
-                    verification_input_summary = _phase_results_summary(
+                    verification_input_summary = self._phase_results_summary(
                         impl_results,
-                        limit=PHASE_INPUT_SUMMARY_CHARS,
+                        limit=self.phase_input_summary_chars,
+                        trace_context=trace,
+                        lane_overrides=lane_overrides,
                     )
                 verify_tasks = self._inject_context(
                     verification_tasks,
                     objective=objective,
                     input_artifact_ref=verification_input_ref,
                     input_summary=verification_input_summary,
+                    phase_input_summary_chars=self.phase_input_summary_chars,
                 )
                 verify_results = self._dispatch_parallel(verify_tasks, trace, lane_overrides=lane_overrides)
                 result.phase_results["verification"] = verify_results
@@ -256,6 +301,20 @@ class CoordinatorService:
                     trace,
                     results=verify_results,
                 )
+                critical = _critical_worker_result(verify_results)
+                if critical is not None:
+                    return self._complete_critical_worker_run(
+                        result=result,
+                        objective=objective,
+                        phase="verification",
+                        critical_result=critical,
+                        collected_results=research_results + impl_results + verify_results,
+                        scratch=scratch,
+                        orchestration_run_id=orchestration_run_id,
+                        trace_context=trace,
+                        lane_overrides=lane_overrides,
+                        start_time=start,
+                    )
 
             result.duration_seconds = time.time() - start
             self._orchestration_complete_run(
@@ -305,7 +364,9 @@ class CoordinatorService:
             return []
 
         results: list[WorkerResult] = []
-        with ThreadPoolExecutor(max_workers=min(self.max_workers, len(tasks))) as pool:
+        pool = ThreadPoolExecutor(max_workers=min(self.max_workers, len(tasks)))
+        shutdown_early = False
+        try:
             futures = {
                 pool.submit(self._execute_worker, task, trace_context, lane_overrides=lane_overrides): task
                 for task in tasks
@@ -313,14 +374,25 @@ class CoordinatorService:
             for future in as_completed(futures):
                 task = futures[future]
                 try:
-                    results.append(future.result())
+                    worker_result = future.result()
                 except Exception as exc:
-                    results.append(WorkerResult(
+                    worker_result = WorkerResult(
                         task_name=task.name,
                         content="",
                         duration_seconds=0.0,
                         error=str(exc),
-                    ))
+                    )
+                results.append(worker_result)
+                if _has_critical_worker_error(worker_result):
+                    for pending in futures:
+                        if pending is not future:
+                            pending.cancel()
+                    pool.shutdown(wait=False, cancel_futures=True)
+                    shutdown_early = True
+                    return results
+        finally:
+            if not shutdown_early:
+                pool.shutdown(wait=True)
         return results
 
     _RETRY_LANES: frozenset[str] = frozenset({"worker", "worker_heavy"})
@@ -391,11 +463,14 @@ class CoordinatorService:
         trace_context: dict[str, Any] | None = None,
         *,
         lane_overrides: dict[str, dict[str, Any]] | None = None,
+        critical_audit: dict[str, Any] | None = None,
     ) -> str:
         """Merge research findings into a coherent plan."""
-        findings = _phase_results_summary(
+        findings = self._phase_results_summary(
             research_results,
-            limit=PHASE_INPUT_SUMMARY_CHARS,
+            limit=self.phase_input_summary_chars,
+            trace_context=trace_context,
+            lane_overrides=lane_overrides,
         )
 
         agent_context = ""
@@ -404,17 +479,40 @@ class CoordinatorService:
                 f"- {name}: domains={caps.get('domains', [])}, model={caps.get('model', '?')}, skills={caps.get('skills', [])}"
                 for name, caps in self.agent_registry.items()
             )
-            agent_context = f"\n\n## Available Agents\n{agent_lines}"
+            agent_context = f"\n\n## Registro de Subagentes Disponibles\n{agent_lines}"
+
+        critical_context = ""
+        if critical_audit:
+            raw_error = str(critical_audit.get("raw_error") or "")
+            critical_context = (
+                "\n\n## Protocolo de Contención Self-Healing\n"
+                "El pipeline lineal queda detenido. La meta principal de esta síntesis ya no es completar "
+                "el objetivo original, sino diagnosticar el error crítico del worker, proponer una hipótesis "
+                "de reparación inmediata y delegar una subtarea enfocada en corregir el entorno o dependencia "
+                "antes de reintentar la misión principal.\n\n"
+                "## Error Crítico Crudo Redactado\n"
+                f"{raw_error}"
+            )
 
         prompt = (
-            "You are a coordinator agent. Synthesize the research findings below "
-            "into a clear, actionable plan. The findings are compact summaries; "
-            "do not assume omitted details are verified facts.\n\n"
-            f"## Objective\n{objective}{agent_context}\n\n"
-            f"## Research Result Summaries\n{findings}\n\n"
-            "Output a structured plan with numbered steps. "
-            "For each step, assign it to the most appropriate agent based on their domains and skills. "
-            "Use the format: **Step N [agent_name]:** description"
+            "### Prompt: Síntesis y Orquestación del Enjambre\n\n"
+            "Eres el agente coordinador central. Tu tarea es analizar los reportes técnicos unificados "
+            "de los subagentes de investigación y consolidarlos en un plan de ejecución maestro y coherente.\n"
+            "## Objetivo General:\n\n"
+            f"**{objective}**{agent_context}\n"
+            "## Evidencia Recopilada por los Workers:\n\n"
+            f"**{findings}**{critical_context}\n"
+            "## Reglas Críticas de Evaluación:\n\n"
+            "* **Invariante de Evidencia:** No asumas que un paso intermedio fue exitoso si el reporte "
+            "del subagente omitió los logs de confirmación. Evalúa las lagunas de información como "
+            "riesgos técnicos activos.\n"
+            "* **Aislamiento de Errores:** Si un reporte contiene la cadena `CRITICAL ERROR EN WORKER`, "
+            "detén el pipeline asincrónico inmediatamente y prioriza una subtarea de diagnóstico y "
+            "reparación (Self-Healing).\n\n"
+            "**Formato del Plan Maestro:** Genera una secuencia numerada de pasos de ingeniería. "
+            "Cada paso debe estar explícitamente delegado al subagente especializado idóneo de tu registro "
+            "basándote en sus habilidades específicas, utilizando estrictamente este formato:\n"
+            "`**Step N [nombre_del_agente]:** Descripción concreta del comando o edición a ejecutar.`"
         )
 
         try:
@@ -442,26 +540,220 @@ class CoordinatorService:
         objective: str,
         input_artifact_ref: str | None,
         input_summary: str,
+        phase_input_summary_chars: int = DEFAULT_PHASE_INPUT_SUMMARY_CHARS,
     ) -> list[WorkerTask]:
         """Prepend compact artifact-mediated context to each task's instruction."""
         ref = input_artifact_ref or "none"
-        summary = _compact_text(input_summary, limit=PHASE_INPUT_SUMMARY_CHARS)
+        summary = _compact_text(input_summary, limit=phase_input_summary_chars)
         return [
             WorkerTask(
                 name=t.name,
                 instruction=(
-                    "## Task Context\n"
-                    f"objective: {objective}\n"
-                    f"input_artifact_ref: {ref}\n"
-                    f"input_summary: {summary or 'none'}\n\n"
-                    "## Your task\n"
-                    f"{t.instruction}"
+                    "### Prompt: Contexto de Continuidad Operativa\n\n"
+                    "## Contexto de la Misión\n\n"
+                    f"* **Objetivo General del Dueño:** {objective}\n"
+                    f"* **Artefacto de Referencia en Scratch:** {ref}\n"
+                    f"* **Estado Técnico Consolidado:** {summary or 'none'}\n\n"
+                    "## Tu Tarea Específica:\n\n"
+                    f"**{t.instruction}**\n"
+                    "**Directriz Ejecutiva:** No operes de manera aislada. Utiliza los parámetros e "
+                    "identificadores del estado consolidado para asegurar que tu código, parche o comando "
+                    "de terminal encaje de forma exacta con las decisiones tomadas por las fases previas "
+                    "del enjambre."
                 ),
                 lane=t.lane,
                 assigned_agent=t.assigned_agent,
             )
             for t in tasks
         ]
+
+    def _phase_results_summary(
+        self,
+        results: list[WorkerResult],
+        *,
+        limit: int,
+        trace_context: dict[str, Any] | None = None,
+        lane_overrides: dict[str, dict[str, Any]] | None = None,
+    ) -> str:
+        if not results:
+            return "none"
+        lines: list[str] = []
+        critical_present = False
+        for result in results:
+            if _has_critical_worker_error(result):
+                critical_present = True
+            summary, degraded = self._worker_result_summary(
+                result,
+                limit=self.worker_result_summary_chars,
+                trace_context=trace_context,
+                lane_overrides=lane_overrides,
+            )
+            if degraded:
+                result.degraded_compaction = True
+            lines.append(f"- {result.task_name}: {summary}")
+        joined = "\n".join(lines)
+        if critical_present:
+            return joined
+        if len(joined) <= limit:
+            return joined
+        summary, _ = self._distill_text(
+            joined,
+            limit=limit,
+            trace_context=trace_context,
+            lane_overrides=lane_overrides,
+        )
+        return summary
+
+    def _worker_result_summary(
+        self,
+        result: WorkerResult,
+        *,
+        limit: int,
+        trace_context: dict[str, Any] | None = None,
+        lane_overrides: dict[str, dict[str, Any]] | None = None,
+    ) -> tuple[str, bool]:
+        if result.error:
+            text = f"ERROR: {result.error}"
+        elif not result.content:
+            return "empty result", False
+        else:
+            text = result.content
+        redacted = redact_text(str(text), limit=0)
+        if _has_critical_worker_error(result):
+            return redacted, False
+        return self._distill_text(
+            redacted,
+            limit=limit,
+            trace_context=trace_context,
+            lane_overrides=lane_overrides,
+        )
+
+    def _distill_text(
+        self,
+        text: str,
+        *,
+        limit: int,
+        trace_context: dict[str, Any] | None = None,
+        lane_overrides: dict[str, dict[str, Any]] | None = None,
+    ) -> tuple[str, bool]:
+        redacted = redact_text(str(text or ""), limit=0)
+        if len(redacted) <= limit:
+            return redacted, False
+        prompt = _distillation_prompt(redacted, limit=limit)
+        try:
+            distill_trace = child_trace_context(trace_context, artifact_id="semantic_distillation")
+            response = self.router.ask(
+                prompt,
+                lane="research",
+                provider=(lane_overrides or {}).get("research", {}).get("provider"),
+                model=(lane_overrides or {}).get("research", {}).get("model"),
+                effort=(lane_overrides or {}).get("research", {}).get("effort"),
+                evidence_pack=attach_trace(
+                    {"coordinator_phase": "semantic_distillation", "limit": limit},
+                    distill_trace,
+                ),
+            )
+            distilled = redact_text(str(response.content or ""), limit=0)
+            if distilled and len(distilled) < limit:
+                return distilled, False
+        except Exception:
+            logger.exception("Coordinator semantic distillation failed")
+        return _mechanical_compact_text(redacted, limit=max(limit - 1, 1)), True
+
+    def _complete_critical_worker_run(
+        self,
+        *,
+        result: CoordinatorResult,
+        objective: str,
+        phase: str,
+        critical_result: WorkerResult,
+        collected_results: list[WorkerResult],
+        scratch: Path,
+        orchestration_run_id: str,
+        trace_context: dict[str, Any],
+        lane_overrides: dict[str, dict[str, Any]] | None,
+        start_time: float,
+    ) -> CoordinatorResult:
+        audit = _critical_worker_audit(phase, critical_result)
+        result.error = f"critical_worker_error:{critical_result.task_name}"
+        result.audit = {**result.audit, **audit}
+        self.observe.emit(
+            "coordinator_critical_worker_error",
+            trace_id=trace_context["trace_id"],
+            root_trace_id=trace_context["root_trace_id"],
+            span_id=trace_context["span_id"],
+            parent_span_id=trace_context["parent_span_id"],
+            job_id=trace_context["job_id"],
+            artifact_id=critical_result.task_name,
+            payload={
+                "task_id": result.task_id,
+                "phase": phase,
+                "task_name": critical_result.task_name,
+                "error": result.error,
+            },
+        )
+
+        self._orchestration_begin_phase(orchestration_run_id, "synthesis", trace_context)
+        synthesis = self._synthesize(
+            objective,
+            collected_results,
+            trace_context,
+            lane_overrides=lane_overrides,
+            critical_audit=audit,
+        )
+        result.synthesis = synthesis
+        self._write_scratch_text(scratch, "synthesis.md", synthesis)
+        synthesis_artifact_id = self._orchestration_record_text_artifact(
+            orchestration_run_id,
+            phase="synthesis",
+            artifact_type="synthesis",
+            content=synthesis,
+            producer_role="coordinator_synthesis",
+            consumer_role="coordinator_result",
+            trace_context=trace_context,
+        )
+        self._orchestration_ack(synthesis_artifact_id, consumer_role="coordinator_result")
+        self._orchestration_require_ack(synthesis_artifact_id, consumer_role="coordinator_result")
+        self._orchestration_checkpoint(
+            orchestration_run_id,
+            phase="synthesis",
+            reason="critical_worker_self_healing_synthesis",
+            artifact_ids=[synthesis_artifact_id] if synthesis_artifact_id else [],
+        )
+        self._orchestration_finish_phase(
+            orchestration_run_id,
+            "synthesis",
+            trace_context,
+            payload={
+                "content_length": len(synthesis or ""),
+                "critical_worker_error": True,
+                "critical_phase": phase,
+            },
+        )
+        result.duration_seconds = time.time() - start_time
+        self._orchestration_complete_run(
+            orchestration_run_id,
+            status="failed",
+            reason=result.error,
+            trace_context=trace_context,
+        )
+        self.observe.emit(
+            "coordinator_complete",
+            trace_id=trace_context["trace_id"],
+            root_trace_id=trace_context["root_trace_id"],
+            span_id=trace_context["span_id"],
+            parent_span_id=trace_context["parent_span_id"],
+            job_id=trace_context["job_id"],
+            artifact_id=trace_context["artifact_id"],
+            payload={
+                "task_id": result.task_id,
+                "phases": list(result.phase_results.keys()),
+                "duration": result.duration_seconds,
+                "workers_total": sum(len(v) for v in result.phase_results.values()),
+                "error": result.error,
+            },
+        )
+        return result
 
     def _ensure_scratch(self, task_id: str) -> Path:
         """Create and return the scratch directory for a task."""
@@ -637,6 +929,7 @@ class CoordinatorService:
                 "content": r.content,
                 "duration_seconds": r.duration_seconds,
                 "error": r.error,
+                "degraded_compaction": r.degraded_compaction,
             }
             (phase_dir / f"{r.task_name}.json").write_text(
                 json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
@@ -654,6 +947,7 @@ def _worker_result_payload(result: WorkerResult) -> dict[str, Any]:
         "content": result.content,
         "duration_seconds": result.duration_seconds,
         "error": result.error,
+        "degraded_compaction": result.degraded_compaction,
     }
 
 
@@ -664,7 +958,7 @@ def _phase_results_summary(results: list[WorkerResult], *, limit: int) -> str:
     for result in results:
         lines.append(
             f"- {result.task_name}: "
-            f"{_worker_result_summary(result, limit=WORKER_RESULT_SUMMARY_CHARS)}"
+            f"{_worker_result_summary(result, limit=DEFAULT_WORKER_RESULT_SUMMARY_CHARS)}"
         )
     return _compact_text("\n".join(lines), limit=limit)
 
@@ -682,7 +976,78 @@ def _compact_text(text: str, *, limit: int) -> str:
     if len(clean) <= limit:
         return clean
     suffix = "... [truncated]"
-    return clean[: max(limit - len(suffix), 0)].rstrip() + suffix
+    return _head_tail_compact(clean, limit=limit, suffix=suffix)
+
+
+def _mechanical_compact_text(text: str, *, limit: int) -> str:
+    clean = str(text or "")
+    if len(clean) <= limit:
+        return clean
+    return _head_tail_compact(clean, limit=limit, suffix=MECHANICAL_TRUNCATION_SIGNATURE)
+
+
+def _head_tail_compact(text: str, *, limit: int, suffix: str) -> str:
+    if limit <= len(suffix):
+        return suffix[:limit]
+    available = limit - len(suffix)
+    head_chars = min(HEAD_TAIL_PRESERVE_CHARS, available // 2)
+    tail_chars = min(HEAD_TAIL_PRESERVE_CHARS, available - head_chars)
+    if head_chars + tail_chars < available:
+        head_chars = available - tail_chars
+    head = text[:head_chars].rstrip()
+    tail = text[-tail_chars:].lstrip() if tail_chars else ""
+    if tail:
+        return f"{head}{suffix}{tail}"
+    return f"{head}{suffix}"
+
+
+def _distillation_prompt(text: str, *, limit: int) -> str:
+    return (
+        "### Prompt: Destilación de Contexto Crítico\n\n"
+        "Actúa como un analizador de infraestructura y optimizador de contexto. Tu único objetivo es "
+        f"condensar el contenido técnico provisto para que ocupe estrictamente menos de **{limit}** "
+        "caracteres, eliminando el ruido conversacional pero **PRESERVANDO INTACTOS** los siguientes "
+        "elementos clave:\n"
+        "1. Rumbos y rutas de archivos completas (`/Users/...`, `claw_v2/...`).\n"
+        "2. Códigos de error específicos, tracebacks de excepciones y respuestas de la terminal.\n"
+        "3. Asignaciones de variables, nombres de funciones y tokens de configuración no sensibles.\n\n"
+        "**Formato de salida:** Estructura la información usando viñetas densas e hiper-específicas. "
+        "Prioriza la causa raíz del fallo y los parámetros reales observados. Ve directo al grano, "
+        "sin preámbulos ni introducciones coloniales.\n"
+        "## Contenido Técnico a Condensar:\n\n"
+        f"**{text}**"
+    )
+
+
+def _has_critical_worker_error(result: WorkerResult) -> bool:
+    return CRITICAL_WORKER_MARKER in f"{result.content or ''}\n{result.error or ''}"
+
+
+def _critical_worker_result(results: list[WorkerResult]) -> WorkerResult | None:
+    return next((result for result in results if _has_critical_worker_error(result)), None)
+
+
+def _critical_worker_audit(phase: str, result: WorkerResult) -> dict[str, Any]:
+    raw_error = redact_text(
+        "\n".join(
+            part
+            for part in (
+                f"task_name: {result.task_name}",
+                f"phase: {phase}",
+                f"error: {result.error}" if result.error else "",
+                result.content or "",
+            )
+            if part
+        ),
+        limit=0,
+    )
+    return {
+        "critical_worker_error": True,
+        "phase": phase,
+        "task_name": result.task_name,
+        "raw_error": raw_error,
+        "degraded_compaction": result.degraded_compaction,
+    }
 
 
 def _phase_counts(results: list[WorkerResult]) -> dict[str, Any]:

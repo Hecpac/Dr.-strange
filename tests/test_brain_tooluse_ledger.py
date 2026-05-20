@@ -9,9 +9,8 @@ PR 0E wraps every brain fallback turn in a post-hoc ledger pass:
   - 0 tool events                  → noop, no task created (no DB noise)
   - any tool event + active task   → attach (no second task)
   - any tool event + no active task→ synthetic agent_tasks row with
+                                      status="completed_unverified" and
                                       verification_status="needs_verification"
-                                      (downgraded by the defense-in-depth
-                                      gate to running+missing_evidence)
   - tool failures                   → status="failed", verification_status="failed"
   - approval-required, no tool ran  → no synthetic task, sensitive event emitted
 
@@ -290,7 +289,7 @@ class BrainToolUseLedgerTests(unittest.TestCase):
         )
         task = self.ledger.list(limit=10)[0]
         self.assertNotEqual(task.status, "failed")
-        self.assertEqual(task.status, "running")
+        self.assertEqual(task.status, "completed_unverified")
         self.assertEqual(task.verification_status, "needs_verification")
         substeps = task.artifacts.get("substeps", [])
         self.assertTrue(
@@ -332,9 +331,9 @@ class BrainToolUseLedgerTests(unittest.TestCase):
         task = self.ledger.list(limit=10)[0]
         self.assertEqual(task.notify_policy, "none")
         self.assertNotEqual(task.verification_status, "passed")
-        # Runtime invariant: a manifest records tool activity, but the row stays
-        # running until a verifier promotes it to passed success.
-        self.assertEqual(task.status, "running")
+        # Runtime invariant: a manifest records tool activity, but the row closes
+        # unverified until a verifier promotes it to passed success.
+        self.assertEqual(task.status, "completed_unverified")
         self.assertEqual(task.verification_status, "needs_verification")
         events = [name for name, _ in observe.events]
         self.assertIn("brain_tooluse_ledger_needs_verification", events)

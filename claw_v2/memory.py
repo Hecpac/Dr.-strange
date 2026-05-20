@@ -14,8 +14,8 @@ from claw_v2.sqlite_runtime import connect_runtime_sqlite
 
 logger = logging.getLogger(__name__)
 
-_COMPACTED_MESSAGE_SNIPPET_CHARS = 260
-_ROLLING_SUMMARY_MAX_CHARS = 12_000
+_COMPACTED_MESSAGE_SNIPPET_CHARS = 600
+_ROLLING_SUMMARY_MAX_CHARS = 20_000
 
 
 SCHEMA = """
@@ -255,7 +255,7 @@ def _summarize_compacted_messages(rows: list[sqlite3.Row]) -> str:
     start = rows[0]["created_at"]
     end = rows[-1]["created_at"]
     lines = [f"Compacted {len(rows)} older messages from {start} to {end}."]
-    remaining = 2600
+    remaining = 6_000
     for index, row in enumerate(rows):
         line = f"- {row['role']}: {_compact_message_snippet(row['content'])}"
         if remaining - len(line) < 0:
@@ -489,8 +489,8 @@ class MemoryStore:
         content: str,
         *,
         compact: bool = False,
-        max_messages: int = 80,
-        preserve_recent: int = 40,
+        max_messages: int = 200,
+        preserve_recent: int = 80,
     ) -> int:
         # Wave 3.5: defense-in-depth — strip system-reminder markers before
         # they hit the messages table. The chat-output sanitizer is the
@@ -519,8 +519,8 @@ class MemoryStore:
         self,
         session_id: str,
         *,
-        max_messages: int = 80,
-        preserve_recent: int = 40,
+        max_messages: int = 200,
+        preserve_recent: int = 80,
     ) -> int:
         max_messages = max(1, int(max_messages))
         preserve_recent = min(max(1, int(preserve_recent)), max_messages)
@@ -560,12 +560,6 @@ class MemoryStore:
             ids = [row["id"] for row in rows]
             placeholders = ",".join("?" for _ in ids)
             self._conn.execute(f"DELETE FROM messages WHERE id IN ({placeholders})", ids)
-            self._clear_provider_sessions_for_app_locked(session_id)
-            self._mark_provider_session_reset_locked(
-                session_id,
-                reason="memory_compaction",
-                summary_only_context=True,
-            )
             self._conn.commit()
             return len(ids)
 
@@ -1052,7 +1046,7 @@ class MemoryStore:
         return "\n".join(sections)
 
     def _provider_session_row(
-        self, app_session_id: str, provider: str, *, max_age_seconds: int = 7200,
+        self, app_session_id: str, provider: str, *, max_age_seconds: int = 86_400,
     ) -> sqlite3.Row | None:
         with self._lock:
             row = self._conn.execute(
@@ -1082,13 +1076,13 @@ class MemoryStore:
             return row
 
     def get_provider_session(
-        self, app_session_id: str, provider: str, *, max_age_seconds: int = 7200,
+        self, app_session_id: str, provider: str, *, max_age_seconds: int = 86_400,
     ) -> str | None:
         row = self._provider_session_row(app_session_id, provider, max_age_seconds=max_age_seconds)
         return row["provider_session_id"] if row else None
 
     def get_provider_session_cursor(
-        self, app_session_id: str, provider: str, *, max_age_seconds: int = 7200,
+        self, app_session_id: str, provider: str, *, max_age_seconds: int = 86_400,
     ) -> int | None:
         row = self._provider_session_row(app_session_id, provider, max_age_seconds=max_age_seconds)
         return int(row["last_message_id"] or 0) if row else None

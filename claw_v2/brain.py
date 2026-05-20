@@ -365,9 +365,7 @@ class BrainService:
             response.content,
             compact=_memory_compaction_enabled(self.router),
         )
-        if compacted_message_count:
-            provider_session_artifact = None
-        elif isinstance(provider_session_artifact, str) and provider_session_artifact:
+        if isinstance(provider_session_artifact, str) and provider_session_artifact:
             self.memory.link_provider_session(
                 session_id,
                 response.provider,

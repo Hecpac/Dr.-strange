@@ -40,6 +40,7 @@ class BrowseJinaTests(unittest.TestCase):
         self.assertEqual(_select_navigation_strategy("https://example.com/docs"), "static")
         self.assertEqual(_select_navigation_strategy("https://github.com/org/repo"), "js_rendered")
         self.assertEqual(_select_navigation_strategy("https://x.com/post/123"), "authenticated")
+        self.assertEqual(_select_navigation_strategy("https://flow.google"), "authenticated")
 
     @patch("claw_v2.browse_handler._jina_read")
     def test_browse_jina_success(self, mock_jina) -> None:
