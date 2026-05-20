@@ -4551,6 +4551,104 @@ class BotTests(unittest.TestCase):
                 self.assertIn("[URL analizada]: https://example.com/docs", args[1])
                 self.assertEqual(kwargs["memory_text"], "revisa example.com/docs")
 
+    def test_instagram_link_review_counts_cdp_browse_as_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+                "CLAW_DISABLE_TASK_INTENT_ROUTER": "1",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                from claw_v2.browser import BrowseResult
+
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot.browser = MagicMock()
+                runtime.bot.managed_chrome = MagicMock()
+                runtime.bot.managed_chrome.cdp_url = "http://localhost:9250"
+                runtime.bot.browser.chrome_navigate.return_value = BrowseResult(
+                    url="https://www.instagram.com/tcinsurance1?igsh=test",
+                    title="Tatiana Castaneda Instagram",
+                    content=(
+                        "Tatiana Castaneda | Agente de Seguros | Seguros\n"
+                        "@tcinsurance1 419 publicaciones 1416 seguidores 482 seguidos\n"
+                        "Bio visible: OBAMACARE VIDA INFORMACION POLIZAS SEGUROS"
+                    ),
+                )
+                with patch.object(type(runtime.bot.brain), "handle_message") as mock_handle_message:
+                    mock_handle_message.return_value = LLMResponse(
+                        content=(
+                            "## Fuente\n"
+                            "- Leí el perfil público de `@tcinsurance1`: 419 publicaciones, "
+                            "1416 seguidores y 482 seguidos.\n\n"
+                            "## Aplicación sugerida\n"
+                            "- MP4 listo en el mensaje anterior no debe activar el evidence gate "
+                            "porque el browse CDP ya produjo evidencia."
+                        ),
+                        lane="brain",
+                        provider="anthropic",
+                        model="claude-opus-4-7",
+                    )
+                    result = runtime.bot.handle_text(
+                        user_id="123",
+                        session_id="s1",
+                        text="Revisa el Instagram de Tatiana https://www.instagram.com/tcinsurance1?igsh=test",
+                        runtime_channel="telegram",
+                    )
+
+                self.assertIn("@tcinsurance1", result)
+                self.assertIn("419 publicaciones", result)
+                self.assertNotIn("No lo marco como hecho todavía", result)
+                events = [event["event_type"] for event in runtime.observe.recent_events(limit=50)]
+                self.assertIn("browse_result", events)
+                self.assertNotIn("evidence_gate_blocked_completion_claim", events)
+                args, kwargs = mock_handle_message.call_args
+                self.assertIn("[URL analizada]: https://www.instagram.com/tcinsurance1?igsh=test", args[1])
+                self.assertEqual(
+                    kwargs["memory_text"],
+                    "Revisa el Instagram de Tatiana https://www.instagram.com/tcinsurance1?igsh=test",
+                )
+
+    def test_past_tense_review_question_is_not_treated_as_operator_action(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+                "CLAW_DISABLE_TASK_INTENT_ROUTER": "1",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                with patch.object(type(runtime.bot.brain), "handle_message") as mock_handle_message:
+                    mock_handle_message.return_value = LLMResponse(
+                        content=(
+                            "Sí, hace un par de minutos. MP4 listo en el mensaje anterior "
+                            "solo describe el contexto, no una acción nueva."
+                        ),
+                        lane="brain",
+                        provider="anthropic",
+                        model="claude-opus-4-7",
+                    )
+                    result = runtime.bot.handle_text(
+                        user_id="123",
+                        session_id="s1",
+                        text="Revisaste el Instagram de Tatiana",
+                        runtime_channel="telegram",
+                    )
+
+                self.assertIn("Sí, hace un par de minutos", result)
+                self.assertNotIn("No lo marco como hecho todavía", result)
+                events = [event["event_type"] for event in runtime.observe.recent_events(limit=50)]
+                self.assertNotIn("evidence_gate_blocked_completion_claim", events)
+
     @patch("claw_v2.browse_handler._jina_read")
     def test_standalone_url_uses_brain_link_analysis_prompt(self, mock_jina) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
