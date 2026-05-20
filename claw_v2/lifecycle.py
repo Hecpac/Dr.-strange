@@ -87,6 +87,7 @@ def _public_task_state(value: str) -> str:
         "running_needs_verification": "en verificacion",
         "passed": "verificada",
         "succeeded": "completada",
+        "completed_unverified": "completada sin verificacion final",
         "succeeded_with_warnings": "completada con advertencias",
         "failed": "fallida",
         "blocked": "bloqueada",

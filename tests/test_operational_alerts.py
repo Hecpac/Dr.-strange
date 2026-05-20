@@ -65,6 +65,22 @@ class OperationalAlertRouterTests(unittest.TestCase):
         events = self.observe.recent_events(limit=3)
         self.assertTrue(any(event["event_type"] == "operational_alert_suppressed" for event in events))
 
+    def test_daemon_task_reconciliation_is_observe_only(self) -> None:
+        notifications: list[str] = []
+        router = OperationalAlertRouter(observe=self.observe, notify=notifications.append)
+        router.install()
+
+        self.observe.emit(
+            "daemon_task_reconciliation",
+            payload={"lost_tasks": 1, "older_than_seconds": 21600},
+        )
+
+        self.assertEqual(notifications, [])
+        events = self.observe.recent_events(limit=3)
+        suppressed = [event for event in events if event["event_type"] == "operational_alert_suppressed"]
+        self.assertEqual(suppressed[0]["payload"]["reason"], "observe_only")
+        self.assertFalse(any(event["event_type"] == "operational_alert_sent" for event in events))
+
     def test_alerts_when_llm_provider_circuit_opens(self) -> None:
         notifications: list[str] = []
         router = OperationalAlertRouter(observe=self.observe, notify=notifications.append)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import re
 from typing import Callable
 
 from claw_v2.adapters.anthropic import AnthropicAgentAdapter
@@ -72,8 +73,17 @@ class LLMRouter:
         thinking_tokens: int | None = None,
     ) -> LLMResponse:
         self._validate_lane_input(lane, evidence_pack, allowed_tools, agents, hooks)
-        selected_provider = provider or self.config.provider_for_lane(lane)
-        selected_model = model or self.config.model_for_lane(lane)
+        configured_provider = self.config.provider_for_lane(lane)
+        selected_provider = provider or configured_provider
+        selected_model = (
+            model
+            or (
+                self.config.advisory_model_for_provider(selected_provider)
+                if provider and selected_provider != configured_provider
+                else self.config.model_for_lane(lane)
+            )
+        )
+        _validate_provider_model_pair(selected_provider, selected_model)
         selected_effort = effort or self.config.effort_for_lane(lane)
         selected_thinking = (
             thinking_tokens
@@ -139,6 +149,7 @@ class LLMRouter:
                 return blocked
             request = result
             request.validate()
+            _validate_provider_model_pair(request.provider, request.model)
 
         adapter = self._adapter_for(request.provider)
         if lane not in self.NON_TOOL_LANES and not adapter.tool_capable:
@@ -146,6 +157,7 @@ class LLMRouter:
 
         try:
             response = self._complete_with_circuit(adapter, request)
+            _suppress_corrupt_provider_content(response)
         except AdapterError as exc:
             fallback_provider = self._pick_fallback(request.provider, lane)
             if fallback_provider is None:
@@ -161,8 +173,10 @@ class LLMRouter:
                     "session_id": _fallback_session_id(request, fallback_provider),
                 }
             )
+            _validate_provider_model_pair(fallback_request.provider, fallback_request.model)
             fallback_request.validate()
             response = self._complete_with_circuit(fb_adapter, fallback_request)
+            _suppress_corrupt_provider_content(response)
             response.degraded_mode = True
             response.artifacts["fallback_reason"] = redact_sensitive(str(exc))
             response.artifacts.update(trace_metadata(fallback_request.evidence_pack))
@@ -394,6 +408,49 @@ def _fallback_session_id(request: LLMRequest, fallback_provider: str) -> str | N
 
 def _looks_like_openai_response_id(session_id: str) -> bool:
     return session_id.startswith("resp_") or session_id.startswith("resp-")
+
+
+_INTERNAL_TOOL_TRACE_PATTERNS = (
+    re.compile(r"(?<!\w)to=(?:functions|multi_tool_use|web|image_gen|tool_search)\.", re.IGNORECASE),
+    re.compile(r'"recipient_name"\s*:\s*"(?:functions|multi_tool_use|web|image_gen|tool_search)\.', re.IGNORECASE),
+    re.compile(r'"tool_uses"\s*:\s*\[', re.IGNORECASE),
+)
+_CORRUPT_PROVIDER_CONTENT = (
+    "Tuve un error preparando la respuesta del modelo y suprimi contenido interno corrupto. "
+    "No lo envio como resultado; conserva el estado y reintenta la accion con evidencia."
+)
+
+
+def _suppress_corrupt_provider_content(response: LLMResponse) -> None:
+    content = response.content or ""
+    stripped = content.strip()
+    if stripped == "(unused)":
+        response.content = ""
+        response.confidence = 0.0
+        response.artifacts["provider_placeholder_suppressed"] = True
+        response.artifacts["contract_violation"] = "provider_unused_placeholder"
+        return
+    if any(pattern.search(content) for pattern in _INTERNAL_TOOL_TRACE_PATTERNS):
+        response.content = _CORRUPT_PROVIDER_CONTENT
+        response.confidence = 0.0
+        response.artifacts["internal_tool_trace_suppressed"] = True
+        response.artifacts["contract_violation"] = "internal_tool_trace"
+        response.artifacts["raw_response"] = "[suppressed_internal_tool_trace]"
+
+
+def _validate_provider_model_pair(provider: str, model: str) -> None:
+    normalized_provider = provider.strip().lower()
+    normalized_model = model.strip().lower()
+    if normalized_provider == "anthropic" and (
+        normalized_model.startswith("gpt-")
+        or normalized_model.startswith("o3")
+        or normalized_model.startswith("o4")
+    ):
+        raise ValueError(f"Anthropic provider cannot serve OpenAI model {model!r}.")
+    if normalized_provider in {"openai", "codex"} and normalized_model.startswith("claude-"):
+        raise ValueError(f"{provider} provider cannot serve Anthropic model {model!r}.")
+    if normalized_provider == "google" and not normalized_model.startswith("gemini-"):
+        raise ValueError(f"Google provider cannot serve non-Gemini model {model!r}.")
 
 
 def _prompt_size_metadata(request: LLMRequest) -> dict[str, int | str | bool]:

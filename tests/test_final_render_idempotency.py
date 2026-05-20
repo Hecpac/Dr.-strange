@@ -143,7 +143,9 @@ def _make_bot_for_render_only(tmp_root: Path):
         "TELEGRAM_ALLOWED_USER_ID": "123",
         "CLAW_DISABLE_TASK_INTENT_ROUTER": "1",
     }
-    return build_runtime(anthropic_executor=_fake_anthropic), env
+    with patch.dict(os.environ, env, clear=False):
+        runtime = build_runtime(anthropic_executor=_fake_anthropic)
+    return runtime, env
 
 
 @pytest.mark.parametrize("raw", _ADVERSARIAL_INPUTS)

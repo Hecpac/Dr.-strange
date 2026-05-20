@@ -13,7 +13,7 @@ from claw_v2.sqlite_runtime import connect_runtime_sqlite
 from claw_v2.task_completion import COMPLETION_CANDIDATES, validate_completion
 
 
-TERMINAL_STATUSES = frozenset({"succeeded", "failed", "timed_out", "cancelled", "lost"})
+TERMINAL_STATUSES = frozenset({"succeeded", "failed", "timed_out", "cancelled", "lost", "completed_unverified"})
 VALID_STATUSES = frozenset({"queued", "running", *TERMINAL_STATUSES})
 
 
@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
     runtime TEXT NOT NULL,
     provider TEXT,
     model TEXT,
-    status TEXT NOT NULL CHECK(status IN ('queued', 'running', 'succeeded', 'failed', 'timed_out', 'cancelled', 'lost')),
+    status TEXT NOT NULL CHECK(status IN ('queued', 'running', 'succeeded', 'failed', 'timed_out', 'cancelled', 'lost', 'completed_unverified')),
     notify_policy TEXT NOT NULL DEFAULT 'done_only',
     created_at REAL NOT NULL,
     started_at REAL,
@@ -95,7 +95,47 @@ class TaskLedger:
         self._lock = threading.Lock()
         with self._lock:
             self._conn.executescript(TASK_LEDGER_SCHEMA)
+            self._ensure_completed_unverified_status_locked()
             self._conn.commit()
+
+    def _ensure_completed_unverified_status_locked(self) -> None:
+        row = self._conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'agent_tasks'"
+        ).fetchone()
+        table_sql = str(row["sql"] if isinstance(row, sqlite3.Row) else row[0]) if row else ""
+        if "completed_unverified" in table_sql:
+            return
+        self._conn.executescript(
+            """
+            ALTER TABLE agent_tasks RENAME TO agent_tasks_old;
+            """
+        )
+        self._conn.executescript(TASK_LEDGER_SCHEMA)
+        self._conn.execute(
+            """
+            INSERT INTO agent_tasks (
+                task_id, session_id, channel, external_session_id, external_user_id,
+                objective, mode, runtime, provider, model, status, notify_policy,
+                created_at, started_at, completed_at, summary, error, verification_status,
+                artifacts_json, route_json, metadata_json, updated_at
+            )
+            SELECT
+                task_id, session_id, channel, external_session_id, external_user_id,
+                objective, mode, runtime, provider, model, status, notify_policy,
+                created_at, started_at, completed_at, summary, error, verification_status,
+                artifacts_json, route_json, metadata_json, updated_at
+            FROM agent_tasks_old
+            """
+        )
+        self._conn.execute("DROP TABLE agent_tasks_old")
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_agent_tasks_session_updated "
+            "ON agent_tasks(session_id, updated_at DESC)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_agent_tasks_status_updated "
+            "ON agent_tasks(status, updated_at DESC)"
+        )
 
     def create(
         self,

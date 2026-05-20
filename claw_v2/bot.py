@@ -1831,6 +1831,24 @@ class BotService:
                 url=link_analysis_context["url"],
                 fetched_content=link_analysis_context["fetched_content"],
             )
+        cleaned = _strip_url_permission_deferrals(content, context=source_text)
+        if cleaned != content:
+            self._emit_safe(
+                "url_autonomy_guard_triggered",
+                {
+                    "session_id": session_id,
+                    "source_text_preview": source_text[:160],
+                    "original_length": len(content),
+                    "sanitized_length": len(cleaned),
+                },
+            )
+            self._emit_internal_chat_suppressed(
+                session_id,
+                reason="url_autonomy_permission_deferral",
+                original=content,
+                sanitized=cleaned,
+            )
+            content = cleaned
         return self._sanitize_visible_chat_response(session_id, content)
 
     def _start_claim_lacks_evidence(
@@ -2186,7 +2204,7 @@ class BotService:
         self.brain.memory.update_session_state(
             session_id,
             mode="ops",
-            current_goal=objective[:280],
+            current_goal=objective[:280] if self._looks_like_persistable_current_goal(objective) else "",
             pending_action=objective,
             task_queue=task_queue,
             verification_status="awaiting_continue",
@@ -3975,11 +3993,12 @@ class BotService:
         if tool_failure_events:
             useful_result = self._brain_response_has_useful_result(response)
             if useful_result:
-                evidence_manifest["checkpointed_at"] = time.time()
+                evidence_manifest["completed_at"] = time.time()
                 evidence_manifest["verification_result"] = "succeeded_with_warnings"
                 evidence_manifest["blockers"] = [first_error[:200] or "nonfatal tool failure"]
-                self.task_ledger.mark_running_checkpoint(
+                self.task_ledger.mark_terminal(
                     task_id,
+                    status="completed_unverified",
                     summary=f"brain tool-use completed with warnings: {len(tool_failure_events)} substep failure(s)",
                     error=first_error[:300],
                     verification_status="needs_verification",
@@ -3992,7 +4011,7 @@ class BotService:
                             "task_id": task_id,
                             "error_count": len(tool_failure_events),
                             "first_error_kind": first_error[:60],
-                            "task_status": "running_needs_verification",
+                            "task_status": "completed_unverified",
                         },
                     )
                 except Exception:
@@ -4021,12 +4040,14 @@ class BotService:
             except Exception:
                 logger.debug("brain_tooluse_ledger_failed emit failed", exc_info=True)
             return
-        # Tools ran without failure, but no verifier has passed yet. Keep the
-        # ledger row running so `succeeded` remains reserved for passed evidence.
-        evidence_manifest["checkpointed_at"] = time.time()
+        # Tools ran without failure, but no verifier has passed yet. Close the
+        # row as completed_unverified so the stale-running watchdog does not
+        # rewrite real user-visible work into a false lost failure.
+        evidence_manifest["completed_at"] = time.time()
         evidence_manifest["verification_result"] = "needs_verification"
-        self.task_ledger.mark_running_checkpoint(
+        self.task_ledger.mark_terminal(
             task_id,
+            status="completed_unverified",
             summary=f"brain tool-use turn: {len(tool_events)} tool calls (unverified)",
             verification_status="needs_verification",
             artifacts=brain_artifacts,
@@ -4036,7 +4057,7 @@ class BotService:
                 "brain_tooluse_ledger_needs_verification",
                 payload={
                     "task_id": task_id,
-                    "task_status": "running",
+                    "task_status": "completed_unverified",
                     "verification_status": "needs_verification",
                     "tools_count": len(tool_events),
                 },
@@ -4354,19 +4375,15 @@ class BotService:
         return task_id
 
     def _pending_evidence_response(self, task_id: str | None = None) -> str:
-        suffix = f"\nTask: `{task_id}`" if task_id else ""
         return (
-            "Bloqueé esa respuesta como `explicit_blocker`: no hubo ejecución verificable "
-            "ni aprobación pendiente que la respalde."
-            f"{suffix}"
+            "No lo marco como hecho todavía: no tengo evidencia verificable de ejecución. "
+            "Retomo con una acción real y reporto solo cuando haya resultado."
         )
 
     def _unexecuted_start_response(self, task_id: str | None = None) -> str:
-        suffix = f"\nTask: `{task_id}`" if task_id else ""
         return (
-            "Bloqueé el arranque como `explicit_blocker`: la respuesta intentó iniciar trabajo "
-            "sin crear tarea durable, ejecutar acción ni pedir aprobación."
-            f"{suffix}"
+            "No arranqué nada todavía: no tengo una ejecución verificable que respalde decir "
+            "que ya está en curso. Retomo con una acción real y reporto solo cuando haya resultado."
         )
 
     def _emit_identity_capability_binding_guard(
@@ -6742,10 +6759,15 @@ class BotService:
         )
         active_object["active_mission"] = mission
         last_result = active_object.get("last_action_result")
+        current_goal_candidate = (pending_action or last_user_goal).strip()
         self.brain.memory.update_session_state(
             session_id,
             mode="ops",
-            current_goal=last_user_goal[:280],
+            current_goal=(
+                current_goal_candidate[:280]
+                if self._looks_like_persistable_current_goal(current_goal_candidate)
+                else ""
+            ),
             pending_action=pending_action or state.get("pending_action"),
             active_object=active_object,
             last_checkpoint={
@@ -7775,7 +7797,11 @@ class BotService:
             if checkpoint_action:
                 return checkpoint_action, "last_checkpoint"
         current_goal = str(state.get("current_goal") or "").strip()
-        if current_goal and not self._looks_like_actionable_followup(current_goal):
+        if (
+            current_goal
+            and self._looks_like_persistable_current_goal(current_goal)
+            and not self._looks_like_actionable_followup(current_goal)
+        ):
             return current_goal, "current_goal"
         active_object = state.get("active_object") or {}
         if isinstance(active_object, dict):
@@ -7786,6 +7812,56 @@ class BotService:
                 if objective and status not in {"completed", "succeeded"}:
                     return objective, "active_task"
         return None, "missing_context"
+
+    @staticmethod
+    def _looks_like_persistable_current_goal(text: str) -> bool:
+        normalized = _normalize_command_text(text).strip(" \t\n\r.,;:!?¿¡")
+        if len(normalized) < 8 or _looks_like_proceed_request(text):
+            return False
+        complaint_markers = (
+            "no has ",
+            "no haz ",
+            "no habias ",
+            "no abriste",
+            "no has abierto",
+            "mentiste",
+            "deja de mentir",
+            "porque perdiste",
+            "perdiste el contexto",
+            "eso no es",
+        )
+        if any(marker in normalized for marker in complaint_markers):
+            return False
+        goal_markers = (
+            "abre",
+            "abrir",
+            "open",
+            "focus",
+            "inspect",
+            "revisa",
+            "revisar",
+            "lee ",
+            "leer ",
+            "busca",
+            "buscar",
+            "crea",
+            "crear",
+            "implementa",
+            "implementar",
+            "arregla",
+            "corrige",
+            "actualiza",
+            "ejecuta",
+            "corre",
+            "verifica",
+            "valida",
+            "termina",
+            "completa",
+            "regenera",
+            "haz ",
+            "hacer ",
+        )
+        return any(marker in normalized for marker in goal_markers)
 
     @staticmethod
     def _looks_like_direct_actionable_task(text: str) -> bool:

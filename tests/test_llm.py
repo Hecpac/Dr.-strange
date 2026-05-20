@@ -499,6 +499,69 @@ class LLMRouterTests(unittest.TestCase):
 
                     self.assertEqual(seen["provider"], fallback_provider)
 
+    def test_provider_override_uses_compatible_default_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            seen: dict[str, str] = {}
+
+            def responder(request: LLMRequest) -> LLMResponse:
+                seen["model"] = request.model
+                return echo_response("anthropic")(request)
+
+            router = LLMRouter(
+                config=config,
+                adapters={"anthropic": StaticAdapter("anthropic", tool_capable=True, responder=responder)},
+            )
+            response = router.ask("verify", lane="verifier", provider="anthropic", evidence_pack={"diff": "x"})
+
+            self.assertEqual(response.provider, "anthropic")
+            self.assertTrue(seen["model"].startswith("claude-"))
+
+    def test_rejects_known_incompatible_provider_model_pair(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            router = LLMRouter(
+                config=config,
+                adapters={"anthropic": StaticAdapter("anthropic", tool_capable=True, responder=echo_response("anthropic"))},
+            )
+
+            with self.assertRaisesRegex(ValueError, "Anthropic provider cannot serve OpenAI model"):
+                router.ask("verify", lane="verifier", provider="anthropic", model="gpt-5.5", evidence_pack={"diff": "x"})
+
+    def test_suppresses_corrupt_internal_tool_trace_from_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+
+            def failing(_: LLMRequest) -> LLMResponse:
+                raise AdapterUnavailableError("provider unavailable")
+
+            def corrupt(request: LLMRequest) -> LLMResponse:
+                return LLMResponse(
+                    content='to=multi_tool_use.parallel {"tool_uses":[]}',
+                    lane=request.lane,
+                    provider="anthropic",
+                    model=request.model,
+                    confidence=0.8,
+                )
+
+            audit_log: list[dict] = []
+            router = LLMRouter(
+                config=config,
+                adapters={
+                    "openai": StaticAdapter("openai", tool_capable=False, responder=failing),
+                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=corrupt),
+                },
+                audit_sink=audit_log.append,
+            )
+
+            response = router.ask("verify", lane="verifier", evidence_pack={"diff": "x"})
+
+            self.assertEqual(response.confidence, 0.0)
+            self.assertTrue(response.artifacts["internal_tool_trace_suppressed"])
+            self.assertNotIn("multi_tool_use.parallel", response.content)
+            fallback_event = [event for event in audit_log if event["action"] == "llm_fallback"][0]
+            self.assertNotIn("multi_tool_use.parallel", fallback_event["metadata"]["response_text"])
+
     def test_pre_hook_blocked_is_audited(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = make_config(Path(tmpdir))
@@ -554,6 +617,7 @@ class LLMRouterTests(unittest.TestCase):
 
             def reroute_to_openai(request: LLMRequest) -> LLMRequest:
                 request.provider = "openai"
+                request.model = "gpt-5.5"
                 return request
 
             router.pre_hooks.append(reroute_to_openai)

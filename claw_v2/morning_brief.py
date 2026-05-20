@@ -1392,6 +1392,7 @@ def _public_task_state(value: Any) -> str:
         "queued": "en cola",
         "running": "en curso",
         "succeeded": "completada",
+        "completed_unverified": "completada sin verificacion final",
         "failed": "fallida",
         "timed_out": "agotada por tiempo",
         "cancelled": "cancelada",

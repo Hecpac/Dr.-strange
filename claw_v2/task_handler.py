@@ -1540,6 +1540,9 @@ class TaskHandler:
             ),
         )
         artifacts["response_preview"] = response_preview
+        if checkpoint.get("critical_worker_error"):
+            artifacts["critical_worker_error"] = True
+            artifacts["coordinator_audit"] = dict(checkpoint.get("coordinator_audit") or {})
         job_state = "completed" if terminal_status == "succeeded" else "failed"
         return self._with_job_artifact(task_id, session_id, job_state, artifacts)
 
@@ -1565,6 +1568,9 @@ class TaskHandler:
             ),
         )
         artifacts["response_preview"] = response_preview
+        if checkpoint.get("critical_worker_error"):
+            artifacts["critical_worker_error"] = True
+            artifacts["coordinator_audit"] = dict(checkpoint.get("coordinator_audit") or {})
         return self._with_job_artifact(task_id, session_id, "pending", artifacts)
 
     @staticmethod

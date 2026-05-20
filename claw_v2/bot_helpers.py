@@ -13,6 +13,12 @@ from dataclasses import dataclass
 
 from claw_v2.coordinator import CoordinatorResult, WorkerTask
 
+_CRITICAL_WORKER_ERROR_PREFIX = "critical_worker_error:"
+_CRITICAL_WORKER_VISIBLE_MESSAGE = (
+    "No pude avanzar la tarea porque el subagente experimentó un error crítico en el entorno local. "
+    "Activé la bitácora de contingencia técnica y dejé registrada la reparación necesaria."
+)
+
 __all__ = [
     "current_meta_introspection_kind",
     "meta_introspection_context",
@@ -84,6 +90,7 @@ __all__ = [
     "_format_task_approval_response",
     "_format_tweet_analysis_prompt",
     "_format_worker_results",
+    "_extract_url_candidates",
     "_has_link_analysis_sections",
     "_has_runtime_capability_sections",
     "_has_url_query",
@@ -108,6 +115,7 @@ __all__ = [
     "_needs_real_browser",
     "_normalize_command_text",
     "_normalize_url",
+    "_nested_url_candidates",
     "_parse_autonomy_mode",
     "_parse_float",
     "_parse_non_negative_int",
@@ -121,6 +129,7 @@ __all__ = [
     "_select_next_task_queue_item",
     "_sanitize_chat_response",
     "_chat_response_has_internal_leak",
+    "_strip_url_permission_deferrals",
     "_stable_task_id",
     "_strip_url_punctuation",
     "_summarize_prefetched_link_content",
@@ -1627,22 +1636,28 @@ def _coordinator_checkpoint(result: CoordinatorResult, *, objective: str) -> dic
     implementation_results = result.phase_results.get("implementation", [])
     verification_text = "\n".join(item.content for item in verification_results if item.content)
     implementation_text = "\n".join(item.content for item in implementation_results if item.content)
+    critical_worker_error = _is_critical_worker_error(result)
     pending_action = _extract_pending_action_from_reply(verification_text) or _extract_pending_action_from_reply(implementation_text)
     implementation_error = next(
         (item.error for item in implementation_results if item.error),
         "",
     )
     verification_status = (
-        ("failed" if implementation_error else None)
+        ("failed" if critical_worker_error else None)
+        or ("failed" if implementation_error else None)
         or _extract_verification_status(verification_text)
         or ("failed" if result.error else None)
         or ("pending" if verification_results else "unknown")
     )
-    summary = _compact_summary(result.synthesis or objective, limit=180) or objective
+    summary_source = _CRITICAL_WORKER_VISIBLE_MESSAGE if critical_worker_error else (result.synthesis or objective)
+    summary = _compact_summary(summary_source, limit=180) or summary_source
     checkpoint = {
         "summary": summary,
         "verification_status": verification_status,
     }
+    if critical_worker_error:
+        checkpoint["critical_worker_error"] = True
+        checkpoint["coordinator_audit"] = dict(getattr(result, "audit", {}) or {})
 
     structured = _coordinator_result_to_structured(
         result,
@@ -1661,6 +1676,8 @@ def _coordinator_checkpoint(result: CoordinatorResult, *, objective: str) -> dic
 
     if pending_action:
         checkpoint["pending_action"] = pending_action
+    elif critical_worker_error:
+        checkpoint["pending_action"] = "reparar error crítico del subagente antes de reintentar la misión principal"
     elif implementation_error:
         checkpoint["pending_action"] = f"reintentar implementación: {implementation_error}"
     if result.error:
@@ -1713,6 +1730,8 @@ def _coordinator_result_to_structured(
         blockers.append(f"coordinator_error: {result.error}")
     if implementation_error:
         blockers.append(f"implementation_error: {implementation_error}")
+    if _is_critical_worker_error(result):
+        blockers.append("critical_worker_error")
 
     if not actions and not evidence:
         coerced = coerce_unstructured_coordinator_output(result.synthesis or objective)
@@ -1764,6 +1783,11 @@ def _format_worker_results(results: list[Any]) -> str:
 
 
 def _format_coordinator_response(result: CoordinatorResult, *, checkpoint: dict[str, str], forced: bool) -> str:
+    if _is_critical_worker_error(result):
+        lines = [_CRITICAL_WORKER_VISIBLE_MESSAGE]
+        if checkpoint.get("pending_action"):
+            lines.append(f"Siguiente paso: {checkpoint['pending_action']}")
+        return "\n".join(lines)
     status = checkpoint.get("verification_status", "unknown")
     opening = {
         "passed": f"Listo. Cerré la tarea `{result.task_id}`.",
@@ -1782,6 +1806,10 @@ def _format_coordinator_response(result: CoordinatorResult, *, checkpoint: dict[
     if checkpoint.get("pending_action"):
         lines.append(f"Siguiente paso: {checkpoint['pending_action']}")
     return "\n".join(lines)
+
+
+def _is_critical_worker_error(result: CoordinatorResult) -> bool:
+    return str(getattr(result, "error", "") or "").startswith(_CRITICAL_WORKER_ERROR_PREFIX)
 
 
 def _autonomy_policy_payload(state: dict[str, Any]) -> dict[str, Any]:
@@ -2035,6 +2063,26 @@ def _extract_url_candidate(text: str) -> str | None:
     return None
 
 
+def _extract_url_candidates(text: str) -> list[str]:
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for pattern in (_SCHEME_URL_RE, _HOST_URL_RE):
+        for match in pattern.finditer(text):
+            candidate = _strip_url_punctuation(match.group("url"))
+            if not candidate:
+                continue
+            try:
+                normalized = _normalize_url(candidate)
+            except ValueError:
+                continue
+            key = _url_identity(normalized)
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(normalized)
+    return candidates
+
+
 def _strip_url_punctuation(value: str) -> str:
     candidate = value.strip().strip("<>[]{}\"'")
     while candidate and candidate[-1] in ".,;:!?":
@@ -2046,6 +2094,107 @@ def _looks_like_standalone_url(text: str, url: str) -> bool:
     remainder = text.replace(url, " ", 1)
     remainder = re.sub(r"[\s`\"'“”‘’<>()\[\]{}.,;:!?-]+", "", remainder)
     return remainder == ""
+
+
+def _url_identity(url: str) -> str:
+    try:
+        parsed = urlsplit(_normalize_url(url))
+    except Exception:
+        return _strip_url_punctuation(url).lower()
+    host = (parsed.hostname or parsed.netloc).lower()
+    if host.startswith("www."):
+        host = host[4:]
+    path = parsed.path.rstrip("/")
+    return f"{host}{path}".lower()
+
+
+def _nested_url_candidates(text: str, *, skip_urls: list[str] | tuple[str, ...] = (), max_urls: int = 3) -> list[str]:
+    skip = {_url_identity(url) for url in skip_urls}
+    candidates: list[str] = []
+    for url in _extract_url_candidates(text):
+        key = _url_identity(url)
+        if key in skip:
+            continue
+        skip.add(key)
+        candidates.append(url)
+        if len(candidates) >= max_urls:
+            break
+    return candidates
+
+
+def _textual_nested_url_review_blocks(
+    text: str,
+    *,
+    skip_urls: list[str] | tuple[str, ...] = (),
+    max_urls: int = 3,
+) -> list[str]:
+    blocks: list[str] = []
+    for url in _nested_url_candidates(text, skip_urls=skip_urls, max_urls=max_urls):
+        content = _tweet_fxtwitter_read(url) if _is_tweet_url(url) else _jina_read(url)
+        if content:
+            blocks.append(f"[URL anidada analizada]: {url}\n{content[:3000]}")
+        else:
+            blocks.append(f"[URL anidada intentada]: {url}\nNo se pudo extraer contenido útil con lectura textual.")
+    return blocks
+
+
+def _looks_like_url_permission_deferral(text: str, *, context: str = "") -> bool:
+    combined = f"{text}\n{context}" if context else text
+    normalized = _normalize_command_text(combined)
+    if not (
+        _extract_url_candidate(combined)
+        or any(token in normalized for token in ("url", "enlace", "tweet", "tuit", "flow.google"))
+    ):
+        return False
+    has_defer_marker = any(
+        marker in normalized
+        for marker in (
+            "si quieres",
+            "cuando me digas",
+            "cuando decidas",
+            "hasta que decidas",
+            "si me das la luz",
+            "tu pick",
+        )
+    )
+    if not has_defer_marker:
+        return False
+    return any(
+        action in normalized
+        for action in (
+            " abro",
+            " abra",
+            " abrir",
+            " abre ",
+            " reviso",
+            " revisar",
+            " verifico",
+            " verificar",
+            " navego",
+            " navegar",
+            " traigo",
+            " traer",
+            " compruebo",
+            " confirmar acceso",
+        )
+    )
+
+
+def _strip_url_permission_deferrals(text: str, *, context: str = "") -> str:
+    if not text:
+        return text
+    kept: list[str] = []
+    changed = False
+    for line in text.splitlines():
+        if _looks_like_url_permission_deferral(line, context=context):
+            changed = True
+            continue
+        kept.append(line)
+    if not changed:
+        return text
+    stripped = "\n".join(kept)
+    stripped = re.sub(r"\n{3,}", "\n\n", stripped).strip()
+    return stripped or "Detecté una URL Tier 1 que no debe convertirse en pregunta; la revisión queda como acción autónoma."
 
 
 # Domains that require real browser cookies (auth) or heavy JS rendering.
@@ -2060,6 +2209,7 @@ _AUTH_DOMAINS = frozenset({
     "threads.net",
     "mail.google.com",
     "web.whatsapp.com",
+    "flow.google",
 })
 
 _JS_RENDERED_DOMAINS = frozenset({
@@ -2127,15 +2277,19 @@ _RAW_MARKUP_SIGNALS = [
 
 def _enrich_tweet_urls(text: str) -> str:
     """If text contains tweet URLs, pre-fetch content and append to message."""
-    urls = _SCHEME_URL_RE.findall(text)
-    tweet_urls = [_strip_url_punctuation(u) for u in urls if _is_tweet_url(_strip_url_punctuation(u))]
+    tweet_urls = [u for u in _extract_url_candidates(text) if _is_tweet_url(u)]
     if not tweet_urls:
         return text
     enriched = text
+    seen_urls: list[str] = []
     for url in tweet_urls:
+        seen_urls.append(url)
         content = _tweet_fxtwitter_read(url)
         if content:
             enriched += f"\n\n---\n[Contenido del tweet pre-cargado]:\n{content}"
+            nested_blocks = _textual_nested_url_review_blocks(content, skip_urls=seen_urls)
+            if nested_blocks:
+                enriched += "\n\n---\n[URLs anidadas revisadas autónomamente]\n" + "\n\n".join(nested_blocks)
     return enriched
 
 
@@ -2146,10 +2300,12 @@ def _format_tweet_analysis_prompt(original_text: str, enriched_text: str) -> str
         "Si respondes sobre este tweet o sobre enlaces relacionados que el tweet incluye, separa SIEMPRE la respuesta en dos secciones exactas:\n"
         "## Fuente\n"
         "- Resume únicamente lo que está en el tweet y, si aplica, en el contenido enlazado que sí fue leído.\n"
+        "- Si hay bloques [URL anidada analizada] o [URL anidada intentada], incorpóralos como revisión ya ejecutada; no preguntes si debe abrirse una URL.\n"
         "- Distingue con claridad qué viene del tweet y qué viene del enlace.\n"
         "- No presentes inferencias o recomendaciones como si fueran parte de la fuente.\n\n"
         "## Aplicación sugerida\n"
         "- Incluye solo inferencias, recomendaciones o ideas prácticas tuyas.\n"
+        "- Si detectas otra URL Tier 1 no revisada, no la conviertas en opción para Hector; reporta la limitación como intento pendiente o bloqueador real.\n"
         "- Si no hay una recomendación útil, escribe: Ninguna por ahora.\n\n"
         f"{enriched_text}"
     )
@@ -2162,10 +2318,12 @@ def _format_link_analysis_prompt(original_text: str, url: str, fetched_content: 
         "Si respondes sobre este enlace, separa SIEMPRE la respuesta en dos secciones exactas:\n"
         "## Fuente\n"
         "- Resume únicamente lo que sí fue leído del enlace.\n"
+        "- Si hay bloques [URL anidada analizada] o [URL anidada intentada], trátalos como revisión autónoma ya ejecutada; no preguntes si debe abrirse una URL.\n"
         "- Si el contenido vino incompleto, estaba detrás de login o hubo limitaciones de lectura, dilo explícitamente.\n"
         "- No mezcles inferencias, recomendaciones o juicio propio con la fuente.\n\n"
         "## Aplicación sugerida\n"
         "- Incluye solo inferencias, recomendaciones, riesgos o siguientes pasos tuyos.\n"
+        "- No termines con 'si quieres lo abro/reviso/verifico' para URLs; esas revisiones son Tier 1 salvo acción Tier 3.\n"
         "- Si no hay una sugerencia útil, escribe: Ninguna por ahora.\n\n"
         f"[URL analizada]: {url}\n\n"
         f"[Contenido del enlace pre-cargado]:\n{fetched_content}"
