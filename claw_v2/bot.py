@@ -319,7 +319,15 @@ def _looks_like_operator_action_request(text: str) -> bool:
         )
     if looks_like_actionable_telegram_message(text):
         return True
-    return any(term in normalized for term in _OPERATOR_ACTION_REQUEST_TERMS)
+    return _contains_operator_action_term(normalized)
+
+
+def _contains_operator_action_term(normalized_text: str) -> bool:
+    for term in _OPERATOR_ACTION_REQUEST_TERMS:
+        pattern = rf"(?<!\w){re.escape(term)}(?!\w)"
+        if re.search(pattern, normalized_text):
+            return True
+    return False
 
 
 def _looks_like_completion_side_effect_claim(text: str) -> bool:
@@ -1685,6 +1693,16 @@ class BotService:
         link_analysis_context: dict[str, Any] | None,
     ) -> str:
         content = raw_content.strip()
+        meta_evidence_skip_reason = self._meta_evidence_skip_reason(content)
+        if meta_evidence_skip_reason is not None:
+            self._emit_safe(
+                "evidence_gate_skipped_meta",
+                {
+                    "session_id": session_id,
+                    "reason": meta_evidence_skip_reason,
+                    "meta_kind": current_meta_introspection_kind(),
+                },
+            )
         if not content or content == "(no result)":
             content = "Recibido. ¿Qué quieres que haga con esto?"
         elif _looks_like_pre_hook_block(content):
@@ -1722,14 +1740,15 @@ class BotService:
         ):
             meta_kind = current_meta_introspection_kind()
             if meta_kind is not None:
-                self._emit_safe(
-                    "evidence_gate_skipped_meta",
-                    {
-                        "session_id": session_id,
-                        "reason": "start_claim_without_evidence",
-                        "meta_kind": meta_kind,
-                    },
-                )
+                if meta_evidence_skip_reason is None:
+                    self._emit_safe(
+                        "evidence_gate_skipped_meta",
+                        {
+                            "session_id": session_id,
+                            "reason": "start_claim_without_evidence",
+                            "meta_kind": meta_kind,
+                        },
+                    )
             else:
                 blocker_task_id = self._record_evidence_gate_explicit_blocker(
                     session_id=session_id,
@@ -1757,17 +1776,19 @@ class BotService:
             source_text=source_text,
             content=content,
             response=response,
+            link_analysis_context=link_analysis_context,
         ):
             meta_kind = current_meta_introspection_kind()
             if meta_kind is not None:
-                self._emit_safe(
-                    "evidence_gate_skipped_meta",
-                    {
-                        "session_id": session_id,
-                        "reason": "completion_claim_without_evidence",
-                        "meta_kind": meta_kind,
-                    },
-                )
+                if meta_evidence_skip_reason is None:
+                    self._emit_safe(
+                        "evidence_gate_skipped_meta",
+                        {
+                            "session_id": session_id,
+                            "reason": "completion_claim_without_evidence",
+                            "meta_kind": meta_kind,
+                        },
+                    )
             else:
                 blocker_task_id = self._record_evidence_gate_explicit_blocker(
                     session_id=session_id,
@@ -1876,16 +1897,43 @@ class BotService:
         source_text: str,
         content: str,
         response: Any | None,
+        link_analysis_context: dict[str, Any] | None = None,
     ) -> bool:
         if not _looks_like_operator_action_request(source_text):
             return False
         if not _looks_like_completion_side_effect_claim(content):
+            return False
+        if self._link_analysis_context_has_evidence(link_analysis_context):
             return False
         if self._response_has_evidence_signal(response):
             return False
         if self._session_has_fresh_evidence(session_id):
             return False
         return True
+
+    @staticmethod
+    def _link_analysis_context_has_evidence(context: dict[str, Any] | None) -> bool:
+        if not isinstance(context, dict):
+            return False
+        fetched_content = str(context.get("fetched_content") or "").strip()
+        if not fetched_content:
+            return False
+        lowered = fetched_content.lower()
+        if lowered.startswith("browse error"):
+            return False
+        if "no se pudo leer" in lowered or "all browse backends fail" in lowered:
+            return False
+        return _is_usable_browse_content(str(context.get("url") or ""), fetched_content)
+
+    @staticmethod
+    def _meta_evidence_skip_reason(content: str) -> str | None:
+        if current_meta_introspection_kind() is None:
+            return None
+        if _looks_like_starting_side_effect_claim(content):
+            return "start_claim_without_evidence"
+        if _looks_like_completion_side_effect_claim(content):
+            return "completion_claim_without_evidence"
+        return None
 
     def _response_has_evidence_signal(self, response: Any | None) -> bool:
         if response is None:
@@ -4377,13 +4425,13 @@ class BotService:
     def _pending_evidence_response(self, task_id: str | None = None) -> str:
         return (
             "No lo marco como hecho todavía: no tengo evidencia verificable de ejecución. "
-            "Retomo con una acción real y reporto solo cuando haya resultado."
+            "Dejé registrado el bloqueo y necesito una ejecución con herramienta antes de reportarlo como resultado."
         )
 
     def _unexecuted_start_response(self, task_id: str | None = None) -> str:
         return (
             "No arranqué nada todavía: no tengo una ejecución verificable que respalde decir "
-            "que ya está en curso. Retomo con una acción real y reporto solo cuando haya resultado."
+            "que ya está en curso. Dejé registrado el bloqueo y necesito una ejecución con herramienta."
         )
 
     def _emit_identity_capability_binding_guard(
