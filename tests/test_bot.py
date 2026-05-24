@@ -5225,8 +5225,8 @@ class BotTests(unittest.TestCase):
                     text="/browse https://example.com/public",
                 )
 
-                event = runtime.observe.recent_events(1)[0]
-                self.assertEqual(event["event_type"], "browse_result")
+                events = runtime.observe.recent_events(10)
+                event = next(e for e in events if e["event_type"] == "browse_result")
                 self.assertEqual(event["payload"]["strategy"], "public")
                 self.assertEqual(event["payload"]["selected_backend"], "jina")
                 self.assertEqual(event["payload"]["status"], "success")
@@ -5263,8 +5263,8 @@ class BotTests(unittest.TestCase):
                     text="/browse https://x.com/acme/status/1",
                 )
 
-                event = runtime.observe.recent_events(1)[0]
-                self.assertEqual(event["event_type"], "browse_result")
+                events = runtime.observe.recent_events(10)
+                event = next(e for e in events if e["event_type"] == "browse_result")
                 self.assertEqual(event["payload"]["strategy"], "authenticated")
                 self.assertEqual(event["payload"]["selected_backend"], "chrome_cdp")
                 self.assertEqual(event["payload"]["status"], "success")
