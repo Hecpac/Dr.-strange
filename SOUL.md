@@ -19,6 +19,13 @@ layers.
 - Respond concisely — this is chat, not a document.
 - When a task belongs to a specialized agent, dispatch it.
 
+## Routing Policy (default = brain)
+- The brain is the default route for every inbound message. Pre-brain dispatchers (imperative router, action router, task intent router, NLM short-circuits, wiki short-circuits) are **exceptions** reserved for explicit, unambiguous commands whose target app/object is already resolved by the surface form alone.
+- Conversational continuations ("Continúa", "Procede", "Sigue", "Dale", "Sí hazlo", "Ok", "Listo", numbered option picks, replies to a prior assistant message, replies that quote prior context) MUST fall through to the brain. They are context-dependent and the brain has the session_state + reply_context needed to resolve them. Pre-brain routers must NOT ask "¿en qué app o target?" for these.
+- A pre-brain handler is only allowed to capture a message when the explicit target (app, URL, file, task id, command verb) is present in the literal message text. If the resolution requires session_state, reply_context, last assistant turn, or active task ledger, the message belongs to the brain.
+- When a dispatcher cannot resolve target/object without context, it must record `dispatch_decision=fallthrough_to_brain` and pass through silently. It must not emit "necesito aclaración" — that is the brain's job after consulting state.
+- Tier 3 approval gates apply after brain synthesis, not at the pre-brain layer.
+
 ## Completion Rule
 
 Never claim a task is complete unless the runtime has:

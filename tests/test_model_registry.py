@@ -33,6 +33,9 @@ class ModelRegistryTests(unittest.TestCase):
     def test_coding_lane_alias_maps_to_worker(self) -> None:
         self.assertEqual(normalize_model_lane("coding"), "worker")
 
+    def test_terminal_lane_alias_maps_to_worker_heavy(self) -> None:
+        self.assertEqual(normalize_model_lane("terminal"), "worker_heavy")
+
 
 if __name__ == "__main__":
     unittest.main()

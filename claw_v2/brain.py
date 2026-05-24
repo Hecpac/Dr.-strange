@@ -95,6 +95,7 @@ _INTERNAL_TOOL_TRACE_PATTERNS = (
 _INTERNAL_PROMPT_ECHO_PATTERNS = (
     re.compile(r"^\s*#\s*Telegram message\b", re.IGNORECASE),
     re.compile(r"\bReply ONLY to (?:that|the) latest message\b", re.IGNORECASE),
+    re.compile(r"\bReply\s+ONLY\b", re.IGNORECASE),
     re.compile(r"\bTelegram-friendly Markdown\b", re.IGNORECASE),
     re.compile(r"\bDo not include internal trace\b", re.IGNORECASE),
     re.compile(r"\bNo user-visible text is valid outside <response> tags\b", re.IGNORECASE),
@@ -230,6 +231,16 @@ class BrainService:
         session_provider = model_override.provider if model_override else "anthropic"
         provider_session_id = self.memory.get_provider_session(session_id, session_provider)
         provider_cursor = self.memory.get_provider_session_cursor(session_id, session_provider)
+        provider_reset = self.memory.get_provider_session_reset(session_id)
+        reset_from_compaction = (
+            provider_reset is not None
+            and provider_reset.get("reason") == "memory_compaction"
+            and bool(provider_reset.get("summary_only_context", True))
+        )
+        if reset_from_compaction:
+            provider_session_id = None
+            provider_cursor = None
+            self.memory.clear_provider_sessions_for_app(session_id)
         # When resuming a provider session, skip message history — the SDK already has it.
         # Including both causes Claude to re-summarize the entire conversation each time.
         resuming = provider_session_id is not None
@@ -237,7 +248,8 @@ class BrainService:
             session_id=session_id,
             message=message,
             stored_user_message=stored_user_message,
-            include_history=not resuming,
+            include_history=not resuming and not reset_from_compaction,
+            compact_context=reset_from_compaction,
             catchup_after_id=provider_cursor,
             task_type=task_type,
         )
@@ -252,6 +264,22 @@ class BrainService:
                     artifact_id=trace["artifact_id"],
                     payload={"app_session_id": session_id},
                 )
+                if reset_from_compaction:
+                    self.observe.emit(
+                        "provider_session_reset",
+                        lane="brain",
+                        provider=session_provider,
+                        trace_id=trace["trace_id"],
+                        root_trace_id=trace["root_trace_id"],
+                        span_id=trace["span_id"],
+                        parent_span_id=trace["parent_span_id"],
+                        artifact_id=trace["artifact_id"],
+                        payload={
+                            "app_session_id": session_id,
+                            "reason": "memory_compaction",
+                            "summary_only_context": True,
+                        },
+                    )
             response = self.router.ask(
                 prompt,
                 system_prompt=_brain_system_prompt(self.system_prompt),
@@ -307,6 +335,7 @@ class BrainService:
                 message=message,
                 stored_user_message=stored_user_message,
                 include_history=True,
+                compact_context=False,
                 catchup_after_id=None,
                 task_type=task_type,
             )
@@ -330,7 +359,7 @@ class BrainService:
             self._last_confidence.popitem(last=False)
         provider_session_artifact = response.artifacts.get("session_id")
         self.memory.store_message(session_id, "user", stored_user_message)
-        self.memory.store_message(
+        compacted_message_count = self.memory.store_message(
             session_id,
             "assistant",
             response.content,
@@ -343,6 +372,8 @@ class BrainService:
                 provider_session_artifact,
                 last_message_id=self.memory.last_message_id(session_id),
             )
+        if reset_from_compaction and not compacted_message_count:
+            self.memory.clear_provider_session_reset(session_id)
         if self.observe is not None:
             completion = child_trace_context(trace, artifact_id=session_id)
             reasoning_trace = response.artifacts.get("reasoning_trace")
@@ -442,6 +473,7 @@ class BrainService:
         message: UserPrompt,
         stored_user_message: str,
         include_history: bool,
+        compact_context: bool,
         catchup_after_id: int | None,
         task_type: str | None,
     ) -> UserPrompt:
@@ -516,6 +548,9 @@ class BrainService:
             lessons = f"{lessons}\n{autonomy_contract}" if lessons else autonomy_contract
         if isinstance(message, str):
             if not include_history:
+                if compact_context:
+                    ctx = self.memory.build_context(session_id, message, include_history=False)
+                    return f"{lessons}\n{ctx}" if lessons else ctx
                 # Include recent messages the SDK session might have missed
                 # (shortcuts bypass the brain, creating gaps in the SDK context).
                 catchup = self._build_catchup(session_id, after_id=catchup_after_id)
@@ -525,6 +560,11 @@ class BrainService:
             return f"{lessons}\n{ctx}" if lessons else ctx
 
         if not include_history:
+            if compact_context:
+                context = self.memory.build_context(session_id, include_history=False).strip()
+                preamble = f"{lessons}\n{context}" if lessons and context else (lessons or context)
+                marker_text = f"{preamble}\n# Current input" if preamble else "# Current input"
+                return [{"type": "text", "text": marker_text}, *message]
             catchup = self._build_catchup(session_id, after_id=catchup_after_id)
             preamble = f"{lessons}\n{catchup}" if lessons and catchup else (lessons or catchup)
             if preamble:
@@ -621,7 +661,22 @@ class BrainService:
             try:
                 self.checkpoint.schedule_restore(latest["ckpt_id"])
             except Exception:
-                logger.warning("schedule_restore failed", exc_info=True)
+                logger.exception("auto-rollback schedule_restore failed")
+                if self.observe is not None:
+                    try:
+                        self.observe.emit(
+                            "auto_rollback_failed",
+                            payload={
+                                "ckpt_id": latest["ckpt_id"],
+                                "session_id": session_id,
+                                "autonomy_mode": autonomy_mode,
+                            },
+                        )
+                    except Exception:
+                        logger.debug(
+                            "auto_rollback_failed emit suppressed",
+                            exc_info=True,
+                        )
 
     def _wiki_context(self, message: str) -> str:
         """Query the wiki for relevant pages and return a compact context section."""
@@ -1020,7 +1075,21 @@ class BrainService:
                 session_id=session_id,
             )
         except Exception:
-            logger.warning("Pre-action checkpoint failed", exc_info=True)
+            logger.exception("Pre-action checkpoint failed for %s", action[:80])
+            if self.observe is not None:
+                try:
+                    self.observe.emit(
+                        "pre_snapshot_failed",
+                        payload={
+                            "action": action[:80],
+                            "session_id": session_id,
+                        },
+                    )
+                except Exception:
+                    logger.debug(
+                        "pre_snapshot_failed emit suppressed",
+                        exc_info=True,
+                    )
             return None
 
     def _emit_execution_event(

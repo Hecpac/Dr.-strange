@@ -8,9 +8,9 @@
 ## meta
 
 ```yaml
-describes_commit: 1b6e37c+tool-policies-json
-doc_version: 1.3
-last_verified: 2026-05-10
+describes_commit: 6d43148+final-render-funnel
+doc_version: 1.5
+last_verified: 2026-05-17
 verification_method: manual + grep cross-check
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
@@ -67,6 +67,60 @@ invariants:
          entirely (calling adapter.publish or subprocess directly) would
          escape every gate. The pending-record path forces a human action
          from Telegram before the side effect lands.
+
+  evidence_gate_meta_skip_sync_path:
+    rule: The chain handle_text → _brain_text_response →
+          _prepare_visible_brain_content → _record_evidence_gate_explicit_blocker
+          must stay synchronous and on the same worker thread. The
+          meta_introspection_guard (claw_v2/bot.py) uses
+          `meta_introspection_context` (ContextVar in claw_v2/bot_helpers.py)
+          to mark the turn as meta so the evidence-gate emits
+          `evidence_gate_skipped_meta` and lets the brain reply pass through
+          instead of pinning a failed `runtime=evidence_gate` row in the
+          task ledger.
+    enforced_by:
+      - tests/test_meta_introspection_integration.py
+        (test_complaint_no_evidence_gate_task + _via_asyncio_to_thread
+        variant exercise the same-thread guarantee that asyncio.to_thread
+        from telegram.py:1010 relies on)
+    why: Converting any step to `async def` returns the coroutine before
+         the `with` block exits, resetting the ContextVar before the gate
+         reads it. Hector's complaints then become failed evidence_gate
+         tasks again and the user sees the explicit_blocker template with
+         internal IDs exposed (the exact 2026-05-17 P0-1 regression).
+
+  final_render_brain_path_inside_meta_context:
+    rule: When `_final_render` (claw_v2/bot.py) is applied to the brain
+          path, it MUST run inside `_brain_text_response`, which itself
+          runs inside the `with meta_introspection_context(...)` block
+          opened by the meta_introspection_guard branch of
+          `BotService.handle_text` (the one that captures
+          `detect_meta_introspection_request` matches). Calling it from
+          a caller frame after `_brain_text_response` returns is allowed
+          for non-brain handlers (own ContextVar lifetime not relevant),
+          but NEVER for the brain path on a meta turn.
+    contract:
+      - `_final_render` is render-then-sanitize only: NaturalLanguageRenderer.render
+        followed by _sanitize_visible_chat_response.
+      - It must NOT call _record_evidence_gate_explicit_blocker, touch
+        task_ledger, emit evidence_gate_* events, or read
+        current_meta_introspection_kind.
+      - Both inner ops are idempotent regex transforms; the helper itself
+        is idempotent (proven by tests/test_final_render_idempotency.py
+        with adversarial inputs).
+    enforced_by:
+      - tests/test_final_render_idempotency.py
+        (test_final_render_is_idempotent_on_adversarial_inputs +
+         test_final_render_does_not_touch_evidence_gate +
+         test_final_render_preserves_meta_skip_invariant)
+    why: If gate logic creeps into `_final_render`, the gate would read
+         the ContextVar from a caller frame outside the
+         meta_introspection_context `with` block (ContextVar already
+         reset in __exit__) and re-introduce the P0-1 regression — meta
+         turns would create failed evidence_gate ledger rows again.
+         Keeping the helper a pure formatter prevents that whole class
+         of bug; the placement rule ensures the brain-path migration
+         (P1-6 funnel) never breaks `evidence_gate_meta_skip_sync_path`.
 ```
 
 ---
@@ -115,13 +169,19 @@ Telegram → BotService.handle_text
 ```yaml
 lanes:
   brain:    { tool_capable: true,  default: anthropic }
-  worker:   { tool_capable: true,  default: codex_or_anthropic }
-  verifier: { tool_capable: false, default: multi_vote }
-  research: { tool_capable: false, default: openai_or_google }
-  judge:    { tool_capable: false, default: anthropic }
+  worker:   { tool_capable: true,  default: anthropic }
+  worker_heavy:
+    tool_capable: true
+    default: codex/gpt-5.5
+    purpose: terminal/debugging/long tool runs
+  verifier: { tool_capable: false, default: codex/gpt-5.5 read-only unless overridden }
+  research: { tool_capable: false, default: codex/gpt-5.5 read-only }
+  judge:    { tool_capable: false, default: codex/gpt-5.5 read-only }
 
 NON_TOOL_LANES: [verifier, research, judge]
-enforced_by: LLMRouter._validate_lane_input  # claw_v2/llm.py
+enforced_by:
+  - LLMRouter._validate_lane_input  # blocks tool-loop config
+  - CodexAdapter read-only sandbox for advisory lanes
 ```
 
 ### resilience
@@ -136,12 +196,14 @@ enforced_by: LLMRouter._validate_lane_input  # claw_v2/llm.py
     fallback_provider: null  # explicit — codex is ChatGPT subscription
   ```
 - ObservationWindowState (`claw_v2/observation_window.py`) is an additional
-  gate over LLM and tool execution: rolling 1h cost, rolling 1min tool-call
-  rate, hard denylist (git push -f, vercel --prod, gh release create, dynamic
-  rm -rf). Frozen state persists between restarts; `circuit_breaker:*`
-  freezes auto-clear after `stale_freeze_seconds` (default 3600s) since the
-  rolling-window evidence has decayed by then. Manual freezes (manual_*)
-  always require explicit unfreeze.
+  gate over LLM and tool execution: rolling 1h billable API cost, rolling 1min
+  tool-call rate, hard denylist (git push -f, vercel --prod, gh release create,
+  dynamic rm -rf). Subscription/local providers (`codex`, `ollama`, and
+  `anthropic` when `CLAUDE_AUTH_MODE=subscription`) report notional costs only;
+  those are ignored for budget freezes. Frozen state persists between restarts;
+  `circuit_breaker:*` freezes auto-clear after `stale_freeze_seconds` (default
+  3600s) since the rolling-window evidence has decayed by then. Manual freezes
+  (manual_*) always require explicit unfreeze.
 
 ### provider-aware sessions
 
@@ -418,7 +480,7 @@ Self-improvement loop must reject these even if tests pass.
 do_not:
   - change: Grant tool access to verifier, research, or judge lanes
     why: Breaks advisory-only invariant.
-    enforced_by: LLMRouter._validate_lane_input
+    enforced_by: LLMRouter._validate_lane_input + CodexAdapter advisory sandbox
 
   - change: Add fallback codex → anthropic
     why: Codex is ChatGPT subscription. Silent fallback hides provider switch.
@@ -444,6 +506,12 @@ do_not:
          freezes are evidence-backed by rolling windows and safe to TTL out.
     enforced_by: ObservationWindowState._load_state stale-freeze TTL guard.
 
+  - change: Count subscription/local provider notional costs as billable budget
+    why: Subscription usage is an operational run-budget signal, not API spend;
+         blocking the bot on it makes the agent unavailable while paid
+         subscription lanes are still usable.
+    enforced_by: AppConfig.notional_cost_providers + ObservationWindowState
+
   - change: Call adapter.publish, subprocess git push, or any other direct
             external-state mutation from a Kairos handler without going
             through ApprovalManager.create or an explicit env opt-in.
@@ -452,6 +520,35 @@ do_not:
          gate. New mutating handlers must follow the
          _autonomous_action_authorized(env_var) pattern.
     enforced_by: invariant kairos_external_mutation_gated (§1).
+
+  - change: Convert handle_text, _brain_text_response, or
+            _prepare_visible_brain_content to `async def`, or move the LLM
+            call to a thread that copies the parent context, without first
+            re-deriving the meta-skip flag from a non-ContextVar source.
+    why: The meta_introspection_guard wraps _brain_text_response in
+         `with meta_introspection_context(...)`. ContextVar resets in
+         __exit__; if the wrapped call returns a coroutine (no await
+         inside the with) or hands off to a context-copying executor, the
+         flag is gone before _prepare_visible_brain_content reads it and
+         meta complaints become failed evidence_gate ledger rows again
+         (reopens P0-1).
+    enforced_by: invariant evidence_gate_meta_skip_sync_path (§1) +
+                 tests/test_meta_introspection_integration.py.
+
+  - change: Add evidence-gate logic, task_ledger writes, observe emits of
+            evidence_gate_*, or reads of current_meta_introspection_kind
+            inside _final_render (claw_v2/bot.py). Or apply _final_render
+            to the brain path from a caller frame outside the
+            `with meta_introspection_context(...)` block.
+    why: _final_render is the funnel for the incremental P1-6 migration
+         (render+sanitize across the 17 return points of the Telegram
+         path). If gate logic creeps in, or the helper is moved outside
+         the meta-context `with` for the brain path, the ContextVar
+         lifetime invariant breaks and meta complaints regress to failed
+         evidence_gate rows + explicit_blocker templates (reopens P0-1
+         through a different door).
+    enforced_by: invariant final_render_brain_path_inside_meta_context
+                 (§1) + tests/test_final_render_idempotency.py.
 ```
 
 ---

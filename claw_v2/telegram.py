@@ -344,17 +344,11 @@ class TelegramTransport:
         await self._notify_startup()
 
     async def _notify_startup(self) -> None:
-        if self._allowed_user_id is None or self._app is None:
+        if self._app is None:
             return
-        try:
-            from datetime import datetime
-            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            await self._app.bot.send_message(
-                chat_id=int(self._allowed_user_id),
-                text=f"Dr. Strange online. {now}",
-            )
-        except Exception:
-            logger.warning("Could not send startup notification", exc_info=True)
+        from datetime import datetime
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        logger.info("Dr. Strange online at %s", now)
 
     async def stop(self) -> None:
         if self._app is None:
@@ -912,7 +906,8 @@ class TelegramTransport:
         """Send a proactive text message, split to Telegram's message limit."""
         if self._app is None:
             return
-        for part in _split_message(text):
+        response = self._sanitize_outbound_response(f"tg-{chat_id}", text)
+        for part in _split_message(response):
             try:
                 await self._app.bot.send_message(
                     chat_id=chat_id,

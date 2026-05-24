@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from claw_v2.approval_gate import ApprovalPending
 from claw_v2.bot_commands import BotCommand, CommandContext
 from claw_v2.bot_helpers import _parse_non_negative_int
 
@@ -86,6 +87,8 @@ class TerminalHandler:
             return "terminal bridge unavailable"
         try:
             sessions = self.terminal_bridge.list_sessions()
+        except ApprovalPending:
+            raise
         except Exception as exc:
             return f"terminal list error: {exc}"
         return json.dumps({"sessions": sessions}, indent=2, sort_keys=True)
@@ -95,6 +98,8 @@ class TerminalHandler:
             return "terminal bridge unavailable"
         try:
             result = self.terminal_bridge.open(tool, cwd=cwd)
+        except ApprovalPending:
+            raise
         except Exception as exc:
             return f"terminal open error: {exc}"
         return json.dumps(result, indent=2, sort_keys=True)
@@ -104,6 +109,8 @@ class TerminalHandler:
             return "terminal bridge unavailable"
         try:
             result = self.terminal_bridge.status(session_id)
+        except ApprovalPending:
+            raise
         except Exception as exc:
             return f"terminal status error: {exc}"
         return json.dumps(result, indent=2, sort_keys=True)
@@ -113,6 +120,8 @@ class TerminalHandler:
             return "terminal bridge unavailable"
         try:
             result = self.terminal_bridge.read(session_id, offset=offset, limit=3000)
+        except ApprovalPending:
+            raise
         except Exception as exc:
             return f"terminal read error: {exc}"
         return json.dumps(result, indent=2, sort_keys=True)
@@ -122,6 +131,8 @@ class TerminalHandler:
             return "terminal bridge unavailable"
         try:
             result = self.terminal_bridge.send(session_id, text)
+        except ApprovalPending:
+            raise
         except Exception as exc:
             return f"terminal send error: {exc}"
         return json.dumps(result, indent=2, sort_keys=True)
@@ -131,6 +142,8 @@ class TerminalHandler:
             return "terminal bridge unavailable"
         try:
             result = self.terminal_bridge.close(session_id)
+        except ApprovalPending:
+            raise
         except Exception as exc:
             return f"terminal close error: {exc}"
         return json.dumps(result, indent=2, sort_keys=True)

@@ -19,7 +19,7 @@ def fake_anthropic(request: LLMRequest) -> LLMResponse:
     return LLMResponse(
         content=f"<response>handled:{request.lane}</response>",
         lane=request.lane,
-        provider="anthropic",
+        provider=request.provider,
         model=request.model,
         confidence=0.9,
         cost_estimate=0.02,
@@ -56,6 +56,37 @@ class RuntimeTests(unittest.TestCase):
                 response = runtime.router.ask("classify", lane="judge", evidence_pack={"data": "x"})
                 self.assertEqual(response.provider, "ollama")
                 self.assertEqual(response.model, "gemma4")
+
+    def test_build_runtime_reuses_injected_executor_for_unprovided_secondary_transports(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "PIPELINE_STATE_ROOT": str(root / "pipeline"),
+                "JUDGE_PROVIDER": "codex",
+                "JUDGE_MODEL": "gpt-5.5",
+            }
+            providers: list[str] = []
+
+            def fake(request: LLMRequest) -> LLMResponse:
+                providers.append(request.provider)
+                return LLMResponse(
+                    content='{"action":"none"}',
+                    lane=request.lane,
+                    provider=request.provider,
+                    model=request.model,
+                )
+
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake)
+                response = runtime.router.ask("classify", lane="judge", evidence_pack={"data": "x"})
+
+            self.assertEqual(response.provider, "codex")
+            self.assertEqual(providers, ["codex"])
 
     def test_build_runtime_and_status_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -173,9 +204,15 @@ class RuntimeTests(unittest.TestCase):
                 "APPROVALS_ROOT": str(root / "approvals"),
                 "PIPELINE_STATE_ROOT": str(root / "pipeline"),
                 "WORKER_PROVIDER": "anthropic",  # isolate from host env
+                "CLAW_AUTONOMOUS_MAINTENANCE": "false",
+                "CLAW_AUTONOMOUS_MAINTENANCE_ENABLED": "false",
+                "EVAL_ON_SELF_IMPROVE": "false",
             }
             with patch.dict(os.environ, env, clear=False):
-                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime = build_runtime(
+                    anthropic_executor=fake_anthropic,
+                    codex_transport=fake_anthropic,
+                )
                 tick = runtime.daemon.tick(now=1000)
                 self.assertIn("heartbeat", tick.executed_jobs)
                 self.assertIn("morning_brief", tick.executed_jobs)
@@ -241,6 +278,7 @@ class RuntimeTests(unittest.TestCase):
                 "APPROVALS_ROOT": str(root / "approvals"),
                 "PIPELINE_STATE_ROOT": str(root / "pipeline"),
                 "WORKER_PROVIDER": "anthropic",
+                "RESEARCH_PROVIDER": "anthropic",
                 "VERIFIER_PROVIDER": "anthropic",
             }
             with patch.dict(os.environ, env, clear=False):

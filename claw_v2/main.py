@@ -24,6 +24,10 @@ from claw_v2.agents import (
     wiki_quality_evaluator,
 )
 from claw_v2.approval import ApprovalManager
+from claw_v2.self_improve_backpressure import (
+    SELF_IMPROVE_MAX_PENDING_PER_ACTION,
+    should_pause_self_improve,
+)
 from claw_v2.approval_gate import (
     build_system_auto_approve_gate,
     build_telegram_approval_gate,
@@ -52,13 +56,16 @@ from claw_v2.llm import LLMRouter
 from claw_v2.memory import MemoryStore
 from claw_v2.metrics import MetricsTracker
 from claw_v2.model_registry import ModelRegistry
+from claw_v2.network_proxy import DomainAllowlistEnforcer
 from claw_v2.observation_window import ObservationWindowConfig, ObservationWindowState
 from claw_v2.observe import ObserveStream
+from claw_v2.orchestration import OrchestrationStore
 from claw_v2.pipeline import PipelineService
 from claw_v2.skills import SkillRegistry
 from claw_v2.social import SocialPublisher
 from claw_v2.content import ContentEngine
 from claw_v2.sandbox import SandboxPolicy
+from claw_v2.runtime_policy import RuntimePolicyEngine
 from claw_v2.task_board import TaskBoard
 from claw_v2.task_ledger import TaskLedger
 from claw_v2.terminal_bridge import TerminalBridgeService
@@ -137,6 +144,48 @@ class ClawRuntime:
     observation_window: ObservationWindowState | None = None
 
 
+def build_runtime_approval_gate(approvals: ApprovalManager) -> Callable[[object, dict], None]:
+    from claw_v2.tool_policy import daemon_can_auto_approve
+
+    telegram_gate = build_telegram_approval_gate(approvals)
+
+    def gate(definition: object, args: dict) -> None:
+        tool_name = str(getattr(definition, "name", ""))
+        daemon_reason = current_daemon_reason()
+        if daemon_reason is not None and daemon_can_auto_approve(tool_name):
+            return build_system_auto_approve_gate(approvals, reason=daemon_reason)(definition, args)  # type: ignore[arg-type]
+        return telegram_gate(definition, args)  # type: ignore[arg-type]
+
+    return gate
+
+
+def build_runtime_policy_engine(config: AppConfig, approvals: ApprovalManager) -> RuntimePolicyEngine:
+    sandbox_policy = SandboxPolicy(
+        workspace_root=config.workspace_root,
+        allowed_paths=[
+            *config.allowed_read_paths,
+            *config.extra_workspace_roots,
+            *config.allowed_paths,
+        ],
+        writable_paths=[
+            config.workspace_root,
+            Path("/private/tmp"),
+            Path.home() / ".claw",
+            *config.extra_workspace_roots,
+        ],
+        network_policy="allow",
+        credential_scope="external",
+        capability_profile=config.sandbox_capability_profile,
+    )
+    return RuntimePolicyEngine(
+        workspace_root=config.workspace_root,
+        sandbox_policy=sandbox_policy,
+        network_enforcer=DomainAllowlistEnforcer(),
+        approval_gate=build_runtime_approval_gate(approvals),
+        autoexec_max_tier=config.tier_autoexec_max,
+    )
+
+
 def _noop_experiment_runner(agent_name: str, experiment_number: int, state: dict) -> object:
     from claw_v2.agents import ExperimentRecord
 
@@ -210,6 +259,13 @@ def _find_local_chrome() -> str | None:
     return None
 
 
+def _probe_pyautogui_display() -> tuple[int, int]:
+    import pyautogui
+
+    size = pyautogui.size()
+    return int(getattr(size, "width", 0)), int(getattr(size, "height", 0))
+
+
 def _run_startup_healthchecks(config: AppConfig, observe: ObserveStream) -> StartupHealthReport:
     report = StartupHealthReport()
 
@@ -267,7 +323,26 @@ def _run_startup_healthchecks(config: AppConfig, observe: ObserveStream) -> Star
         )
 
     if config.computer_use_enabled:
-        report.add_ok("computer_use", "desktop control enabled", capability="computer_use")
+        report.add_ok(
+            "computer_use",
+            f"configured: backend={config.computer_use_backend}",
+            capability="computer_use",
+        )
+        try:
+            display_width, display_height = _probe_pyautogui_display()
+        except Exception as exc:
+            report.add_degraded(
+                "computer_display",
+                f"pyautogui display probe failed: {exc}",
+            )
+        else:
+            if display_width <= 0 or display_height <= 0:
+                report.add_degraded(
+                    "computer_display",
+                    f"pyautogui reports unusable display size: {display_width}x{display_height}",
+                )
+            else:
+                report.add_ok("computer_display", f"{display_width}x{display_height}")
     else:
         report.add_degraded(
             "computer_use",
@@ -285,12 +360,20 @@ def _run_startup_healthchecks(config: AppConfig, observe: ObserveStream) -> Star
             )
         else:
             report.add_ok("codex_cli", codex_path, capability="computer_control")
-    elif config.computer_use_enabled and not sys.modules.get("openai") and importlib.util.find_spec("openai") is None:
-        report.add_degraded(
-            "openai_sdk",
-            "OpenAI SDK no está instalado; el control de escritorio asistido quedará degradado",
-            capability="computer_control",
-        )
+    elif config.computer_use_backend == "openai":
+        if config.computer_use_enabled and not config.openai_api_key:
+            report.add_degraded(
+                "openai_api_key",
+                "OPENAI_API_KEY no está configurado; el backend openai fallará al ejecutar acciones reales",
+            )
+        if config.computer_use_enabled and not sys.modules.get("openai") and importlib.util.find_spec("openai") is None:
+            report.add_degraded(
+                "openai_sdk",
+                "OpenAI SDK no está instalado; el control de escritorio asistido quedará degradado",
+                capability="computer_control",
+            )
+        else:
+            report.add_ok("computer_control", config.computer_use_backend, capability="computer_control")
     else:
         report.add_ok("computer_control", config.computer_use_backend, capability="computer_control")
 
@@ -390,15 +473,34 @@ def _setup_llm_stack(
             degraded_mode=event["degraded_mode"],
         )
 
+    injected_anthropic_executor = anthropic_executor is not None
     if anthropic_executor is None:
         anthropic_executor = create_claude_sdk_executor(config, observe=observe, approvals=approvals)
+    elif injected_anthropic_executor:
+        openai_transport = openai_transport or anthropic_executor
+        google_transport = google_transport or anthropic_executor
+        ollama_transport = ollama_transport or anthropic_executor
+        codex_transport = codex_transport or anthropic_executor
 
     auth_mode = getattr(config, "claude_auth_mode", "auto")
+    billable_providers = config.billable_cost_providers()
     if config.daily_cost_limit is None:
-        pre_hooks: list = [make_daily_cost_gate(observe, 10.0, auth_mode=auth_mode)]
+        pre_hooks: list = [
+            make_daily_cost_gate(
+                observe,
+                10.0,
+                auth_mode=auth_mode,
+                billable_providers=billable_providers,
+            )
+        ]
     elif config.daily_cost_limit > 0:
         pre_hooks = [
-            make_daily_cost_gate(observe, config.daily_cost_limit, auth_mode=auth_mode)
+            make_daily_cost_gate(
+                observe,
+                config.daily_cost_limit,
+                auth_mode=auth_mode,
+                billable_providers=billable_providers,
+            )
         ]
     else:
         raise ValueError("daily_cost_limit must be positive or None")
@@ -524,11 +626,15 @@ def _setup_agent_services(
     discovered = sub_agents.discover()
     if discovered:
         observe.emit("sub_agents_discovered", payload={"agents": discovered})
+    orchestration_store = OrchestrationStore(config.db_path, observe=observe)
     coordinator = CoordinatorService(
         router=router,
         observe=observe,
         scratch_root=config.agent_state_root / "_scratch",
         agent_registry=sub_agents.registry(),
+        orchestration_store=orchestration_store,
+        worker_result_summary_chars=config.claw_worker_summary_limit,
+        phase_input_summary_chars=config.claw_phase_input_limit,
     )
     task_board = TaskBoard(board_root=config.agent_state_root / "_board")
     registry_path = config.agent_state_root / "AGENTS.md"
@@ -552,6 +658,7 @@ def _setup_agent_services(
         auto_research=auto_research,
         task_board=task_board,
         monitored_sites=config.monitored_sites,
+        runtime_policy=build_runtime_policy_engine(config, approvals),
         agent_loop_factory=_build_kairos_agent_loop_factory(
             sub_agents=sub_agents,
             observe=observe,
@@ -681,7 +788,12 @@ def _setup_operational_services(
         browsers_path=config.dev_browser_browsers_path,
         timeout=config.dev_browser_timeout,
     )
-    terminal_bridge = TerminalBridgeService()
+    runtime_policy = build_runtime_policy_engine(config, approvals)
+    terminal_bridge = TerminalBridgeService(
+        policy_engine=runtime_policy,
+        policy_context="telegram",
+        default_cwd=config.workspace_root,
+    )
     codex_computer_backend: CodexComputerBackend | None = None
     if config.computer_use_backend == "codex":
         codex_computer_backend = CodexComputerBackend(
@@ -746,7 +858,11 @@ def _setup_operational_services(
 
     content_engine = ContentEngine(router=router, accounts_root=config.social_accounts_root)
     bot.content_engine = content_engine
-    bot.social_publisher = SocialPublisher(adapters={})
+    bot.social_publisher = SocialPublisher(
+        adapters={},
+        runtime_policy=runtime_policy,
+        policy_context="telegram",
+    )
 
     return daemon, bot, pipeline, browser, browser_use, computer
 
@@ -756,6 +872,7 @@ def _register_site_monitor_jobs(
     scheduler: CronScheduler,
     observe: ObserveStream,
     sites: list[MonitoredSiteConfig],
+    skip_if: Callable[[], str | None] | None = None,
 ) -> None:
     import httpx
 
@@ -779,7 +896,12 @@ def _register_site_monitor_jobs(
             ScheduledJob(
                 name=job_name,
                 interval_seconds=site.interval_seconds,
-                handler=_wrap_job_handler(name=job_name, observe=observe, handler=lambda s=site: _site_monitor_handler(s)),
+                handler=_wrap_job_handler(
+                    name=job_name,
+                    observe=observe,
+                    handler=lambda s=site: _site_monitor_handler(s),
+                    skip_if=skip_if,
+                ),
             )
         )
 
@@ -790,6 +912,7 @@ def _register_sub_agent_jobs(
     observe: ObserveStream,
     sub_agents: SubAgentService,
     scheduled_jobs: list[ScheduledSubAgentConfig],
+    skip_if: Callable[[], str | None] | None = None,
 ) -> None:
     def _sub_agent_handler(agent: str, skill: str, lane: str) -> None:
         result = sub_agents.run_skill(agent, skill, lane=lane)
@@ -799,6 +922,10 @@ def _register_sub_agent_jobs(
         job_name = f"{_sanitize_job_name(job.agent)}_{_sanitize_job_name(job.skill)}"
 
         def _skip_reason(agent: str = job.agent, skill: str = job.skill) -> str | None:
+            if skip_if is not None:
+                reason = skip_if()
+                if reason:
+                    return reason
             definition = sub_agents.get_agent(agent)
             if definition is None:
                 return f"sub-agent '{agent}' not found"
@@ -839,8 +966,10 @@ def _setup_scheduler(
     task_board: TaskBoard,
     sub_agents: SubAgentService,
     bot: BotService,
+    task_ledger: TaskLedger,
     pipeline: PipelineService,
     startup_health: StartupHealthReport,
+    approvals: ApprovalManager,
 ) -> tuple[CronScheduler, AutoDreamService, WikiService, SkillRegistry, A2AService]:
     def _cron_error_sink(job: ScheduledJob, exc: BaseException) -> None:
         observe.emit(
@@ -926,9 +1055,28 @@ def _setup_scheduler(
             )
 
         agents = auto_research.list_agents()
+        agents_paused_for_backlog = 0
         for agent_name in agents:
             state = auto_research.inspect(agent_name)
             if state.get("paused"):
+                continue
+            # P0-G: skip experiments when this agent's promote_* backlog is
+            # already saturated; spamming Hector with duplicate proposals
+            # turns the approval queue into noise.
+            paused_for_backlog, pending_count = should_pause_self_improve(
+                approvals, agent_name
+            )
+            if paused_for_backlog:
+                agents_paused_for_backlog += 1
+                observe.emit(
+                    "self_improve_paused_backlog_too_high",
+                    payload={
+                        "agent": agent_name,
+                        "pending_count": pending_count,
+                        "action_kind": f"promote_{agent_name}",
+                        "threshold": SELF_IMPROVE_MAX_PENDING_PER_ACTION,
+                    },
+                )
                 continue
             result = auto_research.run_loop(agent_name, max_experiments=5)
             observe.emit(
@@ -941,7 +1089,13 @@ def _setup_scheduler(
                     "last_metric": result.last_metric,
                 },
             )
-        observe.emit("self_improve_complete", payload={"agents_run": len(agents)})
+        observe.emit(
+            "self_improve_complete",
+            payload={
+                "agents_run": len(agents),
+                "agents_paused_for_backlog": agents_paused_for_backlog,
+            },
+        )
 
     def _morning_brief_handler() -> None:
         agents = auto_research.list_agents()
@@ -977,6 +1131,18 @@ def _setup_scheduler(
                 continue
             state["experiments_today"] = 0
             agent_store.save_state(name, state)
+
+    def _task_lifecycle_watchdog_handler() -> None:
+        resumed = bot.resume_interrupted_tasks()
+        reconciled = task_ledger.reconcile_false_successes()
+        if resumed or reconciled:
+            observe.emit(
+                "task_lifecycle_watchdog",
+                payload={
+                    "resumed_tasks": resumed,
+                    "reconciled_false_successes": reconciled,
+                },
+            )
 
     def _perf_optimizer_handler() -> None:
         agent_name = "perf-optimizer"
@@ -1037,7 +1203,19 @@ def _setup_scheduler(
         )
 
     scheduler.register(ScheduledJob(name="heartbeat", interval_seconds=config.heartbeat_interval, handler=heartbeat.emit))
-    scheduler.register(ScheduledJob(name="kairos_tick", interval_seconds=600, handler=kairos.tick))
+    scheduler.register(ScheduledJob(name="task_lifecycle_watchdog", interval_seconds=300, handler=_task_lifecycle_watchdog_handler))
+    scheduler.register(
+        ScheduledJob(
+            name="kairos_tick",
+            interval_seconds=600,
+            handler=_wrap_job_handler(
+                name="kairos_tick",
+                observe=observe,
+                handler=kairos.tick,
+                skip_if=_maintenance_skip,
+            ),
+        )
+    )
     scheduler.register(ScheduledJob(name="buddy_tick", interval_seconds=600, handler=lambda: buddy.tick(observe)))
     if config.eval_on_self_improve:
         scheduler.register(
@@ -1085,8 +1263,30 @@ def _setup_scheduler(
     wiki = WikiService(router=router, observe=observe)
     bot.wiki = wiki
     kairos.wiki = wiki
-    scheduler.register(ScheduledJob(name="wiki_lint", interval_seconds=86400, handler=wiki.lint))
-    scheduler.register(ScheduledJob(name="wiki_confidence", interval_seconds=604800, handler=wiki.recompute_confidence))
+    scheduler.register(
+        ScheduledJob(
+            name="wiki_lint",
+            interval_seconds=86400,
+            handler=_wrap_job_handler(
+                name="wiki_lint",
+                observe=observe,
+                handler=wiki.lint,
+                skip_if=_maintenance_skip,
+            ),
+        )
+    )
+    scheduler.register(
+        ScheduledJob(
+            name="wiki_confidence",
+            interval_seconds=604800,
+            handler=_wrap_job_handler(
+                name="wiki_confidence",
+                observe=observe,
+                handler=wiki.recompute_confidence,
+                skip_if=_maintenance_skip,
+            ),
+        )
+    )
     scheduler.register(
         ScheduledJob(
             name="wiki_research",
@@ -1106,7 +1306,12 @@ def _setup_scheduler(
         )
     )
 
-    _register_site_monitor_jobs(scheduler=scheduler, observe=observe, sites=config.monitored_sites)
+    _register_site_monitor_jobs(
+        scheduler=scheduler,
+        observe=observe,
+        sites=config.monitored_sites,
+        skip_if=_maintenance_skip,
+    )
 
     skill_registry = SkillRegistry(router=router)
     a2a = A2AService(router=router)
@@ -1152,6 +1357,7 @@ def _setup_scheduler(
         observe=observe,
         sub_agents=sub_agents,
         scheduled_jobs=config.scheduled_sub_agents,
+        skip_if=_maintenance_skip,
     )
     scheduler.register(
         ScheduledJob(
@@ -1190,6 +1396,7 @@ def build_runtime(
             cost_per_hour_threshold=config.observation_cost_per_hour_threshold,
             tool_calls_per_minute_threshold=config.observation_tool_calls_per_minute_threshold,
             daily_budget_cap=config.daily_cost_limit,
+            notional_cost_providers=tuple(sorted(config.notional_cost_providers())),
         ),
     )
     agent_workspace = AgentWorkspace(config.workspace_root, template_root=Path(__file__).parent)
@@ -1285,8 +1492,10 @@ def build_runtime(
         task_board=task_board,
         sub_agents=sub_agents,
         bot=bot,
+        task_ledger=task_ledger,
         pipeline=pipeline,
         startup_health=startup_health,
+        approvals=approvals,
     )
     daemon.scheduler = scheduler
     brain.wiki = wiki

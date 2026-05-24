@@ -137,6 +137,134 @@ class AppConfigDefaultsTests(unittest.TestCase):
         self.assertEqual(config.morning_brief_hour, 5)
         self.assertEqual(config.evening_brief_hour, 21)
 
+    def test_benchmark_informed_lane_defaults(self) -> None:
+        previous_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.chdir(tmpdir)
+            try:
+                with patch.dict(os.environ, {}, clear=True):
+                    config = AppConfig.from_env()
+            finally:
+                os.chdir(previous_cwd)
+
+        self.assertEqual(config.provider_for_lane("brain"), "anthropic")
+        self.assertEqual(config.model_for_lane("brain"), "claude-opus-4-7")
+        self.assertEqual(config.provider_for_lane("worker"), "anthropic")
+        self.assertEqual(config.model_for_lane("worker"), "claude-sonnet-4-6")
+        self.assertEqual(config.provider_for_lane("worker_heavy"), "codex")
+        self.assertEqual(config.model_for_lane("worker_heavy"), "gpt-5.5")
+        self.assertEqual(config.effort_for_lane("worker_heavy"), "high")
+        self.assertEqual(config.provider_for_lane("research"), "codex")
+        self.assertEqual(config.model_for_lane("research"), "gpt-5.5")
+        self.assertEqual(config.provider_for_lane("judge"), "codex")
+        self.assertEqual(config.model_for_lane("judge"), "gpt-5.5")
+        self.assertEqual(config.provider_for_lane("verifier"), "codex")
+        self.assertEqual(config.claw_worker_summary_limit, 16_000)
+        self.assertEqual(config.claw_phase_input_limit, 48_000)
+
+    def test_coordinator_context_limits_accept_env_overrides(self) -> None:
+        previous_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.chdir(tmpdir)
+            try:
+                with patch.dict(
+                    os.environ,
+                    {
+                        "CLAW_WORKER_SUMMARY_LIMIT": "4000",
+                        "CLAW_PHASE_INPUT_LIMIT": "12000",
+                    },
+                    clear=True,
+                ):
+                    config = AppConfig.from_env()
+            finally:
+                os.chdir(previous_cwd)
+
+        self.assertEqual(config.claw_worker_summary_limit, 4_000)
+        self.assertEqual(config.claw_phase_input_limit, 12_000)
+
+    def test_lane_distribution_env_overrides_still_win(self) -> None:
+        previous_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.chdir(tmpdir)
+            try:
+                with patch.dict(
+                    os.environ,
+                    {
+                        "RESEARCH_PROVIDER": "google",
+                        "RESEARCH_MODEL": "gemini-2.5-pro",
+                        "JUDGE_PROVIDER": "anthropic",
+                        "JUDGE_MODEL": "claude-sonnet-4-6",
+                        "WORKER_HEAVY_PROVIDER": "anthropic",
+                        "WORKER_HEAVY_MODEL": "claude-opus-4-7",
+                    },
+                    clear=True,
+                ):
+                    config = AppConfig.from_env()
+            finally:
+                os.chdir(previous_cwd)
+
+        self.assertEqual(config.provider_for_lane("research"), "google")
+        self.assertEqual(config.model_for_lane("research"), "gemini-2.5-pro")
+        self.assertEqual(config.provider_for_lane("judge"), "anthropic")
+        self.assertEqual(config.model_for_lane("judge"), "claude-sonnet-4-6")
+        self.assertEqual(config.provider_for_lane("worker_heavy"), "anthropic")
+        self.assertEqual(config.model_for_lane("worker_heavy"), "claude-opus-4-7")
+
+    def test_billing_modes_separate_subscription_from_api_costs(self) -> None:
+        previous_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.chdir(tmpdir)
+            try:
+                with patch.dict(os.environ, {"CLAUDE_AUTH_MODE": "subscription"}, clear=True):
+                    subscription = AppConfig.from_env()
+                with patch.dict(os.environ, {"CLAUDE_AUTH_MODE": "api_key"}, clear=True):
+                    api_key = AppConfig.from_env()
+            finally:
+                os.chdir(previous_cwd)
+
+        self.assertEqual(subscription.provider_billing_mode("anthropic"), "subscription")
+        self.assertEqual(subscription.provider_billing_mode("codex"), "subscription")
+        self.assertNotIn("anthropic", subscription.billable_cost_providers())
+        self.assertIn("anthropic", subscription.notional_cost_providers())
+        self.assertEqual(api_key.provider_billing_mode("anthropic"), "api")
+        self.assertIn("anthropic", api_key.billable_cost_providers())
+
+    def test_subscription_budget_floor_prevents_tiny_brain_caps(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from tests.helpers import make_config
+            config = make_config(Path(tmpdir))
+            config.claude_auth_mode = "subscription"
+            self.assertEqual(
+                config.effective_max_budget_for_request(
+                    lane="brain",
+                    provider="anthropic",
+                    requested_budget=0.05,
+                ),
+                1.0,
+            )
+            self.assertEqual(
+                config.effective_max_budget_for_request(
+                    lane="brain",
+                    provider="anthropic",
+                    requested_budget=2.0,
+                ),
+                2.0,
+            )
+
+    def test_api_budget_caps_are_not_raised_by_subscription_floor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from tests.helpers import make_config
+            config = make_config(Path(tmpdir))
+            config.claude_auth_mode = "api_key"
+            self.assertEqual(
+                config.effective_max_budget_for_request(
+                    lane="brain",
+                    provider="anthropic",
+                    requested_budget=0.05,
+                ),
+                0.05,
+            )
+
     def test_invalid_morning_brief_timezone_fails_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             from tests.helpers import make_config
@@ -221,10 +349,20 @@ class CodexConfigTests(unittest.TestCase):
             config = make_config(Path(tmpdir))
             config.worker_provider = "codex"
             config.worker_model = "codex-mini-latest"
-            config.research_provider = None
+            config.research_provider = "anthropic"
             config.research_model = None
             self.assertEqual(config.provider_for_lane("research"), "anthropic")
             self.assertEqual(config.model_for_lane("research"), "claude-sonnet-4-6")
+
+    def test_validate_rejects_incompatible_provider_model_pairs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from tests.helpers import make_config
+            config = make_config(Path(tmpdir))
+            config.verifier_provider = "anthropic"
+            config.verifier_model = "gpt-5.5"
+
+            with self.assertRaisesRegex(ValueError, "verifier"):
+                config.validate()
 
 
 class PerLaneThinkingAndEffortTests(unittest.TestCase):
@@ -242,16 +380,18 @@ class PerLaneThinkingAndEffortTests(unittest.TestCase):
 
     def test_thinking_tokens_default_to_zero_for_every_lane(self) -> None:
         config = self._from_env({"HOME": str(Path.home())})
-        for lane in ("brain", "worker", "verifier", "research", "judge"):
+        for lane in ("brain", "worker", "worker_heavy", "verifier", "research", "judge"):
             self.assertEqual(config.thinking_tokens_for_lane(lane), 0, lane)
 
     def test_thinking_tokens_env_overrides_per_lane(self) -> None:
         config = self._from_env({
             "HOME": str(Path.home()),
             "BRAIN_THINKING_TOKENS": "8000",
+            "WORKER_HEAVY_THINKING_TOKENS": "6000",
             "VERIFIER_THINKING_TOKENS": "4000",
         })
         self.assertEqual(config.thinking_tokens_for_lane("brain"), 8000)
+        self.assertEqual(config.thinking_tokens_for_lane("worker_heavy"), 6000)
         self.assertEqual(config.thinking_tokens_for_lane("verifier"), 4000)
         self.assertEqual(config.thinking_tokens_for_lane("worker"), 0)
         self.assertEqual(config.thinking_tokens_for_lane("research"), 0)

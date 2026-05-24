@@ -102,11 +102,15 @@ class NotebookLMService:
         observe: Any | None = None,
         job_service: JobService | None = None,
         research_fallback: ResearchFallback | None = None,
+        runtime_policy: Any | None = None,
+        policy_context: str = "telegram",
     ) -> None:
         self._notify = notify or (lambda msg: None)
         self._observe = observe
         self._job_service = job_service
         self._research_fallback = research_fallback
+        self._runtime_policy = runtime_policy
+        self._policy_context = policy_context
         self._running: dict[str, threading.Thread] = {}
         self._client_factory: Callable[[], Any] | None = None
         # Optional override for CDP-backed methods (used by tests). Defaults to
@@ -188,6 +192,7 @@ class NotebookLMService:
             ]
 
     def list_notebooks(self) -> list[dict]:
+        self._enforce_policy("notebooklm.list", {}, mutates_state=False, requires_network=True)
         # Prefer SDK when test factory is injected; otherwise scrape via CDP.
         if self._use_sdk:
             return self._run_async(self._async_list_notebooks())
@@ -203,6 +208,12 @@ class NotebookLMService:
             return {"id": nb.id, "title": nb.title}
 
     def create_notebook(self, title: str) -> dict:
+        self._enforce_policy(
+            "notebooklm.create",
+            {"title": title},
+            mutates_state=True,
+            requires_network=True,
+        )
         # Test mode: an injected SDK client_factory takes precedence so existing
         # SDK-based test mocks keep working. Otherwise use the CDP path
         # (production), which can be overridden via _cdp_create_notebook_fn for
@@ -218,6 +229,12 @@ class NotebookLMService:
             return await client.notebooks.delete(full_id)
 
     def delete_notebook(self, notebook_id: str) -> bool:
+        self._enforce_policy(
+            "notebooklm.delete",
+            {"notebook_id": notebook_id},
+            mutates_state=True,
+            requires_network=True,
+        )
         return self._run_async(self._async_delete_notebook(notebook_id))
 
     async def _async_status(self, notebook_id: str) -> dict:
@@ -234,6 +251,7 @@ class NotebookLMService:
             }
 
     def status(self, notebook_id: str) -> dict:
+        self._enforce_policy("notebooklm.status", {"notebook_id": notebook_id}, mutates_state=False, requires_network=True)
         return self._run_async(self._async_status(notebook_id))
 
     async def _async_resolve_notebook_id(self, partial_id: str) -> str:
@@ -258,6 +276,12 @@ class NotebookLMService:
             return results
 
     def add_sources(self, notebook_id: str, urls: list[str]) -> list[dict]:
+        self._enforce_policy(
+            "notebooklm.add_sources",
+            {"notebook_id": notebook_id, "urls": urls},
+            mutates_state=True,
+            requires_network=True,
+        )
         return self._run_async(self._async_add_sources(notebook_id, urls))
 
     async def _async_add_text(self, notebook_id: str, title: str, content: str) -> dict:
@@ -267,6 +291,12 @@ class NotebookLMService:
             return {"id": src.id, "title": src.title}
 
     def add_text(self, notebook_id: str, title: str, content: str) -> dict:
+        self._enforce_policy(
+            "notebooklm.add_text",
+            {"notebook_id": notebook_id, "title": title, "content": content},
+            mutates_state=True,
+            requires_network=True,
+        )
         return self._run_async(self._async_add_text(notebook_id, title, content))
 
     async def _async_chat(self, notebook_id: str, question: str) -> str:
@@ -276,6 +306,12 @@ class NotebookLMService:
             return result.answer
 
     def chat(self, notebook_id: str, question: str) -> str:
+        self._enforce_policy(
+            "notebooklm.chat",
+            {"notebook_id": notebook_id, "question": question},
+            mutates_state=False,
+            requires_network=True,
+        )
         return self._run_async(self._async_chat(notebook_id, question))
 
     def _resolve_notebook_id(self, partial_id: str) -> str:
@@ -288,6 +324,12 @@ class NotebookLMService:
     # --- Background research & podcast ---
 
     def start_research(self, notebook_id: str, query: str, mode: str = "deep") -> str:
+        self._enforce_policy(
+            "notebooklm.start_research",
+            {"notebook_id": notebook_id, "query": query, "mode": mode},
+            mutates_state=True,
+            requires_network=True,
+        )
         # CDP mode skips SDK-only id resolution and title lookup. The handler
         # passes the full id from create_notebook, and the notify message uses
         # the id as a stand-in title.
@@ -592,6 +634,12 @@ class NotebookLMService:
         normalized_kind = kind.strip().lower()
         if normalized_kind not in self._ARTIFACT_LABELS:
             raise ValueError(f"Tipo de artefacto no soportado: {kind}")
+        self._enforce_policy(
+            "notebooklm.start_artifact",
+            {"notebook_id": notebook_id, "kind": normalized_kind},
+            mutates_state=True,
+            requires_network=True,
+        )
         cdp_mode = not self._use_sdk
         if cdp_mode:
             full_id = notebook_id
@@ -725,3 +773,21 @@ class NotebookLMService:
         except Exception:
             pass
         return full_id[:8]
+
+    def _enforce_policy(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        *,
+        mutates_state: bool,
+        requires_network: bool,
+    ) -> None:
+        if self._runtime_policy is None:
+            return
+        self._runtime_policy.enforce(
+            tool_name,
+            args,
+            context=self._policy_context,
+            mutates_state=mutates_state,
+            requires_network=requires_network,
+        )

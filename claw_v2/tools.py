@@ -16,7 +16,8 @@ from claw_v2.action_events import ActionResult, ProposedAction, emit_event
 from claw_v2.evidence_ledger import EvidenceRef, record_claim
 from claw_v2.goal_contract import create_goal
 from claw_v2.network_proxy import DomainAllowlistEnforcer
-from claw_v2.sandbox import SandboxPolicy, sandbox_hook
+from claw_v2.runtime_policy import RuntimePolicyEngine
+from claw_v2.sandbox import SandboxPolicy
 from claw_v2.sanitizer import extract_structured, sanitize
 from claw_v2.tool_policy import validate_workspace_path
 from claw_v2.types import AgentClass, SanitizedContent
@@ -429,19 +430,27 @@ class ToolRegistry:
         if agent_class not in definition.allowed_agent_classes:
             raise PermissionError(f"Agent class '{agent_class}' cannot use tool '{name}'.")
         self._observation_before_tool(definition, args, agent_class)
+        runtime_decision = None
         if policy is not None:
-            decision = sandbox_hook(
-                name,
-                args,
-                policy=policy,
+            runtime_decision = RuntimePolicyEngine(
+                workspace_root=policy.workspace_root,
+                sandbox_policy=policy,
                 network_enforcer=network_enforcer,
-                actor=agent_class,
+                autoexec_max_tier=self.autoexec_max_tier,
+            ).enforce_tool(
+                definition,
+                args,
+                context=agent_class,
+                approval_gate=approval_gate,
             )
-            if not decision.allowed:
-                raise PermissionError(decision.reason or "tool invocation blocked by sandbox")
         # Tier enforcement (HEC-14): bypass approval for Tier 1/2, gate Tier 3.
         # Logged to observe stream for audit. approval_gate may raise to block.
-        if tool_requires_approval(definition.tier) or definition.tier > self.autoexec_max_tier:
+        if runtime_decision is not None:
+            if runtime_decision.approval_required:
+                self._emit_autonomy_event("AUTONOMY_APPROVED", definition, agent_class)
+            else:
+                self._emit_autonomy_event("AUTONOMY_BYPASS", definition, agent_class)
+        elif tool_requires_approval(definition.tier) or definition.tier > self.autoexec_max_tier:
             if approval_gate is None:
                 raise PermissionError(
                     f"Tool '{name}' is Tier {definition.tier} (requires approval) "
@@ -634,6 +643,18 @@ class ToolRegistry:
             )
             return claim.claim_id
         except Exception:
+            logger.exception("P0 record_claim failed for %s", definition.name)
+            if self.observe is not None:
+                try:
+                    self.observe.emit(
+                        "p0_telemetry_failed",
+                        payload={"phase": "record_claim", "tool": definition.name},
+                    )
+                except Exception:
+                    logger.debug(
+                        "p0_telemetry_failed emit suppressed",
+                        exc_info=True,
+                    )
             return None
 
     def _emit_p0_tool_event(
@@ -672,6 +693,24 @@ class ToolRegistry:
             )
             return event.event_id
         except Exception:
+            logger.exception(
+                "P0 emit_event %s failed for %s", event_type, definition.name
+            )
+            if self.observe is not None:
+                try:
+                    self.observe.emit(
+                        "p0_telemetry_failed",
+                        payload={
+                            "phase": "emit_event",
+                            "event_type": event_type,
+                            "tool": definition.name,
+                        },
+                    )
+                except Exception:
+                    logger.debug(
+                        "p0_telemetry_failed emit suppressed",
+                        exc_info=True,
+                    )
             return None
 
     def _emit_autonomy_event(

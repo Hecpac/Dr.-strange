@@ -180,6 +180,22 @@ class ProviderSessionTTLTests(unittest.TestCase):
         self.assertIsNone(self.store.get_provider_session("app-1", "anthropic"))
         self.assertEqual(self.store.count_messages("app-1"), 1)
 
+    def test_compaction_preserves_provider_handles(self) -> None:
+        for idx in range(6):
+            self.store.store_message("app-1", "user", f"old-message-{idx}")
+        self.store.link_provider_session("app-1", "anthropic", "sdk-old")
+        self.store.link_provider_session("app-1", "openai", "resp-old")
+        self.store.link_provider_session("app-2", "anthropic", "sdk-other")
+
+        deleted = self.store.compact_session_messages("app-1", max_messages=4, preserve_recent=2)
+
+        self.assertEqual(deleted, 4)
+        self.assertEqual(self.store.get_provider_session("app-1", "anthropic"), "sdk-old")
+        self.assertEqual(self.store.get_provider_session("app-1", "openai"), "resp-old")
+        self.assertEqual(self.store.get_provider_session("app-2", "anthropic"), "sdk-other")
+        reset = self.store.get_provider_session_reset("app-1")
+        self.assertIsNone(reset)
+
     def test_get_messages_since_returns_only_unsynced_messages(self) -> None:
         self.store.store_message("app-1", "user", "synced-user")
         self.store.store_message("app-1", "assistant", "synced-assistant")

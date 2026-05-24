@@ -31,6 +31,8 @@ from claw_v2.bot_helpers import (
     _normalize_command_text,
     _stable_task_id,
     _task_approval_summary,
+    detect_meta_introspection_request,
+    has_explicit_implementation_request,
 )
 from claw_v2.evidence_ledger import EvidenceRef, record_claim
 from claw_v2.goal_contract import create_goal
@@ -134,8 +136,44 @@ class TaskHandler:
             )
         return "coordinated task rejected"
 
+    def _reject_non_actionable_objective(
+        self, text: str, *, session_id: str, source: str
+    ) -> bool:
+        """Defensive guard for PR 0B.
+
+        Mirrors the meta/introspection guard in the bot router so that any
+        future caller of `start_autonomous_task` / `maybe_run_coordinated_task`
+        (not just `bot.handle_text`) is protected. An explicit implementation
+        verb in the text bypasses the rejection — coding work still flows.
+        """
+        if not text or has_explicit_implementation_request(text):
+            return False
+        intent = detect_meta_introspection_request(text)
+        if intent is None:
+            return False
+        if self.observe is not None:
+            try:
+                self.observe.emit(
+                    "coordinator_rejected_non_actionable_objective",
+                    payload={
+                        "session_id": session_id,
+                        "source": source,
+                        "kind": intent.kind,
+                        "reason": intent.reason,
+                        "normalized_text": intent.normalized_text,
+                    },
+                )
+            except Exception:
+                logger.debug(
+                    "coordinator_rejected_non_actionable_objective emit failed",
+                    exc_info=True,
+                )
+        return True
+
     def maybe_run_coordinated_task(self, session_id: str, text: str) -> str | None:
         if self.coordinator is None or not text or text.startswith("/"):
+            return None
+        if self._reject_non_actionable_objective(text, session_id=session_id, source="maybe_run_coordinated_task"):
             return None
         state = self._get_session_state(session_id)
         if state.get("autonomy_mode") != "autonomous":
@@ -178,9 +216,19 @@ class TaskHandler:
         plan: list[str] | None = None,
         verification_requirement: str | None = None,
         verify: str | None = None,
+        delegation_metadata: dict[str, Any] | None = None,
     ) -> str:
         if self.coordinator is None:
             return "coordinator unavailable"
+        if self._reject_non_actionable_objective(
+            objective, session_id=session_id, source="start_autonomous_task"
+        ):
+            return (
+                "No inicio el coordinador para esta entrada: parece una "
+                "pregunta reflexiva o un objetivo no accionable. Si quieres "
+                "que implemente algo, dilo explicitamente (por ejemplo, "
+                "\"implementa el fix\" o \"aplica el patch\")."
+            )
         mode = mode or _infer_session_mode(objective)
         task_id = f"{session_id}:{time.time_ns()}"
         checkpoint = {
@@ -188,6 +236,8 @@ class TaskHandler:
             "verification_status": "running",
             "task_id": task_id,
         }
+        if delegation_metadata:
+            checkpoint["delegation_metadata"] = dict(delegation_metadata)
         state = self._get_session_state(session_id)
         route = active_route = dict(
             state.get("active_object", {}).get("last_channel_route") or {}
@@ -221,6 +271,8 @@ class TaskHandler:
         }
         if goal_id:
             active_object["active_task"]["goal_id"] = goal_id
+        if delegation_metadata:
+            active_object["active_task"]["delegation_metadata"] = dict(delegation_metadata)
         self._update_session_state(
             session_id,
             mode=mode,
@@ -675,6 +727,29 @@ class TaskHandler:
                 response=response,
                 verification_status=verification_status,
             )
+            if (
+                verification_status == "passed"
+                and self._response_contradicts_passed_verification(response, completed_checkpoint)
+            ):
+                verification_status = "unknown"
+                completed_checkpoint = {
+                    **completed_checkpoint,
+                    "verification_status": "unknown",
+                    "reason": "contradictory_verification_claim",
+                }
+                self._update_session_state(
+                    session_id,
+                    verification_status="unknown",
+                    last_checkpoint=completed_checkpoint,
+                )
+                self._emit(
+                    "verification_pass_rejected",
+                    {
+                        "session_id": session_id,
+                        "task_id": task_id,
+                        "reason": "contradictory_verification_claim",
+                    },
+                )
             terminal_status = (
                 "succeeded" if verification_status == "passed"
                 else "failed" if verification_status == "failed"
@@ -1000,6 +1075,52 @@ class TaskHandler:
             self._resume_autonomous_record(record, reason="startup_recovery")
             count += 1
         return count
+
+    def resume_idle_autonomous_task(self, session_id: str, task_id: str) -> dict[str, Any]:
+        if self.task_ledger is None:
+            return {
+                "advanced": False,
+                "reason": "task_ledger_unavailable",
+                "message": "task ledger unavailable",
+            }
+        record = self.task_ledger.get(task_id)
+        if record is None:
+            return {
+                "advanced": False,
+                "reason": "task_not_found",
+                "message": f"task {task_id} not found",
+            }
+        metadata = dict(record.metadata or {})
+        if record.session_id != session_id:
+            return {
+                "advanced": False,
+                "reason": "session_mismatch",
+                "message": f"task {task_id} belongs to another session",
+            }
+        if record.runtime != "coordinator" or metadata.get("autonomous") is not True:
+            return {
+                "advanced": False,
+                "reason": "not_idle_resumable",
+                "message": f"task {task_id} is not an autonomous coordinator task",
+            }
+        if record.status not in {"queued", "running"}:
+            return {
+                "advanced": False,
+                "reason": "not_idle_resumable_status",
+                "message": f"task {task_id} is not idle-resumable from status {record.status}",
+            }
+        if self._has_live_task_thread(task_id):
+            return {
+                "advanced": False,
+                "reason": "already_running",
+                "message": f"task {task_id} is already running",
+            }
+        self._resume_autonomous_record(record, reason="idle_executor", requested_by_session=session_id)
+        return {
+            "advanced": True,
+            "reason": "resumed_by_idle_executor",
+            "message": f"La retomé automáticamente.\nTarea reanudada: `{task_id}`",
+        }
 
     def resume_task_response(self, session_id: str, task_id: str) -> str:
         if self.task_ledger is None:
@@ -1419,6 +1540,9 @@ class TaskHandler:
             ),
         )
         artifacts["response_preview"] = response_preview
+        if checkpoint.get("critical_worker_error"):
+            artifacts["critical_worker_error"] = True
+            artifacts["coordinator_audit"] = dict(checkpoint.get("coordinator_audit") or {})
         job_state = "completed" if terminal_status == "succeeded" else "failed"
         return self._with_job_artifact(task_id, session_id, job_state, artifacts)
 
@@ -1444,6 +1568,9 @@ class TaskHandler:
             ),
         )
         artifacts["response_preview"] = response_preview
+        if checkpoint.get("critical_worker_error"):
+            artifacts["critical_worker_error"] = True
+            artifacts["coordinator_audit"] = dict(checkpoint.get("coordinator_audit") or {})
         return self._with_job_artifact(task_id, session_id, "pending", artifacts)
 
     @staticmethod
@@ -1475,6 +1602,39 @@ class TaskHandler:
             return ""
         detail = pending_action or summary or error
         return f"waiting_for_user_input: {detail[:500]}"
+
+    @staticmethod
+    def _response_contradicts_passed_verification(
+        response: str,
+        checkpoint: dict[str, Any],
+    ) -> bool:
+        summary = str(checkpoint.get("summary") or "")
+        error = str(checkpoint.get("error") or "")
+        verification = str(checkpoint.get("verification_status") or "")
+        normalized = _normalize_command_text(
+            f"{response or ''}\n{summary}\n{error}\n{verification}"
+        )
+        if not normalized:
+            return False
+        contradiction_markers = (
+            "no verificado",
+            "sin verificar",
+            "not verified",
+            "verification failed",
+            "verification pending",
+            "verificacion pendiente",
+            "falta evidencia",
+            "falta de evidencia",
+            "no hay evidencia",
+            "sin evidencia",
+            "evidencia disponible no incluye",
+            "no incluye pid",
+            "no incluye launchd",
+            "no incluye logs",
+            "no incluye db",
+            "no incluye evento",
+        )
+        return any(marker in normalized for marker in contradiction_markers)
 
 
     def _outcome_artifacts(

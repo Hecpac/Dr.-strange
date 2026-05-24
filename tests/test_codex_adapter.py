@@ -79,6 +79,9 @@ class CodexAdapterTests(unittest.TestCase):
         self.assertIn("auth_status", result.artifacts)
         cmd = mock_run.call_args.args[0]
         self.assertNotIn("Write a hello world function", cmd)
+        self.assertNotIn("--full-auto", cmd)
+        self.assertIn("--sandbox", cmd)
+        self.assertIn("workspace-write", cmd)
         self.assertEqual(mock_run.call_args.kwargs["input"], "Write a hello world function")
 
     def test_confidence_is_low_when_response_empty(self) -> None:
@@ -179,6 +182,26 @@ class CodexAdapterTests(unittest.TestCase):
         self.assertEqual(calls[0], ["/usr/local/bin/codex", "--version"])
         self.assertEqual(calls[1], ["/usr/local/bin/codex", "login", "status"])
         self.assertEqual(calls[2][0:2], ["/usr/local/bin/codex", "exec"])
+        self.assertIn("--sandbox", calls[2])
+        self.assertIn("workspace-write", calls[2])
+
+    def test_advisory_lane_uses_read_only_sandbox_without_full_auto(self) -> None:
+        adapter = CodexAdapter(cli_path="codex")
+        execution = _proc(stdout="classification")
+        request = _make_request(prompt="classify", lane="judge")
+        request.evidence_pack = {"record": "x"}
+        with patch("claw_v2.adapters.codex.subprocess.run", side_effect=[*_preflight_ok(), execution]) as mock_run:
+            with patch("claw_v2.adapters.codex.shutil.which", return_value="/usr/local/bin/codex"):
+                result = adapter.complete(request)
+
+        self.assertEqual(result.content, "classification")
+        self.assertEqual(result.artifacts["codex_sandbox"], "read-only")
+        self.assertTrue(result.artifacts["codex_ephemeral"])
+        cmd = mock_run.call_args_list[-1].args[0]
+        self.assertNotIn("--full-auto", cmd)
+        self.assertIn("--sandbox", cmd)
+        self.assertIn("read-only", cmd)
+        self.assertIn("--ephemeral", cmd)
 
     def test_preflight_rejects_missing_cwd_before_subprocess(self) -> None:
         adapter = CodexAdapter(cli_path="codex")

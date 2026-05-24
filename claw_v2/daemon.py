@@ -97,7 +97,7 @@ class ClawDaemon:
             if not task_id:
                 continue
             task = self.task_ledger.get(task_id)
-            if task is None or task.status not in {"succeeded", "failed", "timed_out", "cancelled", "lost"}:
+            if task is None or task.status not in {"succeeded", "completed_unverified", "failed", "timed_out", "cancelled", "lost"}:
                 continue
             cancelled = self.job_service.cancel(job.job_id, reason=f"orphaned_by_task:{task.status}")
             if cancelled is not None and cancelled.status == "cancelled":

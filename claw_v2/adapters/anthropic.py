@@ -22,7 +22,9 @@ from claw_v2.approval import ApprovalManager
 from claw_v2.config import AppConfig
 from claw_v2.network_proxy import DomainAllowlistEnforcer
 from claw_v2.observe import ObserveStream
-from claw_v2.sandbox import SandboxPolicy, sandbox_hook
+from claw_v2.approval_gate import ApprovalPending, build_telegram_approval_gate
+from claw_v2.runtime_policy import RuntimePolicyEngine
+from claw_v2.sandbox import SandboxPolicy
 from claw_v2.tracing import trace_metadata
 from claw_v2.types import LLMResponse
 
@@ -321,6 +323,7 @@ class ClaudeSDKExecutor:
     def _build_can_use_tool(self, sdk: Any, request: LLMRequest) -> Callable[..., Any]:
         allowed = set(request.allowed_tools or [])
         policy = self._policy_for_request(request)
+        runtime_policy = self._runtime_policy_for_request(request, policy)
         sdk_types = _load_sdk_types()
 
         async def can_use_tool(tool_name: str, input_data: dict[str, Any], context: Any) -> Any:
@@ -330,15 +333,15 @@ class ClaudeSDKExecutor:
                     interrupt=True,
                 )
 
-            decision = sandbox_hook(
-                tool_name,
-                input_data,
-                policy=policy,
-                network_enforcer=self.network_enforcer,
-                actor=request.lane,
-            )
-            if not decision.allowed:
-                return sdk_types.PermissionResultDeny(message=decision.reason, interrupt=True)
+            try:
+                runtime_policy.enforce(tool_name, input_data, context=request.lane)
+            except ApprovalPending as exc:
+                return sdk_types.PermissionResultDeny(message=str(exc), interrupt=True)
+            except PermissionError as exc:
+                return sdk_types.PermissionResultDeny(
+                    message=_safe_runtime_policy_reason(str(exc)),
+                    interrupt=True,
+                )
             return sdk_types.PermissionResultAllow(updated_input=input_data)
 
         return can_use_tool
@@ -346,22 +349,33 @@ class ClaudeSDKExecutor:
     def _build_hooks(self, sdk: Any, request: LLMRequest) -> dict[str, list[Any]] | None:
         hooks: dict[str, list[Any]] = {}
         policy = self._policy_for_request(request)
+        runtime_policy = self._runtime_policy_for_request(request, policy)
 
         async def pre_tool_use(input_data: dict[str, Any], tool_use_id: str | None, context: Any) -> dict[str, Any]:
-            decision = sandbox_hook(
-                input_data.get("tool_name", ""),
-                input_data.get("tool_input", {}),
-                policy=policy,
-                network_enforcer=self.network_enforcer,
-                actor=request.lane,
-            )
-            if not decision.allowed:
+            try:
+                runtime_policy.enforce(
+                    input_data.get("tool_name", ""),
+                    input_data.get("tool_input", {}),
+                    context=request.lane,
+                )
+            except ApprovalPending as exc:
+                reason = str(exc)
                 return {
-                    "systemMessage": f"Tool invocation blocked: {decision.reason}",
+                    "systemMessage": f"Tool invocation blocked: {reason}",
                     "hookSpecificOutput": {
                         "hookEventName": "PreToolUse",
                         "permissionDecision": "deny",
-                        "permissionDecisionReason": decision.reason,
+                        "permissionDecisionReason": reason,
+                    },
+                }
+            except PermissionError as exc:
+                reason = _safe_runtime_policy_reason(str(exc))
+                return {
+                    "systemMessage": f"Tool invocation blocked: {reason}",
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": reason,
                     },
                 }
             return {"continue_": True}
@@ -476,12 +490,37 @@ class ClaudeSDKExecutor:
             capability_profile=getattr(self.config, "sandbox_capability_profile", "engineer"),
         )
 
+    def _runtime_policy_for_request(self, request: LLMRequest, policy: SandboxPolicy) -> RuntimePolicyEngine:
+        approval_gate = build_telegram_approval_gate(self.approvals) if self.approvals is not None else None
+        return RuntimePolicyEngine(
+            workspace_root=policy.workspace_root,
+            sandbox_policy=policy,
+            network_enforcer=self.network_enforcer,
+            approval_gate=approval_gate,
+            autoexec_max_tier=getattr(self.config, "tier_autoexec_max", 2),
+        )
+
     def _should_use_api_key_auth(self) -> bool:
         if self.config.claude_auth_mode == "api_key":
             return True
         if self.config.claude_auth_mode == "auto":
             return _resolve_anthropic_api_key() is not None
         return False
+
+
+def _safe_runtime_policy_reason(reason: str) -> str:
+    text = str(reason or "runtime policy blocked the command")
+    text = re.sub(
+        r"\bbinary\s+'([^']+)'\s+requires higher privilege level\s+\(not in the allowed whitelist\)",
+        r"command '\1' is blocked by local execution policy",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"\ballowed whitelist\b", "local execution policy", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bwhitelist\b", "policy", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bruntime host\b", "local runtime", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bBash tool\b|\btool Bash\b", "local tool", text, flags=re.IGNORECASE)
+    return text
 
 
 def create_claude_sdk_executor(

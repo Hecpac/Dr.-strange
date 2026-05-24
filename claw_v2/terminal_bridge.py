@@ -34,9 +34,15 @@ class TerminalBridgeService:
         *,
         root: Path | str | None = None,
         popen_factory: PopenFactory | None = None,
+        policy_engine: Any | None = None,
+        policy_context: str = "telegram",
+        default_cwd: Path | str | None = None,
     ) -> None:
         self.root = Path(root) if root is not None else DEFAULT_TERMINAL_BRIDGE_ROOT
         self._popen = popen_factory or subprocess.Popen
+        self._policy_engine = policy_engine
+        self._policy_context = policy_context
+        self._default_cwd = Path(default_cwd) if default_cwd is not None else None
 
     def open(self, tool: str, *, cwd: str | Path | None = None, args: list[str] | None = None) -> dict[str, Any]:
         command = self._resolve_command(tool, args=args)
@@ -49,8 +55,22 @@ class TerminalBridgeService:
         command: list[str],
         cwd: str | Path | None = None,
     ) -> dict[str, Any]:
+        normalized_tool = tool.strip().lower()
+        if normalized_tool not in {"claude", "codex"}:
+            raise TerminalBridgeError("tool must be one of: claude, codex")
+        requested_cwd = cwd if cwd is not None else self._default_cwd
+        self._enforce_policy(
+            "terminal.open",
+            {
+                "tool": normalized_tool,
+                "cwd": str(requested_cwd or Path.home()),
+                "storage_root": str(self.root),
+                "args": command[1:],
+            },
+            mutates_state=True,
+        )
         self.root.mkdir(parents=True, exist_ok=True)
-        working_dir = Path(cwd) if cwd is not None else Path.home()
+        working_dir = Path(requested_cwd) if requested_cwd is not None else Path.home()
         working_dir = working_dir.expanduser().resolve(strict=False)
         if not working_dir.exists() or not working_dir.is_dir():
             raise TerminalBridgeError(f"cwd does not exist or is not a directory: {working_dir}")
@@ -101,6 +121,7 @@ class TerminalBridgeService:
         return meta
 
     def list_sessions(self) -> list[dict[str, Any]]:
+        self._enforce_policy("terminal.list", {"storage_root": str(self.root)}, mutates_state=False)
         if not self.root.exists():
             return []
         sessions: list[dict[str, Any]] = []
@@ -116,12 +137,14 @@ class TerminalBridgeService:
         return sessions
 
     def status(self, session_id: str) -> dict[str, Any]:
+        self._enforce_policy("terminal.status", {"session_id": session_id, "storage_root": str(self.root)}, mutates_state=False)
         session_dir = self._session_dir(session_id)
         meta = self._read_meta(session_dir)
         meta["alive"] = self._session_alive(meta)
         return meta
 
     def send(self, session_id: str, text: str, *, append_newline: bool = True) -> dict[str, Any]:
+        self._enforce_policy("terminal.send", {"session_id": session_id, "text": text}, mutates_state=True)
         session_dir = self._session_dir(session_id)
         meta = self._read_meta(session_dir)
         payload = text if not append_newline or text.endswith("\n") else f"{text}\n"
@@ -133,6 +156,7 @@ class TerminalBridgeService:
         return {"session_id": session_id, "bytes_written": len(raw)}
 
     def read(self, session_id: str, *, offset: int = 0, limit: int = 4000) -> dict[str, Any]:
+        self._enforce_policy("terminal.read", {"session_id": session_id, "storage_root": str(self.root)}, mutates_state=False)
         session_dir = self._session_dir(session_id)
         output_path = session_dir / "output.log"
         raw = output_path.read_bytes()
@@ -147,6 +171,7 @@ class TerminalBridgeService:
         }
 
     def close(self, session_id: str, *, force: bool = False) -> dict[str, Any]:
+        self._enforce_policy("terminal.close", {"session_id": session_id, "force": force}, mutates_state=True)
         session_dir = self._session_dir(session_id)
         meta = self._read_meta(session_dir)
         sig = signal.SIGKILL if force else signal.SIGTERM
@@ -184,6 +209,16 @@ class TerminalBridgeService:
         if not executable:
             raise TerminalBridgeError(f"{normalized} CLI not found")
         return [str(Path(executable).expanduser()), *extra_args]
+
+    def _enforce_policy(self, tool_name: str, args: dict[str, Any], *, mutates_state: bool) -> None:
+        if self._policy_engine is None:
+            return
+        self._policy_engine.enforce(
+            tool_name,
+            args,
+            context=self._policy_context,
+            mutates_state=mutates_state,
+        )
 
     def _session_dir(self, session_id: str) -> Path:
         session_dir = self.root / session_id

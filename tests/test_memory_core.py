@@ -143,6 +143,18 @@ class BuildContextTests(unittest.TestCase):
         self.assertIn("mode=coding", ctx)
         self.assertIn("current_goal=fix bug", ctx)
 
+    def test_context_distinguishes_rolling_and_last_turn_summaries(self) -> None:
+        self.store.update_session_state(
+            "s1",
+            rolling_summary="historial compactado persistente",
+            last_turn_summary="ultimo turno solamente",
+        )
+
+        ctx = self.store.build_context("s1", message="go", include_history=False)
+
+        self.assertIn("rolling_summary=historial compactado persistente", ctx)
+        self.assertIn("last_turn_summary=ultimo turno solamente", ctx)
+
 
 class NormalizeTagsTests(unittest.TestCase):
     def test_snake_cases_and_lowercases(self) -> None:

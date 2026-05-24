@@ -262,6 +262,43 @@ class HandleMessageTests(unittest.TestCase):
         session = self.memory.get_provider_session("s1", "anthropic")
         self.assertEqual(session, "sdk-abc-123")
 
+    def test_compaction_preserves_provider_session_resume(self) -> None:
+        for idx in range(6):
+            self.memory.store_message("s1", "user", f"old-provider-context-{idx}")
+        self.memory.link_provider_session("s1", "anthropic", "sdk-old")
+        self.memory.compact_session_messages("s1", max_messages=4, preserve_recent=2)
+        resp = LLMResponse(
+            content="<response>fresh</response>", lane="brain", provider="anthropic", model="test",
+        )
+        resp.artifacts["session_id"] = "sdk-new"
+        self.router.ask.return_value = resp
+
+        self.brain.handle_message("s1", "continua")
+
+        prompt = self.router.ask.call_args.args[0]
+        call_kwargs = self.router.ask.call_args.kwargs
+        self.assertEqual(call_kwargs["session_id"], "sdk-old")
+        self.assertNotIn("summary=", prompt)
+        self.assertEqual(self.memory.get_provider_session("s1", "anthropic"), "sdk-new")
+        self.assertIsNone(self.memory.get_provider_session_reset("s1"))
+
+    def test_current_turn_compaction_relinks_returned_provider_session(self) -> None:
+        self.router.config.use_compaction = True
+        for idx in range(199):
+            self.memory.store_message("s1", "user", f"history-{idx}")
+        self.memory.link_provider_session("s1", "anthropic", "sdk-old")
+        resp = LLMResponse(
+            content="<response>compacted</response>", lane="brain", provider="anthropic", model="test",
+        )
+        resp.artifacts["session_id"] = "sdk-old-returned"
+        self.router.ask.return_value = resp
+
+        self.brain.handle_message("s1", "trigger compaction")
+
+        self.assertEqual(self.router.ask.call_args.kwargs["session_id"], "sdk-old")
+        self.assertEqual(self.memory.get_provider_session("s1", "anthropic"), "sdk-old-returned")
+        self.assertIsNone(self.memory.get_provider_session_reset("s1"))
+
     def test_preserves_unwrapped_sdk_output_as_visible_reply(self) -> None:
         self.router.ask.return_value = LLMResponse(
             content="I checked the files and fixed it.",
@@ -564,6 +601,7 @@ class ExperienceReplayObserveTests(unittest.TestCase):
             message="pytest cannot import",
             stored_user_message="pytest cannot import",
             include_history=False,
+            compact_context=False,
             catchup_after_id=None,
             task_type="self_heal",
         )
@@ -586,6 +624,7 @@ class ExperienceReplayObserveTests(unittest.TestCase):
             message="nothing relevant",
             stored_user_message="nothing relevant",
             include_history=False,
+            compact_context=False,
             catchup_after_id=None,
             task_type="self_heal",
         )
