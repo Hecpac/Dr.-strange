@@ -2328,6 +2328,28 @@ class BotService:
             raise PermissionError("TELEGRAM_ALLOWED_USER_ID must be configured")
         if user_id != self.allowed_user_id:
             raise PermissionError("user is not allowed to access this bot")
+        # P2: open a fresh turn_id_context so every observe event, ledger
+        # row, and approval created during this turn carries the same
+        # correlator. The context resets on method exit. See
+        # claw_v2/turn_context.py and INTERNAL_WIRING.md §1.
+        with turn_id_context(new_turn_id()):
+            return self._handle_text_body(
+                user_id=user_id,
+                session_id=session_id,
+                text=text,
+                runtime_channel=runtime_channel,
+                context_metadata=context_metadata,
+            )
+
+    def _handle_text_body(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        text: str,
+        runtime_channel: str | None = None,
+        context_metadata: dict[str, Any] | None = None,
+    ) -> str | None:
         self._ensure_default_autonomy(session_id)
         self._remember_inbound_context(session_id, context_metadata)
         stripped = text.strip()

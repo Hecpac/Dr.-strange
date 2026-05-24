@@ -41,13 +41,13 @@ CRITICAL_OBSERVE_EVENTS_REQUIRING_TURN_ID: frozenset[str] = frozenset(
         "brain_tooluse_ledger_completed_with_warnings",
         "brain_tooluse_ledger_failed",
         "dispatch_decision",
-        # NOTE: ``task_ledger_created`` is intentionally NOT in this set
-        # yet. ``BotService.handle_text`` does not open ``turn_id_context``
-        # in the current branch (P2 follow-up), so every daemon-side
-        # task creation — Kairos ticks, heartbeat, recovery — would emit
-        # a sibling ``turn_id_missing`` event and flood ``observe_stream``
-        # with noise. Reintroduce this entry only AFTER ``handle_text``
-        # is wired to open the context.
+        # Reactivated once ``BotService.handle_text`` opens a
+        # ``turn_id_context`` for every Telegram turn. Daemon-side
+        # task creations (Kairos, heartbeat, recovery) still emit a
+        # ``turn_id_missing`` sibling — that surfaces a real gap rather
+        # than noise, because those paths should eventually carry a
+        # correlator too.
+        "task_ledger_created",
         "approval_pending",
     }
 )
