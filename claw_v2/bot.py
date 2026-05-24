@@ -66,6 +66,7 @@ from claw_v2.pipeline import PipelineService
 from claw_v2.social import SocialPublisher
 from claw_v2.bot_helpers import *  # noqa: F403
 from claw_v2.bot_helpers import _is_secret_shaped_token  # explicit: private helper
+from claw_v2.turn_receipt import emit_turn_receipt
 
 if TYPE_CHECKING:
     from claw_v2.jobs import JobService
@@ -2332,14 +2333,35 @@ class BotService:
         # row, and approval created during this turn carries the same
         # correlator. The context resets on method exit. See
         # claw_v2/turn_context.py and INTERNAL_WIRING.md §1.
-        with turn_id_context(new_turn_id()):
-            return self._handle_text_body(
-                user_id=user_id,
-                session_id=session_id,
-                text=text,
-                runtime_channel=runtime_channel,
-                context_metadata=context_metadata,
-            )
+        turn_id = new_turn_id()
+        started_at = time.time()
+        with turn_id_context(turn_id):
+            try:
+                return self._handle_text_body(
+                    user_id=user_id,
+                    session_id=session_id,
+                    text=text,
+                    runtime_channel=runtime_channel,
+                    context_metadata=context_metadata,
+                )
+            finally:
+                # Post-merge wave: emit a behavior_turn_receipt summarising
+                # the turn — intent, tools, approvals, ledger status — so
+                # post-mortem queries get one row per turn instead of
+                # reconstructing from N event types.
+                observe = getattr(self, "observe", None)
+                if observe is not None:
+                    try:
+                        emit_turn_receipt(
+                            observe,
+                            turn_id=turn_id,
+                            session_id=session_id,
+                            user_text=text,
+                            started_at=started_at,
+                        )
+                    except Exception:
+                        # Receipt emission must never break a turn.
+                        logger.debug("turn_receipt emit failed", exc_info=True)
 
     def _handle_text_body(
         self,
