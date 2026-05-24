@@ -11,6 +11,24 @@ from claw_v2.task_ledger import TaskLedger
 
 
 class TaskHandlerTests(unittest.TestCase):
+    def test_passed_verification_is_rejected_when_result_says_not_verified(self) -> None:
+        self.assertTrue(
+            TaskHandler._response_contradicts_passed_verification(
+                (
+                    "Estado actual: **no verificado**. La evidencia disponible "
+                    "no incluye PID, launchd, logs, DB ni evento agent_startup_context."
+                ),
+                {"summary": "Estado actual: no verificado"},
+            )
+        )
+
+        self.assertFalse(
+            TaskHandler._response_contradicts_passed_verification(
+                "Verificado: passed. El evento agent_startup_context existe.",
+                {"summary": "Verificado con evidencia"},
+            )
+        )
+
     def test_record_blocked_task_persists_contract_and_blocker_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

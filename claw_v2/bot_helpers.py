@@ -1,15 +1,44 @@
 """Module-level helper functions and constants extracted from bot.py."""
 from __future__ import annotations
 
+import contextlib
 import re
 import unicodedata
+from contextvars import ContextVar
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 from urllib.parse import urlsplit
 
+from dataclasses import dataclass
+
 from claw_v2.coordinator import CoordinatorResult, WorkerTask
+from claw_v2.turn_context import (  # P0-B: re-export the turn_id helpers from bot_helpers for callers that already pull from this module.
+    current_turn_id,
+    new_turn_id,
+    turn_id_context,
+)
+
+_CRITICAL_WORKER_ERROR_PREFIX = "critical_worker_error:"
+_CRITICAL_WORKER_VISIBLE_MESSAGE = (
+    "No pude avanzar la tarea porque el subagente experimentó un error crítico en el entorno local. "
+    "Activé la bitácora de contingencia técnica y dejé registrada la reparación necesaria."
+)
 
 __all__ = [
+    "current_meta_introspection_kind",
+    "current_turn_id",
+    "meta_introspection_context",
+    "new_turn_id",
+    "turn_id_context",
+    "MetaIntrospectionIntent",
+    "OwnerDelegationIntent",
+    "TelegramImperativeIntent",
+    "detect_meta_introspection_request",
+    "detect_owner_delegation",
+    "detect_telegram_imperative",
+    "has_explicit_implementation_request",
+    "is_destructive_or_external_objective",
+    "looks_like_actionable_telegram_message",
     "_AUTH_DOMAINS",
     "_AUTONOMY_ACTION_PATTERNS",
     "_AUTONOMY_MODES",
@@ -69,6 +98,7 @@ __all__ = [
     "_format_task_approval_response",
     "_format_tweet_analysis_prompt",
     "_format_worker_results",
+    "_extract_url_candidates",
     "_has_link_analysis_sections",
     "_has_runtime_capability_sections",
     "_has_url_query",
@@ -93,6 +123,7 @@ __all__ = [
     "_needs_real_browser",
     "_normalize_command_text",
     "_normalize_url",
+    "_nested_url_candidates",
     "_parse_autonomy_mode",
     "_parse_float",
     "_parse_non_negative_int",
@@ -106,6 +137,7 @@ __all__ = [
     "_select_next_task_queue_item",
     "_sanitize_chat_response",
     "_chat_response_has_internal_leak",
+    "_strip_url_permission_deferrals",
     "_stable_task_id",
     "_strip_url_punctuation",
     "_summarize_prefetched_link_content",
@@ -115,6 +147,32 @@ __all__ = [
     "_tweet_oembed_fallback",
     "_help_response",
 ]
+
+
+_META_INTROSPECTION_CONTEXT: ContextVar[str | None] = ContextVar(
+    "claw_meta_introspection_context", default=None
+)
+
+
+@contextlib.contextmanager
+def meta_introspection_context(kind: str) -> Iterator[None]:
+    """Mark the current turn as routed by ``meta_introspection_guard``.
+
+    While active, the evidence-gate skips ledger row creation and the
+    user-visible reply replacement so brain answers to critiques, audits, or
+    clarification asks pass through intact. A dedicated observability event
+    (`evidence_gate_skipped_meta`) still fires so the self-improvement loop
+    keeps the signal.
+    """
+    token = _META_INTROSPECTION_CONTEXT.set(kind)
+    try:
+        yield
+    finally:
+        _META_INTROSPECTION_CONTEXT.reset(token)
+
+
+def current_meta_introspection_kind() -> str | None:
+    return _META_INTROSPECTION_CONTEXT.get()
 
 
 _BROWSE_SHORTCUT_TOKENS = (
@@ -457,6 +515,669 @@ def _normalize_command_text(text: str) -> str:
     return "".join(ch for ch in folded if not unicodedata.combining(ch)).lower()
 
 
+@dataclass(frozen=True)
+class MetaIntrospectionIntent:
+    """Result of detecting a non-actionable meta/reflective/audit prompt.
+
+    `kind` is one of:
+        - "meta":  reflective question about the bot's behavior or
+                   clarification of intent.
+        - "audit": request to inspect logs / traces / past failures.
+        - "non_actionable_token": input looks like an opaque secret-shaped
+                   token rather than an objective.
+    """
+
+    kind: str
+    normalized_text: str
+    reason: str
+
+
+# Patterns are matched against `_normalize_command_text(text)`, which
+# lowercases and strips diacritics. Use ASCII-only literals.
+_META_INTROSPECTION_PATTERNS_ES: tuple[str, ...] = (
+    # "por que" (interrogative) and "porque" (conjunction/typo) both reach
+    # here — accept both because users mix them freely in chat.
+    r"\b(?:por que|porque) no (?:completas|completaste|terminas|terminaste|haces|hiciste|puedes|pudiste|frenas|paraste|cierras|cerraste)\b",
+    r"\b(?:por que|porque) (?:fallaste|fallas|fallo|te frenas|frenas|te detienes|te detuviste)\b",
+    r"\bcual fue la causa\b",
+    r"\b(?:que|cual) fue el problema\b",
+    r"\b(?:entendiste|me entendiste|entiendes)\b",
+    r"\bdime si (?:esta lectura|esta interpretacion|este resumen|esta respuesta|este analisis) (?:es correcta|es correcto|esta bien)\b",
+    r"\banaliza (?:esta conversacion|este chat|esta respuesta|este comportamiento|esta interaccion)\b",
+    r"\brevisa (?:el chat|esta conversacion|esta respuesta|este comportamiento|el historial)\b",
+    r"\bque opinas (?:de|sobre) (?:esta|este|esa|ese|tu|la|el)\b",
+    r"\bque (?:queremos|quieres|quiero) (?:comunicar|decir|expresar|transmitir)\b",
+)
+_META_INTROSPECTION_PATTERNS_EN: tuple[str, ...] = (
+    r"\bwhy did you (?:fail|stop|skip|miss|not finish|not complete|freeze)\b",
+    r"\bwhat went wrong\b",
+    r"\b(?:do|did) you understand\b",
+    r"\banalyze (?:this conversation|this chat|this behavior|this response|this interaction)\b",
+    r"\breview (?:this conversation|this chat|this response|this behavior|the history)\b",
+    r"\bis this (?:reading|interpretation|summary|response|analysis) correct\b",
+    r"\bwhat are we (?:trying to|going to|here to) (?:communicate|say|express|convey)\b",
+)
+_META_AUDIT_PATTERNS: tuple[str, ...] = (
+    r"\binvestiga (?:los logs|el log|la traza|el bug|esta falla|este error|esta tarea fallida|la falla)\b",
+    r"\bauditar?(?:la|lo|el|los|esta|este) (?:falla|error|tarea|log|traza)\b",
+    r"\brevisa los logs\b",
+    r"\bdebug (?:this|the) (?:log|logs|trace|failure|error)\b",
+    r"\binspect (?:the|this) (?:log|logs|trace|failure|error)\b",
+)
+_EXPLICIT_IMPLEMENTATION_PATTERNS: tuple[str, ...] = (
+    # Spanish imperative implementation verbs.
+    r"\bimplementa\b",
+    r"\bparchea\b",
+    r"\bagrega (?:un |unos |los )?tests?\b",
+    r"\bmodifica (?:el|la|los|las|este|esta)\b",
+    r"\bcorrige (?:el|la|los|las|este|esta)\b",
+    r"\baplica (?:el|este|ese|un) (?:cambio|fix|patch|parche)\b",
+    r"\bescribe (?:el|un) (?:patch|parche|fix|codigo)\b",
+    r"\bcrea (?:el|un) (?:pr|pull request|commit|patch|parche)\b",
+    # English imperative implementation verbs.
+    r"\bimplement (?:the|this|a)\b",
+    r"\bpatch \w",
+    r"\badd (?:a |the |some |more )?tests?\b",
+    r"\bmodify (?:the|this)\b",
+    r"\bfix (?:the|this|that) (?:bug|issue|test|build|error)\b",
+    r"\bapply (?:the|this|that) (?:change|fix|patch)\b",
+    r"\bwrite (?:the|a) (?:patch|fix|code)\b",
+    r"\bcreate (?:the|a) (?:pr|pull request|commit|patch)\b",
+)
+
+
+def has_explicit_implementation_request(text: str) -> bool:
+    """True iff the message contains an unambiguous request to write/modify code.
+
+    Used to prevent the meta-introspection guard from blocking real
+    implementation work. Past-tense conjugations ("implementaste",
+    "parcheaste") do not match — only imperative / present forms do, so a
+    question about prior implementation is still treated as meta.
+    """
+    if not text:
+        return False
+    normalized = _normalize_command_text(text)
+    return any(re.search(pattern, normalized) for pattern in _EXPLICIT_IMPLEMENTATION_PATTERNS)
+
+
+def _is_secret_shaped_token(text: str) -> bool:
+    """True iff the input is a single high-entropy token rather than a sentence.
+
+    Matches things like `8eyt8R1Hp008liTCA98a` (mixed-case alphanumeric, no
+    spaces, length >= 16). Avoids false positives on common task IDs
+    (`tg-574707975:1778533984299303000`) because those contain `:` and have
+    no mixed case.
+    """
+    stripped = (text or "").strip()
+    if not stripped or any(ch.isspace() for ch in stripped):
+        return False
+    if len(stripped) < 16:
+        return False
+    if not re.fullmatch(r"[A-Za-z0-9_\-]+", stripped):
+        return False
+    has_upper = any(c.isupper() for c in stripped)
+    has_lower = any(c.islower() for c in stripped)
+    has_digit = any(c.isdigit() for c in stripped)
+    return has_upper and has_lower and has_digit
+
+
+@dataclass(frozen=True)
+class OwnerDelegationIntent:
+    """Result of detecting an owner-delegation phrase.
+
+    `kind` is one of:
+        - "execution":    user wants the bot to RUN the pending/proposed action
+                          ("córrelo tú", "hazlo tu", "ejecútalo tú", "run it
+                          yourself"). Usually requires resolving WHAT to run.
+        - "decision":     user wants the bot to CHOOSE among options ("decide
+                          tú", "you decide", "tú decides").
+        - "no_manual_work": user is refusing further manual back-and-forth
+                          ("te toca a ti", "encárgate tú", "ya no tengo que
+                          teclear nada", "stop asking me to run commands").
+
+    `requires_resolution` is True when the verb is pronoun-bound and needs
+    context to know WHAT to do.
+
+    `explicit_action_hint` carries any object/verb that appeared inline with
+    the delegation (e.g. "encárgate tú DE actualizar el deck" → hint =
+    "actualizar el deck"). When set, the resolver can use it directly
+    without searching session state.
+    """
+
+    kind: str
+    confidence: float
+    normalized_text: str
+    requires_resolution: bool
+    is_execution_delegation: bool = False
+    is_decision_delegation: bool = False
+    is_no_manual_work_delegation: bool = False
+    explicit_action_hint: str | None = None
+    lexical_score: float = 0.0
+    direction_score: float = 0.0
+
+
+@dataclass(frozen=True)
+class TelegramImperativeIntent:
+    """Normalized operator command for Telegram imperative routing.
+
+    ``intent`` is deliberately narrower than "do task": UI focus, clipboard,
+    paste, submit, inspect, and continuation have different safety/capability
+    requirements. ``needs_context`` means the current message names a pronoun
+    or generic object ("la app", "el prompt", "eso") and must be resolved from
+    active mission/session state before execution.
+    """
+
+    intent: str
+    normalized_text: str
+    confidence: float
+    target_hint: str | None = None
+    artifact_hint: str | None = None
+    needs_context: bool = False
+    requires_ui_read: bool = False
+    requires_ui_write: bool = False
+    requires_submit: bool = False
+    requires_clipboard: bool = False
+    matched_pattern: str = ""
+
+
+# Patterns run against `_normalize_command_text(text)` — ASCII, lowercase,
+# diacritics stripped. Use plain ASCII letters only. Word boundaries (\b)
+# prevent false positives inside longer compound words.
+
+# Execution delegation: "córrelo tú mismo", "hazlo tu", "ejecútalo tú", etc.
+_OWNER_DELEGATION_EXEC_PATTERNS_ES: tuple[str, ...] = (
+    r"\b(?:correlo|corrolo)s?\s+tu(?:\s+mismo)?\b",
+    r"\bcorre\s+los?\s+tu(?:\s+mismo)?\b",
+    r"\bpuedes\s+correr(?:los?)?\s+tu\b",
+    r"\bhaz\s*los?\s+tu(?:\s+mismo)?\b",
+    r"\bhazlo\s+tu(?:\s+mismo)?\b",
+    r"\bejecuta(?:lo|los)?\s+tu(?:\s+mismo)?\b",
+    r"\blo\s+haces\s+tu(?:\s+mismo)?\b",
+    r"\blo\s+corres\s+tu(?:\s+mismo)?\b",
+)
+_OWNER_DELEGATION_EXEC_PATTERNS_EN: tuple[str, ...] = (
+    r"\brun\s+(?:it|this|that|them|those)\s+yourself\b",
+    r"\byou\s+run\s+(?:it|this|that|them|those)\b",
+    r"\bdo\s+(?:it|this|that|them)\s+yourself\b",
+    r"\bdo\s+(?:it|this|that|them)\s+for\s+me\b",
+    r"\byou\s+handle\s+(?:it|this|that|them)\b",
+)
+
+# Decision delegation: pure "decide tú" / "you decide" variants.
+_OWNER_DELEGATION_DECISION_PATTERNS_ES: tuple[str, ...] = (
+    r"\bdecide\s+tu\b",
+    r"\btu\s+decides\b",
+    r"\bescoge\s+tu\b",
+    r"\belige\s+tu\b",
+    r"\btu\s+eliges\b",
+)
+_OWNER_DELEGATION_DECISION_PATTERNS_EN: tuple[str, ...] = (
+    r"\byou\s+decide\b",
+    r"\byou\s+choose\b",
+    r"\byou\s+pick\b",
+)
+
+# No-manual-work delegation: user is refusing manual handoff entirely.
+_OWNER_DELEGATION_NO_MANUAL_PATTERNS_ES: tuple[str, ...] = (
+    r"\bte\s+toca\s+a\s+ti\b",
+    r"\b(?:ya\s+)?no\s+tengo\s+que\s+teclear(?:\s+nada)?\b",
+    r"\bno\s+me\s+pidas\s+(?:que\s+lo\s+haga|que\s+teclee|que\s+corra)\b",
+    r"\bno\s+me\s+preguntes(?:\s+m[aá]s)?\b",
+    r"\bno\s+me\s+devuelvas\s+el\s+trabajo\b",
+    r"\bno\s+me\s+hagas\s+teclear\b",
+    r"\bencargate\s+tu(?:\s+de\s+(?P<hint_es_encargate>.+))?\b",
+    r"\bgestiona(?:lo|los)?\s+tu(?:\s+de\s+(?P<hint_es_gestiona>.+))?\b",
+)
+_OWNER_DELEGATION_NO_MANUAL_PATTERNS_EN: tuple[str, ...] = (
+    r"\btake\s+ownership(?:\s+of\s+(?P<hint_en_ownership>.+))?\b",
+    r"\bhandle\s+it\b",
+    r"\bdon'?t\s+ask\s+me\s+(?:to\s+do\s+it|to\s+run|anymore)\b",
+    r"\bstop\s+asking\s+me\s+to\s+(?:run|do|type)\b",
+)
+
+
+# Verbs/objects that almost always need context to resolve.
+_PRONOUN_ONLY_TOKENS = (
+    "lo", "los", "la", "las", "eso", "esos", "ello", "ellos", "it", "this",
+    "that", "them", "those",
+)
+
+# Destructive / external / irreversible / credential markers.
+_RISKY_OBJECTIVE_PATTERNS: tuple[str, ...] = (
+    r"\b(?:deploy|despliega|desplegar|deployment|deploys?)\b",
+    r"\b(?:merge|mergea|mergear)\b",
+    r"\b(?:publish|publica|publicar|publishing|publi[ck]a)\b",
+    r"\b(?:send|env[ií]a|enviar|mandar)\s+(?:el|un|una|the|a|an)?\s*(?:email|correo|mensaje|telegram|sms|notification|tweet|post)\b",
+    r"\b(?:submit|env[ií]a)\s+(?:the|la|el|una)?\s*(?:application|aplicacion|solicitud|form|formulario)\b",
+    r"\b(?:pay|paga|pagar|payment|charge|cobra|cobrar|spend|gasta|gastar)\b",
+    r"\b(?:borra|borrar|delete|elimina|eliminar|drop|remove)\s+(?:la|el|los|las|all|the|table|database|data|files|user|account|customer|usuario|cuenta)\b",
+    r"\brm\s+-rf\b",
+    r"\b(?:secret|secrets|password|passwords|token|tokens|credentials|credenciales|api[_\s]?key|rotar|rotate)\b",
+    r"\b(?:production|prod|en\s+produccion|on\s+prod)\b",
+    r"\bsudo\b",
+    r"\bdrop\s+table\b",
+    r"\b(?:force\s*push|--force\b|git\s+push\s+--force)\b",
+)
+
+
+def is_destructive_or_external_objective(text: str) -> bool:
+    """True iff the resolved objective looks destructive, external,
+    irreversible, or credential-gated."""
+    if not text:
+        return False
+    normalized = _normalize_command_text(text)
+    return any(re.search(pattern, normalized) for pattern in _RISKY_OBJECTIVE_PATTERNS)
+
+
+def _extract_inline_hint(match: re.Match[str]) -> str | None:
+    """Pull a named capture group out of an owner-delegation match, if any.
+
+    Patterns that opt into capturing inline objects use named groups whose
+    names start with ``hint_``; this helper returns the first non-empty
+    one. Returns ``None`` when the delegation phrase carried no inline
+    object (the common case for "córrelo tú").
+    """
+    try:
+        groups = match.groupdict()
+    except IndexError:
+        return None
+    for name, value in groups.items():
+        if not name.startswith("hint_"):
+            continue
+        if value:
+            cleaned = value.strip().strip(".!?")
+            if cleaned and cleaned not in _PRONOUN_ONLY_TOKENS:
+                return cleaned[:200]
+    return None
+
+
+_OWNER_DELEGATION_MIN_SIGNAL = 0.70
+
+
+def _owner_delegation_lexical_score(normalized: str, matched_text: str) -> float:
+    matched_tokens = set(_normalize_command_text(matched_text).split())
+    if not matched_tokens:
+        return 0.0
+    tokens = set(normalized.split())
+    if not tokens:
+        return 0.0
+    return len(matched_tokens & tokens) / len(matched_tokens)
+
+
+def _owner_delegation_direction_score(normalized: str, *, kind: str) -> float:
+    """Return how strongly the utterance directs action at the agent.
+
+    Regex match alone is not enough. Phrases like "what would happen if you
+    decide?" contain the lexical trigger but are hypothetical, not a command.
+    """
+    text = f" {normalized} "
+    hypothetical_markers = (
+        " what would happen ",
+        " que pasaria ",
+        " que pasa si ",
+        " if you decide ",
+        " if you choose ",
+        " si decide tu ",
+        " si tu decides ",
+        " dime si decide tu ",
+        " antes de que ",
+        " deberia hacerlo tu o yo ",
+        " deberia hacerlo yo o tu ",
+    )
+    if any(marker in text for marker in hypothetical_markers):
+        return 0.20
+    if re.search(r"\b(?:deberia|should)\b.+\b(?:tu|you)\b.+\b(?:yo|me|i)\b", normalized):
+        return 0.25
+    if kind == "decision" and re.search(
+        r"\b(?:decide tu|tu decides|tu eliges|escoge tu|elige tu|you decide|you choose|you pick)\b",
+        normalized,
+    ):
+        return 0.95
+    if kind == "execution" and re.search(r"\b(?:tu|you|yourself|for me)\b", normalized):
+        return 0.95
+    if kind == "no_manual_work" and re.search(
+        r"\b(?:no me|no tengo|don't ask|don t ask|stop asking|take ownership|handle it|encargate|gestiona|gestionalo|te toca)\b",
+        normalized,
+    ):
+        return 0.95
+    return 0.65
+
+
+def _build_owner_delegation_intent(
+    *,
+    kind: str,
+    normalized: str,
+    match: re.Match[str],
+) -> OwnerDelegationIntent | None:
+    hint = _extract_inline_hint(match)
+    lexical_score = _owner_delegation_lexical_score(normalized, match.group(0))
+    direction_score = _owner_delegation_direction_score(normalized, kind=kind)
+    if lexical_score < _OWNER_DELEGATION_MIN_SIGNAL or direction_score < _OWNER_DELEGATION_MIN_SIGNAL:
+        return None
+    confidence = min(0.99, round((lexical_score + direction_score) / 2, 3))
+    return OwnerDelegationIntent(
+        kind=kind,
+        confidence=confidence,
+        normalized_text=normalized[:200],
+        requires_resolution=hint is None,
+        is_execution_delegation=(kind == "execution"),
+        is_decision_delegation=(kind == "decision"),
+        is_no_manual_work_delegation=(kind == "no_manual_work"),
+        explicit_action_hint=hint,
+        lexical_score=lexical_score,
+        direction_score=direction_score,
+    )
+
+
+def detect_owner_delegation(text: str) -> OwnerDelegationIntent | None:
+    """Classify owner-delegation phrases.
+
+    Returns ``None`` when the input is empty or doesn't match any
+    delegation pattern. Casual chat ("hola", "ok", "gracias", "perfecto")
+    does not match because the patterns require specific verbs/pronouns.
+    """
+    if not text:
+        return None
+    normalized = _normalize_command_text(text)
+
+    for pattern in _OWNER_DELEGATION_EXEC_PATTERNS_ES + _OWNER_DELEGATION_EXEC_PATTERNS_EN:
+        match = re.search(pattern, normalized)
+        if match:
+            intent = _build_owner_delegation_intent(
+                kind="execution", normalized=normalized, match=match
+            )
+            if intent is not None:
+                return intent
+
+    for pattern in _OWNER_DELEGATION_DECISION_PATTERNS_ES + _OWNER_DELEGATION_DECISION_PATTERNS_EN:
+        match = re.search(pattern, normalized)
+        if match:
+            intent = _build_owner_delegation_intent(
+                kind="decision", normalized=normalized, match=match
+            )
+            if intent is not None:
+                return intent
+
+    for pattern in _OWNER_DELEGATION_NO_MANUAL_PATTERNS_ES + _OWNER_DELEGATION_NO_MANUAL_PATTERNS_EN:
+        match = re.search(pattern, normalized)
+        if match:
+            intent = _build_owner_delegation_intent(
+                kind="no_manual_work", normalized=normalized, match=match
+            )
+            if intent is not None:
+                return intent
+
+    return None
+
+
+_TELEGRAM_IMPERATIVE_RULES: tuple[dict[str, Any], ...] = (
+    {
+        "intent": "approvals.cleanup_stale_duplicates",
+        "patterns": (
+            r"^\s*(?:limpia|limpiar|depura|depurar|clean\s+up|cleanup)\s*$",
+            r"\b(?:limpia|depura|clean\s+up)\s+(?:las\s+)?(?:aprobaciones|approvals)(?:\s+(?:duplicadas|stale|viejas|pendientes))?\b",
+        ),
+        "needs_context": True,
+    },
+    {
+        "intent": "ui.submit_prompt",
+        "patterns": (
+            r"\b(?:mandalo|mandalo ya|envialo|dale enter|presiona enter|ejecutalo|correlo|run it|submit|send it)\b",
+        ),
+        "requires_ui_write": True,
+        "requires_submit": True,
+        "needs_context": True,
+        "artifact_hint": "prompt",
+    },
+    {
+        "intent": "ui.paste_text",
+        "patterns": (
+            r"\b(?:pegale|pega|pégale)\s+(?:el\s+)?prompt\b",
+            r"\b(?:pegalo|pégalo|paste\s+it)\b",
+            r"\bpaste\s+(?:the\s+)?prompt\b",
+        ),
+        "requires_ui_write": True,
+        "requires_clipboard": True,
+        "needs_context": True,
+        "artifact_hint": "prompt",
+    },
+    {
+        "intent": "ui.set_instructions",
+        "patterns": (
+            r"\bdale\s+las\s+(?:instructions|instrucciones)\b",
+            r"\bgive\s+it\s+the\s+instructions\b",
+        ),
+        "requires_ui_write": True,
+        "requires_clipboard": True,
+        "needs_context": True,
+        "artifact_hint": "instructions",
+    },
+    {
+        "intent": "ui.open_app",
+        "patterns": (
+            r"\babre\s+(?:la\s+)?app(?:\s+de\s+(?P<target_es_app>[a-z0-9 ._-]+))?\b",
+            r"\babre\s+(?P<target_es_bare>codex|chatgpt|chrome|claude)\b",
+            r"\bopen\s+(?:the\s+)?app(?:\s+(?P<target_en_app>[a-z0-9 ._-]+))?\b",
+            r"\bopen\s+(?P<target_en_bare>codex|chatgpt|chrome|claude)\b",
+        ),
+        "requires_ui_write": True,
+        "requires_ui_read": False,
+        "needs_context": False,
+    },
+    {
+        "intent": "ui.inspect_app",
+        "patterns": (
+            r"\brevisa\s+(?:la\s+)?app(?:\s+(?:de\s+)?(?P<target_es_inspect>[a-z0-9 ._-]+))?\b",
+            r"\brevisa\s+(?P<target_es_inspect_bare>codex|chatgpt|chrome|claude)\b",
+            r"\brevisa\s+en\s+(?P<target_es_inspect_in>[a-z0-9 ._-]+)\b",
+            r"\breview\s+(?:the\s+)?app(?:\s+(?P<target_en_inspect>[a-z0-9 ._-]+))?\b",
+            r"\breview\s+(?P<target_en_inspect_bare>codex|chatgpt|chrome|claude)\b",
+            r"\breview\s+in\s+(?P<target_en_inspect_in>[a-z0-9 ._-]+)\b",
+        ),
+        "requires_ui_read": True,
+        "needs_context": True,
+    },
+    {
+        "intent": "task.continue_active_mission",
+        "patterns": (
+            r"\b(?:continua|sigue|procede)\b",
+            r"\b(?:continue|proceed)\b",
+        ),
+        "needs_context": True,
+    },
+)
+
+_ACTIONABLE_TELEGRAM_MARKERS: tuple[str, ...] = (
+    "abre",
+    "open",
+    "dale",
+    "pega",
+    "pegale",
+    "paste",
+    "revisa",
+    "review",
+    "corre",
+    "correlo",
+    "ejecuta",
+    "ejecutalo",
+    "encargate",
+    "continua",
+    "sigue",
+    "procede",
+    "orquesta",
+    "orchestrate",
+    "limpia",
+    "limpiar",
+    "depura",
+    "depurar",
+    "clean up",
+    "cleanup",
+    "run",
+    "submit",
+    "send it",
+    "take ownership",
+)
+
+
+def _target_from_match(match: re.Match[str]) -> str | None:
+    for name, value in match.groupdict().items():
+        if not name.startswith("target_"):
+            continue
+        if value:
+            target = value.strip(" .,:;!?")
+            if target:
+                return target[:80]
+    return None
+
+
+def _canonical_target(target: str | None) -> str | None:
+    if not target:
+        return None
+    normalized = _normalize_command_text(target).strip()
+    if "codex" in normalized:
+        return "Codex app"
+    if "chatgpt" in normalized or "chat gpt" in normalized:
+        return "ChatGPT"
+    if "chrome" in normalized:
+        return "Chrome"
+    if "claude" in normalized:
+        return "Claude"
+    if "google cloud" in normalized or "gcp" in normalized:
+        return "Google Cloud"
+    if normalized in {"app", "la app", "the app"}:
+        return None
+    return target.strip()[:80]
+
+
+def detect_telegram_imperative(text: str) -> TelegramImperativeIntent | None:
+    """Detect explicit Spanish/English Telegram operator commands.
+
+    This is intentionally separate from the fuzzy task_intent classifier.
+    The global task_intent kill switch may disable weak inference, but it
+    must not disable explicit operator commands.
+    """
+    if not text:
+        return None
+    normalized = _normalize_command_text(text).strip()
+    if not normalized or normalized.startswith("/"):
+        return None
+    for rule in _TELEGRAM_IMPERATIVE_RULES:
+        for pattern in rule["patterns"]:
+            match = re.search(pattern, normalized)
+            if not match:
+                continue
+            intent_name = str(rule["intent"])
+            target_hint = _canonical_target(_target_from_match(match))
+            if intent_name in {"ui.open_app", "ui.inspect_app"} and _is_web_target_ambiguous(
+                normalized, target_hint
+            ):
+                return None
+            return TelegramImperativeIntent(
+                intent=intent_name,
+                normalized_text=normalized[:200],
+                confidence=0.94,
+                target_hint=target_hint,
+                artifact_hint=rule.get("artifact_hint"),
+                needs_context=bool(rule.get("needs_context", False)),
+                requires_ui_read=bool(rule.get("requires_ui_read", False)),
+                requires_ui_write=bool(rule.get("requires_ui_write", False)),
+                requires_submit=bool(rule.get("requires_submit", False)),
+                requires_clipboard=bool(rule.get("requires_clipboard", False)),
+                matched_pattern=pattern,
+            )
+    return None
+
+
+def _is_web_target_ambiguous(normalized: str, target_hint: str | None) -> bool:
+    """Return True when the imperative names a web/URL context that cannot
+    be served by a local `open -a <App>` and should fall through to brain.
+
+    Examples that must NOT resolve to the desktop app:
+    - "abre claude/design" → claude.ai/design in browser
+    - "abre claude.ai/projects" → URL
+    - "abre en chrome claude/design" → explicit browser path
+    """
+    if not target_hint:
+        return False
+    if target_hint not in {"Claude", "ChatGPT", "Codex app"}:
+        return False
+    if "claude.ai" in normalized or "chatgpt.com" in normalized or "openai.com" in normalized:
+        return True
+    if re.search(r"\b(?:claude|chatgpt|codex)\s*/\s*\w+", normalized):
+        return True
+    if "en chrome" in normalized or "in chrome" in normalized:
+        return True
+    return False
+
+
+def looks_like_actionable_telegram_message(text: str) -> bool:
+    """Broad safety net for imperative-ish Telegram messages.
+
+    A True result is not enough to execute anything. It only means the
+    message must not silently fall into generic brain fallback; callers should
+    map it to a supported intent, block it, or ask one concise clarification.
+    """
+    if not text:
+        return False
+    normalized = _normalize_command_text(text).strip()
+    if not normalized or normalized.startswith("/"):
+        return False
+    if detect_owner_delegation(text) is not None or detect_telegram_imperative(text) is not None:
+        return True
+    return any(re.search(rf"\b{re.escape(marker)}\b", normalized) for marker in _ACTIONABLE_TELEGRAM_MARKERS)
+
+
+def detect_meta_introspection_request(text: str) -> MetaIntrospectionIntent | None:
+    """Classify reflective/meta/audit/non-actionable prompts.
+
+    Returns `None` when the message is either:
+      - empty,
+      - an explicit implementation request (those win over meta),
+      - or simply not meta/audit/secret-shaped.
+
+    Otherwise returns a `MetaIntrospectionIntent` whose `kind` is one of
+    `meta`, `audit`, or `non_actionable_token`. The caller is responsible
+    for routing — typically to chat/brain — and for not logging
+    `normalized_text` if `kind == "non_actionable_token"` (the field is
+    redacted to length-and-shape for that kind).
+    """
+    if not text:
+        return None
+    if has_explicit_implementation_request(text):
+        return None
+    normalized = _normalize_command_text(text)
+    for pattern in _META_AUDIT_PATTERNS:
+        match = re.search(pattern, normalized)
+        if match:
+            return MetaIntrospectionIntent(
+                kind="audit",
+                normalized_text=normalized[:200],
+                reason=f"audit_pattern:{match.group(0)[:40]}",
+            )
+    for pattern in _META_INTROSPECTION_PATTERNS_ES + _META_INTROSPECTION_PATTERNS_EN:
+        match = re.search(pattern, normalized)
+        if match:
+            return MetaIntrospectionIntent(
+                kind="meta",
+                normalized_text=normalized[:200],
+                reason=f"meta_pattern:{match.group(0)[:40]}",
+            )
+    if _is_secret_shaped_token(text):
+        token = text.strip()
+        shape = (
+            f"len={len(token)}"
+            f" upper={sum(1 for c in token if c.isupper())}"
+            f" lower={sum(1 for c in token if c.islower())}"
+            f" digit={sum(1 for c in token if c.isdigit())}"
+        )
+        return MetaIntrospectionIntent(
+            kind="non_actionable_token",
+            normalized_text=f"<redacted:{shape}>",
+            reason="single_token_high_entropy",
+        )
+    return None
+
+
 def _stable_task_id(summary: str, *, mode: str, source: str) -> str:
     normalized = _normalize_command_text(summary)
     slug = re.sub(r"[^a-z0-9]+", "-", normalized).strip("-")[:48] or "task"
@@ -564,6 +1285,18 @@ _INTERNAL_LEAK_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"/Users/hector/"),
     re.compile(r"</?\s*system-reminder\s*>", re.IGNORECASE),
     re.compile(r"&lt;/?\s*system-reminder\s*&gt;", re.IGNORECASE),
+    re.compile(r"\bReply\s+ONLY\b", re.IGNORECASE),
+    re.compile(r"\bReply\s+ONLY\b[\s\S]{0,500}\bI\s+am\s+Dr\.?\s+Strange\b", re.IGNORECASE),
+    re.compile(r"\bbrain-tooluse:[^\s`]+", re.IGNORECASE),
+    re.compile(r"(?:\[id interno omitido\]|tg-[A-Za-z0-9_-]+):evidence-gate:\d+", re.IGNORECASE),
+    re.compile(r"\b(?:needs_verification|running_needs_verification)\b", re.IGNORECASE),
+    re.compile(r"\bbrain_tooluse_with_manifest_pending_verification\b", re.IGNORECASE),
+    re.compile(r"\bruntime lost authoritative backing state\b", re.IGNORECASE),
+    re.compile(r"\bbinary\s+'[^']+'\s+requires higher privilege level\b", re.IGNORECASE),
+    re.compile(r"\b(?:allowed whitelist|sandbox\.excludedCommands|Seatbelt OS-level|runtime host|CLI host|Bash tool|tool Bash)\b", re.IGNORECASE),
+    re.compile(r"\bsandbox\s+(?:embebido|del entorno local|que est[aá] bloqueando|carga policies)\b", re.IGNORECASE),
+    re.compile(r"(?:~|/Users/hector)/\.claude/settings\.json(?:\.[A-Za-z0-9_.-]+)?", re.IGNORECASE),
+    re.compile(r"\bclaw_v2/sandbox\.py\b", re.IGNORECASE),
 )
 
 # Indices in _INTERNAL_LEAK_PATTERNS that bump the entire reply to the error
@@ -571,7 +1304,7 @@ _INTERNAL_LEAK_PATTERNS: tuple[re.Pattern[str], ...] = (
 # verbatim prompt echoes. Soft phrases ("respuesta bloqueada", "trazas internas",
 # "circuit breaker", etc.) are inline-redacted further below so legitimate
 # technical references do not nuke an otherwise valid reply.
-_NUKE_PATTERN_INDICES: tuple[int, ...] = (4, 5, 6, 20, 21, 22, 23, 24, 25, 30, 31)
+_NUKE_PATTERN_INDICES: tuple[int, ...] = (4, 5, 6, 20, 21, 22, 23, 24, 25, 32, 33)
 
 
 def _chat_response_has_internal_leak(text: str) -> bool:
@@ -581,21 +1314,104 @@ def _chat_response_has_internal_leak(text: str) -> bool:
 def _sanitize_chat_response(text: str) -> str:
     if not text:
         return text
-    if any(_INTERNAL_LEAK_PATTERNS[i].search(text) for i in _NUKE_PATTERN_INDICES):
+    from claw_v2.leak_scrub import redact_system_reminders
+
+    precleaned = redact_system_reminders(text)
+    if any(_INTERNAL_LEAK_PATTERNS[i].search(precleaned) for i in _NUKE_PATTERN_INDICES):
         return (
             "Tuve un error preparando la respuesta. "
             "Retomo la acción con el contexto disponible o te diré el bloqueo verificado."
         )
 
-    sanitized = text
+    sanitized = precleaned
+    sanitized = re.sub(r"\[redacted:\s*system-reminder\]", "[redacted: internal marker]", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"&lt;/?\s*system-reminder\s*&gt;", "[redacted: internal marker]", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"</?\s*system-reminder\s*>", "[redacted: internal marker]", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(
+        r"\bbrain-tooluse:[^\s`]+",
+        "[tarea interna omitida]",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"(?:\[id interno omitido\]|tg-[A-Za-z0-9_-]+):evidence-gate:\d+",
+        "[tarea interna omitida]",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
     sanitized = re.sub(r"\bMessage ID\s+\d+\b", "Mensaje enviado", sanitized, flags=re.IGNORECASE)
     sanitized = re.sub(r"\bmessage_id\s*[:#]?\s*\d+\b", "mensaje enviado", sanitized, flags=re.IGNORECASE)
     sanitized = re.sub(r"\bchat_id\s*[:#]?\s*-?\d+\b", "chat", sanitized, flags=re.IGNORECASE)
     sanitized = re.sub(r"\btg-[A-Za-z0-9_-]+\b", "[id interno omitido]", sanitized)
+    sanitized = re.sub(
+        r"\[id interno omitido\]:evidence-gate:\d+",
+        "[tarea interna omitida]",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
     sanitized = re.sub(r"\bnlm-[A-Za-z0-9_-]+\b", "[id interno omitido]", sanitized)
     sanitized = re.sub(r"\bPID\s*[:#]?\s*\d+\b", "proceso local", sanitized, flags=re.IGNORECASE)
     sanitized = re.sub(r"\blocalhost(?::\d+)?\b", "[endpoint local interno]", sanitized, flags=re.IGNORECASE)
     sanitized = re.sub(r"\b127\.0\.0\.1(?::\d+)?\b", "[endpoint local interno]", sanitized)
+    sanitized = re.sub(
+        r"\bbrain_tooluse_with_manifest_pending_verification\b",
+        "pendiente de verificacion con evidencia local",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"\brunning_needs_verification\b",
+        "en verificacion",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"\bneeds_verification\b",
+        "pendiente de verificacion",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"\bruntime lost authoritative backing state\b",
+        "se perdio el estado ejecutable de la tarea",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"\bbinary\s+'([^']+)'\s+requires higher privilege level\s+\(not in the allowed whitelist\)",
+        r"el comando '\1' está bloqueado por la política de ejecución local",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"\bsandbox\.excludedCommands\b",
+        "configuración local de permisos",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"`?(?:~|/Users/hector)/\.claude/settings\.json(?:\.[A-Za-z0-9_.-]+)?`?",
+        "[configuración local omitida]",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(r"\ballowed whitelist\b", "política de ejecución", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bel allowlist real\b", "la política efectiva", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\ballowlist real\b", "política efectiva", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bSeatbelt OS-level\b", "política del sistema", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bClaude Code\s+\(CLI host\)", "el entorno local", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bCLI host\b", "entorno local", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bruntime host\b", "entorno local", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bBash tool\b|\btool Bash\b", "herramienta local", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bsub-runtime\b", "entorno local", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bsandbox que est[aá] bloqueando\b", "política de ejecución que está bloqueando", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bsandbox embebido\b", "política de ejecución embebida", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bsandbox del entorno local\b", "política de ejecución local", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bsandbox carga policies\b", "la política de ejecución carga reglas", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bruntime de la herramienta local\b", "entorno de ejecución local", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bclaw_v2/sandbox\.py\b", "política local del agente", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bconfig de el entorno local\b", "config del entorno local", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\bel política\b", "la política", sanitized, flags=re.IGNORECASE)
     sanitized = re.sub(r"\bpuerto\s+\d{2,5}\b", "puerto interno", sanitized, flags=re.IGNORECASE)
     sanitized = re.sub(r"\ben\s+:\d{2,5}\b", "en un puerto interno", sanitized, flags=re.IGNORECASE)
     sanitized = re.sub(r"\bterminal bridge\b", "herramienta local", sanitized, flags=re.IGNORECASE)
@@ -665,9 +1481,17 @@ def _compact_summary(text: str, *, limit: int = 240) -> str | None:
 
 def _extract_pending_action_from_reply(text: str) -> str | None:
     for line in text.splitlines():
-        match = re.match(r"^\s*(?:siguiente paso|next step|pendiente|retomo la acci[oó]n)\s*:\s*(.+?)\s*$", line, re.IGNORECASE)
+        normalized_line = re.sub(r"^\s*(?:[-*]\s*)+", "", line.strip())
+        normalized_line = normalized_line.replace("**", "").replace("__", "")
+        match = re.match(
+            r"^\s*(?:siguiente paso|next step|pendiente|retomo la acci[oó]n)\s*:\s*(.+?)\s*$",
+            normalized_line,
+            re.IGNORECASE,
+        )
         if match:
-            return match.group(1).strip()
+            pending = match.group(1).strip()
+            pending = re.split(r"\s+[—-]\s+requiere\b", pending, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+            return pending
     return None
 
 
@@ -820,22 +1644,28 @@ def _coordinator_checkpoint(result: CoordinatorResult, *, objective: str) -> dic
     implementation_results = result.phase_results.get("implementation", [])
     verification_text = "\n".join(item.content for item in verification_results if item.content)
     implementation_text = "\n".join(item.content for item in implementation_results if item.content)
+    critical_worker_error = _is_critical_worker_error(result)
     pending_action = _extract_pending_action_from_reply(verification_text) or _extract_pending_action_from_reply(implementation_text)
     implementation_error = next(
         (item.error for item in implementation_results if item.error),
         "",
     )
     verification_status = (
-        ("failed" if implementation_error else None)
+        ("failed" if critical_worker_error else None)
+        or ("failed" if implementation_error else None)
         or _extract_verification_status(verification_text)
         or ("failed" if result.error else None)
         or ("pending" if verification_results else "unknown")
     )
-    summary = _compact_summary(result.synthesis or objective, limit=180) or objective
+    summary_source = _CRITICAL_WORKER_VISIBLE_MESSAGE if critical_worker_error else (result.synthesis or objective)
+    summary = _compact_summary(summary_source, limit=180) or summary_source
     checkpoint = {
         "summary": summary,
         "verification_status": verification_status,
     }
+    if critical_worker_error:
+        checkpoint["critical_worker_error"] = True
+        checkpoint["coordinator_audit"] = dict(getattr(result, "audit", {}) or {})
 
     structured = _coordinator_result_to_structured(
         result,
@@ -854,6 +1684,8 @@ def _coordinator_checkpoint(result: CoordinatorResult, *, objective: str) -> dic
 
     if pending_action:
         checkpoint["pending_action"] = pending_action
+    elif critical_worker_error:
+        checkpoint["pending_action"] = "reparar error crítico del subagente antes de reintentar la misión principal"
     elif implementation_error:
         checkpoint["pending_action"] = f"reintentar implementación: {implementation_error}"
     if result.error:
@@ -906,6 +1738,8 @@ def _coordinator_result_to_structured(
         blockers.append(f"coordinator_error: {result.error}")
     if implementation_error:
         blockers.append(f"implementation_error: {implementation_error}")
+    if _is_critical_worker_error(result):
+        blockers.append("critical_worker_error")
 
     if not actions and not evidence:
         coerced = coerce_unstructured_coordinator_output(result.synthesis or objective)
@@ -957,6 +1791,11 @@ def _format_worker_results(results: list[Any]) -> str:
 
 
 def _format_coordinator_response(result: CoordinatorResult, *, checkpoint: dict[str, str], forced: bool) -> str:
+    if _is_critical_worker_error(result):
+        lines = [_CRITICAL_WORKER_VISIBLE_MESSAGE]
+        if checkpoint.get("pending_action"):
+            lines.append(f"Siguiente paso: {checkpoint['pending_action']}")
+        return "\n".join(lines)
     status = checkpoint.get("verification_status", "unknown")
     opening = {
         "passed": f"Listo. Cerré la tarea `{result.task_id}`.",
@@ -975,6 +1814,10 @@ def _format_coordinator_response(result: CoordinatorResult, *, checkpoint: dict[
     if checkpoint.get("pending_action"):
         lines.append(f"Siguiente paso: {checkpoint['pending_action']}")
     return "\n".join(lines)
+
+
+def _is_critical_worker_error(result: CoordinatorResult) -> bool:
+    return str(getattr(result, "error", "") or "").startswith(_CRITICAL_WORKER_ERROR_PREFIX)
 
 
 def _autonomy_policy_payload(state: dict[str, Any]) -> dict[str, Any]:
@@ -1228,6 +2071,26 @@ def _extract_url_candidate(text: str) -> str | None:
     return None
 
 
+def _extract_url_candidates(text: str) -> list[str]:
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for pattern in (_SCHEME_URL_RE, _HOST_URL_RE):
+        for match in pattern.finditer(text):
+            candidate = _strip_url_punctuation(match.group("url"))
+            if not candidate:
+                continue
+            try:
+                normalized = _normalize_url(candidate)
+            except ValueError:
+                continue
+            key = _url_identity(normalized)
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(normalized)
+    return candidates
+
+
 def _strip_url_punctuation(value: str) -> str:
     candidate = value.strip().strip("<>[]{}\"'")
     while candidate and candidate[-1] in ".,;:!?":
@@ -1239,6 +2102,107 @@ def _looks_like_standalone_url(text: str, url: str) -> bool:
     remainder = text.replace(url, " ", 1)
     remainder = re.sub(r"[\s`\"'“”‘’<>()\[\]{}.,;:!?-]+", "", remainder)
     return remainder == ""
+
+
+def _url_identity(url: str) -> str:
+    try:
+        parsed = urlsplit(_normalize_url(url))
+    except Exception:
+        return _strip_url_punctuation(url).lower()
+    host = (parsed.hostname or parsed.netloc).lower()
+    if host.startswith("www."):
+        host = host[4:]
+    path = parsed.path.rstrip("/")
+    return f"{host}{path}".lower()
+
+
+def _nested_url_candidates(text: str, *, skip_urls: list[str] | tuple[str, ...] = (), max_urls: int = 3) -> list[str]:
+    skip = {_url_identity(url) for url in skip_urls}
+    candidates: list[str] = []
+    for url in _extract_url_candidates(text):
+        key = _url_identity(url)
+        if key in skip:
+            continue
+        skip.add(key)
+        candidates.append(url)
+        if len(candidates) >= max_urls:
+            break
+    return candidates
+
+
+def _textual_nested_url_review_blocks(
+    text: str,
+    *,
+    skip_urls: list[str] | tuple[str, ...] = (),
+    max_urls: int = 3,
+) -> list[str]:
+    blocks: list[str] = []
+    for url in _nested_url_candidates(text, skip_urls=skip_urls, max_urls=max_urls):
+        content = _tweet_fxtwitter_read(url) if _is_tweet_url(url) else _jina_read(url)
+        if content:
+            blocks.append(f"[URL anidada analizada]: {url}\n{content[:3000]}")
+        else:
+            blocks.append(f"[URL anidada intentada]: {url}\nNo se pudo extraer contenido útil con lectura textual.")
+    return blocks
+
+
+def _looks_like_url_permission_deferral(text: str, *, context: str = "") -> bool:
+    combined = f"{text}\n{context}" if context else text
+    normalized = _normalize_command_text(combined)
+    if not (
+        _extract_url_candidate(combined)
+        or any(token in normalized for token in ("url", "enlace", "tweet", "tuit", "flow.google"))
+    ):
+        return False
+    has_defer_marker = any(
+        marker in normalized
+        for marker in (
+            "si quieres",
+            "cuando me digas",
+            "cuando decidas",
+            "hasta que decidas",
+            "si me das la luz",
+            "tu pick",
+        )
+    )
+    if not has_defer_marker:
+        return False
+    return any(
+        action in normalized
+        for action in (
+            " abro",
+            " abra",
+            " abrir",
+            " abre ",
+            " reviso",
+            " revisar",
+            " verifico",
+            " verificar",
+            " navego",
+            " navegar",
+            " traigo",
+            " traer",
+            " compruebo",
+            " confirmar acceso",
+        )
+    )
+
+
+def _strip_url_permission_deferrals(text: str, *, context: str = "") -> str:
+    if not text:
+        return text
+    kept: list[str] = []
+    changed = False
+    for line in text.splitlines():
+        if _looks_like_url_permission_deferral(line, context=context):
+            changed = True
+            continue
+        kept.append(line)
+    if not changed:
+        return text
+    stripped = "\n".join(kept)
+    stripped = re.sub(r"\n{3,}", "\n\n", stripped).strip()
+    return stripped or "Detecté una URL Tier 1 que no debe convertirse en pregunta; la revisión queda como acción autónoma."
 
 
 # Domains that require real browser cookies (auth) or heavy JS rendering.
@@ -1253,6 +2217,7 @@ _AUTH_DOMAINS = frozenset({
     "threads.net",
     "mail.google.com",
     "web.whatsapp.com",
+    "flow.google",
 })
 
 _JS_RENDERED_DOMAINS = frozenset({
@@ -1320,15 +2285,19 @@ _RAW_MARKUP_SIGNALS = [
 
 def _enrich_tweet_urls(text: str) -> str:
     """If text contains tweet URLs, pre-fetch content and append to message."""
-    urls = _SCHEME_URL_RE.findall(text)
-    tweet_urls = [_strip_url_punctuation(u) for u in urls if _is_tweet_url(_strip_url_punctuation(u))]
+    tweet_urls = [u for u in _extract_url_candidates(text) if _is_tweet_url(u)]
     if not tweet_urls:
         return text
     enriched = text
+    seen_urls: list[str] = []
     for url in tweet_urls:
+        seen_urls.append(url)
         content = _tweet_fxtwitter_read(url)
         if content:
             enriched += f"\n\n---\n[Contenido del tweet pre-cargado]:\n{content}"
+            nested_blocks = _textual_nested_url_review_blocks(content, skip_urls=seen_urls)
+            if nested_blocks:
+                enriched += "\n\n---\n[URLs anidadas revisadas autónomamente]\n" + "\n\n".join(nested_blocks)
     return enriched
 
 
@@ -1339,10 +2308,12 @@ def _format_tweet_analysis_prompt(original_text: str, enriched_text: str) -> str
         "Si respondes sobre este tweet o sobre enlaces relacionados que el tweet incluye, separa SIEMPRE la respuesta en dos secciones exactas:\n"
         "## Fuente\n"
         "- Resume únicamente lo que está en el tweet y, si aplica, en el contenido enlazado que sí fue leído.\n"
+        "- Si hay bloques [URL anidada analizada] o [URL anidada intentada], incorpóralos como revisión ya ejecutada; no preguntes si debe abrirse una URL.\n"
         "- Distingue con claridad qué viene del tweet y qué viene del enlace.\n"
         "- No presentes inferencias o recomendaciones como si fueran parte de la fuente.\n\n"
         "## Aplicación sugerida\n"
         "- Incluye solo inferencias, recomendaciones o ideas prácticas tuyas.\n"
+        "- Si detectas otra URL Tier 1 no revisada, no la conviertas en opción para Hector; reporta la limitación como intento pendiente o bloqueador real.\n"
         "- Si no hay una recomendación útil, escribe: Ninguna por ahora.\n\n"
         f"{enriched_text}"
     )
@@ -1355,10 +2326,12 @@ def _format_link_analysis_prompt(original_text: str, url: str, fetched_content: 
         "Si respondes sobre este enlace, separa SIEMPRE la respuesta en dos secciones exactas:\n"
         "## Fuente\n"
         "- Resume únicamente lo que sí fue leído del enlace.\n"
+        "- Si hay bloques [URL anidada analizada] o [URL anidada intentada], trátalos como revisión autónoma ya ejecutada; no preguntes si debe abrirse una URL.\n"
         "- Si el contenido vino incompleto, estaba detrás de login o hubo limitaciones de lectura, dilo explícitamente.\n"
         "- No mezcles inferencias, recomendaciones o juicio propio con la fuente.\n\n"
         "## Aplicación sugerida\n"
         "- Incluye solo inferencias, recomendaciones, riesgos o siguientes pasos tuyos.\n"
+        "- No termines con 'si quieres lo abro/reviso/verifico' para URLs; esas revisiones son Tier 1 salvo acción Tier 3.\n"
         "- Si no hay una sugerencia útil, escribe: Ninguna por ahora.\n\n"
         f"[URL analizada]: {url}\n\n"
         f"[Contenido del enlace pre-cargado]:\n{fetched_content}"
@@ -1527,7 +2500,7 @@ def _is_tweet_url(url: str) -> bool:
 def _looks_like_tweet_followup_request(normalized_text: str) -> bool:
     if not any(token in normalized_text for token in _BROWSE_SHORTCUT_TOKENS):
         return False
-    if not any(token in normalized_text for token in ("tweet", "tweets", "tuit", "tuits", "post")):
+    if not any(token in normalized_text for token in ("tweet", "tweets", "tuit", "tuits", "post", "hilo", "hilos", "thread")):
         return False
     # Only reuse the prior tweet when the user clearly points back to it.
     return any(
@@ -1547,6 +2520,31 @@ def _looks_like_tweet_followup_request(normalized_text: str) -> bool:
             "tuit de arriba",
             "tweet pasado",
             "tuit pasado",
+            "tweet que te acabo",
+            "tuit que te acabo",
+            "post que te acabo",
+            "hilo que te acabo",
+            "thread que te acabo",
+            "tweet que te di",
+            "tuit que te di",
+            "post que te di",
+            "hilo que te di",
+            "tweet que te mande",
+            "tuit que te mande",
+            "post que te mande",
+            "hilo que te mande",
+            "tweet que te envie",
+            "tuit que te envie",
+            "post que te envie",
+            "hilo que te envie",
+            "tweet que te pase",
+            "tuit que te pase",
+            "post que te pase",
+            "hilo que te pase",
+            "que te acabo de dar",
+            "que acabo de darte",
+            "que te acabo de pasar",
+            "que acabo de pasarte",
         )
     )
 

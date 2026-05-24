@@ -406,8 +406,24 @@ class LearningLoop:
             return None
 
         proposal["evidence_counts"] = {"signals": len(signals), "outcomes": len(outcomes), "events": len(events)}
-        key = f"soul_update_suggestion.{int(time.time())}"
         value = json.dumps(proposal, ensure_ascii=True, sort_keys=True)
+        # P0-F: dedup by content hash so identical proposals consolidate
+        # instead of accumulating one fact per run.
+        content_hash = hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+        key = f"soul_update_suggestion.{content_hash}"
+        existing = self.memory.get_fact(key)
+        if existing is not None:
+            new_conf = self.memory.bump_fact_confidence(key, delta=0.05, cap=1.0)
+            observe.emit(
+                "learning_loop_dedup",
+                payload={
+                    "fact_key": key,
+                    "content_hash": content_hash,
+                    "confidence": new_conf,
+                    "summary": str(proposal.get("summary", ""))[:500],
+                },
+            )
+            return proposal
         self.memory.store_fact(
             key,
             value,
@@ -422,6 +438,7 @@ class LearningLoop:
                 "suggestion_count": len(proposal.get("suggestions", [])),
                 "summary": str(proposal.get("summary", ""))[:500],
                 "fact_key": key,
+                "content_hash": content_hash,
             },
         )
         return proposal

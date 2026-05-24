@@ -76,9 +76,33 @@ _SECONDARY_PROVIDER_DEFAULT_MODELS: dict[str, str] = {
     "codex": "gpt-5.5",
 }
 
+_SUBSCRIPTION_BUDGET_FLOORS: dict[Lane, float] = {
+    "brain": 1.00,
+    "worker": 0.25,
+    "worker_heavy": 0.25,
+    "verifier": 0.05,
+    "research": 0.10,
+    "judge": 0.05,
+}
+
 
 def _is_anthropic_model(model: str | None) -> bool:
     return bool(model and model.startswith("claude-"))
+
+
+def _validate_provider_model_pair(provider: str, model: str, *, lane: str) -> None:
+    normalized_provider = provider.strip().lower()
+    normalized_model = model.strip().lower()
+    if normalized_provider == "anthropic" and (
+        normalized_model.startswith("gpt-")
+        or normalized_model.startswith("o3")
+        or normalized_model.startswith("o4")
+    ):
+        raise ValueError(f"{lane}: anthropic provider cannot serve OpenAI model {model!r}.")
+    if normalized_provider in {"openai", "codex"} and normalized_model.startswith("claude-"):
+        raise ValueError(f"{lane}: {provider} provider cannot serve Anthropic model {model!r}.")
+    if normalized_provider == "google" and not normalized_model.startswith("gemini-"):
+        raise ValueError(f"{lane}: google provider cannot serve non-Gemini model {model!r}.")
 
 
 @dataclass(slots=True)
@@ -295,6 +319,8 @@ class AppConfig:
     brain_model: str
     worker_provider: str
     worker_model: str
+    worker_heavy_provider: str
+    worker_heavy_model: str
     verifier_provider: str | None
     verifier_model: str | None
     research_provider: str | None
@@ -302,6 +328,7 @@ class AppConfig:
     judge_provider: str | None
     judge_model: str | None
     worker_effort: str
+    worker_heavy_effort: str
     brain_effort: str
     judge_effort: str
     max_budget_usd: float
@@ -373,9 +400,12 @@ class AppConfig:
     research_effort: str | None = None
     brain_thinking_tokens: int = 0
     worker_thinking_tokens: int = 0
+    worker_heavy_thinking_tokens: int = 0
     verifier_thinking_tokens: int = 0
     research_thinking_tokens: int = 0
     judge_thinking_tokens: int = 0
+    claw_worker_summary_limit: int = 16_000
+    claw_phase_input_limit: int = 48_000
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -389,6 +419,13 @@ class AppConfig:
             home,
             Path("/private/tmp"),
         ]
+        worker_provider = os.getenv("WORKER_PROVIDER", "anthropic")
+        worker_model = os.getenv("WORKER_MODEL", "claude-sonnet-4-6")
+        worker_heavy_provider = os.getenv("WORKER_HEAVY_PROVIDER", "codex")
+        worker_heavy_model = os.getenv("WORKER_HEAVY_MODEL") or _SECONDARY_PROVIDER_DEFAULT_MODELS.get(
+            worker_heavy_provider,
+            worker_model,
+        )
         return cls(
             telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN"),
             telegram_allowed_user_id=os.getenv("TELEGRAM_ALLOWED_USER_ID"),
@@ -404,21 +441,25 @@ class AppConfig:
             approval_secret=os.getenv("APPROVAL_SECRET") or _load_or_create_approval_secret(),
             brain_provider=os.getenv("BRAIN_PROVIDER", "anthropic"),
             brain_model=os.getenv("BRAIN_MODEL", "claude-opus-4-7"),
-            worker_provider=os.getenv("WORKER_PROVIDER", "anthropic"),
-            worker_model=os.getenv("WORKER_MODEL", "claude-sonnet-4-6"),
+            worker_provider=worker_provider,
+            worker_model=worker_model,
+            worker_heavy_provider=worker_heavy_provider,
+            worker_heavy_model=worker_heavy_model,
             verifier_provider=os.getenv("VERIFIER_PROVIDER"),
             verifier_model=os.getenv("VERIFIER_MODEL"),
-            research_provider=os.getenv("RESEARCH_PROVIDER"),
+            research_provider=os.getenv("RESEARCH_PROVIDER", "codex"),
             research_model=os.getenv("RESEARCH_MODEL"),
-            judge_provider=os.getenv("JUDGE_PROVIDER"),
+            judge_provider=os.getenv("JUDGE_PROVIDER", "codex"),
             judge_model=os.getenv("JUDGE_MODEL"),
             worker_effort=os.getenv("WORKER_EFFORT", "high"),
+            worker_heavy_effort=os.getenv("WORKER_HEAVY_EFFORT", "high"),
             brain_effort=os.getenv("BRAIN_EFFORT", "high"),
             judge_effort=os.getenv("JUDGE_EFFORT", "medium"),
             verifier_effort=os.getenv("VERIFIER_EFFORT"),
             research_effort=os.getenv("RESEARCH_EFFORT"),
             brain_thinking_tokens=_env_int("BRAIN_THINKING_TOKENS", 0),
             worker_thinking_tokens=_env_int("WORKER_THINKING_TOKENS", 0),
+            worker_heavy_thinking_tokens=_env_int("WORKER_HEAVY_THINKING_TOKENS", 0),
             verifier_thinking_tokens=_env_int("VERIFIER_THINKING_TOKENS", 0),
             research_thinking_tokens=_env_int("RESEARCH_THINKING_TOKENS", 0),
             judge_thinking_tokens=_env_int("JUDGE_THINKING_TOKENS", 0),
@@ -494,6 +535,8 @@ class AppConfig:
             evening_brief_enabled=_env_bool("EVENING_BRIEF_ENABLED", True),
             evening_brief_hour=_env_int("EVENING_BRIEF_HOUR", 21),
             telemetry_root=Path(os.getenv("TELEMETRY_ROOT", str(home / ".claw" / "telemetry"))),
+            claw_worker_summary_limit=_env_int("CLAW_WORKER_SUMMARY_LIMIT", 16_000),
+            claw_phase_input_limit=_env_int("CLAW_PHASE_INPUT_LIMIT", 48_000),
         )
 
     def ensure_directories(self) -> None:
@@ -510,6 +553,8 @@ class AppConfig:
             raise ValueError("brain_provider must be 'anthropic' in the current runtime design.")
         if self.worker_provider not in {"anthropic", "codex", "openai"}:
             raise ValueError("worker_provider must be 'anthropic', 'codex', or 'openai'.")
+        if self.worker_heavy_provider not in {"anthropic", "codex", "openai"}:
+            raise ValueError("worker_heavy_provider must be 'anthropic', 'codex', or 'openai'.")
         if self.claude_auth_mode not in {"subscription", "api_key", "auto"}:
             raise ValueError("claude_auth_mode must be one of: subscription, api_key, auto.")
         supported = {"anthropic", "openai", "google", "ollama", "codex"}
@@ -522,6 +567,8 @@ class AppConfig:
         for field_name, value in secondary.items():
             if value is not None and value not in supported:
                 raise ValueError(f"{field_name} must be one of {sorted(supported)}.")
+        for lane in ("brain", "worker", "worker_heavy", "verifier", "research", "judge"):
+            _validate_provider_model_pair(self.provider_for_lane(lane), self.model_for_lane(lane), lane=lane)
         if self.browse_backend not in supported_browse_backends:
             raise ValueError(f"browse_backend must be one of {sorted(supported_browse_backends)}.")
         if self.sandbox_capability_profile not in {"surgical", "engineer", "admin"}:
@@ -544,6 +591,10 @@ class AppConfig:
             raise ValueError("observation_cost_per_hour_threshold must be positive.")
         if self.observation_tool_calls_per_minute_threshold <= 0:
             raise ValueError("observation_tool_calls_per_minute_threshold must be positive.")
+        if self.claw_worker_summary_limit <= 0:
+            raise ValueError("claw_worker_summary_limit must be positive.")
+        if self.claw_phase_input_limit <= 0:
+            raise ValueError("claw_phase_input_limit must be positive.")
         for site in self.monitored_sites:
             if not site.name:
                 raise ValueError("monitored_sites entries must include a name.")
@@ -591,6 +642,7 @@ class AppConfig:
         mapping = {
             "brain": self.brain_provider,
             "worker": self.worker_provider,
+            "worker_heavy": self.worker_heavy_provider,
             "verifier": self.verifier_provider or critic_provider,
             "research": self.research_provider or self.brain_provider,
             "judge": self.judge_provider or critic_provider,
@@ -602,6 +654,8 @@ class AppConfig:
             return self.brain_model
         if lane == "worker":
             return self.worker_model
+        if lane == "worker_heavy":
+            return self.worker_heavy_model
         explicit = {
             "verifier": self.verifier_model,
             "research": self.research_model,
@@ -623,6 +677,8 @@ class AppConfig:
             return self.brain_effort
         if lane == "worker":
             return self.worker_effort
+        if lane == "worker_heavy":
+            return self.worker_heavy_effort
         if lane == "verifier":
             return self.verifier_effort or self.judge_effort
         if lane == "research":
@@ -635,6 +691,7 @@ class AppConfig:
         mapping = {
             "brain": self.brain_thinking_tokens,
             "worker": self.worker_thinking_tokens,
+            "worker_heavy": self.worker_heavy_thinking_tokens,
             "verifier": self.verifier_thinking_tokens,
             "research": self.research_thinking_tokens,
             "judge": self.judge_thinking_tokens,
@@ -650,3 +707,48 @@ class AppConfig:
         if lane == "brain":
             return self.brain_max_output
         return self.worker_max_output
+
+    def provider_billing_mode(self, provider: str) -> str:
+        normalized = provider.strip().lower()
+        if normalized == "codex":
+            return "subscription"
+        if normalized == "ollama":
+            return "local"
+        if normalized == "anthropic":
+            if self.claude_auth_mode == "api_key":
+                return "api"
+            if self.claude_auth_mode == "subscription":
+                return "subscription"
+            return "api" if os.getenv("ANTHROPIC_API_KEY") else "subscription"
+        if normalized in {"openai", "google"}:
+            return "api"
+        return "unknown"
+
+    def billable_cost_providers(self) -> set[str]:
+        providers = {"anthropic", "openai", "google"}
+        return {
+            provider
+            for provider in providers
+            if self.provider_billing_mode(provider) == "api"
+        }
+
+    def notional_cost_providers(self) -> set[str]:
+        providers = {"anthropic", "codex", "ollama"}
+        return {
+            provider
+            for provider in providers
+            if self.provider_billing_mode(provider) in {"subscription", "local"}
+        }
+
+    def effective_max_budget_for_request(
+        self,
+        *,
+        lane: Lane,
+        provider: str,
+        requested_budget: float,
+    ) -> float:
+        budget = float(requested_budget)
+        if self.provider_billing_mode(provider) != "subscription":
+            return budget
+        floor = _SUBSCRIPTION_BUDGET_FLOORS.get(lane, 0.0)
+        return max(budget, floor)

@@ -18,6 +18,10 @@ SURGICAL_ALLOWED_BINARIES = frozenset(
         "ls",
         "mkdir",
         "mv",
+        "node",
+        "npm",
+        "npx",
+        "pnpm",
         "pwd",
         "rg",
         "touch",
@@ -30,6 +34,7 @@ DEVELOPMENT_ALLOWED_BINARIES = frozenset(
         "node",
         "npm",
         "npx",
+        "pnpm",
         "pip",
         "pip3",
         "python",
@@ -39,13 +44,16 @@ DEVELOPMENT_ALLOWED_BINARIES = frozenset(
 
 OPERATIONAL_ALLOWED_BINARIES = frozenset(
     {
+        "brew",
         "chmod",
         "date",
+        "gemini",
         "gh",
         "head",
         "id",
         "launchctl",
         "lsof",
+        "osascript",
         "pgrep",
         "ps",
         "readlink",
@@ -331,36 +339,14 @@ def sandbox_hook(
     network_enforcer: DomainAllowlistEnforcer | None = None,
     actor: str = "default",
 ) -> SandboxDecision:
-    if tool_name in {"Read", "Write", "Edit", "mcp__claw_tools__write_file"}:
-        path = Path(tool_input.get("file_path") or tool_input.get("path") or "")
-        allowed = is_within_allowed(path, policy)
-        return SandboxDecision(allowed, "" if allowed else "path outside allowed boundaries")
+    from claw_v2.runtime_policy import RuntimePolicyEngine
 
-    if tool_name == "Bash":
-        command = tool_input.get("command", "")
-        violation = check_command(command, policy)
-        if violation:
-            return SandboxDecision(False, violation)
-        # System directories that are safe to reference (read-only tools, interpreters).
-        _SYSTEM_ROOTS = [Path("/usr"), Path("/bin"), Path("/sbin"), Path("/opt"), Path("/tmp"), Path("/private/tmp")]
-        tokens = shlex.split(command) if command else []
-        for token in tokens:
-            if not _is_path_token(token, policy):
-                continue
-            path_token = _path_candidate_token(token)
-            if path_token is None:
-                continue
-            try:
-                normalized = _resolve_path_for_policy(Path(path_token), policy)
-            except OSError:
-                return SandboxDecision(False, "invalid path resolution")
-            roots = [root.expanduser().resolve(strict=False) for root in _path_roots(policy, _SYSTEM_ROOTS)]
-            if not any(normalized.is_relative_to(root) for root in roots):
-                return SandboxDecision(False, "command references path outside allowed boundaries")
-        return SandboxDecision(True)
-
-    if tool_name in {"WebSearch", "WebFetch"} and network_enforcer is not None:
-        url = tool_input.get("url") or tool_input.get("target") or ""
-        if url:
-            return network_enforcer.enforce_url(url, policy=policy.network_policy if hasattr(policy, "network_policy") and isinstance(policy.network_policy, NetworkPolicy) else NetworkPolicy(allowed_domains=[], blocked_domains=[]), actor=actor)
+    try:
+        RuntimePolicyEngine(
+            workspace_root=policy.workspace_root,
+            sandbox_policy=policy,
+            network_enforcer=network_enforcer,
+        ).enforce(tool_name, tool_input, context=actor)
+    except PermissionError as exc:
+        return SandboxDecision(False, str(exc))
     return SandboxDecision(True)

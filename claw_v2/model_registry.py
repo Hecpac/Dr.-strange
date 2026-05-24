@@ -4,10 +4,13 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 
-VALID_MODEL_LANES = frozenset({"brain", "worker", "research", "verifier", "judge"})
+VALID_MODEL_LANES = frozenset({"brain", "worker", "worker_heavy", "research", "verifier", "judge"})
 LANE_ALIASES = {
     "coding": "worker",
     "code": "worker",
+    "debug": "worker_heavy",
+    "heavy": "worker_heavy",
+    "terminal": "worker_heavy",
     "verify": "verifier",
     "verification": "verifier",
 }

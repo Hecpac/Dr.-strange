@@ -24,6 +24,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_CDP_URL = "http://localhost:9250"
 NLM_HOME = "https://notebooklm.google.com/"
 _NOTEBOOK_URL_RE = re.compile(r"notebooklm\.google\.com/notebook/([A-Za-z0-9_-]+)")
+_SOURCE_COUNT_PATTERNS = (
+    re.compile(r"\b(?:fuentes|sources)\s*[\n\r: ]+\(?\s*(\d{1,4})\s*\)?", re.IGNORECASE),
+    re.compile(r"\(?\s*(\d{1,4})\s*\)?\s+(?:fuentes|sources)\b", re.IGNORECASE),
+)
 # IDs that NotebookLM uses transiently while a notebook is being provisioned.
 # We must wait for the URL to settle past these before capturing the real id.
 _TRANSIENT_NOTEBOOK_IDS = {"creating", "loading", "new"}
@@ -82,6 +86,113 @@ def _open_nlm_page(browser) -> "Page":
 def _extract_notebook_id(url: str) -> str | None:
     match = _NOTEBOOK_URL_RE.search(url)
     return match.group(1) if match else None
+
+
+def _parse_source_count(text: str) -> int | None:
+    collapsed = re.sub(r"[ \t]+", " ", str(text or ""))
+    if not collapsed.strip():
+        return None
+    for pattern in _SOURCE_COUNT_PATTERNS:
+        match = pattern.search(collapsed)
+        if not match:
+            continue
+        try:
+            return int(match.group(1))
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _notebook_source_count(page) -> int | None:
+    try:
+        body_text = page.locator("body").inner_text(timeout=2_000)
+    except Exception:
+        return None
+    return _parse_source_count(body_text)
+
+
+def _wait_for_verified_sources(page, *, before_count: int | None, timeout: float = 60.0) -> int:
+    baseline = before_count if before_count is not None else -1
+    deadline = time.monotonic() + timeout
+    last_count: int | None = None
+    while time.monotonic() < deadline:
+        count = _notebook_source_count(page)
+        if count is not None:
+            last_count = count
+            if count > 0 and count > baseline:
+                return count
+        time.sleep(2)
+    raise CdpNotebookLMError(
+        "Deep Research import did not verify imported sources "
+        f"(before={before_count}, after={last_count})."
+    )
+
+
+def _notebook_ids_from_home_grid(page, *, limit: int = 60) -> set[str]:
+    ids: set[str] = set()
+    try:
+        cards = page.locator('a[href*="/notebook/"]')
+        count = min(cards.count(), limit)
+    except Exception:
+        return ids
+    for i in range(count):
+        try:
+            href = cards.nth(i).get_attribute("href") or ""
+        except Exception:
+            continue
+        nb_id = _extract_notebook_id(href)
+        if nb_id and nb_id not in _TRANSIENT_NOTEBOOK_IDS:
+            ids.add(nb_id)
+    return ids
+
+
+def _click_create_notebook(page) -> None:
+    factories = (
+        lambda: page.get_by_role(
+            "button",
+            name=re.compile(r"(crear cuaderno nuevo|create new notebook)", re.IGNORECASE),
+        ),
+        lambda: page.locator('button:has-text("Crear cuaderno nuevo")'),
+        lambda: page.locator('button:has-text("Create new notebook")'),
+        lambda: page.locator("text=Crear cuaderno nuevo"),
+        lambda: page.locator("text=Create new notebook"),
+    )
+    last_exc: Exception | None = None
+    for factory in factories:
+        try:
+            factory().first.click(timeout=8_000)
+            return
+        except Exception as exc:
+            last_exc = exc
+    raise CdpNotebookLMError(
+        f"Could not find NotebookLM create button: {last_exc}"
+    )
+
+
+def _scan_home_for_new_id(page, before_ids: set[str], *, limit: int = 30) -> str | None:
+    try:
+        page.goto(NLM_HOME, wait_until="domcontentloaded", timeout=20_000)
+    except Exception:
+        return None
+    time.sleep(1.5)
+    try:
+        cards = page.locator('a[href*="/notebook/"]')
+        count = min(cards.count(), limit)
+    except Exception:
+        return None
+    for i in range(count):
+        try:
+            href = cards.nth(i).get_attribute("href") or ""
+        except Exception:
+            continue
+        candidate = _extract_notebook_id(href)
+        if (
+            candidate
+            and candidate not in _TRANSIENT_NOTEBOOK_IDS
+            and candidate not in before_ids
+        ):
+            return candidate
+    return None
 
 
 def list_notebooks(*, cdp_url: str = DEFAULT_CDP_URL, limit: int = 60) -> list[dict]:
@@ -179,20 +290,21 @@ def create_notebook(title: str, *, cdp_url: str = DEFAULT_CDP_URL) -> dict:
                     before_ids.add(nb_id)
             except Exception:
                 continue
+        before_ids.update(_notebook_ids_from_home_grid(page))
 
+        _click_create_notebook(page)
         try:
-            page.locator("text=Crear cuaderno nuevo").first.click(timeout=15_000)
-        except Exception as exc:
-            raise CdpNotebookLMError(
-                f"Could not find 'Crear cuaderno nuevo' button: {exc}"
-            ) from exc
+            page.wait_for_load_state("domcontentloaded", timeout=5_000)
+        except Exception:
+            pass
+        time.sleep(1)
 
         # Find the new notebook by scanning ALL tabs for a real id we haven't
         # seen before. Handles in-place navigation and new-tab creation alike.
         notebook_id: str | None = None
         new_page = page
         deadline = time.monotonic() + 120
-        reloaded = False
+        reloads_done = 0
         while time.monotonic() < deadline:
             for p in context.pages:
                 try:
@@ -209,18 +321,32 @@ def create_notebook(title: str, *, cdp_url: str = DEFAULT_CDP_URL) -> dict:
                     break
             if notebook_id:
                 break
-            # If stuck at /creating for >45s, reload the page to nudge navigation
             elapsed = 120 - (deadline - time.monotonic())
-            if not reloaded and elapsed > 45:
+            if reloads_done < 2 and elapsed > 30 + 45 * reloads_done:
                 for p in context.pages:
                     if "/notebook/creating" in p.url:
                         try:
                             p.reload(wait_until="domcontentloaded", timeout=15_000)
                         except Exception:
                             pass
-                        reloaded = True
+                        reloads_done += 1
                         break
+                else:
+                    reloads_done += 1
             time.sleep(0.5)
+        if not notebook_id:
+            fallback_id = _scan_home_for_new_id(page, before_ids)
+            if fallback_id:
+                notebook_id = fallback_id
+                target = f"https://notebooklm.google.com/notebook/{fallback_id}"
+                try:
+                    page.goto(target, wait_until="domcontentloaded", timeout=20_000)
+                    new_page = page
+                except Exception:
+                    logger.warning(
+                        "Notebook %s found via home-grid fallback but navigation failed",
+                        fallback_id,
+                    )
         if not notebook_id:
             urls = [p.url for p in context.pages if "notebooklm" in p.url]
             raise CdpNotebookLMError(
@@ -274,6 +400,125 @@ def _focus_notebook(browser, notebook_id: str) -> "Page":
     return page
 
 
+# Deep Research lifecycle states observable on the source-discovery panel.
+DR_STATE_READY_TO_IMPORT = "ready_to_import"
+DR_STATE_IN_PROGRESS = "in_progress"
+DR_STATE_SUBMITTABLE = "submittable"
+DR_STATE_COMPLETED = "completed"
+DR_STATE_UNKNOWN = "unknown"
+
+
+def detect_deep_research_state(page) -> str:
+    """Read the notebook DOM and classify the Deep Research panel state.
+
+    Returns one of DR_STATE_*. This is the gate that prevents premature
+    re-submission when a previous DR run is still in flight or finished
+    and only waiting on the Importar click. Today's failure mode was
+    misreading a disabled textarea (aria-label says "consulta enviada",
+    i.e. past tense) as "not submitted yet" and starting over.
+    """
+    try:
+        body = page.locator("body").inner_text(timeout=4_000)
+    except Exception:
+        body = ""
+    body_low = body.lower()
+
+    # 1. If sources already imported, we are done.
+    count = _parse_source_count(body)
+    if count is not None and count > 0:
+        return DR_STATE_COMPLETED
+
+    # 2. Results panel surfaced — "Deep Research finalizó la búsqueda".
+    if "deep research finalizó" in body_low or "deep research finished" in body_low:
+        return DR_STATE_READY_TO_IMPORT
+
+    # 3. Mid-flight indicators visible.
+    progress_markers = (
+        "planificando",
+        "investigando",
+        "no salgas de esta página",
+        "do not leave this page",
+    )
+    if any(m in body_low for m in progress_markers):
+        return DR_STATE_IN_PROGRESS
+
+    # 4. Query textarea state: aria-label "consulta enviada" + disabled means
+    # a query is already submitted (mid-flight or pending results render).
+    try:
+        ta = page.locator(
+            'mat-dialog-container textarea[aria-label*="consulta enviada"], '
+            'source-discovery-query-box textarea[aria-label*="consulta enviada"]'
+        ).first
+        if ta.is_visible(timeout=1_500):
+            disabled = ta.evaluate(
+                "el => el.disabled || el.readOnly || el.getAttribute('aria-disabled')==='true'"
+            )
+            if disabled:
+                return DR_STATE_IN_PROGRESS
+    except Exception:
+        pass
+
+    # 5. Importar button visible without explicit "finalizó" text — treat as ready.
+    try:
+        importar = page.locator('button:has-text("Importar")').first
+        if importar.is_visible(timeout=1_500):
+            return DR_STATE_READY_TO_IMPORT
+    except Exception:
+        pass
+
+    # 6. Empty notebook welcome with no DR markers means we can submit fresh.
+    if "iniciemos tu cuaderno" in body_low or "let's get started" in body_low:
+        return DR_STATE_SUBMITTABLE
+
+    return DR_STATE_UNKNOWN
+
+
+def _click_importar(page) -> bool:
+    """Click the Importar button if visible. Returns True if clicked."""
+    for sel in (
+        'button:has-text("Importar")',
+        '[role="button"]:has-text("Importar")',
+        'mat-dialog-container button:has-text("Importar")',
+    ):
+        try:
+            loc = page.locator(sel)
+            n = loc.count()
+        except Exception:
+            continue
+        for i in range(n):
+            try:
+                btn = loc.nth(i)
+                if not btn.is_visible(timeout=1_500):
+                    continue
+                disabled = False
+                try:
+                    disabled = btn.evaluate(
+                        "el => el.disabled || el.getAttribute('aria-disabled')==='true'"
+                    )
+                except Exception:
+                    pass
+                if disabled:
+                    continue
+                btn.click()
+                return True
+            except Exception:
+                continue
+    return False
+
+
+def _wait_for_deep_research_completion(page, *, poll_timeout: float) -> None:
+    """Poll until 'Deep Research finalizó' or Importar surfaces."""
+    deadline = time.monotonic() + poll_timeout
+    while time.monotonic() < deadline:
+        state = detect_deep_research_state(page)
+        if state in (DR_STATE_READY_TO_IMPORT, DR_STATE_COMPLETED):
+            return
+        time.sleep(15)
+    raise CdpNotebookLMError(
+        f"Deep Research did not complete within {poll_timeout:.0f}s"
+    )
+
+
 def deep_research(
     notebook_id: str,
     query: str,
@@ -305,6 +550,29 @@ def deep_research(
     pw, browser = _connect(cdp_url)
     try:
         page = _focus_notebook(browser, notebook_id)
+        before_source_count = _notebook_source_count(page)
+
+        # 0. Idempotency gate: if a previous DR run for this notebook is mid-flight
+        # or already finished and waiting on Importar, do NOT re-submit.
+        # Re-submitting would either fail silently (textarea is disabled while
+        # aria-label is "consulta enviada") or destroy completed results.
+        state = detect_deep_research_state(page)
+        if state == DR_STATE_COMPLETED:
+            count = _notebook_source_count(page) or 0
+            logger.info("deep_research: notebook already has %s sources, skipping", count)
+            return count
+        if state in (DR_STATE_IN_PROGRESS, DR_STATE_READY_TO_IMPORT):
+            logger.info(
+                "deep_research: prior run detected (state=%s); skipping submit and resuming",
+                state,
+            )
+            if state == DR_STATE_IN_PROGRESS:
+                _wait_for_deep_research_completion(page, poll_timeout=poll_timeout)
+            if not _click_importar(page):
+                raise CdpNotebookLMError(
+                    "Could not click 'Importar' on existing Deep Research results"
+                )
+            return _wait_for_verified_sources(page, before_count=before_source_count)
 
         # 1. Open the source-mode dropdown and switch to Deep Research.
         try:
@@ -350,51 +618,56 @@ def deep_research(
         except Exception as exc:
             raise CdpNotebookLMError(f"Could not click Enviar: {exc}") from exc
 
-        # 4. Poll for completion (up to poll_timeout seconds).
-        deadline = time.monotonic() + poll_timeout
-        completed = False
-        while time.monotonic() < deadline:
-            try:
-                if page.locator("text=Deep Research finalizó la búsqueda").first.is_visible(
-                    timeout=2_000
-                ):
-                    completed = True
-                    break
-            except Exception:
-                pass
-            time.sleep(15)
-        if not completed:
-            raise CdpNotebookLMError(
-                f"Deep Research did not complete within {poll_timeout:.0f}s"
-            )
+        # 4. Poll for completion using the shared state detector.
+        _wait_for_deep_research_completion(page, poll_timeout=poll_timeout)
 
-        # 5. Click Importar.
+        # 5. Click Importar via shared helper.
+        if not _click_importar(page):
+            raise CdpNotebookLMError("Could not find 'Importar' button after research")
+
+        # 6. Completion is not enough: verify that sources actually landed in
+        # the notebook. This prevents transient "planning/completed" UI states
+        # from being reported as a successful research run while the notebook
+        # remains empty.
+        return _wait_for_verified_sources(page, before_count=before_source_count)
+    finally:
         try:
-            buttons = page.locator("button")
-            count = buttons.count()
-            clicked = False
-            for i in range(count):
-                btn = buttons.nth(i)
-                try:
-                    if btn.is_visible() and "Importar" in btn.inner_text():
-                        btn.click()
-                        clicked = True
-                        break
-                except Exception:
-                    continue
-            if not clicked:
-                raise CdpNotebookLMError("Could not find 'Importar' button after research")
-        except CdpNotebookLMError:
-            raise
-        except Exception as exc:
-            raise CdpNotebookLMError(f"Could not click Importar: {exc}") from exc
+            browser.close()
+        except Exception:
+            pass
+        pw.stop()
 
-        # 6. Best-effort source count: brief settle then return 0 if not parseable.
-        # NotebookLM doesn't expose a stable count selector; the caller already gets
-        # a "Deep Research completado" notification with the notebook URL, so the
-        # exact count is informational.
-        time.sleep(2)
-        return 0
+
+def resume_deep_research(
+    notebook_id: str,
+    *,
+    cdp_url: str = DEFAULT_CDP_URL,
+    poll_timeout: float = 600.0,
+) -> dict:
+    """Inspect an existing notebook's Deep Research panel and finish whatever
+    step is pending: wait → click Importar → verify sources.
+
+    Idempotent: callable repeatedly. Never submits a new query. Returns
+    {"state": <DR_STATE_*>, "sources_imported": int|None}.
+    """
+    pw, browser = _connect(cdp_url)
+    try:
+        page = _focus_notebook(browser, notebook_id)
+        before = _notebook_source_count(page)
+        state = detect_deep_research_state(page)
+        if state == DR_STATE_COMPLETED:
+            return {"state": state, "sources_imported": before or 0}
+        if state == DR_STATE_IN_PROGRESS:
+            _wait_for_deep_research_completion(page, poll_timeout=poll_timeout)
+            state = DR_STATE_READY_TO_IMPORT
+        if state == DR_STATE_READY_TO_IMPORT:
+            if not _click_importar(page):
+                raise CdpNotebookLMError(
+                    "Could not click 'Importar' on existing Deep Research results"
+                )
+            count = _wait_for_verified_sources(page, before_count=before)
+            return {"state": DR_STATE_COMPLETED, "sources_imported": count}
+        return {"state": state, "sources_imported": before}
     finally:
         try:
             browser.close()

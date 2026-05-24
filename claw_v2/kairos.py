@@ -4,6 +4,7 @@ import datetime
 import json
 import logging
 import os
+import re
 import subprocess
 import time
 from dataclasses import dataclass
@@ -25,6 +26,28 @@ DEFAULT_ACTION_BUDGET = 15.0
 
 # Tick interval hint (actual scheduling is in CronScheduler).
 DEFAULT_TICK_INTERVAL = 1800  # 30 minutes
+APPROVAL_BACKLOG_NOTIFY_COOLDOWN_SECONDS = 6 * 3600
+_CRITICAL_NOTIFICATION_TOKENS = ("critical", "down", "failed", "blocked", "urgent", "security")
+_APPROVAL_BACKLOG_TOKENS = (
+    "approval",
+    "approvals",
+    "approve",
+    "aprobacion",
+    "aprobaciones",
+)
+_APPROVAL_BACKLOG_CONTEXT_TOKENS = (
+    "pending",
+    "await",
+    "review",
+    "require",
+    "requires",
+    "listed",
+    "ids",
+    "pendiente",
+    "pendientes",
+    "revision",
+    "revisar",
+)
 
 
 @dataclass(slots=True)
@@ -94,6 +117,7 @@ class KairosService:
         action_budget: float = DEFAULT_ACTION_BUDGET,
         brief: bool = True,
         agent_loop_factory: Any | None = None,
+        runtime_policy: Any | None = None,
     ) -> None:
         self.router = router
         self.heartbeat = heartbeat
@@ -108,6 +132,7 @@ class KairosService:
         self.a2a: A2AService | None = None
         self.nlm_service: Any | None = None
         self.monitored_sites = list(monitored_sites or [])
+        self.runtime_policy = runtime_policy
         self.action_budget = action_budget
         self.brief = brief
         # Wave 2.6: lets Kairos drive an AgentLoop on a goal_id when it
@@ -117,6 +142,7 @@ class KairosService:
         # default — Kairos stays router-lite unless the runtime opts in.
         self.agent_loop_factory: Any | None = agent_loop_factory
         self.state = KairosState()
+        self._notification_suppression_reason: str | None = None
 
     def tick(self) -> TickDecision:
         """Called periodically by the CronScheduler. Gather context, decide, act."""
@@ -439,7 +465,10 @@ class KairosService:
                 parent_span_id=trace_context.get("parent_span_id") if trace_context else None,
                 job_id=trace_context.get("job_id") if trace_context else None,
                 artifact_id=trace_context.get("artifact_id") if trace_context else None,
-                payload={"message": decision.detail, "reason": decision.reason},
+                payload={
+                    "message": decision.detail,
+                    "reason": self._notification_suppression_reason or decision.reason,
+                },
             )
             return
         logger.info("KAIROS notify_user: %s", decision.detail)
@@ -455,11 +484,19 @@ class KairosService:
         )
 
     def _notification_is_important(self, decision: TickDecision) -> bool:
+        self._notification_suppression_reason = None
         text = f"{decision.reason}\n{decision.detail}".strip()
         if not text:
             return False
         lowered = text.lower()
-        if any(token in lowered for token in ("approval", "critical", "down", "failed", "blocked", "urgent", "security")):
+        if any(token in lowered for token in _CRITICAL_NOTIFICATION_TOKENS):
+            return True
+        if self._looks_like_approval_backlog(lowered):
+            if self._recent_duplicate_approval_notification(text):
+                self._notification_suppression_reason = "duplicate_approval_backlog"
+                return False
+            return True
+        if any(token in lowered for token in _APPROVAL_BACKLOG_TOKENS):
             return True
         prompt = (
             "Decide whether this proactive notification should interrupt Hector.\n"
@@ -480,6 +517,64 @@ class KairosService:
         except Exception:
             logger.debug("KAIROS notification importance check failed", exc_info=True)
             return True
+
+    def _looks_like_approval_backlog(self, lowered_text: str) -> bool:
+        return (
+            any(token in lowered_text for token in _APPROVAL_BACKLOG_TOKENS)
+            and any(token in lowered_text for token in _APPROVAL_BACKLOG_CONTEXT_TOKENS)
+        )
+
+    def _recent_duplicate_approval_notification(self, text: str) -> bool:
+        fingerprint = self._approval_notification_fingerprint(text)
+        if not fingerprint:
+            return False
+        try:
+            events = self.observe.recent_events(limit=50, event_type="kairos_notify_user")
+        except Exception:
+            return False
+        if not isinstance(events, list):
+            return False
+        now = datetime.datetime.now(datetime.UTC)
+        for event in events:
+            payload = event.get("payload") if isinstance(event, dict) else None
+            if not isinstance(payload, dict):
+                continue
+            prior_message = str(payload.get("message") or "")
+            if self._approval_notification_fingerprint(prior_message) != fingerprint:
+                continue
+            timestamp = str(event.get("timestamp") or "") if isinstance(event, dict) else ""
+            if not self._event_within_seconds(timestamp, now, APPROVAL_BACKLOG_NOTIFY_COOLDOWN_SECONDS):
+                continue
+            return True
+        return False
+
+    def _approval_notification_fingerprint(self, text: str) -> str:
+        lowered = text.lower()
+        ids = sorted(set(re.findall(r"\b[a-f0-9]{8,}\b", lowered)))
+        if ids:
+            return "approval_ids:" + ",".join(ids)
+        normalized = re.sub(r"\d+", "#", lowered)
+        normalized = re.sub(r"[^a-z0-9#]+", " ", normalized).strip()
+        if not normalized:
+            return ""
+        return f"approval_text:{normalized[:240]}"
+
+    def _event_within_seconds(
+        self,
+        timestamp: str,
+        now: datetime.datetime,
+        window_seconds: float,
+    ) -> bool:
+        if not timestamp:
+            return False
+        try:
+            parsed = datetime.datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=datetime.UTC)
+        age = (now - parsed.astimezone(datetime.UTC)).total_seconds()
+        return 0 <= age <= window_seconds
 
     def _handle_dispatch_to_agent(self, decision: TickDecision, trace_context: dict[str, Any] | None = None) -> None:
         if self.bus is None:
@@ -605,11 +700,17 @@ class KairosService:
             return
         self.task_board.start(task.id)
         try:
-            result = self.sub_agents.dispatch(agent_name, task.instruction, lane=lane)
-            self.task_board.complete(task.id, result)
+            sub_result = self.sub_agents.dispatch_typed(agent_name, task.instruction, lane=lane)
+            self.task_board.complete(task.id, sub_result.summary)
         except Exception as exc:
             self.task_board.fail(task.id, str(exc))
             raise
+        evidence_ref = sub_result.evidence[0].ref if sub_result.evidence else None
+        if sub_result.failures:
+            logger.warning(
+                "KAIROS claim_task agent=%s task=%s preferred-provider fallback: %s",
+                agent_name, task.id, list(sub_result.failures),
+            )
         self.observe.emit(
             "kairos_claim_task",
             trace_id=trace_context.get("trace_id") if trace_context else None,
@@ -618,7 +719,14 @@ class KairosService:
             parent_span_id=trace_context.get("parent_span_id") if trace_context else None,
             job_id=trace_context.get("job_id") if trace_context else None,
             artifact_id=trace_context.get("artifact_id") if trace_context else None,
-            payload={"task_id": task.id, "agent": agent_name, "title": task.title},
+            payload={
+                "task_id": task.id,
+                "agent": agent_name,
+                "title": task.title,
+                "status": sub_result.status,
+                "evidence_ref": evidence_ref,
+                "failures": list(sub_result.failures),
+            },
         )
 
     def _handle_wiki_deep_lint(self, decision: TickDecision, trace_context: dict[str, Any] | None = None) -> None:
@@ -755,6 +863,17 @@ class KairosService:
             logger.info("KAIROS auto_publish_social: pending approval=%s", pending.approval_id)
             return
 
+        self._enforce_runtime_policy(
+            "social.publish",
+            {
+                "account": "PachanoDesign",
+                "platform": "x",
+                "text": tweet_text,
+                "endpoint": "https://api.x.com/2/tweets",
+            },
+            mutates_state=True,
+            requires_network=True,
+        )
         from claw_v2.social import x_adapter_from_keychain
         adapter = x_adapter_from_keychain(handle="PachanoDesign")
         result = adapter.publish(tweet_text)
@@ -892,6 +1011,12 @@ class KairosService:
             params = json.loads(decision.detail) if decision.detail else {}
         except (json.JSONDecodeError, TypeError):
             params = {"to_agent": str(decision.detail), "action": "generic", "payload": {}}
+        self._enforce_runtime_policy(
+            "A2ASend",
+            params,
+            mutates_state=True,
+            requires_network=True,
+        )
         result = self.a2a.send_task(
             to_agent=params.get("to_agent", ""),
             action=params.get("action", ""),
@@ -918,6 +1043,12 @@ class KairosService:
         if isinstance(brief_text, dict):
             brief_text = brief_text.get("result", brief_text.get("content", str(brief_text)))
         brief_text = str(brief_text)[:4500]  # HeyGen limit is 5000 chars
+        self._enforce_runtime_policy(
+            "HeyGenVideo",
+            {"text": brief_text, "title": "Morning Brief"},
+            mutates_state=True,
+            requires_network=True,
+        )
 
         # 2. Get HeyGen API key from Keychain
         key_result = subprocess.run(
@@ -990,6 +1121,24 @@ class KairosService:
 
         import threading
         threading.Thread(target=_poll_heygen, daemon=True, name=f"heygen-poll-{video_id[:8]}").start()
+
+    def _enforce_runtime_policy(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        *,
+        mutates_state: bool,
+        requires_network: bool,
+    ) -> None:
+        if self.runtime_policy is None:
+            return
+        self.runtime_policy.enforce(
+            tool_name,
+            args,
+            context="daemon",
+            mutates_state=mutates_state,
+            requires_network=requires_network,
+        )
 
     def run_health_check(self) -> TickDecision:
         """Trigger a daemon health check as a scheduler-driven autonomous action.

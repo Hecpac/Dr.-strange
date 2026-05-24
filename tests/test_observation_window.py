@@ -7,10 +7,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from claw_v2.observation_window import (
+    LOCAL_READ_ONLY_TIER,
     ObservationWindowBlocked,
     ObservationWindowConfig,
     ObservationWindowState,
     _diagnostic_only_freeze_reason,
+    _is_cost_breaker_reason,
     hard_denylist_reason,
 )
 
@@ -114,6 +116,35 @@ class ObservationWindowTests(unittest.TestCase):
             )
             self.assertTrue(any("circuit_breaker=cost_per_hour" in line for line in diagnostic_stream))
 
+    def test_notional_subscription_cost_does_not_freeze(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = _RecordingObserve()
+            window = ObservationWindowState(
+                observe=observe,
+                state_path=Path(tmpdir) / "window.json",
+                config=ObservationWindowConfig(
+                    cost_per_hour_threshold=0.05,
+                    notional_cost_providers=("anthropic", "codex"),
+                ),
+            )
+
+            window.handle_llm_audit_event(
+                {
+                    "action": "llm_response",
+                    "lane": "brain",
+                    "provider": "anthropic",
+                    "model": "claude-opus-4-7",
+                    "cost_estimate": 9.99,
+                    "degraded_mode": False,
+                    "metadata": {},
+                }
+            )
+
+            self.assertFalse(window.frozen)
+            event_names = [name for name, _ in observe.events]
+            self.assertIn("llm_notional_cost_ignored", event_names)
+            self.assertNotIn("circuit_breaker_tripped", event_names)
+
     def test_cost_per_hour_is_not_diagnostic_only(self) -> None:
         # Regression: budget breaker must escape the diagnostic-silence path so it
         # reaches Telegram. Other circuit_breaker:* reasons stay silent.
@@ -216,6 +247,173 @@ class ObservationWindowTests(unittest.TestCase):
             self.assertIn("Blocked hard-denylisted tool", alerts[0])
             self.assertNotIn("Circuit breaker tripped", alerts[0])
             self.assertTrue(any(name == "tool_hard_denylist_blocked" for name, _ in observe.events))
+
+
+class CostBreakerTierSplitTests(unittest.TestCase):
+    """PR 0A: LLM cost-per-hour breaker must not block Tier-1 local read tools."""
+
+    def _make_window(
+        self,
+        tmpdir: str,
+        *,
+        cost_threshold: float = 0.05,
+        rate_threshold: int = 1000,
+    ) -> tuple[ObservationWindowState, _RecordingObserve]:
+        observe = _RecordingObserve()
+        window = ObservationWindowState(
+            observe=observe,
+            state_path=Path(tmpdir) / "window.json",
+            config=ObservationWindowConfig(
+                cost_per_hour_threshold=cost_threshold,
+                tool_calls_per_minute_threshold=rate_threshold,
+            ),
+        )
+        return window, observe
+
+    def _trip_cost_breaker(self, window: ObservationWindowState) -> None:
+        window.handle_llm_audit_event(
+            {
+                "action": "llm_response",
+                "lane": "brain",
+                "provider": "anthropic",
+                "model": "claude",
+                "cost_estimate": 1.00,
+                "degraded_mode": False,
+                "metadata": {},
+            }
+        )
+        self.assertTrue(window.frozen)
+        self.assertEqual(window.freeze_reason, "circuit_breaker:cost_per_hour")
+
+    def test_cost_breaker_does_not_block_tier1_read_tools(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            window, observe = self._make_window(tmpdir)
+            self._trip_cost_breaker(window)
+            for tool in ("Read", "Grep", "Glob"):
+                with self.subTest(tool=tool):
+                    window.before_tool_execution(
+                        tool_name=tool,
+                        args={},
+                        tier=LOCAL_READ_ONLY_TIER,
+                        actor="operator",
+                    )
+            allowed_events = [
+                payload for name, payload in observe.events
+                if name == "tool_allowed_during_cost_breaker"
+            ]
+            self.assertEqual(len(allowed_events), 3)
+            self.assertEqual(allowed_events[0]["payload"]["freeze_reason"], "circuit_breaker:cost_per_hour")
+            blocked_events = [
+                payload for name, payload in observe.events
+                if name == "tool_blocked_by_freeze"
+            ]
+            self.assertEqual(blocked_events, [])
+
+    def test_cost_breaker_blocks_or_degrades_llm_calls(self) -> None:
+        # Observation window's job: emit autonomy_degraded_by_cost_breaker
+        # AND keep the freeze set so downstream LLM router sees it.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            window, observe = self._make_window(tmpdir)
+            self._trip_cost_breaker(window)
+            degraded = [
+                payload for name, payload in observe.events
+                if name == "autonomy_degraded_by_cost_breaker"
+            ]
+            self.assertEqual(len(degraded), 1)
+            self.assertIn("llm_calls_until_window_decays", degraded[0]["payload"]["blocked_capabilities"])
+            self.assertTrue(window.frozen)
+            self.assertEqual(window.freeze_reason, "circuit_breaker:cost_per_hour")
+
+    def test_hard_denylist_still_blocks_tools_even_when_tier1(self) -> None:
+        # Hard denylist must fire regardless of tier or freeze state.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            window, observe = self._make_window(tmpdir)
+            self._trip_cost_breaker(window)
+            with self.assertRaises(ObservationWindowBlocked):
+                window.before_tool_execution(
+                    tool_name="Bash",
+                    args={"command": "git push --force origin main"},
+                    tier=LOCAL_READ_ONLY_TIER,
+                    actor="operator",
+                )
+            denylist_events = [
+                payload for name, payload in observe.events
+                if name == "tool_hard_denylist_blocked"
+            ]
+            self.assertEqual(len(denylist_events), 1)
+
+    def test_tool_rate_breaker_still_blocks_excessive_tools(self) -> None:
+        # Tool-call-rate breaker is independent of cost breaker and must still trip.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = _RecordingObserve()
+            now = [1000.0]
+            window = ObservationWindowState(
+                observe=observe,
+                state_path=Path(tmpdir) / "window.json",
+                config=ObservationWindowConfig(
+                    cost_per_hour_threshold=10.00,
+                    tool_calls_per_minute_threshold=2,
+                ),
+                clock=lambda: now[0],
+            )
+            window.before_tool_execution(tool_name="Read", args={}, tier=1, actor="operator")
+            window.before_tool_execution(tool_name="Read", args={}, tier=1, actor="operator")
+            with self.assertRaises(ObservationWindowBlocked):
+                window.before_tool_execution(tool_name="Read", args={}, tier=1, actor="operator")
+            self.assertEqual(window.freeze_reason, "circuit_breaker:tool_calls_per_minute")
+            # Tool-rate freeze is NOT a cost breaker — subsequent Tier-1 reads stay blocked.
+            with self.assertRaises(ObservationWindowBlocked):
+                window.before_tool_execution(tool_name="Grep", args={}, tier=1, actor="operator")
+
+    def test_external_or_tier3_tools_not_auto_allowed_by_cost_breaker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            window, observe = self._make_window(tmpdir)
+            self._trip_cost_breaker(window)
+            for tier in (2, 3):
+                with self.subTest(tier=tier):
+                    with self.assertRaises(ObservationWindowBlocked):
+                        window.before_tool_execution(
+                            tool_name="WriteOrDeploy",
+                            args={},
+                            tier=tier,
+                            actor="operator",
+                        )
+
+    def test_autonomy_degraded_event_emitted_when_cost_breaker_active(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            window, observe = self._make_window(tmpdir)
+            self._trip_cost_breaker(window)
+            degraded = [
+                (name, payload) for name, payload in observe.events
+                if name == "autonomy_degraded_by_cost_breaker"
+            ]
+            self.assertEqual(len(degraded), 1)
+            payload = degraded[0][1]["payload"]
+            self.assertEqual(payload["actor"], "brain")
+            self.assertEqual(payload["lane"], "brain")
+            self.assertEqual(payload["provider"], "anthropic")
+            self.assertIn("tier_1_local_read_only", payload["allowed_capabilities"])
+            self.assertGreater(payload["value"], payload["threshold"])
+
+    def test_no_manual_handoff_required_when_tier1_tools_are_available(self) -> None:
+        # Behavioral contract: while cost breaker is open, the bot can still
+        # call safe local read tools, so it has no operational reason to
+        # respond with "ejecuta este comando" / manual handoff for inspection.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            window, _ = self._make_window(tmpdir)
+            self._trip_cost_breaker(window)
+            # Each of these would otherwise force a manual-handoff fallback.
+            window.before_tool_execution(tool_name="Read", args={}, tier=1, actor="brain")
+            window.before_tool_execution(tool_name="Grep", args={}, tier=1, actor="brain")
+            window.before_tool_execution(tool_name="Glob", args={}, tier=1, actor="brain")
+            # WikiSearch is local/read-only by policy.
+            window.before_tool_execution(tool_name="WikiSearch", args={}, tier=1, actor="brain")
+
+    def test_is_cost_breaker_reason_helper(self) -> None:
+        self.assertTrue(_is_cost_breaker_reason("circuit_breaker:cost_per_hour"))
+        self.assertFalse(_is_cost_breaker_reason("circuit_breaker:tool_calls_per_minute"))
+        self.assertFalse(_is_cost_breaker_reason("manual_telegram"))
+        self.assertFalse(_is_cost_breaker_reason(""))
 
 
 if __name__ == "__main__":

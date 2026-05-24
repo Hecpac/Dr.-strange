@@ -112,6 +112,34 @@ class LLMRouterTests(unittest.TestCase):
             self.assertEqual(response.provider, "ollama")
             self.assertEqual(response.model, "gemma4")
 
+    def test_llm_response_audit_includes_prompt_size_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            audit_events: list[dict] = []
+            router = LLMRouter(
+                config=config,
+                adapters={
+                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=echo_response("anthropic")),
+                },
+                audit_sink=audit_events.append,
+            )
+
+            router.ask(
+                "verify this",
+                lane="verifier",
+                provider="anthropic",
+                system_prompt="extra verifier rule",
+                evidence_pack={"diff": "x"},
+            )
+
+            prompt_size = audit_events[-1]["metadata"]["prompt_size"]
+            self.assertEqual(prompt_size["lane"], "verifier")
+            self.assertEqual(prompt_size["provider"], "anthropic")
+            self.assertGreater(prompt_size["prompt_chars"], 0)
+            self.assertGreater(prompt_size["effective_input_chars"], prompt_size["prompt_chars"])
+            self.assertGreater(prompt_size["effective_system_prompt_chars"], 0)
+            self.assertFalse(prompt_size["evidence_pack_truncated"])
+
     def test_secondary_fallback_uses_anthropic_worker_model(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = make_config(Path(tmpdir))
@@ -235,6 +263,19 @@ class LLMRouterTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 router.ask("do work", lane="worker", provider="openai")
 
+    def test_worker_heavy_lane_rejects_non_tool_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            router = LLMRouter(
+                config=config,
+                adapters={
+                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=echo_response("anthropic")),
+                    "google": StaticAdapter("google", tool_capable=False, responder=echo_response("google")),
+                },
+            )
+            with self.assertRaises(ValueError):
+                router.ask("debug this", lane="worker_heavy", provider="google")
+
     def test_invalid_request_fails_before_adapter_call(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = make_config(Path(tmpdir))
@@ -253,6 +294,40 @@ class LLMRouterTests(unittest.TestCase):
                 router.ask("do work", lane="brain", timeout=0)
             self.assertEqual(calls, 0)
 
+    def test_subscription_brain_budget_uses_lane_floor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            config.claude_auth_mode = "subscription"
+            seen: dict[str, float] = {}
+
+            def responder(request: LLMRequest) -> LLMResponse:
+                seen["max_budget"] = request.max_budget
+                return echo_response("anthropic")(request)
+
+            router = LLMRouter(
+                config=config,
+                adapters={"anthropic": StaticAdapter("anthropic", tool_capable=True, responder=responder)},
+            )
+            router.ask("think", lane="brain", max_budget=0.05)
+            self.assertEqual(seen["max_budget"], 1.0)
+
+    def test_api_brain_budget_keeps_requested_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            config.claude_auth_mode = "api_key"
+            seen: dict[str, float] = {}
+
+            def responder(request: LLMRequest) -> LLMResponse:
+                seen["max_budget"] = request.max_budget
+                return echo_response("anthropic")(request)
+
+            router = LLMRouter(
+                config=config,
+                adapters={"anthropic": StaticAdapter("anthropic", tool_capable=True, responder=responder)},
+            )
+            router.ask("think", lane="brain", max_budget=0.05)
+            self.assertEqual(seen["max_budget"], 0.05)
+
     def test_codex_worker_lane_routes_to_codex_adapter(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = make_config(Path(tmpdir))
@@ -268,6 +343,20 @@ class LLMRouterTests(unittest.TestCase):
             )
             response = router.ask("write a function", lane="worker")
             self.assertEqual(response.provider, "codex")
+
+    def test_worker_heavy_lane_defaults_to_codex_adapter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            router = LLMRouter(
+                config=config,
+                adapters={
+                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=echo_response("anthropic")),
+                    "codex": StaticAdapter("codex", tool_capable=True, responder=echo_response("codex")),
+                },
+            )
+            response = router.ask("debug terminal failure", lane="worker_heavy")
+            self.assertEqual(response.provider, "codex")
+            self.assertEqual(response.model, "gpt-5.5")
 
     def test_codex_worker_lane_does_not_fallback_to_anthropic_on_adapter_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -410,6 +499,69 @@ class LLMRouterTests(unittest.TestCase):
 
                     self.assertEqual(seen["provider"], fallback_provider)
 
+    def test_provider_override_uses_compatible_default_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            seen: dict[str, str] = {}
+
+            def responder(request: LLMRequest) -> LLMResponse:
+                seen["model"] = request.model
+                return echo_response("anthropic")(request)
+
+            router = LLMRouter(
+                config=config,
+                adapters={"anthropic": StaticAdapter("anthropic", tool_capable=True, responder=responder)},
+            )
+            response = router.ask("verify", lane="verifier", provider="anthropic", evidence_pack={"diff": "x"})
+
+            self.assertEqual(response.provider, "anthropic")
+            self.assertTrue(seen["model"].startswith("claude-"))
+
+    def test_rejects_known_incompatible_provider_model_pair(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            router = LLMRouter(
+                config=config,
+                adapters={"anthropic": StaticAdapter("anthropic", tool_capable=True, responder=echo_response("anthropic"))},
+            )
+
+            with self.assertRaisesRegex(ValueError, "Anthropic provider cannot serve OpenAI model"):
+                router.ask("verify", lane="verifier", provider="anthropic", model="gpt-5.5", evidence_pack={"diff": "x"})
+
+    def test_suppresses_corrupt_internal_tool_trace_from_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+
+            def failing(_: LLMRequest) -> LLMResponse:
+                raise AdapterUnavailableError("provider unavailable")
+
+            def corrupt(request: LLMRequest) -> LLMResponse:
+                return LLMResponse(
+                    content='to=multi_tool_use.parallel {"tool_uses":[]}',
+                    lane=request.lane,
+                    provider="anthropic",
+                    model=request.model,
+                    confidence=0.8,
+                )
+
+            audit_log: list[dict] = []
+            router = LLMRouter(
+                config=config,
+                adapters={
+                    "openai": StaticAdapter("openai", tool_capable=False, responder=failing),
+                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=corrupt),
+                },
+                audit_sink=audit_log.append,
+            )
+
+            response = router.ask("verify", lane="verifier", evidence_pack={"diff": "x"})
+
+            self.assertEqual(response.confidence, 0.0)
+            self.assertTrue(response.artifacts["internal_tool_trace_suppressed"])
+            self.assertNotIn("multi_tool_use.parallel", response.content)
+            fallback_event = [event for event in audit_log if event["action"] == "llm_fallback"][0]
+            self.assertNotIn("multi_tool_use.parallel", fallback_event["metadata"]["response_text"])
+
     def test_pre_hook_blocked_is_audited(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = make_config(Path(tmpdir))
@@ -465,6 +617,7 @@ class LLMRouterTests(unittest.TestCase):
 
             def reroute_to_openai(request: LLMRequest) -> LLMRequest:
                 request.provider = "openai"
+                request.model = "gpt-5.5"
                 return request
 
             router.pre_hooks.append(reroute_to_openai)

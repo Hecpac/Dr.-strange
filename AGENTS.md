@@ -8,6 +8,13 @@ This workspace is the agent's home.
 - Execute authorized work autonomously, verify outcomes, then report concise results.
 - If blocked, record the blocker and the next concrete action.
 
+## Routing Contract
+- Default route for every inbound message is the brain. Pre-brain dispatchers (imperative router, action router, task intent router, NLM/wiki short-circuits) are exceptions, not the primary path.
+- A pre-brain handler may capture a message only when the target (app, URL, file, task id, verb+object) is unambiguous from the literal message text alone, without reading session_state, reply_context, last assistant turn, or task ledger.
+- Conversational continuations ("Continúa", "Procede", "Sigue", "Dale", "Sí hazlo", "Ok", "Listo", numbered option picks, replies that quote prior context) MUST fall through to the brain. The brain has the state needed to resolve them.
+- When a dispatcher cannot resolve target/object without external context, emit `dispatch_decision=fallthrough_to_brain` and pass through silently. Do NOT respond "necesito aclaración" from the pre-brain layer — that response belongs to the brain after it consults state.
+- Tier 3 approval gates apply after brain synthesis, never at the pre-brain layer.
+
 ## Operational Contract
 - Goal alignment: execute actions only toward the active `GoalContract`. Do not assume undeclared goals or drift into secondary tasks without explicit justification.
 - Epistemic honesty: distinguish verified facts from assumptions. Do not present an inference or high probability as a fact. If a condition has not been empirically verified, state it as uncertainty.

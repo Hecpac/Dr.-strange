@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-Lane = Literal["brain", "worker", "verifier", "research", "judge"]
+Lane = Literal["brain", "worker", "worker_heavy", "verifier", "research", "judge"]
 ProviderName = Literal["anthropic", "openai", "google", "ollama", "codex"]
 AgentClass = Literal["researcher", "operator", "deployer"]
 SanitizerVerdict = Literal["clean", "malicious", "unsure"]

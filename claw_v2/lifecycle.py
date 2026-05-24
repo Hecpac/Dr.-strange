@@ -3,15 +3,17 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import signal
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from claw_v2.chrome import ManagedChrome
 from claw_v2.chat_api import LocalChatAPI
-from claw_v2.main import build_runtime
+from claw_v2.main import build_runtime, build_runtime_policy_engine
 from claw_v2.morning_brief import MorningBriefService, MorningBriefSettings
 from claw_v2.notebooklm import NotebookLMService
 from claw_v2.observability_dashboard import ObservabilityDashboard
@@ -22,6 +24,92 @@ from claw_v2.web_transport import WebTransport
 logger = logging.getLogger(__name__)
 
 _DEFAULT_PID_PATH = Path.home() / ".claw" / "claw.pid"
+
+
+def should_notify_task_ledger_terminal(payload: dict, notified_task_ids: set[str]) -> bool:
+    session_id = str(payload.get("session_id") or "")
+    task_id = str(payload.get("task_id") or "")
+    status = str(payload.get("status") or "")
+    runtime = str(payload.get("runtime") or "")
+    notify_policy = str(payload.get("notify_policy") or "done_only")
+    metadata = payload.get("metadata") or {}
+    if not session_id.startswith("tg-") or not task_id:
+        return False
+    if task_id in notified_task_ids or notify_policy == "none":
+        return False
+    if task_id.startswith("brain-tooluse:"):
+        return False
+    if isinstance(metadata, dict) and (
+        metadata.get("brain_tool_use") is True
+        or metadata.get("created_by") == "brain_tool_use_ledger"
+    ):
+        return False
+    if status not in {"succeeded", "failed", "timed_out", "cancelled", "lost"}:
+        return False
+    # Coordinator tasks emit richer autonomous_task_completed/failed events.
+    # Stale/lost coordinator tasks are created by daemon reconciliation and
+    # otherwise have no per-session completion event, so notify them here.
+    if runtime == "coordinator" and status != "lost":
+        return False
+    return True
+
+
+def format_task_ledger_terminal_message(payload: dict) -> str:
+    status = str(payload.get("status") or "unknown")
+    verification = str(payload.get("verification_status") or "unknown")
+    summary = str(payload.get("summary") or "").strip()
+    error = str(payload.get("error") or "").strip()
+    objective = str(payload.get("objective") or "").strip()
+    if status == "succeeded":
+        if verification in {"passed", "succeeded", "succeeded_with_warnings"}:
+            header = "Cerré una tarea."
+        else:
+            header = "Registré resultado de una tarea; falta verificación final."
+        lines = [header, f"Verificación: {_public_task_state(verification)}"]
+    else:
+        lines = [
+            "No pude cerrar una tarea.",
+            f"Estado: {_public_task_state(status)}",
+            f"Verificación: {_public_task_state(verification)}",
+        ]
+    detail = summary or error or objective
+    if detail:
+        lines.extend(["", _sanitize_public_notification_detail(detail[:2500])])
+    if error and error != detail:
+        lines.extend(["", f"Error: {_sanitize_public_notification_detail(error[:1200])}"])
+    return "\n".join(lines)
+
+
+def _public_task_state(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    return {
+        "needs_verification": "pendiente de verificacion",
+        "running_needs_verification": "en verificacion",
+        "passed": "verificada",
+        "succeeded": "completada",
+        "completed_unverified": "completada sin verificacion final",
+        "succeeded_with_warnings": "completada con advertencias",
+        "failed": "fallida",
+        "blocked": "bloqueada",
+        "lost": "sin estado ejecutable",
+        "timed_out": "agotada por tiempo",
+        "cancelled": "cancelada",
+        "not_applicable": "no aplica",
+        "unknown": "desconocida",
+    }.get(normalized, normalized or "desconocida")
+
+
+def _sanitize_public_notification_detail(value: str) -> str:
+    from claw_v2.bot_helpers import _sanitize_chat_response
+
+    sanitized = _sanitize_chat_response(str(value or ""))
+    sanitized = re.sub(
+        r"\bbrain[_ -]?tool(?:[_ -]?use)?(?:[_ -]?\w+)*\b",
+        "ejecucion con herramientas",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    return sanitized
 
 
 def load_soul(soul_path: Path | None = None) -> str:
@@ -150,29 +238,59 @@ async def run() -> int:
             except ValueError:
                 logger.warning("Cannot notify non-numeric Telegram session id: %s", session_id)
                 return
-            for start in range(0, len(message), 3500):
-                chunk = message[start:start + 3500]
-                asyncio.run_coroutine_threadsafe(
-                    transport._app.bot.send_message(chat_id=chat_id, text=chunk),
-                    _loop,
-                )
+            future = asyncio.run_coroutine_threadsafe(
+                transport.send_text(chat_id=chat_id, text=message),
+                _loop,
+            )
+            future.add_done_callback(_log_session_telegram_failure)
+
+        def _log_session_telegram_failure(done: Any) -> None:
+            try:
+                exc = done.exception()
+            except Exception as callback_exc:
+                logger.warning("Telegram session notification callback failed: %s", callback_exc)
+                return
+            if exc is not None:
+                logger.warning("Telegram session notification failed: %s", exc)
+
+        _notified_task_ids: set[str] = set()
 
         def _autonomous_task_complete_consumer(payload: dict) -> None:
             session_id = str(payload.get("session_id") or "")
             task_id = str(payload.get("task_id") or "")
+            if task_id in _notified_task_ids:
+                return
             status = str(payload.get("verification_status") or "unknown")
             response = str(payload.get("response") or "").strip()
             header = f"Cerré la tarea `{task_id}`.\nVerificación: {status}\n\n"
             _send_session_telegram_message(session_id, header + response)
+            if task_id:
+                _notified_task_ids.add(task_id)
 
         def _autonomous_task_failed_consumer(payload: dict) -> None:
             session_id = str(payload.get("session_id") or "")
             task_id = str(payload.get("task_id") or "")
+            if task_id in _notified_task_ids:
+                return
             response = str(payload.get("response") or payload.get("error") or "unknown error")
             _send_session_telegram_message(session_id, f"No pude cerrar la tarea `{task_id}`.\n{response}")
+            if task_id:
+                _notified_task_ids.add(task_id)
+
+        def _task_ledger_terminal_consumer(payload: dict) -> None:
+            if not should_notify_task_ledger_terminal(payload, _notified_task_ids):
+                return
+            task_id = str(payload.get("task_id") or "")
+            _send_session_telegram_message(
+                str(payload.get("session_id") or ""),
+                format_task_ledger_terminal_message(payload),
+            )
+            if task_id:
+                _notified_task_ids.add(task_id)
 
         runtime.observe.subscribe("autonomous_task_completed", _autonomous_task_complete_consumer)
         runtime.observe.subscribe("autonomous_task_failed", _autonomous_task_failed_consumer)
+        runtime.observe.subscribe("task_ledger_terminal", _task_ledger_terminal_consumer)
 
         def _nlm_notify(message: str) -> None:
             try:
@@ -197,6 +315,9 @@ async def run() -> int:
             job_service=runtime.job_service,
             task_board=runtime.task_board,
             pipeline=runtime.bot.pipeline,
+            approvals=runtime.approvals,
+            memory=runtime.memory,
+            llm_router=runtime.router,
         )
         evening_brief = MorningBriefService(
             settings=MorningBriefSettings(
@@ -218,6 +339,9 @@ async def run() -> int:
             job_service=runtime.job_service,
             task_board=runtime.task_board,
             pipeline=runtime.bot.pipeline,
+            approvals=runtime.approvals,
+            memory=runtime.memory,
+            llm_router=runtime.router,
         )
 
         from claw_v2.cron import ScheduledJob as _SJ
@@ -254,6 +378,8 @@ async def run() -> int:
             observe=runtime.observe,
             job_service=runtime.job_service,
             research_fallback=_nlm_research_fallback,
+            runtime_policy=build_runtime_policy_engine(runtime.config, runtime.approvals),
+            policy_context="telegram",
         )
         runtime.bot.notebooklm = nlm_service
 

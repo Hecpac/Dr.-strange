@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import tempfile
@@ -473,6 +474,93 @@ class ExecuteActionTests(unittest.TestCase):
             job_id=None,
             artifact_id=None,
             payload={"message": "Critical approval pending"},
+        )
+
+    def test_notify_user_suppresses_duplicate_approval_backlog(self) -> None:
+        svc, router, _, observe = _make_service()
+        observed_at = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d %H:%M:%S")
+        observe.recent_events.return_value = [
+            {
+                "event_type": "kairos_notify_user",
+                "timestamp": observed_at,
+                "payload": {
+                    "message": (
+                        "5 approvals require review: "
+                        "0e8fd603c8ccd46c, 4885d761ae58ee7d"
+                    )
+                },
+            }
+        ]
+        decision = TickDecision(
+            action="notify_user",
+            reason="approval backlog",
+            detail=(
+                "Pending approval IDs: "
+                "4885d761ae58ee7d, 0e8fd603c8ccd46c"
+            ),
+        )
+
+        svc._handle_notify_user(decision)
+
+        router.ask.assert_not_called()
+        observe.emit.assert_any_call(
+            "kairos_notify_suppressed",
+            trace_id=None,
+            root_trace_id=None,
+            span_id=None,
+            parent_span_id=None,
+            job_id=None,
+            artifact_id=None,
+            payload={
+                "message": (
+                    "Pending approval IDs: "
+                    "4885d761ae58ee7d, 0e8fd603c8ccd46c"
+                ),
+                "reason": "duplicate_approval_backlog",
+            },
+        )
+
+    def test_notify_user_allows_approval_backlog_when_ids_change(self) -> None:
+        svc, router, _, observe = _make_service()
+        observed_at = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d %H:%M:%S")
+        observe.recent_events.return_value = [
+            {
+                "event_type": "kairos_notify_user",
+                "timestamp": observed_at,
+                "payload": {
+                    "message": (
+                        "5 approvals require review: "
+                        "0e8fd603c8ccd46c, 4885d761ae58ee7d"
+                    )
+                },
+            }
+        ]
+        decision = TickDecision(
+            action="notify_user",
+            reason="approval backlog",
+            detail=(
+                "6 approvals are pending; listed IDs: "
+                "0e8fd603c8ccd46c, 4885d761ae58ee7d, 6be1a96098b4cfa0"
+            ),
+        )
+
+        svc._handle_notify_user(decision)
+
+        router.ask.assert_not_called()
+        observe.emit.assert_any_call(
+            "kairos_notify_user",
+            trace_id=None,
+            root_trace_id=None,
+            span_id=None,
+            parent_span_id=None,
+            job_id=None,
+            artifact_id=None,
+            payload={
+                "message": (
+                    "6 approvals are pending; listed IDs: "
+                    "0e8fd603c8ccd46c, 4885d761ae58ee7d, 6be1a96098b4cfa0"
+                )
+            },
         )
 
 

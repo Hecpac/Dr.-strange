@@ -43,7 +43,9 @@ from claw_v2.chrome_handler import ChromeHandler
 from claw_v2.computer_handler import ComputerHandler
 from claw_v2.design_handler import DesignHandler
 from claw_v2.nlm_handler import NlmHandler
+from claw_v2.natural_language_renderer import NaturalLanguageRenderer
 from claw_v2.state_handler import StateHandler, _BrainShortcut
+from claw_v2.semantic_turn import SemanticTurn, classify_semantic_turn
 from claw_v2.terminal_handler import TerminalHandler
 from claw_v2.wiki_handler import WikiHandler
 from claw_v2.coordinator import CoordinatorService
@@ -51,6 +53,7 @@ from claw_v2.content import ContentEngine
 from claw_v2.redaction import redact_sensitive
 from claw_v2.github import GitHubPullRequestService
 from claw_v2.heartbeat import HeartbeatService
+from claw_v2.idle_executor import IdleOwnershipExecutor
 from claw_v2.stop_notifier import StopNotifier
 from claw_v2.model_registry import (
     ModelRegistry,
@@ -62,6 +65,7 @@ from claw_v2.model_registry import (
 from claw_v2.pipeline import PipelineService
 from claw_v2.social import SocialPublisher
 from claw_v2.bot_helpers import *  # noqa: F403
+from claw_v2.bot_helpers import _is_secret_shaped_token  # explicit: private helper
 
 if TYPE_CHECKING:
     from claw_v2.jobs import JobService
@@ -160,6 +164,115 @@ def _chatgpt_browser_task_instruction(text: str) -> str:
 
 _CAPABILITY_DENIAL_SENTENCE_SPLIT = re.compile(r"[.!?\n]+")
 _CAPABILITY_DENIAL_MAX_LEN = 600
+_IDENTITY_DRIFT_SENTENCE_SPLIT = re.compile(r"[.!?\n]+")
+_IDENTITY_DRIFT_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bsoy\s+(?:claude|claude code|codex|chatgpt|un modelo|una ia|un asistente de ia)\b"),
+    re.compile(r"\bmi identidad\s+es\s+(?:claude|claude code|codex|chatgpt|un modelo|una ia)\b"),
+    re.compile(r"\bcomo\s+(?:claude|claude code|codex|chatgpt|modelo|ia)\b"),
+    re.compile(r"\bestoy\s+(?:corriendo|ejecutandome|en)\s+(?:claude code|codex cli|el cli|la cli)\b"),
+    re.compile(r"\bthis\s+(?:claude code|codex|chatgpt)\s+(?:session|instance)\b"),
+    re.compile(r"\bi\s*(?:am|'m)\s+(?:claude|claude code|codex|chatgpt|an ai language model)\b"),
+    re.compile(r"\bas\s+(?:claude|claude code|codex|chatgpt|an ai language model)\b"),
+)
+_IDENTITY_DRIFT_SAFE_CONTEXT = (
+    "no soy claude",
+    "no soy claude code",
+    "no soy codex",
+    "no debo decir que soy",
+    "nunca decir que soy",
+    "no deberia decir que soy",
+    "do not identify as",
+    "never identify as",
+)
+_MANUAL_HANDOFF_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bpasos finales\b"),
+    re.compile(r"\bcorre\s+este\s+comando\b"),
+    re.compile(r"\bejecuta(?:lo)?\s+tu\b"),
+    re.compile(r"\bpruebalo\s+tu\b"),
+    re.compile(r"\bcopia\s+y\s+pega\b"),
+    re.compile(r"\bte\s+toca\s+(?:a\s+ti)?\b"),
+    re.compile(r"\b(?:vos|tu|t[uú])\s+en\s+la\s+mac\b"),
+    re.compile(r"\b(?:click|haz click|hace click)\s+en\s+la\s+ventana\b"),
+    re.compile(r"\bcmd\s*\+?\s*v\b"),
+    re.compile(r"\b(?:cmd|command)\s*\+?\s*(?:enter|return)\b"),
+    re.compile(r"\b(?:queda|quedo)\s+contigo\b"),
+    re.compile(r"\b(?:te toca|hazlo tu|hazlo t[uú]|lo haces tu|lo haces t[uú])\b"),
+    re.compile(r"\b(?:desde aqui|desde aqu[ií])\s+no\s+puedo\b"),
+    re.compile(r"\bno\s+(?:se\s+lo\s+)?(?:pegue|pegu[eé]|pude pegar|puedo pegar)\s+yo\b"),
+    re.compile(r"\b(?:run this command|try it yourself|copy and paste this|paste it yourself|you need to click|you do the final|press enter yourself)\b"),
+)
+_OPERATOR_ACTION_REQUEST_TERMS = (
+    "abre",
+    "abrir",
+    "actualiza",
+    "aplica",
+    "arregla",
+    "cierra",
+    "completa",
+    "continua",
+    "continúa",
+    "corrige",
+    "corre",
+    "correlo",
+    "córrelo",
+    "crea",
+    "dale",
+    "ejecuta",
+    "encargate",
+    "encárgate",
+    "envia",
+    "envía",
+    "enviame",
+    "envíame",
+    "genera",
+    "hazlo",
+    "instala",
+    "levanta",
+    "limpia",
+    "limpiar",
+    "manda",
+    "mandalo",
+    "mándalo",
+    "pega",
+    "pegale",
+    "pégale",
+    "revisa",
+    "retoma",
+    "run",
+    "open",
+    "paste",
+    "review",
+    "send",
+    "create",
+    "generate",
+    "install",
+    "continue",
+    "resume",
+    "execute",
+    "fix",
+    "clean",
+    "cleanup",
+    "clean up",
+    "take ownership",
+)
+_COMPLETION_CLAIM_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\b(?:listo|hecho|done|cerrado|terminado|verificado)\b"),
+    re.compile(r"\b(?:lo\s+correg[ií]|lo\s+limpi[eé]|lo\s+arregl[eé]|cambi[eé]\s+el|actualic[eé]\s+el)\b"),
+    re.compile(r"\b(?:i\s+fixed|i\s+changed|i\s+updated|completed|verified)\b"),
+)
+_SIDE_EFFECT_CLAIM_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\b(?:archivo|file|comando|command|test|tests|deploy|mensaje|email|prompt|app|codex|approval|approvals|aprobaciones|ledger|cola)\b"),
+    re.compile(r"\b(?:corr[ií]|ejecut[eé]|corr[eí]\s+tests?|ran|changed|updated|sent|submitted|pasted)\b"),
+)
+_STARTING_ACTION_CLAIM_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\b(?:voy\s+a|procedo\s+a|empiezo|arranco|arrancando|iniciando)\b"),
+    re.compile(r"\b(?:i\s+will|i'll|i\s+am\s+going\s+to|i'm\s+going\s+to|starting|started)\b"),
+)
+_STARTING_ACTION_OBJECT_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\b(?:depur|limpi|archiv|ejecut|corr|aplic|actualiz|arregl)\w*\b"),
+    re.compile(r"\b(?:clean|cleanup|archive|execute|run|apply|update|fix)\w*\b"),
+    re.compile(r"\b(?:approval|approvals|aprobaciones|ledger|cola|archivo|file|comando|command|task|tarea)\b"),
+)
 
 
 def _looks_like_unverified_capability_denial(text: str) -> bool:
@@ -172,6 +285,68 @@ def _looks_like_unverified_capability_denial(text: str) -> bool:
         ):
             return True
     return False
+
+
+def _looks_like_identity_drift(text: str) -> bool:
+    normalized = _normalize_command_text(text)
+    for sentence in _IDENTITY_DRIFT_SENTENCE_SPLIT.split(normalized):
+        compact = re.sub(r"\s+", " ", sentence).strip()
+        if not compact:
+            continue
+        if any(safe in compact for safe in _IDENTITY_DRIFT_SAFE_CONTEXT):
+            continue
+        if any(pattern.search(compact) for pattern in _IDENTITY_DRIFT_PATTERNS):
+            return True
+    return False
+
+
+def _looks_like_manual_handoff(text: str) -> bool:
+    normalized = _normalize_command_text(text)
+    normalized = re.sub(r"\s+", " ", normalized)
+    return any(pattern.search(normalized) for pattern in _MANUAL_HANDOFF_PATTERNS)
+
+
+def _looks_like_operator_action_request(text: str) -> bool:
+    normalized = _normalize_command_text(text)
+    if not normalized.strip():
+        return False
+    try:
+        if detect_telegram_imperative(text) is not None or detect_owner_delegation(text) is not None:
+            return True
+    except Exception:
+        logger.exception(
+            "dispatch detector failed in _looks_like_operator_action_request"
+        )
+    if looks_like_actionable_telegram_message(text):
+        return True
+    return _contains_operator_action_term(normalized)
+
+
+def _contains_operator_action_term(normalized_text: str) -> bool:
+    for term in _OPERATOR_ACTION_REQUEST_TERMS:
+        pattern = rf"(?<!\w){re.escape(term)}(?!\w)"
+        if re.search(pattern, normalized_text):
+            return True
+    return False
+
+
+def _looks_like_completion_side_effect_claim(text: str) -> bool:
+    normalized = _normalize_command_text(text)
+    if not normalized.strip():
+        return False
+    has_completion = any(pattern.search(normalized) for pattern in _COMPLETION_CLAIM_PATTERNS)
+    if not has_completion:
+        return False
+    return any(pattern.search(normalized) for pattern in _SIDE_EFFECT_CLAIM_PATTERNS)
+
+
+def _looks_like_starting_side_effect_claim(text: str) -> bool:
+    normalized = _normalize_command_text(text)
+    if not normalized.strip():
+        return False
+    if not any(pattern.search(normalized) for pattern in _STARTING_ACTION_CLAIM_PATTERNS):
+        return False
+    return any(pattern.search(normalized) for pattern in _STARTING_ACTION_OBJECT_PATTERNS)
 PRE_HOOK_BLOCK_REPEATED_THRESHOLD = 5
 PRE_HOOK_BLOCK_REPEATED_WINDOW_MINUTES = 10
 
@@ -495,6 +670,14 @@ class BotService:
             brain_memory=brain.memory,
             task_handler=self._task_handler,
             observe=observe,
+        )
+        self._idle_executor = IdleOwnershipExecutor(
+            memory=brain.memory,
+            task_ledger=task_ledger,
+            job_service=job_service,
+            task_handler=self._task_handler,
+            observe=observe,
+            telemetry_root=getattr(config, "telemetry_root", None),
         )
         self._chrome_handler = ChromeHandler(
             capability_check=self._capability_unavailable_message,
@@ -1135,6 +1318,51 @@ class BotService:
                 route,
             )
 
+    def _emit_semantic_turn_trace(
+        self,
+        *,
+        session_id: str,
+        text: str,
+        semantic_turn: SemanticTurn,
+        state_sources_checked: list[str],
+        approval_scope_match: str,
+        decision: str,
+        output_kind: str,
+        response_text: str | None = None,
+    ) -> None:
+        if self.observe is None:
+            return
+        renderer = NaturalLanguageRenderer(mode="normal")
+        leaked = renderer.leaked_internal_labels(response_text or "")
+        try:
+            self.observe.emit(
+                "semantic_turn_trace",
+                payload={
+                    "session_id": session_id,
+                    "semantic_intent": semantic_turn.intent,
+                    "semantic_confidence": semantic_turn.confidence,
+                    "clear_goal": semantic_turn.clear_goal,
+                    "state_sources_checked": list(state_sources_checked),
+                    "approval_scope_match": approval_scope_match,
+                    "decision": decision,
+                    "output_kind": output_kind,
+                    "leaked_internal_labels": leaked,
+                    "text_preview": text[:80],
+                    "text_len": len(text),
+                    "reasons": list(semantic_turn.reasons),
+                },
+            )
+        except Exception:
+            logger.debug("failed to emit semantic_turn_trace", exc_info=True)
+
+    @staticmethod
+    def _semantic_approval_scope_default(semantic_turn: SemanticTurn) -> str:
+        if semantic_turn.intent == "new_task":
+            return "skipped_new_task"
+        if semantic_turn.intent in {"approval_response", "continue_active_mission"}:
+            return "deferred_until_state_scope"
+        return "not_checked"
+
     def _emit_skill_task_event(
         self,
         event_type: str,
@@ -1289,6 +1517,36 @@ class BotService:
             )
         return sanitized
 
+    def _final_render(self, session_id: str, content: str) -> str:
+        """Single funnel for user-visible text on the Telegram brain path.
+
+        Contract — keep narrow:
+        1. Apply ``NaturalLanguageRenderer(mode="normal").render`` to drop
+           internal labels (approval_id, /task_*, explicit_blocker, …) and
+           replace internal tokens with natural Spanish copy.
+        2. Apply ``_sanitize_visible_chat_response`` to redact runtime IDs
+           and local paths.
+
+        Forbidden inside this helper (enforced by tests):
+        - Touching ``_record_evidence_gate_explicit_blocker`` or any
+          evidence-gate / task ledger logic.
+        - Reading ``current_meta_introspection_kind`` to alter behaviour.
+        - Mutating session_state, observe, or approvals state.
+
+        Both inner ops are idempotent regex transforms: ``_final_render(_final_render(x)) == _final_render(x)``
+        is exercised by ``tests/test_final_render_idempotency.py``.
+
+        Placement invariant when applied to the brain path: must run INSIDE
+        ``_brain_text_response`` so it stays inside the
+        ``with meta_introspection_context(...)`` set by the
+        ``meta_introspection_guard``. See INTERNAL_WIRING.md §1
+        ``final_render_brain_path_inside_meta_context``.
+        """
+        if not content:
+            return content
+        rendered = NaturalLanguageRenderer(mode="normal").render(content)
+        return self._sanitize_visible_chat_response(session_id, rendered)
+
     def _emit_sanitizer_recovery_event(self, event_type: str, session_id: str, **payload: Any) -> None:
         if self.observe is None:
             return
@@ -1430,17 +1688,155 @@ class BotService:
         source_text: str,
         raw_content: str,
         *,
+        response: Any | None = None,
         runtime_capability_question: bool,
         link_analysis_context: dict[str, Any] | None,
     ) -> str:
         content = raw_content.strip()
+        meta_evidence_skip_reason = self._meta_evidence_skip_reason(content)
+        if meta_evidence_skip_reason is not None:
+            self._emit_safe(
+                "evidence_gate_skipped_meta",
+                {
+                    "session_id": session_id,
+                    "reason": meta_evidence_skip_reason,
+                    "meta_kind": current_meta_introspection_kind(),
+                },
+            )
         if not content or content == "(no result)":
             content = "Recibido. ¿Qué quieres que haga con esto?"
         elif _looks_like_pre_hook_block(content):
             content = self._maybe_augment_pre_hook_block(content)
+        elif _looks_like_manual_handoff(content) and _looks_like_operator_action_request(source_text):
+            if self._should_allow_tool_backed_handoff_response(response, content):
+                self._emit_identity_capability_binding_guard(
+                    "operator_handoff_guard_allowed_tool_backed",
+                    session_id,
+                    reason="tool_backed_long_result",
+                    original=content,
+                    sanitized=content,
+                )
+            else:
+                corrected = self._operator_handoff_binding_response()
+                self._emit_identity_capability_binding_guard(
+                    "operator_handoff_guard_triggered",
+                    session_id,
+                    reason="manual_handoff_for_action_request",
+                    original=content,
+                    sanitized=corrected,
+                )
+                self._emit_internal_chat_suppressed(
+                    session_id,
+                    reason="manual_handoff_for_action_request",
+                    original=content,
+                    sanitized=corrected,
+                )
+                content = corrected
+        elif self._start_claim_lacks_evidence(
+            session_id=session_id,
+            source_text=source_text,
+            content=content,
+            response=response,
+        ):
+            meta_kind = current_meta_introspection_kind()
+            if meta_kind is not None:
+                if meta_evidence_skip_reason is None:
+                    self._emit_safe(
+                        "evidence_gate_skipped_meta",
+                        {
+                            "session_id": session_id,
+                            "reason": "start_claim_without_evidence",
+                            "meta_kind": meta_kind,
+                        },
+                    )
+            else:
+                blocker_task_id = self._record_evidence_gate_explicit_blocker(
+                    session_id=session_id,
+                    source_text=source_text,
+                    blocked_content=content,
+                    reason="start_claim_without_evidence",
+                )
+                corrected = self._unexecuted_start_response(blocker_task_id)
+                self._emit_identity_capability_binding_guard(
+                    "evidence_gate_blocked_start_claim",
+                    session_id,
+                    reason="start_claim_without_evidence",
+                    original=content,
+                    sanitized=corrected,
+                )
+                self._emit_internal_chat_suppressed(
+                    session_id,
+                    reason="start_claim_without_evidence",
+                    original=content,
+                    sanitized=corrected,
+                )
+                content = corrected
+        elif self._completion_claim_lacks_evidence(
+            session_id=session_id,
+            source_text=source_text,
+            content=content,
+            response=response,
+            link_analysis_context=link_analysis_context,
+        ):
+            meta_kind = current_meta_introspection_kind()
+            if meta_kind is not None:
+                if meta_evidence_skip_reason is None:
+                    self._emit_safe(
+                        "evidence_gate_skipped_meta",
+                        {
+                            "session_id": session_id,
+                            "reason": "completion_claim_without_evidence",
+                            "meta_kind": meta_kind,
+                        },
+                    )
+            else:
+                blocker_task_id = self._record_evidence_gate_explicit_blocker(
+                    session_id=session_id,
+                    source_text=source_text,
+                    blocked_content=content,
+                    reason="completion_claim_without_evidence",
+                )
+                corrected = self._pending_evidence_response(blocker_task_id)
+                self._emit_identity_capability_binding_guard(
+                    "evidence_gate_blocked_completion_claim",
+                    session_id,
+                    reason="completion_claim_without_evidence",
+                    original=content,
+                    sanitized=corrected,
+                )
+                self._emit_internal_chat_suppressed(
+                    session_id,
+                    reason="completion_claim_without_evidence",
+                    original=content,
+                    sanitized=corrected,
+                )
+                content = corrected
+        elif _looks_like_identity_drift(content):
+            corrected = self._identity_binding_response()
+            self._emit_identity_capability_binding_guard(
+                "identity_drift_guard_triggered",
+                session_id,
+                reason="provider_identity_leak",
+                original=content,
+                sanitized=corrected,
+            )
+            self._emit_internal_chat_suppressed(
+                session_id,
+                reason="identity_drift",
+                original=content,
+                sanitized=corrected,
+            )
+            content = corrected
         elif _looks_like_unverified_capability_denial(content):
             corrected = self._correct_unverified_capability_denial(content)
             if corrected is not None:
+                self._emit_identity_capability_binding_guard(
+                    "capability_binding_guard_triggered",
+                    session_id,
+                    reason="unverified_capability_denial",
+                    original=content,
+                    sanitized=corrected,
+                )
                 self._emit_internal_chat_suppressed(
                     session_id,
                     reason="unverified_capability_denial",
@@ -1456,7 +1852,144 @@ class BotService:
                 url=link_analysis_context["url"],
                 fetched_content=link_analysis_context["fetched_content"],
             )
+        cleaned = _strip_url_permission_deferrals(content, context=source_text)
+        if cleaned != content:
+            self._emit_safe(
+                "url_autonomy_guard_triggered",
+                {
+                    "session_id": session_id,
+                    "source_text_preview": source_text[:160],
+                    "original_length": len(content),
+                    "sanitized_length": len(cleaned),
+                },
+            )
+            self._emit_internal_chat_suppressed(
+                session_id,
+                reason="url_autonomy_permission_deferral",
+                original=content,
+                sanitized=cleaned,
+            )
+            content = cleaned
         return self._sanitize_visible_chat_response(session_id, content)
+
+    def _start_claim_lacks_evidence(
+        self,
+        *,
+        session_id: str,
+        source_text: str,
+        content: str,
+        response: Any | None,
+    ) -> bool:
+        if not _looks_like_operator_action_request(source_text):
+            return False
+        if not _looks_like_starting_side_effect_claim(content):
+            return False
+        if self._response_has_evidence_signal(response):
+            return False
+        if self._session_has_fresh_evidence(session_id):
+            return False
+        return True
+
+    def _completion_claim_lacks_evidence(
+        self,
+        *,
+        session_id: str,
+        source_text: str,
+        content: str,
+        response: Any | None,
+        link_analysis_context: dict[str, Any] | None = None,
+    ) -> bool:
+        if not _looks_like_operator_action_request(source_text):
+            return False
+        if not _looks_like_completion_side_effect_claim(content):
+            return False
+        if self._link_analysis_context_has_evidence(link_analysis_context):
+            return False
+        if self._response_has_evidence_signal(response):
+            return False
+        if self._session_has_fresh_evidence(session_id):
+            return False
+        return True
+
+    @staticmethod
+    def _link_analysis_context_has_evidence(context: dict[str, Any] | None) -> bool:
+        if not isinstance(context, dict):
+            return False
+        fetched_content = str(context.get("fetched_content") or "").strip()
+        if not fetched_content:
+            return False
+        lowered = fetched_content.lower()
+        if lowered.startswith("browse error"):
+            return False
+        if "no se pudo leer" in lowered or "all browse backends fail" in lowered:
+            return False
+        return _is_usable_browse_content(str(context.get("url") or ""), fetched_content)
+
+    @staticmethod
+    def _meta_evidence_skip_reason(content: str) -> str | None:
+        if current_meta_introspection_kind() is None:
+            return None
+        if _looks_like_starting_side_effect_claim(content):
+            return "start_claim_without_evidence"
+        if _looks_like_completion_side_effect_claim(content):
+            return "completion_claim_without_evidence"
+        return None
+
+    def _response_has_evidence_signal(self, response: Any | None) -> bool:
+        if response is None:
+            return False
+        artifacts = getattr(response, "artifacts", {}) or {}
+        if not isinstance(artifacts, dict):
+            return False
+        if artifacts.get("evidence_manifest"):
+            return True
+        if artifacts.get("tool_calls"):
+            return True
+        if artifacts.get("observe_event_ids"):
+            return True
+        trace_id = str(artifacts.get("trace_id") or "")
+        if trace_id and self.observe is not None:
+            try:
+                events = self.observe.trace_events(trace_id)
+            except Exception:
+                events = []
+            return any(
+                str(event.get("event_type") or "")
+                in {"sdk_post_tool_use", "sdk_post_tool_use_failure", "approval_required"}
+                for event in events
+            )
+        return False
+
+    def _should_allow_tool_backed_handoff_response(self, response: Any | None, content: str) -> bool:
+        if len(content or "") < 1200:
+            return False
+        if not self._response_has_evidence_signal(response):
+            return False
+        return self._brain_response_has_useful_result(response)
+
+    def _session_has_fresh_evidence(self, session_id: str) -> bool:
+        if self.task_ledger is None:
+            return False
+        try:
+            records = self.task_ledger.list(session_id=session_id, limit=3)
+        except Exception:
+            return False
+        now = time.time()
+        for record in records:
+            try:
+                updated_at = float(getattr(record, "updated_at", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                updated_at = 0.0
+            if updated_at and now - updated_at > 120:
+                continue
+            verification = str(getattr(record, "verification_status", "") or "").lower()
+            artifacts = dict(getattr(record, "artifacts", {}) or {})
+            if verification in {"passed", "ok", "verified"} and artifacts:
+                return True
+            manifest = artifacts.get("evidence_manifest")
+            if isinstance(manifest, dict) and manifest:
+                return True
+        return False
 
     def _recover_internal_trace_suppression(
         self,
@@ -1622,6 +2155,166 @@ class BotService:
             except Exception:
                 logger.debug("failed to emit reply_context_loaded", exc_info=True)
 
+    def _maybe_handle_brain_first_new_task(
+        self,
+        *,
+        semantic_turn: SemanticTurn,
+        session_id: str,
+        text: str,
+        runtime_channel: str | None,
+    ) -> str | None:
+        if (runtime_channel or "").strip().lower() != "telegram":
+            return None
+        if semantic_turn.intent != "new_task" or not semantic_turn.clear_goal:
+            return None
+        if not self._looks_like_durable_mission_request(text):
+            return None
+
+        objective = semantic_turn.objective or text.strip()
+        mission_name = self._extract_requested_mission_name(text)
+        task_id = f"{session_id}:brain-first:{time.time_ns()}"
+        mission_id = f"mission:{session_id}:{self._stable_text_hash(objective)}"
+        now = time.time()
+        state = self.brain.memory.get_session_state(session_id)
+        active_object = dict(state.get("active_object") or {})
+        active_object["active_mission"] = {
+            "mission_id": mission_id,
+            "channel": "telegram",
+            "chat_id": session_id,
+            "active_target": mission_name or "durable mission",
+            "active_artifact": "continuation smoke proposal",
+            "last_user_goal": objective[:240],
+            "pending_action": objective,
+            "proposal_task_id": task_id,
+            "status": "waiting_for_continue",
+            "created_at": now,
+            "updated_at": now,
+            "expires_at": now + 30 * 60,
+        }
+        active_object["last_actionable_proposal"] = {
+            "objective": objective[:500],
+            "source": "brain_first_new_task",
+            "task_id": task_id,
+            "created_at": now,
+        }
+        task_queue = self._task_handler.upsert_task_queue_entry(
+            state.get("task_queue") or [],
+            summary=objective,
+            mode=_infer_session_mode(objective),
+            status="pending",
+            source="brain_first_new_task",
+            priority=0,
+            depends_on=self._task_handler.derive_task_dependencies(
+                state.get("task_queue") or [],
+                summary=objective,
+            ),
+        )
+        if self.task_ledger is not None:
+            artifacts = {
+                "semantic_turn": {
+                    "intent": semantic_turn.intent,
+                    "confidence": semantic_turn.confidence,
+                    "clear_goal": semantic_turn.clear_goal,
+                    "reasons": list(semantic_turn.reasons),
+                },
+                "proposal": {
+                    "status": "waiting_for_continue",
+                    "mission_name": mission_name or "",
+                },
+                "evidence": {"brain_first_semantic_classification": semantic_turn.intent},
+            }
+            self.task_ledger.create(
+                task_id=task_id,
+                session_id=session_id,
+                objective=objective,
+                runtime="brain_first",
+                mode=_infer_session_mode(objective),
+                status="running",
+                notify_policy="none",
+                route={"channel": "telegram", "external_session_id": session_id},
+                metadata={
+                    "origin": "brain_first_semantic",
+                    "semantic_intent": semantic_turn.intent,
+                    "mission_id": mission_id,
+                    "mission_name": mission_name or "",
+                    "source_message": text[:500],
+                    "result_status": "waiting_for_continue",
+                },
+                artifacts=artifacts,
+            )
+            self.task_ledger.mark_running_checkpoint(
+                task_id,
+                summary="Brain-first durable mission proposal created; waiting for explicit continuation.",
+                verification_status="awaiting_continue",
+                artifacts=artifacts,
+            )
+
+        self.brain.memory.update_session_state(
+            session_id,
+            mode="ops",
+            current_goal=objective[:280] if self._looks_like_persistable_current_goal(objective) else "",
+            pending_action=objective,
+            task_queue=task_queue,
+            verification_status="awaiting_continue",
+            active_object=active_object,
+            last_checkpoint={
+                "summary": "Brain-first durable mission proposal is waiting for continuation.",
+                "verification_status": "awaiting_continue",
+                "task_id": task_id,
+                "mission_id": mission_id,
+            },
+        )
+        self._emit_safe(
+            "brain_first_new_task_created",
+            {
+                "session_id": session_id,
+                "task_id": task_id,
+                "mission_id": mission_id,
+                "mission_name": mission_name or "",
+                "objective_preview": objective[:160],
+            },
+        )
+        name_fragment = f" `{mission_name}`" if mission_name else ""
+        response = (
+            f"Creé la misión durable{name_fragment} y la dejé lista como propuesta. "
+            "Respóndeme \"Procede\" para ejecutarla; si quieres ajustar el alcance, dime el cambio concreto."
+        )
+        rendered = NaturalLanguageRenderer(mode="normal").render(response)
+        self._store_memory_turn(session_id, text, rendered, assistant_limit=2000)
+        self._remember_assistant_turn_state(session_id, text, rendered)
+        self._emit_semantic_turn_trace(
+            session_id=session_id,
+            text=text,
+            semantic_turn=semantic_turn,
+            state_sources_checked=["message_text", "session_state", "task_ledger"],
+            approval_scope_match="skipped_new_task",
+            decision="new_task_proposal_created",
+            output_kind="natural_reply",
+            response_text=rendered,
+        )
+        return rendered
+
+    @staticmethod
+    def _looks_like_durable_mission_request(text: str) -> bool:
+        normalized = _normalize_command_text(text)
+        return (
+            "mision durable" in normalized
+            or "misión durable" in text.lower()
+            or "durable mission" in normalized
+            or "mission durable" in normalized
+        )
+
+    @staticmethod
+    def _extract_requested_mission_name(text: str) -> str | None:
+        match = re.search(
+            r"\b(?:llamada|llamado|called|named)\s+([A-Za-z0-9][A-Za-z0-9_.:-]{1,120})",
+            text,
+            re.IGNORECASE,
+        )
+        if not match:
+            return None
+        return match.group(1).strip(" .,:;!?`'\"") or None
+
     def handle_text(
         self,
         *,
@@ -1635,11 +2328,51 @@ class BotService:
             raise PermissionError("TELEGRAM_ALLOWED_USER_ID must be configured")
         if user_id != self.allowed_user_id:
             raise PermissionError("user is not allowed to access this bot")
+        # P2: open a fresh turn_id_context so every observe event, ledger
+        # row, and approval created during this turn carries the same
+        # correlator. The context resets on method exit. See
+        # claw_v2/turn_context.py and INTERNAL_WIRING.md §1.
+        with turn_id_context(new_turn_id()):
+            return self._handle_text_body(
+                user_id=user_id,
+                session_id=session_id,
+                text=text,
+                runtime_channel=runtime_channel,
+                context_metadata=context_metadata,
+            )
+
+    def _handle_text_body(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        text: str,
+        runtime_channel: str | None = None,
+        context_metadata: dict[str, Any] | None = None,
+    ) -> str | None:
         self._ensure_default_autonomy(session_id)
         self._remember_inbound_context(session_id, context_metadata)
         stripped = text.strip()
+        semantic_turn = classify_semantic_turn(stripped)
+        self._emit_semantic_turn_trace(
+            session_id=session_id,
+            text=stripped,
+            semantic_turn=semantic_turn,
+            state_sources_checked=["message_text"],
+            approval_scope_match=self._semantic_approval_scope_default(semantic_turn),
+            decision="classified_before_state_resolution",
+            output_kind="routing_trace",
+        )
         context = CommandContext(user_id=user_id, session_id=session_id, text=text, stripped=stripped)
-        command_response = dispatch_commands(self._pre_state_commands, context)
+        try:
+            command_response = dispatch_commands(self._pre_state_commands, context)
+        except ApprovalPending as exc:
+            self._record_pending_tool_approval(
+                session_id=session_id,
+                user_text=stripped,
+                exc=exc,
+            )
+            return _format_approval_pending(exc)
         if isinstance(command_response, _BrainShortcut):
             return self._brain_text_response(
                 session_id,
@@ -1649,7 +2382,19 @@ class BotService:
             )
         if command_response is not None:
             return command_response
-        computer_approval_response = self._handle_pending_computer_approval_response(session_id, stripped)
+        brain_first_new_task_response = self._maybe_handle_brain_first_new_task(
+            semantic_turn=semantic_turn,
+            session_id=session_id,
+            text=stripped,
+            runtime_channel=runtime_channel,
+        )
+        if brain_first_new_task_response is not None:
+            return brain_first_new_task_response
+        computer_approval_response = self._handle_pending_computer_approval_response(
+            session_id,
+            stripped,
+            semantic_turn=semantic_turn,
+        )
         if computer_approval_response is not None:
             self._store_memory_turn(session_id, stripped, computer_approval_response, assistant_limit=2000)
             self._remember_assistant_turn_state(session_id, stripped, computer_approval_response)
@@ -1691,27 +2436,140 @@ class BotService:
                 assistant_limit=route_outcome.store_memory_limit,
             )
             return route_outcome.response
-        pending_tasks_response = self._maybe_handle_pending_tasks_query(stripped, session_id=session_id)
+        pending_tasks_matched = self._pending_tasks_query_matches(stripped)
         self._emit_dispatch_decision(
             handler="pending_tasks",
-            route="intercepted" if pending_tasks_response is not None else "fall_through",
+            route="intercepted" if pending_tasks_matched else "fall_through",
             reason=(
                 "pending_tasks_query_matched"
-                if pending_tasks_response is not None
+                if pending_tasks_matched
                 else "pending_tasks_query_no_match"
             ),
             session_id=session_id,
             text=stripped,
-            captured=pending_tasks_response is not None,
+            captured=pending_tasks_matched,
         )
-        if pending_tasks_response is not None:
-            self._store_memory_turn(session_id, stripped, pending_tasks_response, assistant_limit=2000)
-            self._remember_assistant_turn_state(session_id, stripped, pending_tasks_response)
-            return pending_tasks_response
+        if pending_tasks_matched:
+            return self._handle_pending_tasks_query(
+                stripped,
+                session_id=session_id,
+                runtime_channel=runtime_channel,
+            )
+        failure_summary_response = self._maybe_handle_operational_failure_summary(
+            stripped,
+            session_id=session_id,
+        )
+        self._emit_dispatch_decision(
+            handler="operational_failure_summary",
+            route="intercepted" if failure_summary_response is not None else "fall_through",
+            reason=(
+                "operational_failure_summary_matched"
+                if failure_summary_response is not None
+                else "operational_failure_summary_no_match"
+            ),
+            session_id=session_id,
+            text=stripped,
+            captured=failure_summary_response is not None,
+        )
+        if failure_summary_response is not None:
+            failure_summary_response = self._quality_guard_response(
+                session_id,
+                stripped,
+                failure_summary_response,
+                source="operational_failure_summary",
+            )
+            self._store_memory_turn(session_id, stripped, failure_summary_response, assistant_limit=3000)
+            self._remember_assistant_turn_state(session_id, stripped, failure_summary_response)
+            return failure_summary_response
+        operational_status_response = self._maybe_handle_operational_status(stripped, session_id=session_id)
+        self._emit_dispatch_decision(
+            handler="operational_status",
+            route="intercepted" if operational_status_response is not None else "fall_through",
+            reason=(
+                "operational_status_matched"
+                if operational_status_response is not None
+                else "operational_status_no_match"
+            ),
+            session_id=session_id,
+            text=stripped,
+            captured=operational_status_response is not None,
+        )
+        if operational_status_response is not None:
+            operational_status_response = self._quality_guard_response(
+                session_id,
+                stripped,
+                operational_status_response,
+                source="operational_status",
+            )
+            self._store_memory_turn(session_id, stripped, operational_status_response, assistant_limit=2000)
+            self._remember_assistant_turn_state(session_id, stripped, operational_status_response)
+            return operational_status_response
+        cleanup_status_response = self._maybe_handle_cleanup_status_query(stripped, session_id=session_id)
+        self._emit_dispatch_decision(
+            handler="cleanup_status",
+            route="intercepted" if cleanup_status_response is not None else "fall_through",
+            reason=(
+                "cleanup_status_matched"
+                if cleanup_status_response is not None
+                else "cleanup_status_no_match"
+            ),
+            session_id=session_id,
+            text=stripped,
+            captured=cleanup_status_response is not None,
+        )
+        if cleanup_status_response is not None:
+            self._store_memory_turn(session_id, stripped, cleanup_status_response, assistant_limit=2000)
+            self._remember_assistant_turn_state(session_id, stripped, cleanup_status_response)
+            return cleanup_status_response
+        owner_delegation_response = self._maybe_handle_owner_delegation_request(
+            stripped,
+            session_id=session_id,
+            runtime_channel=runtime_channel,
+        )
+        if owner_delegation_response is not None:
+            self._store_memory_turn(
+                session_id, stripped, owner_delegation_response, assistant_limit=4000
+            )
+            self._remember_assistant_turn_state(session_id, stripped, owner_delegation_response)
+            return owner_delegation_response
+        telegram_imperative_response, telegram_imperative_reason, telegram_imperative_pattern = (
+            self._maybe_handle_telegram_imperative_request(
+                stripped,
+                session_id=session_id,
+                runtime_channel=runtime_channel,
+            )
+        )
+        self._emit_dispatch_decision(
+            handler="telegram_imperative",
+            route="intercepted" if telegram_imperative_response is not None else "fall_through",
+            reason=telegram_imperative_reason,
+            session_id=session_id,
+            text=stripped,
+            captured=telegram_imperative_response is not None,
+            matched_pattern=telegram_imperative_pattern,
+        )
+        if isinstance(telegram_imperative_response, _BrainShortcut):
+            return self._handle_stateful_brain_shortcut(
+                session_id,
+                stripped,
+                telegram_imperative_response,
+                runtime_channel=runtime_channel,
+            )
+        if telegram_imperative_response is not None:
+            telegram_imperative_response = self._quality_guard_response(
+                session_id,
+                stripped,
+                telegram_imperative_response,
+                source="telegram_imperative",
+            )
+            self._store_memory_turn(session_id, stripped, telegram_imperative_response, assistant_limit=3000)
+            self._remember_assistant_turn_state(session_id, stripped, telegram_imperative_response)
+            return telegram_imperative_response
         actionable_task_response = self._maybe_handle_actionable_task_request(
             stripped,
             session_id=session_id,
             runtime_channel=runtime_channel,
+            semantic_turn=semantic_turn,
         )
         self._emit_dispatch_decision(
             handler="telegram_actionable_task",
@@ -1754,23 +2612,6 @@ class BotService:
             self._store_memory_turn(session_id, stripped, task_intent_response, assistant_limit=2000)
             self._remember_assistant_turn_state(session_id, stripped, task_intent_response)
             return task_intent_response
-        operational_status_response = self._maybe_handle_operational_status(stripped, session_id=session_id)
-        self._emit_dispatch_decision(
-            handler="operational_status",
-            route="intercepted" if operational_status_response is not None else "fall_through",
-            reason=(
-                "operational_status_matched"
-                if operational_status_response is not None
-                else "operational_status_no_match"
-            ),
-            session_id=session_id,
-            text=stripped,
-            captured=operational_status_response is not None,
-        )
-        if operational_status_response is not None:
-            self._store_memory_turn(session_id, stripped, operational_status_response, assistant_limit=2000)
-            self._remember_assistant_turn_state(session_id, stripped, operational_status_response)
-            return operational_status_response
         change_status_response = self._maybe_handle_change_status_question(stripped, session_id=session_id)
         self._emit_dispatch_decision(
             handler="change_status_question",
@@ -1788,6 +2629,81 @@ class BotService:
             self._store_memory_turn(session_id, stripped, change_status_response, assistant_limit=2000)
             self._remember_assistant_turn_state(session_id, stripped, change_status_response)
             return change_status_response
+        # PR 0B: meta/introspection guard. Reflective questions, clarification
+        # asks, audit requests, and secret-shaped tokens must NOT reach the
+        # coordinator/coding pipeline; route them to brain chat instead. An
+        # explicit implementation verb in the message ("implementa", "patch X")
+        # disqualifies the guard so real coding work still flows downstream.
+        meta_intent = detect_meta_introspection_request(stripped)
+        if meta_intent is not None:
+            if self.observe is not None:
+                try:
+                    self.observe.emit(
+                        "meta_introspection_match",
+                        payload={
+                            "session_id": session_id,
+                            "kind": meta_intent.kind,
+                            "reason": meta_intent.reason,
+                            "normalized_text": meta_intent.normalized_text,
+                        },
+                    )
+                except Exception:
+                    logger.debug("meta_introspection_match emit failed", exc_info=True)
+            routed_event = (
+                "meta_introspection_routed_to_audit"
+                if meta_intent.kind == "audit"
+                else "meta_introspection_routed_to_chat"
+            )
+            if self.observe is not None:
+                try:
+                    self.observe.emit(
+                        routed_event,
+                        payload={
+                            "session_id": session_id,
+                            "kind": meta_intent.kind,
+                            "reason": meta_intent.reason,
+                        },
+                    )
+                except Exception:
+                    logger.debug("%s emit failed", routed_event, exc_info=True)
+            self._emit_dispatch_decision(
+                handler="meta_introspection_guard",
+                route="intercepted",
+                reason=f"meta_introspection:{meta_intent.kind}",
+                session_id=session_id,
+                text=stripped,
+                captured=True,
+                matched_pattern=meta_intent.reason,
+            )
+            # Invariant: the path handle_text → _brain_text_response →
+            # _prepare_visible_brain_content must stay synchronous on this thread;
+            # converting any step to async or copying context across threads
+            # resets the ContextVar before the evidence-gate reads it. See
+            # INTERNAL_WIRING.md §1 evidence_gate_meta_skip_sync_path.
+            with meta_introspection_context(meta_intent.kind):
+                return self._brain_text_response(
+                    session_id, stripped, runtime_channel=runtime_channel
+                )
+        if self.observe is not None:
+            try:
+                self.observe.emit(
+                    "meta_introspection_no_match",
+                    payload={"session_id": session_id},
+                )
+            except Exception:
+                logger.debug("meta_introspection_no_match emit failed", exc_info=True)
+        if has_explicit_implementation_request(stripped):
+            if self.observe is not None:
+                try:
+                    self.observe.emit(
+                        "meta_introspection_allows_implementation",
+                        payload={"session_id": session_id},
+                    )
+                except Exception:
+                    logger.debug(
+                        "meta_introspection_allows_implementation emit failed",
+                        exc_info=True,
+                    )
         # Most semantic pre-brain routes stay gated, but explicit operational
         # capability requests like AI news and X trends remain deterministic.
         capability_route_allowed = self._capability_route_allowed(stripped)
@@ -1823,25 +2739,12 @@ class BotService:
             return self._handle_autonomy_grant_response(session_id, stripped)
         stateful_followup = self._maybe_resolve_stateful_followup(stripped, session_id=session_id)
         if isinstance(stateful_followup, _BrainShortcut):
-            is_pending_execution = (
-                stateful_followup.text.startswith("Continúa con esta acción pendiente:")
-                or stateful_followup.text.startswith("Continúa con este siguiente paso")
-            )
-            result = self._brain_text_response(
+            return self._handle_stateful_brain_shortcut(
                 session_id,
-                stateful_followup.text,
-                memory_text=stateful_followup.memory_text,
+                stripped,
+                stateful_followup,
                 runtime_channel=runtime_channel,
             )
-            if is_pending_execution and self.observe is not None:
-                try:
-                    self.observe.emit(
-                        "pending_action_execution_completed",
-                        payload={"session_id": session_id, "response_length": len(result)},
-                    )
-                except Exception:
-                    logger.debug("failed to emit pending_action_execution_completed", exc_info=True)
-            return result
         if stateful_followup is not None:
             self._store_memory_turn(session_id, stripped, stateful_followup, assistant_limit=2000)
             self._remember_assistant_turn_state(session_id, stripped, stateful_followup)
@@ -1873,7 +2776,15 @@ class BotService:
             return shortcut_response
         # NlmHandler owns its own narrow classifier and kill switch; keeping it
         # here prevents explicit NotebookLM commands from falling into autonomy.
-        nlm_response = self._nlm_handler.natural_language_response(session_id, stripped)
+        try:
+            nlm_response = self._nlm_handler.natural_language_response(session_id, stripped)
+        except ApprovalPending as exc:
+            self._record_pending_tool_approval(
+                session_id=session_id,
+                user_text=stripped,
+                exc=exc,
+            )
+            return _format_approval_pending(exc)
         if nlm_response is not None:
             nlm_reason = "nlm_intent_classifier_matched"
         elif os.getenv("CLAW_DISABLE_NLM_NATURAL_LANGUAGE", "0") == "1":
@@ -1914,7 +2825,15 @@ class BotService:
             if not is_start_ack:
                 self._remember_assistant_turn_state(session_id, stripped, coordinated_response)
             return coordinated_response
-        command_response = dispatch_commands(self._post_shortcut_commands, context)
+        try:
+            command_response = dispatch_commands(self._post_shortcut_commands, context)
+        except ApprovalPending as exc:
+            self._record_pending_tool_approval(
+                session_id=session_id,
+                user_text=stripped,
+                exc=exc,
+            )
+            return _format_approval_pending(exc)
         if command_response is not None:
             return command_response
 
@@ -2067,7 +2986,7 @@ class BotService:
         c = self.config
         overrides = model_overrides_from_state(self.brain.memory.get_session_state(context.session_id))
         lanes = {}
-        for lane in ("brain", "worker", "verifier", "research", "judge"):
+        for lane in ("brain", "worker", "worker_heavy", "verifier", "research", "judge"):
             override = overrides.get(lane)
             provider = override.provider if override else c.provider_for_lane(lane)
             model = override.model if override else c.model_for_lane(lane)
@@ -2146,7 +3065,7 @@ class BotService:
             return {"error": "config not available"}
         overrides = model_overrides_from_state(self.brain.memory.get_session_state(session_id))
         lanes: dict[str, Any] = {}
-        for lane in ("brain", "worker", "research", "verifier", "judge"):
+        for lane in ("brain", "worker", "worker_heavy", "research", "verifier", "judge"):
             override = overrides.get(lane)
             if override is not None:
                 lanes[lane] = {
@@ -2447,23 +3366,25 @@ class BotService:
                 f"Effort actual:\n"
                 f"  brain: {self.config.brain_effort}\n"
                 f"  worker: {self.config.worker_effort}\n"
+                f"  worker_heavy: {self.config.worker_heavy_effort}\n"
                 f"  judge: {self.config.judge_effort}\n"
                 f"\nUso: /effort <level> [lane]\n"
                 f"Niveles: {', '.join(self._VALID_EFFORTS)}\n"
-                f"Lanes: brain, worker, judge (omitir = todas)"
+                f"Lanes: brain, worker, worker_heavy, judge (omitir = todas)"
             )
         parts = context.stripped.split()
         level = parts[1].lower() if len(parts) >= 2 else ""
         if level not in self._VALID_EFFORTS:
             return f"Nivel inválido: {level}\nVálidos: {', '.join(self._VALID_EFFORTS)}"
         lane = parts[2].lower() if len(parts) >= 3 else None
-        if lane and lane not in ("brain", "worker", "judge"):
-            return f"Lane inválido: {lane}\nVálidos: brain, worker, judge"
+        if lane and lane not in ("brain", "worker", "worker_heavy", "judge"):
+            return f"Lane inválido: {lane}\nVálidos: brain, worker, worker_heavy, judge"
         if lane:
             setattr(self.config, f"{lane}_effort", level)
         else:
             self.config.brain_effort = level
             self.config.worker_effort = level
+            self.config.worker_heavy_effort = level
             self.config.judge_effort = level
         applied = lane or "todas las lanes"
         return f"Effort → **{level}** para {applied}"
@@ -2797,7 +3718,14 @@ class BotService:
                     )
                     for d in drafts_meta
                 ]
-                results = [self.social_publisher.publish(d) for d in drafts]
+                results = []
+                for draft in drafts:
+                    with approved_tool_invocation(
+                        tool="social.publish",
+                        approval_id=approval_id,
+                        reason="social_publish_confirmed",
+                    ):
+                        results.append(self.social_publisher.publish(draft))
                 return json.dumps(
                     [{"platform": r.platform, "post_id": r.post_id, "url": r.url} for r in results],
                     indent=2,
@@ -2861,34 +3789,601 @@ class BotService:
             session_id,
             source_text,
             raw_content,
+            response=response,
             runtime_capability_question=runtime_capability_question,
             link_analysis_context=link_analysis_context,
         )
+        content = self._quality_guard_response(
+            session_id,
+            source_text,
+            content,
+            source="brain_fallback",
+        )
+        # Slice 2 of P0-3+P0-2+P1-6 block: apply the central render+sanitize
+        # funnel to the brain path. Must stay inside _brain_text_response so
+        # it runs inside the `with meta_introspection_context(...)` set by
+        # the meta_introspection_guard caller (bot.py:2570). See
+        # INTERNAL_WIRING.md §1 final_render_brain_path_inside_meta_context.
+        content = self._final_render(session_id, content)
         if content != raw_content:
             self.brain.memory.replace_latest_assistant_message(session_id, raw_content, content)
+        # P0-E: attach the brain tool-use ledger FIRST so the learning
+        # outcome can be derived from the ledger's terminal state
+        # (success / completed_unverified / failed) instead of being
+        # hardcoded to "success" for every non-empty reply.
+        self._attach_brain_tool_use_ledger(
+            session_id=session_id,
+            response=response,
+            source_text=source_text,
+            runtime_channel=runtime_channel,
+        )
+        brain_tool_use_record = self._lookup_recent_brain_tool_use_record(session_id)
+        self._remember_assistant_turn_state(session_id, source_text, content)
         if content == "Recibido. ¿Qué quieres que haga con esto?":
+            outcome = self._classify_brain_outcome_value(
+                brain_tool_use_record, fallback="failure"
+            )
             self._browse_handler._record_learning_outcome(
                 task_type="telegram_message",
                 session_id=session_id,
                 description=f"Bot returned fallback for message: {source_text[:200]}",
                 approach="brain.handle_message",
-                outcome="failure",
+                outcome=outcome,
                 error_snippet=(raw_content or "empty_response")[:500],
                 lesson="When the brain returns empty output, ask a clarifying question and inspect prompt/context assembly.",
                 predicted_confidence=self.brain._last_confidence.get(session_id) or None,
             )
         else:
+            outcome = self._classify_brain_outcome_value(
+                brain_tool_use_record, fallback="success"
+            )
+            lesson = (
+                "The brain produced a usable reply but the tool-use ledger is unverified; verifier should reconcile."
+                if outcome == "usable_reply_unverified"
+                else "The brain produced a usable reply for this conversational request."
+            )
             self._browse_handler._record_learning_outcome(
                 task_type="telegram_message",
                 session_id=session_id,
                 description=f"Handled message: {source_text[:200]}",
                 approach="brain.handle_message",
-                outcome="success",
-                lesson="The brain produced a usable reply for this conversational request.",
+                outcome=outcome,
+                lesson=lesson,
                 predicted_confidence=self.brain._last_confidence.get(session_id) or None,
             )
-        self._remember_assistant_turn_state(session_id, source_text, content)
         return content
+
+    def _lookup_recent_brain_tool_use_record(self, session_id: str) -> Any:
+        """P0-E: return the most recent brain-fallback ledger row for this
+        session if one was created in the current turn (≤ 60s window).
+        Returns None when no brain tool-use ledger row exists yet — meaning
+        the turn was a pure chat with no tool calls.
+        """
+        if getattr(self, "task_ledger", None) is None:
+            return None
+        try:
+            candidates = self.task_ledger.list(session_id=session_id, limit=3)
+        except Exception:
+            return None
+        now = time.time()
+        for candidate in candidates:
+            if getattr(candidate, "mode", "") != "brain_fallback":
+                continue
+            updated_at = float(getattr(candidate, "updated_at", 0.0) or 0.0)
+            if updated_at <= 0.0 or now - updated_at > 60.0:
+                continue
+            return candidate
+        return None
+
+    @staticmethod
+    def _classify_brain_outcome_value(record: Any, *, fallback: str = "success") -> str:
+        """P0-E: choose the task_outcomes.outcome value that matches the
+        brain tool-use ledger's terminal state.
+
+        Args:
+          record: the brain tool-use ``TaskRecord`` (or None when no tools ran).
+          fallback: outcome to return when ``record`` is None (i.e. pure chat
+            with no tools). Caller may pass ``"failure"`` for empty replies.
+
+        Returns one of: "success", "usable_reply_unverified", "failure".
+        Behavioral audit found 144 success rows aligned against 91
+        completed_unverified ledger rows; this classifier closes that gap.
+        """
+        if record is None:
+            return fallback
+        status = str(getattr(record, "status", "") or "").lower()
+        verification = str(getattr(record, "verification_status", "") or "").lower()
+        if status == "failed" or verification == "failed":
+            return "failure"
+        if status == "completed_unverified" or verification in {
+            "needs_verification",
+            "missing_evidence",
+            "unverified",
+        }:
+            return "usable_reply_unverified"
+        if status == "succeeded" and verification in {"passed", "verified", "ok"}:
+            return "success"
+        # Defensive default: if the brain produced tools and we cannot
+        # confidently call them verified, treat the outcome as
+        # usable_reply_unverified rather than silently inflating success.
+        return "usable_reply_unverified"
+
+    def _attach_brain_tool_use_ledger(
+        self,
+        *,
+        session_id: str,
+        response: Any,
+        source_text: str,
+        runtime_channel: str | None,
+    ) -> None:
+        """PR 0E — Brain Tool-Use Ledger.
+
+        After a brain fallback turn returns, scan observe events for the
+        turn's trace_id. If any tools ran, either attach to an existing
+        active task (owner-delegation/coordinator) or create a synthetic
+        agent_tasks row so the tool-use leaves a durable audit trail.
+
+        Decision matrix:
+          - 0 tool events                  → emit noop, no task created
+          - any tool event + active task   → attach (no second task)
+          - any tool event + no active task→ create synthetic task; keep it
+                                              running until verification passes
+          - approval-gated tool blocked    → recorded as
+                                              brain_tooluse_ledger_skipped_sensitive
+
+        Never marks an unverified brain fallback as succeeded. The manifest is
+        activity evidence, not a verifier pass.
+        """
+        if self.task_ledger is None or self.observe is None:
+            return
+        try:
+            artifacts = getattr(response, "artifacts", None) or {}
+        except Exception:
+            artifacts = {}
+        trace_id = str(artifacts.get("trace_id") or "")
+        if not trace_id:
+            return
+        try:
+            events = self.observe.trace_events(trace_id)
+        except Exception:
+            logger.exception(
+                "brain_tooluse_ledger trace_events failed for trace_id=%s", trace_id
+            )
+            try:
+                self.observe.emit(
+                    "brain_tooluse_ledger_observe_failed",
+                    payload={"session_id": session_id, "trace_id": trace_id},
+                )
+            except Exception:
+                logger.debug(
+                    "brain_tooluse_ledger_observe_failed emit suppressed",
+                    exc_info=True,
+                )
+            return
+        tool_events: list[dict[str, Any]] = []
+        tool_failure_events: list[dict[str, Any]] = []
+        approval_events: list[dict[str, Any]] = []
+        for ev in events:
+            etype = str(ev.get("event_type") or "")
+            if etype == "sdk_post_tool_use":
+                tool_events.append(ev)
+            elif etype == "sdk_post_tool_use_failure":
+                tool_failure_events.append(ev)
+            elif etype in {"approval_required", "tool_blocked_by_freeze", "tool_hard_denylist_blocked"}:
+                approval_events.append(ev)
+        if not tool_events and not tool_failure_events and not approval_events:
+            try:
+                self.observe.emit(
+                    "brain_tooluse_ledger_noop_no_tools",
+                    payload={"session_id": session_id, "trace_id": trace_id},
+                )
+            except Exception:
+                logger.debug("brain_tooluse_ledger_noop_no_tools emit failed", exc_info=True)
+            return
+        # Attach to existing active task if one is present.
+        try:
+            state = self.brain.memory.get_session_state(session_id)
+        except Exception:
+            state = {}
+        active_object = state.get("active_object") or {} if isinstance(state, dict) else {}
+        active_task = active_object.get("active_task") or {} if isinstance(active_object, dict) else {}
+        existing_task_id = ""
+        if isinstance(active_task, dict):
+            existing_task_id = str(active_task.get("task_id") or "")
+            existing_status = str(active_task.get("status") or "")
+            if existing_task_id and existing_status not in ("running",):
+                existing_task_id = ""
+        if existing_task_id:
+            try:
+                self.observe.emit(
+                    "brain_tooluse_ledger_attached_existing",
+                    payload={
+                        "session_id": session_id,
+                        "existing_task_id": existing_task_id,
+                        "trace_id": trace_id,
+                        "tools_count": len(tool_events),
+                        "failures_count": len(tool_failure_events),
+                    },
+                )
+            except Exception:
+                logger.debug("brain_tooluse_ledger_attached_existing emit failed", exc_info=True)
+            return
+        # Approval-required tool was blocked — record as skipped/sensitive,
+        # do NOT mark success.
+        if approval_events and not tool_events and not tool_failure_events:
+            try:
+                self.observe.emit(
+                    "brain_tooluse_ledger_skipped_sensitive",
+                    payload={
+                        "session_id": session_id,
+                        "trace_id": trace_id,
+                        "blocked_events": len(approval_events),
+                    },
+                )
+            except Exception:
+                logger.debug("brain_tooluse_ledger_skipped_sensitive emit failed", exc_info=True)
+            return
+        # Synthetic task creation.
+        task_id = f"brain-tooluse:{session_id}:{time.time_ns()}"
+        started_at_ts = time.time()
+        (
+            tools_run,
+            files_touched,
+            commands_run,
+            files_read,
+            files_written,
+            grep_patterns,
+            glob_patterns,
+            first_error,
+        ) = self._summarize_brain_tool_events(tool_events, tool_failure_events)
+        # PR 0F: scrub secret-shaped tokens out of the user message
+        # summary before it lands in metadata or the manifest. The lower
+        # `redact_sensitive` only matches well-known providers' shapes;
+        # this catches mixed-alphanumeric tokens shaped like opaque
+        # session/api credentials (same heuristic PR 0B/0D use).
+        source_summary, sensitive_redactions = self._redact_secret_tokens(
+            (source_text or "")[:200]
+        )
+        metadata = {
+            "origin": "brain_fallback",
+            "brain_tool_use": True,
+            "channel": (runtime_channel or "").lower() or None,
+            "source_message_summary": source_summary,
+            "verification_required": True,
+            "manual_handoff_forbidden": bool(active_task),
+            "created_by": "brain_tool_use_ledger",
+            "trace_id": trace_id,
+        }
+        task_objective = (
+            source_summary
+            or f"brain fallback tool-use turn ({len(tool_events)} tool calls, trace {trace_id[:8]})"
+        )
+        # PR 0F: evidence_manifest is the proof that this brain tool-use
+        # turn really did the work it claims. task_completion recognizes
+        # the shape and lets the row close terminally without forcing
+        # `succeeded+passed` (which we have no right to claim without an
+        # explicit verifier).
+        evidence_manifest: dict[str, Any] = {
+            "version": 1,
+            "task_id": task_id,
+            "session_id": session_id,
+            "origin": "brain_fallback",
+            "channel": (runtime_channel or "").lower() or None,
+            "user_message_summary": source_summary,
+            "started_at": started_at_ts,
+            "trace_id": trace_id,
+            "tools_run": tools_run[:50],
+            "files_read": sorted(files_read)[:50],
+            "files_written": sorted(files_written)[:50],
+            "files_touched": sorted(files_touched)[:50],
+            "commands_run": commands_run[:20],
+            "grep_patterns": grep_patterns[:20],
+            "glob_patterns": glob_patterns[:20],
+            "checks_run": [],
+            "outputs_summarized": "",
+            "tool_event_count": len(tool_events),
+            "tool_failure_count": len(tool_failure_events),
+            "approval_event_count": len(approval_events),
+            "blockers": [],
+            "sensitive_redactions_applied": sensitive_redactions > 0,
+            "verification_result": "unknown",
+        }
+        brain_artifacts = {
+            "evidence_manifest": evidence_manifest,
+            # Legacy top-level fields kept for backwards-compat with the
+            # PR 0E tests and any downstream audit query that reads
+            # artifacts.tools_run directly.
+            "tools_run": tools_run[:50],
+            "files_touched": sorted(files_touched)[:50],
+            "commands_run": commands_run[:20],
+            "trace_id": trace_id,
+            "tool_event_count": len(tool_events),
+            "tool_failure_count": len(tool_failure_events),
+            "approval_event_count": len(approval_events),
+            "substeps": self._brain_tooluse_substeps(tool_events, tool_failure_events, approval_events),
+        }
+        # P0-D: populate `route` so the agent_tasks.channel column is
+        # non-NULL. Behavioral audit found 99/100 brain-tooluse rows had
+        # channel=NULL because this caller historically omitted `route=`.
+        # Channel preference: explicit runtime_channel → infer from session_id
+        # prefix → omit (column stays NULL for unknown surfaces).
+        route_channel = (runtime_channel or "").strip().lower() or (
+            "telegram" if session_id.startswith("tg-") else None
+        )
+        route_payload: dict[str, Any] = {}
+        if route_channel:
+            route_payload["channel"] = route_channel
+            route_payload["external_session_id"] = session_id
+        try:
+            self.task_ledger.create(
+                task_id=task_id,
+                session_id=session_id,
+                objective=task_objective,
+                runtime=(runtime_channel or "brain_fallback"),
+                mode="brain_fallback",
+                status="running",
+                notify_policy="none",
+                route=route_payload,
+                metadata=metadata,
+                artifacts=brain_artifacts,
+            )
+        except Exception:
+            logger.exception("brain tool-use ledger create failed")
+            return
+        try:
+            self.observe.emit(
+                "brain_tooluse_ledger_started",
+                payload={
+                    "session_id": session_id,
+                    "task_id": task_id,
+                    "trace_id": trace_id,
+                    "tools_count": len(tool_events),
+                    "failures_count": len(tool_failure_events),
+                },
+            )
+        except Exception:
+            logger.debug("brain_tooluse_ledger_started emit failed", exc_info=True)
+        # Decide terminal status.
+        if tool_failure_events:
+            useful_result = self._brain_response_has_useful_result(response)
+            if useful_result:
+                evidence_manifest["completed_at"] = time.time()
+                evidence_manifest["verification_result"] = "succeeded_with_warnings"
+                evidence_manifest["blockers"] = [first_error[:200] or "nonfatal tool failure"]
+                self.task_ledger.mark_terminal(
+                    task_id,
+                    status="completed_unverified",
+                    summary=f"brain tool-use completed with warnings: {len(tool_failure_events)} substep failure(s)",
+                    error=first_error[:300],
+                    verification_status="needs_verification",
+                    artifacts=brain_artifacts,
+                )
+                try:
+                    self.observe.emit(
+                        "brain_tooluse_ledger_completed_with_warnings",
+                        payload={
+                            "task_id": task_id,
+                            "error_count": len(tool_failure_events),
+                            "first_error_kind": first_error[:60],
+                            "task_status": "completed_unverified",
+                        },
+                    )
+                except Exception:
+                    logger.debug("brain_tooluse_ledger_completed_with_warnings emit failed", exc_info=True)
+                return
+            evidence_manifest["completed_at"] = time.time()
+            evidence_manifest["verification_result"] = "failed"
+            evidence_manifest["blockers"] = [first_error[:200] or "tool execution failed"]
+            self.task_ledger.mark_terminal(
+                task_id,
+                status="failed",
+                summary=f"brain tool-use failed: {first_error[:120]}",
+                error=first_error[:300],
+                verification_status="failed",
+                artifacts=brain_artifacts,
+            )
+            try:
+                self.observe.emit(
+                    "brain_tooluse_ledger_failed",
+                    payload={
+                        "task_id": task_id,
+                        "error_count": len(tool_failure_events),
+                        "first_error_kind": first_error[:60],
+                    },
+                )
+            except Exception:
+                logger.debug("brain_tooluse_ledger_failed emit failed", exc_info=True)
+            return
+        # Tools ran without failure, but no verifier has passed yet. Close the
+        # row as completed_unverified so the stale-running watchdog does not
+        # rewrite real user-visible work into a false lost failure.
+        evidence_manifest["completed_at"] = time.time()
+        evidence_manifest["verification_result"] = "needs_verification"
+        self.task_ledger.mark_terminal(
+            task_id,
+            status="completed_unverified",
+            summary=f"brain tool-use turn: {len(tool_events)} tool calls (unverified)",
+            verification_status="needs_verification",
+            artifacts=brain_artifacts,
+        )
+        try:
+            self.observe.emit(
+                "brain_tooluse_ledger_needs_verification",
+                payload={
+                    "task_id": task_id,
+                    "task_status": "completed_unverified",
+                    "verification_status": "needs_verification",
+                    "tools_count": len(tool_events),
+                },
+            )
+        except Exception:
+            logger.debug("brain_tooluse_ledger_completed emit failed", exc_info=True)
+
+    @staticmethod
+    def _redact_secret_tokens(text: str) -> tuple[str, int]:
+        """Scrub secret-shaped tokens (mixed alphanumeric, ≥16 chars,
+        no spaces, contains upper/lower/digit) from a text snippet
+        before it gets persisted. Returns (redacted_text, redaction_count).
+        """
+        if not text:
+            return text, 0
+        redactions = 0
+        out_tokens: list[str] = []
+        # Preserve original whitespace boundaries roughly — token-level
+        # substitution is enough for telemetry summaries.
+        for token in text.split(" "):
+            if _is_secret_shaped_token(token):
+                redactions += 1
+                out_tokens.append(f"<REDACTED:secret-shape:len={len(token)}>")
+            else:
+                out_tokens.append(token)
+        return " ".join(out_tokens), redactions
+
+    @staticmethod
+    def _brain_response_has_useful_result(response: Any) -> bool:
+        content = str(getattr(response, "content", "") or "").strip()
+        if not content or content == "(no result)":
+            return False
+        if content.strip(" .,…!¡?¿-_") == "":
+            return False
+        return len(content) >= 20
+
+    @staticmethod
+    def _tool_payload(event: dict[str, Any]) -> dict[str, Any]:
+        raw_payload = event.get("payload")
+        if isinstance(raw_payload, str):
+            try:
+                payload = json.loads(raw_payload)
+            except Exception:
+                payload = {}
+        elif isinstance(raw_payload, dict):
+            payload = raw_payload
+        else:
+            payload = {}
+        return payload if isinstance(payload, dict) else {}
+
+    @classmethod
+    def _brain_tooluse_substeps(
+        cls,
+        tool_events: list[dict[str, Any]],
+        failure_events: list[dict[str, Any]],
+        approval_events: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        substeps: list[dict[str, Any]] = []
+        for event in tool_events:
+            payload = cls._tool_payload(event)
+            substeps.append(
+                {
+                    "tool": str(payload.get("tool_name") or payload.get("tool") or "unknown")[:80],
+                    "status": "succeeded",
+                }
+            )
+        for event in failure_events:
+            payload = cls._tool_payload(event)
+            error = str(payload.get("error") or "")[:300]
+            reason = "file_too_large" if "exceeds maximum allowed tokens" in error else "tool_failed"
+            substeps.append(
+                {
+                    "tool": str(payload.get("tool_name") or payload.get("tool") or "unknown")[:80],
+                    "status": "failed",
+                    "reason": reason,
+                    "error": error,
+                }
+            )
+        for event in approval_events:
+            payload = cls._tool_payload(event)
+            substeps.append(
+                {
+                    "tool": str(payload.get("tool_name") or payload.get("tool") or "unknown")[:80],
+                    "status": "blocked",
+                    "reason": str(payload.get("reason") or "approval_required")[:120],
+                }
+            )
+        return substeps
+
+    @staticmethod
+    def _summarize_brain_tool_events(
+        tool_events: list[dict[str, Any]],
+        failure_events: list[dict[str, Any]],
+    ) -> tuple[
+        list[str],
+        set[str],
+        list[str],
+        set[str],
+        set[str],
+        list[str],
+        list[str],
+        str,
+    ]:
+        """Pull (tools_run, files_touched, commands_run, files_read,
+        files_written, grep_patterns, glob_patterns, first_error) from
+        observe rows. Payloads are JSON strings; we parse defensively and
+        cap every captured string so secrets can't accidentally bloat the
+        artifacts blob (the ledger also runs `redact_sensitive` on write).
+        """
+        tools_run: list[str] = []
+        files_touched: set[str] = set()
+        files_read: set[str] = set()
+        files_written: set[str] = set()
+        commands_run: list[str] = []
+        grep_patterns: list[str] = []
+        glob_patterns: list[str] = []
+        first_error = ""
+        for ev in list(tool_events) + list(failure_events):
+            raw_payload = ev.get("payload")
+            if isinstance(raw_payload, str):
+                try:
+                    payload = json.loads(raw_payload)
+                except Exception:
+                    payload = {}
+            elif isinstance(raw_payload, dict):
+                payload = raw_payload
+            else:
+                payload = {}
+            tool_name = str(payload.get("tool_name") or "unknown")[:60]
+            tools_run.append(tool_name)
+            tool_input = payload.get("tool_input") or {}
+            if isinstance(tool_input, dict):
+                if tool_name in ("Read", "NotebookEdit"):
+                    fp = tool_input.get("file_path") or tool_input.get("notebook_path")
+                    if fp:
+                        capped = str(fp)[:200]
+                        files_touched.add(capped)
+                        files_read.add(capped)
+                elif tool_name in ("Edit", "Write"):
+                    fp = tool_input.get("file_path")
+                    if fp:
+                        capped = str(fp)[:200]
+                        files_touched.add(capped)
+                        files_written.add(capped)
+                elif tool_name == "Bash":
+                    cmd = tool_input.get("command") or tool_input.get("cmd")
+                    if cmd:
+                        commands_run.append(str(cmd)[:200])
+                elif tool_name == "Grep":
+                    pattern = tool_input.get("pattern")
+                    path = tool_input.get("path")
+                    if pattern:
+                        grep_patterns.append(str(pattern)[:200])
+                    if path:
+                        files_touched.add(str(path)[:200])
+                elif tool_name == "Glob":
+                    pattern = tool_input.get("pattern")
+                    if pattern:
+                        glob_patterns.append(str(pattern)[:200])
+            err = payload.get("error")
+            if err and not first_error:
+                first_error = str(err)[:300]
+        return (
+            tools_run,
+            files_touched,
+            commands_run,
+            files_read,
+            files_written,
+            grep_patterns,
+            glob_patterns,
+            first_error,
+        )
 
     def _with_runtime_capability_context(self, prompt_text: str, *, runtime_channel: str | None = None) -> str:
         context = self._runtime_capability_context(runtime_channel=runtime_channel)
@@ -2898,6 +4393,9 @@ class BotService:
 
     def _runtime_capability_context(self, *, runtime_channel: str | None = None) -> str:
         lines = ["# Runtime capability context", "Use this as current local runtime evidence before claiming a capability is unavailable."]
+        lines.append("- External identity: Dr. Strange, Hector's local autonomous operator.")
+        lines.append("- Claude, Claude Code, Codex, OpenAI, ChatGPT, and provider models are internal tools/providers, not the agent identity.")
+        lines.append("- Binding rule: do not answer as Claude Code/Codex/the model; answer as Dr. Strange operating through the verified runtime.")
         if runtime_channel:
             normalized_channel = runtime_channel.strip().lower()
             lines.append(f"- Current inbound channel: {normalized_channel}")
@@ -2933,6 +4431,139 @@ class BotService:
             lines.append("- Terminal bridge: unavailable")
         lines.append("Rule: do not say 'no tengo acceso/no puedo usar navegador/herramientas' unless the relevant line above is unavailable or a concrete attempted route failed.")
         return "\n".join(lines)
+
+    def _identity_binding_response(self) -> str:
+        return (
+            "Soy Dr. Strange en el daemon local de Hector. "
+            "Claude, Codex, OpenAI y ChatGPT son proveedores o herramientas internas, no mi identidad. "
+            "Retomo desde el runtime: ejecuto la accion concreta disponible, pido aprobacion o reporto el bloqueo verificado."
+        )
+
+    def _operator_handoff_binding_response(self) -> str:
+        return (
+            "No cierro esto con handoff manual. "
+            "Detecte una accion operativa y la respuesta intento delegarte el ultimo paso. "
+            "La ruta correcta es: ejecutar desde el runtime, crear una tarea durable, pedir aprobacion "
+            "o reportar un bloqueo de capacidad/politica verificado. "
+            "No marco la accion como completada sin ejecucion verificable."
+        )
+
+    def _record_evidence_gate_explicit_blocker(
+        self,
+        *,
+        session_id: str,
+        source_text: str,
+        blocked_content: str,
+        reason: str,
+    ) -> str | None:
+        task_id = f"{session_id}:evidence-gate:{time.time_ns()}"
+        objective = _compact_summary(source_text, limit=220) or "Evidence gate blocked an unverified action claim"
+        artifacts = {
+            "action_result": {
+                "status": "explicit_blocker",
+                "reason": reason,
+                "source_message_hash": self._stable_text_hash(source_text),
+            },
+            "evidence": {
+                "gate": {
+                    "reason": reason,
+                    "blocked_response_preview": blocked_content[:500],
+                }
+            },
+        }
+        if self.task_ledger is not None:
+            try:
+                self.task_ledger.create(
+                    task_id=task_id,
+                    session_id=session_id,
+                    objective=objective,
+                    runtime="evidence_gate",
+                    mode=_infer_session_mode(source_text),
+                    status="running",
+                    notify_policy="none",
+                    metadata={
+                        "origin": "evidence_gate",
+                        "reason": reason,
+                        "source_message_hash": self._stable_text_hash(source_text),
+                    },
+                    artifacts=artifacts,
+                )
+                self.task_ledger.mark_terminal(
+                    task_id,
+                    status="failed",
+                    summary=f"Evidence gate explicit blocker: {reason}",
+                    error=reason,
+                    verification_status="blocked",
+                    artifacts=artifacts,
+                )
+            except Exception:
+                logger.debug("failed to record evidence gate explicit blocker", exc_info=True)
+                task_id = None
+        state = self.brain.memory.get_session_state(session_id)
+        active_object = dict(state.get("active_object") or {})
+        active_object["last_action_result"] = {
+            "task_id": task_id,
+            "status": "explicit_blocker",
+            "reason": reason,
+            "updated_at": time.time(),
+        }
+        self.brain.memory.update_session_state(
+            session_id,
+            verification_status="blocked",
+            active_object=active_object,
+            last_checkpoint={
+                "summary": f"Evidence gate blocked unverified action claim: {reason}",
+                "verification_status": "blocked",
+                "task_id": task_id,
+                "reason": reason,
+            },
+        )
+        self._emit_safe(
+            "evidence_gate_explicit_blocker_recorded",
+            {
+                "session_id": session_id,
+                "task_id": task_id,
+                "reason": reason,
+            },
+        )
+        return task_id
+
+    def _pending_evidence_response(self, task_id: str | None = None) -> str:
+        return (
+            "No lo marco como hecho todavía: no tengo evidencia verificable de ejecución. "
+            "Dejé registrado el bloqueo y necesito una ejecución con herramienta antes de reportarlo como resultado."
+        )
+
+    def _unexecuted_start_response(self, task_id: str | None = None) -> str:
+        return (
+            "No arranqué nada todavía: no tengo una ejecución verificable que respalde decir "
+            "que ya está en curso. Dejé registrado el bloqueo y necesito una ejecución con herramienta."
+        )
+
+    def _emit_identity_capability_binding_guard(
+        self,
+        event_type: str,
+        session_id: str,
+        *,
+        reason: str,
+        original: str,
+        sanitized: str,
+    ) -> None:
+        if self.observe is None:
+            return
+        try:
+            self.observe.emit(
+                event_type,
+                payload={
+                    "session_id": session_id,
+                    "reason": reason,
+                    "original_length": len(original),
+                    "sanitized_length": len(sanitized),
+                    "runtime_identity": "dr_strange",
+                },
+            )
+        except Exception:
+            logger.debug("failed to emit %s", event_type, exc_info=True)
 
     def _correct_unverified_capability_denial(self, content: str) -> str | None:
         available = []
@@ -3029,7 +4660,15 @@ class BotService:
             result = self._brain_text_response(session_id, original_text, memory_text=original_text)
         return f"Aprobación registrada. Reintenté la acción original.\n\n{result}"
 
-    def _handle_pending_computer_approval_response(self, session_id: str, text: str) -> str | None:
+    def _handle_pending_computer_approval_response(
+        self,
+        session_id: str,
+        text: str,
+        *,
+        semantic_turn: SemanticTurn | None = None,
+    ) -> str | None:
+        if semantic_turn is not None and semantic_turn.intent == "new_task" and semantic_turn.clear_goal:
+            return None
         pending = self._latest_pending_computer_approval(session_id)
         if pending is None:
             return None
@@ -3119,6 +4758,38 @@ class BotService:
             raise PermissionError("TELEGRAM_ALLOWED_USER_ID must be configured")
         if user_id != self.allowed_user_id:
             raise PermissionError("user is not allowed to access this bot")
+        multimodal_text = self._text_from_multimodal_blocks(content_blocks)
+        failure_summary_response = self._maybe_handle_operational_failure_summary(
+            multimodal_text,
+            session_id=session_id,
+        )
+        self._emit_dispatch_decision(
+            handler="operational_failure_summary",
+            route="intercepted" if failure_summary_response is not None else "fall_through",
+            reason=(
+                "operational_failure_summary_matched"
+                if failure_summary_response is not None
+                else "operational_failure_summary_no_match"
+            ),
+            session_id=session_id,
+            text=multimodal_text,
+            captured=failure_summary_response is not None,
+        )
+        if failure_summary_response is not None:
+            failure_summary_response = self._quality_guard_response(
+                session_id,
+                multimodal_text,
+                failure_summary_response,
+                source="operational_failure_summary",
+            )
+            self._store_memory_turn(
+                session_id,
+                memory_text or multimodal_text,
+                failure_summary_response,
+                assistant_limit=3000,
+            )
+            self._remember_assistant_turn_state(session_id, multimodal_text, failure_summary_response)
+            return failure_summary_response
         runtime_context = self._runtime_capability_context(runtime_channel=runtime_channel) if runtime_channel else ""
         prompt_blocks = list(content_blocks)
         if runtime_context:
@@ -3132,6 +4803,19 @@ class BotService:
             ).content
         except ApprovalPending as exc:
             return _format_approval_pending(exc)
+
+    @staticmethod
+    def _text_from_multimodal_blocks(content_blocks: list[dict[str, Any]]) -> str:
+        parts: list[str] = []
+        for block in content_blocks:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") != "text":
+                continue
+            text = str(block.get("text") or "").strip()
+            if text:
+                parts.append(text)
+        return "\n".join(parts).strip()
 
 
     def _tokens_info_response(self, session_id: str) -> str:
@@ -3205,6 +4889,25 @@ class BotService:
         notebook_context_resolved_count = counts.get(
             "notebook_context_resolved", 0
         )
+        telegram_imperative_detected_total = counts.get("telegram_imperative_detected", 0)
+        telegram_imperative_routed_total = counts.get("telegram_imperative_routed", 0)
+        telegram_imperative_executed_total = counts.get("telegram_imperative_executed", 0)
+        telegram_imperative_execution_failed_total = counts.get("telegram_imperative_execution_failed", 0)
+        telegram_imperative_pending_approval_total = counts.get("telegram_imperative_pending_approval", 0)
+        telegram_imperative_blocked_total = counts.get("telegram_imperative_blocked", 0)
+        telegram_imperative_clarification_total = counts.get("telegram_imperative_clarification", 0)
+        telegram_actionable_no_match_total = counts.get("actionable_no_match", 0) + counts.get("telegram_actionable_no_match", 0)
+        brain_fallback_for_actionable_total = counts.get("brain_fallback_for_actionable", 0)
+        quality_guard_triggered_total = counts.get("quality_guard_triggered", 0)
+        identity_drift_guard_triggered_total = counts.get("identity_drift_guard_triggered", 0)
+        capability_binding_guard_triggered_total = counts.get("capability_binding_guard_triggered", 0)
+        operator_handoff_guard_triggered_total = counts.get("operator_handoff_guard_triggered", 0)
+        owner_delegation_detected_total = counts.get("owner_delegation_match", 0)
+        active_mission_resolution_success_total = counts.get("active_mission_resolution_success", 0)
+        active_mission_resolution_failed_total = counts.get("active_mission_resolution_failed", 0)
+        idle_executor_would_advance_total = counts.get("idle_executor_would_advance", 0)
+        idle_executor_did_advance_total = counts.get("idle_executor_did_advance", 0)
+        idle_executor_circuit_broke_total = counts.get("idle_executor_circuit_broke", 0)
         pre_hook_top_hooks: dict[str, int] = {}
         for event in events:
             if event.get("event_type") != "llm_pre_hook_blocked":
@@ -3263,6 +4966,30 @@ class BotService:
                 "capability_route_selected_count": capability_route_selected_count,
                 "capability_route_blocked_count": capability_route_blocked_count,
                 "notebook_context_resolved_count": notebook_context_resolved_count,
+                "telegram_imperative_detected_total": telegram_imperative_detected_total,
+                "telegram_imperative_routed_total": telegram_imperative_routed_total,
+                "telegram_imperative_executed_total": telegram_imperative_executed_total,
+                "telegram_imperative_execution_failed_total": telegram_imperative_execution_failed_total,
+                "telegram_imperative_pending_approval_total": telegram_imperative_pending_approval_total,
+                "telegram_imperative_blocked_total": telegram_imperative_blocked_total,
+                "telegram_imperative_clarification_total": telegram_imperative_clarification_total,
+                "telegram_actionable_no_match_total": telegram_actionable_no_match_total,
+                "brain_fallback_for_actionable_total": brain_fallback_for_actionable_total,
+                "quality_guard_triggered_total": quality_guard_triggered_total,
+                "identity_drift_guard_triggered_total": identity_drift_guard_triggered_total,
+                "capability_binding_guard_triggered_total": capability_binding_guard_triggered_total,
+                "operator_handoff_guard_triggered_total": operator_handoff_guard_triggered_total,
+                "owner_delegation_detected_total": owner_delegation_detected_total,
+                "active_mission_resolution_success_total": active_mission_resolution_success_total,
+                "active_mission_resolution_failed_total": active_mission_resolution_failed_total,
+                "idle_executor_would_advance_total": idle_executor_would_advance_total,
+                "idle_executor_did_advance_total": idle_executor_did_advance_total,
+                "idle_executor_circuit_broke_total": idle_executor_circuit_broke_total,
+                "diagnostic": (
+                    "ok"
+                    if brain_fallback_for_actionable_total == 0
+                    else "brain_fallback_for_actionable_total_nonzero"
+                ),
             },
         }
         return redact_sensitive(json.dumps(payload, indent=2, sort_keys=True), limit=0)
@@ -3522,9 +5249,51 @@ class BotService:
 
     def _remember_assistant_turn_state(self, session_id: str, user_text: str, reply_text: str) -> None:
         self._state_handler.remember_assistant_turn_state(session_id, user_text, reply_text)
+        try:
+            self._idle_executor.inspect_turn(session_id=session_id)
+        except Exception:
+            logger.debug("idle ownership executor inspection failed", exc_info=True)
 
     def _maybe_resolve_stateful_followup(self, text: str, *, session_id: str) -> str | _BrainShortcut | None:
         return self._state_handler.maybe_resolve_stateful_followup(text, session_id=session_id)
+
+    def _handle_stateful_brain_shortcut(
+        self,
+        session_id: str,
+        user_text: str,
+        shortcut: _BrainShortcut,
+        *,
+        runtime_channel: str | None,
+    ) -> str | None:
+        is_pending_execution = self._stateful_shortcut_is_pending_execution(shortcut)
+        if is_pending_execution and (runtime_channel or "").strip().lower() == "telegram":
+            self._emit_safe(
+                "stateful_continuation_sent_to_brain",
+                {"session_id": session_id, "source_text": user_text[:80]},
+            )
+        result = self._brain_text_response(
+            session_id,
+            shortcut.text,
+            memory_text=shortcut.memory_text,
+            runtime_channel=runtime_channel,
+        )
+        if is_pending_execution and self.observe is not None:
+            try:
+                self.observe.emit(
+                    "pending_action_execution_completed",
+                    payload={"session_id": session_id, "response_length": len(result)},
+                )
+            except Exception:
+                logger.debug("failed to emit pending_action_execution_completed", exc_info=True)
+        return result
+
+    @staticmethod
+    def _stateful_shortcut_is_pending_execution(shortcut: _BrainShortcut) -> bool:
+        return (
+            shortcut.text.startswith("Continúa con esta acción pendiente:")
+            or shortcut.text.startswith("Continúa con este siguiente paso")
+            or shortcut.text.startswith("Continúa con esta acción propuesta previamente:")
+        )
 
     def _maybe_handle_shortcut(self, text: str, *, session_id: str) -> str | _BrainShortcut | None:
         if not text or text.startswith("/"):
@@ -3546,6 +5315,7 @@ class BotService:
                 and not _looks_like_standalone_url(text, extracted_url)
                 and any(token in normalized for token in _TWEET_ANALYSIS_SHORTCUT_TOKENS)
             ):
+                self._browse_handler.remember_recent_browse_url(session_id, normalized_url)
                 return _BrainShortcut(text)
             if "chrome" in normalized and (any(token in normalized for token in _BROWSE_SHORTCUT_TOKENS) or _looks_like_standalone_url(text, extracted_url)):
                 return self._chrome_handler.browse_response(extracted_url, session_id=session_id)
@@ -3562,7 +5332,7 @@ class BotService:
         if _looks_like_tweet_followup_request(normalized):
             recent_tweet_url = self._browse_handler.recent_tweet_url(session_id)
             if recent_tweet_url is not None:
-                return _BrainShortcut(f"{text}\n\n{recent_tweet_url}")
+                return _BrainShortcut(f"{text}\n\n{recent_tweet_url}", memory_text=text)
 
         chatgpt_response = self._maybe_handle_chatgpt_browser_request(
             text,
@@ -3693,29 +5463,263 @@ class BotService:
             return self._task_resume_previous_response(session_id)
         return None
 
-    def _maybe_handle_pending_tasks_query(self, text: str, *, session_id: str) -> str | None:
+    def _pending_tasks_query_matches(self, text: str) -> bool:
         normalized = _normalize_command_text(text).strip(" \t\n\r.,;:!?¿¡")
         compact = re.sub(r"[^a-z0-9]+", "", normalized)
-        if not (
+        return (
             ("tareas" in normalized and "pendient" in normalized)
-            or compact in {"pendientes", "tareaspendientes"}
-        ):
-            return None
-        return self._pending_tasks_summary_response(session_id)
+            or self._task_status_overview_query_matches(normalized)
+            or compact in {"pendientes", "tareaspendientes", "pendietes", "tareaspendietes"}
+        )
 
-    def _pending_tasks_summary_response(self, session_id: str) -> str:
-        lines = ["Tareas pendientes:"]
-        found = False
+    def _handle_pending_tasks_query(
+        self,
+        text: str,
+        *,
+        session_id: str,
+        runtime_channel: str | None = None,
+    ) -> str:
+        if self._task_status_overview_query_matches(text):
+            response = self._pending_tasks_summary_response(session_id)
+            self._store_memory_turn(session_id, text, response, assistant_limit=2000)
+            self._remember_assistant_turn_state(session_id, text, response)
+            self._emit_pending_tasks_synthesis("deterministic_status", session_id=session_id)
+            return response
+        evidence = self._pending_tasks_evidence_pack(session_id)
+        prompt = self._format_pending_tasks_synthesis_prompt(text, evidence=evidence)
+        try:
+            response = self.brain.handle_message(
+                session_id,
+                prompt,
+                memory_text=text,
+                task_type="telegram_message",
+            )
+            raw_content = response.content or ""
+            content = self._prepare_visible_brain_content(
+                session_id,
+                text,
+                raw_content,
+                response=response,
+                runtime_capability_question=False,
+                link_analysis_context=None,
+            )
+            content = self._quality_guard_response(
+                session_id,
+                text,
+                content,
+                source="pending_tasks_synthesis",
+            )
+            if self._pending_tasks_synthesis_usable(content):
+                if content != raw_content:
+                    self.brain.memory.replace_latest_assistant_message(session_id, raw_content, content)
+                self._remember_assistant_turn_state(session_id, text, content)
+                self._emit_pending_tasks_synthesis("brain", session_id=session_id)
+                return content
+            fallback = self._pending_tasks_summary_response(session_id)
+            self.brain.memory.replace_latest_assistant_message(session_id, raw_content, fallback)
+            self._remember_assistant_turn_state(session_id, text, fallback)
+            self._emit_pending_tasks_synthesis("fallback_unusable_brain", session_id=session_id)
+            return fallback
+        except ApprovalPending as exc:
+            reply = _format_approval_pending(exc)
+            self._store_memory_turn(session_id, text, reply, assistant_limit=2000)
+            self._remember_assistant_turn_state(session_id, text, reply)
+            return reply
+        except Exception as exc:
+            fallback = self._pending_tasks_summary_response(session_id)
+            self._store_memory_turn(session_id, text, fallback, assistant_limit=2000)
+            self._remember_assistant_turn_state(session_id, text, fallback)
+            self._emit_pending_tasks_synthesis(
+                "fallback_exception",
+                session_id=session_id,
+                error=str(exc)[:300],
+            )
+            return fallback
+
+    @staticmethod
+    def _task_status_overview_query_matches(text: str) -> bool:
+        normalized = _normalize_command_text(text).strip(" \t\n\r.,;:!?¿¡")
+        compact = re.sub(r"[^a-z0-9]+", "", normalized)
+        if compact in {
+            "estatusdelastareas",
+            "estadodelastareas",
+            "statusdelastareas",
+            "estatusdetareas",
+            "estadodetareas",
+            "statusdetareas",
+            "estatusdelledger",
+            "estadodelledger",
+            "statusdelledger",
+        }:
+            return True
+        return (
+            any(token in normalized for token in ("estatus", "estado", "status"))
+            and any(token in normalized for token in ("tareas", "tasks", "ledger"))
+        )
+
+    def _emit_pending_tasks_synthesis(self, mode: str, *, session_id: str, error: str | None = None) -> None:
+        payload: dict[str, Any] = {"session_id": session_id, "mode": mode}
+        if error:
+            payload["error"] = error
+        try:
+            self.observe.emit("pending_tasks_synthesis", payload=payload)
+        except Exception:
+            logger.debug("pending_tasks_synthesis emit failed", exc_info=True)
+
+    def _pending_tasks_synthesis_usable(self, content: str) -> bool:
+        normalized = _normalize_command_text(content)
+        if len(normalized) < 80:
+            return False
+        if normalized in {"handled", "ok", "recibido"}:
+            return False
+        return any(
+            token in normalized
+            for token in ("tarea", "pendient", "aprob", "corriendo", "cola", "bloque")
+        )
+
+    def _pending_tasks_evidence_pack(self, session_id: str) -> dict[str, Any]:
+        state = self.brain.memory.get_session_state(session_id)
+        recent_messages = self.brain.memory.get_recent_messages(session_id, limit=12)
+        fact_queries = (
+            "pendiente",
+            "pending",
+            "objetivo",
+            "goal",
+            "codex",
+            "ai lead gen",
+            "job search",
+            "pachano design",
+        )
+        facts: list[dict[str, Any]] = []
+        seen_fact_keys: set[str] = set()
+        for query in fact_queries:
+            try:
+                hits = self.brain.memory.search_facts(query, limit=5)
+            except Exception:
+                hits = []
+            for hit in hits:
+                key = str(hit.get("key") or "")
+                if not key or key in seen_fact_keys:
+                    continue
+                source = str(hit.get("source") or "")
+                if key.startswith("soul_update_suggestion.") or source == "learning_loop":
+                    continue
+                seen_fact_keys.add(key)
+                facts.append(
+                    {
+                        "key": key,
+                        "value": str(hit.get("value") or "")[:500],
+                        "source": hit.get("source"),
+                        "confidence": hit.get("confidence"),
+                    }
+                )
+        approvals: list[dict[str, Any]]
         try:
             approvals = self.approvals.list_pending() if self.approvals is not None else []
         except Exception:
             approvals = []
-        if approvals:
-            found = True
-            lines.append(f"Aprobaciones pendientes: {len(approvals)}")
-            for item in approvals[:5]:
-                summary = str(item.get("summary") or item.get("action") or "aprobacion pendiente").strip()
-                lines.append(f"- Aprobacion: {summary[:180]}. Recomendacion: revisar vigencia antes de aprobar.")
+        approval_audit = self._approval_evidence_summary(approvals)
+        records: list[Any] = []
+        if self.task_ledger is not None:
+            try:
+                records = self.task_ledger.list(session_id=session_id, limit=30)
+            except Exception:
+                records = []
+        task_rows = [self._task_record_evidence(record) for record in records[:20]]
+        return {
+            "session_state": {
+                "autonomy_mode": state.get("autonomy_mode"),
+                "mode": state.get("mode"),
+                "current_goal": state.get("current_goal"),
+                "pending_action": state.get("pending_action"),
+                "verification_status": state.get("verification_status"),
+                "task_queue": state.get("task_queue") or [],
+                "last_checkpoint": state.get("last_checkpoint") or {},
+                "rolling_summary": str(state.get("rolling_summary") or "")[:1200],
+            },
+            "approvals": approval_audit,
+            "task_ledger": task_rows,
+            "memory_facts": facts[:16],
+            "recent_messages": [
+                {
+                    "role": row.get("role"),
+                    "content": str(row.get("content") or "")[:700],
+                    "created_at": row.get("created_at"),
+                }
+                for row in recent_messages[-10:]
+            ],
+        }
+
+    def _approval_evidence_summary(self, approvals: list[dict[str, Any]]) -> dict[str, Any]:
+        approvals_for_audit = self._sorted_approvals_for_audit(approvals)
+        audit = self._classify_pending_approvals(approvals_for_audit)
+        seen_actions: set[str] = set()
+        active: list[dict[str, Any]] = []
+        duplicate = 0
+        stale_or_expired = 0
+        for item in approvals_for_audit:
+            classification = self._classify_approval(item, seen_actions=seen_actions)
+            if classification == "still_needed":
+                active.append(
+                    {
+                        "summary": str(item.get("summary") or item.get("action") or "")[:300],
+                        "age_hours": round(self._approval_age_hours(item), 1),
+                        "risk_tier": self._approval_risk_tier(item),
+                    }
+                )
+            elif classification == "duplicate":
+                duplicate += 1
+            else:
+                stale_or_expired += 1
+        return {
+            "total": len(approvals),
+            "counts": audit,
+            "active": active[:5],
+            "duplicate_omitted": duplicate,
+            "stale_or_expired_omitted": stale_or_expired,
+        }
+
+    def _task_record_evidence(self, record: Any) -> dict[str, Any]:
+        try:
+            updated_at = float(getattr(record, "updated_at", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            updated_at = 0.0
+        age_hours = round(max(0.0, (time.time() - updated_at) / 3600.0), 1) if updated_at else None
+        return {
+            "status": str(getattr(record, "status", "") or ""),
+            "verification_status": str(getattr(record, "verification_status", "") or ""),
+            "runtime": str(getattr(record, "runtime", "") or ""),
+            "objective": str(getattr(record, "objective", "") or "")[:500],
+            "summary": str(getattr(record, "summary", "") or "")[:500],
+            "error": str(getattr(record, "error", "") or "")[:250],
+            "age_hours": age_hours,
+            "active": str(getattr(record, "status", "") or "") in {"queued", "running"},
+            "actionable_blocker": self._is_pending_task_blocker(record),
+        }
+
+    def _format_pending_tasks_synthesis_prompt(self, text: str, *, evidence: dict[str, Any]) -> str:
+        return (
+            "El usuario preguntó por sus tareas pendientes. Responde como Dr. Strange, "
+            "agente operativo, no como un endpoint ni con una plantilla fija.\n\n"
+            "Instrucciones:\n"
+            "- Consulta la evidencia incluida y la memoria reciente.\n"
+            "- Contesta en español natural, breve y lógico.\n"
+            "- Distingue entre tareas reales pendientes, aprobaciones que requieren decisión, ruido duplicado e historial cerrado.\n"
+            "- Si no hay tareas corriendo, dilo claro sin sonar a error.\n"
+            "- No pegues JSON, IDs internos, tokens, ni errores crudos de herramientas.\n"
+            "- No inventes tareas. Si algo viene sólo de memoria antigua o inferencia, dilo como contexto, no como pendiente activo.\n"
+            "- Si hay una acción concreta razonable, ofrécela en una frase.\n\n"
+            f"Pregunta original: {text}\n\n"
+            "<evidencia_operativa>\n"
+            f"{json.dumps(evidence, ensure_ascii=False, sort_keys=True, indent=2)}\n"
+            "</evidencia_operativa>"
+        )
+
+    def _pending_tasks_summary_response(self, session_id: str) -> str:
+        try:
+            approvals = self.approvals.list_pending() if self.approvals is not None else []
+        except Exception:
+            approvals = []
         records = []
         if self.task_ledger is not None:
             try:
@@ -3723,33 +5727,2086 @@ class BotService:
             except Exception:
                 records = []
         active = [record for record in records if str(getattr(record, "status", "")) in {"queued", "running"}]
-        blocked = [
-            record for record in records
-            if str(getattr(record, "verification_status", "")) in {"blocked", "missing_evidence", "pending"}
-            or str(getattr(record, "status", "")) in {"failed", "timed_out", "lost"}
-        ]
+        blocked = [record for record in records if self._is_pending_task_blocker(record)]
+        state = self.brain.memory.get_session_state(session_id)
+        pending_action = self._pending_action_for_task_summary(state)
+        lines: list[str] = []
         if active:
-            found = True
-            lines.append("Tareas activas:")
+            count = len(active)
+            lines.append(f"Ahora mismo tengo {count} tarea{'s' if count != 1 else ''} corriendo o en cola en esta sesion:")
             for record in active[:5]:
                 detail = str(getattr(record, "summary", "") or getattr(record, "objective", "") or "sin resumen").strip()
                 verification = str(getattr(record, "verification_status", "unknown") or "unknown")
-                lines.append(f"- Activa / {verification}: {detail[:180]}")
+                lines.append(f"- {detail[:180]} ({verification}).")
+            if len(active) > 5:
+                lines.append(f"- {len(active) - 5} mas omitidas del resumen corto.")
+        else:
+            lines.append("Ahora mismo no tengo tareas corriendo ni en cola para esta sesion.")
         if blocked:
-            found = True
-            lines.append("Tareas bloqueadas o incompletas:")
+            lines.append("")
+            lines.append("Lo que si necesita accion para poder avanzar:")
             for record in blocked[:5]:
-                detail = str(getattr(record, "error", "") or getattr(record, "summary", "") or getattr(record, "objective", "") or "sin detalle").strip()
-                verification = str(getattr(record, "verification_status", "unknown") or "unknown")
-                lines.append(f"- {verification}: {detail[:180]}. Recomendacion: revisar blocker y reintentar solo con tool habilitada.")
+                detail = self._pending_task_blocker_detail(record)
+                lines.append(f"- {detail[:220]}")
+        if pending_action:
+            lines.append("")
+            lines.append(f"Tambien tengo una accion pendiente de sesion: {pending_action[:180]}")
+        approval_lines = self._pending_tasks_approval_summary_lines(approvals)
+        if approval_lines:
+            lines.append("")
+            lines.extend(approval_lines)
+        if not active and not blocked and not pending_action and not approvals:
+            lines.append("")
+            lines.append("No veo nada que este esperando de mi ahora mismo.")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _pending_action_for_task_summary(state: dict[str, Any]) -> str:
+        pending_action = str(state.get("pending_action") or "").strip()
+        if not pending_action:
+            return ""
+        active_object = state.get("active_object") or {}
+        meta = active_object.get("pending_action_meta") if isinstance(active_object, dict) else None
+        source = str((meta or {}).get("source") or "") if isinstance(meta, dict) else ""
+        normalized = _normalize_command_text(pending_action)
+        if source == "assistant_proposal_question" and (
+            normalized.startswith("voy ahora con eso")
+            or "retome alguna otra de las que quedaron perdidas" in normalized
+            or "estatus rapido del ledger" in normalized
+            or "resumen del dia" in normalized
+        ):
+            return ""
+        return pending_action
+
+    def _pending_tasks_approval_summary_lines(self, approvals: list[dict[str, Any]]) -> list[str]:
+        if not approvals:
+            return []
+        approvals_for_audit = self._sorted_approvals_for_audit(approvals)
+        audit = self._classify_pending_approvals(approvals_for_audit)
+        seen_actions: set[str] = set()
+        active_items: list[tuple[dict[str, Any], str]] = []
+        duplicate_count = 0
+        stale_or_expired_count = 0
+        for item in approvals_for_audit:
+            classification = self._classify_approval(item, seen_actions=seen_actions)
+            if classification == "still_needed":
+                active_items.append((item, classification))
+            elif classification == "duplicate":
+                duplicate_count += 1
+            else:
+                stale_or_expired_count += 1
+        lines: list[str] = []
+        active_count = len(active_items)
+        if active_count:
+            lines.append(
+                f"Hay {active_count} aprobacion{'es' if active_count != 1 else ''} que si merece{'n' if active_count != 1 else ''} decision:"
+            )
+        elif approvals:
+            lines.append("No veo aprobaciones vivas; solo ruido viejo o duplicado.")
+        for item, _classification in active_items[:3]:
+            summary = str(item.get("summary") or item.get("action") or "aprobacion pendiente").strip()
+            age_hours = self._approval_age_hours(item)
+            lines.append(f"- {summary[:180]} (edad ~{age_hours:.1f}h).")
+        if len(active_items) > 3:
+            lines.append(f"- {len(active_items) - 3} aprobaciones activas adicionales no entran en este resumen.")
+        if duplicate_count:
+            lines.append(f"Tambien hay {duplicate_count} aprobaciones duplicadas; no las cuento como trabajo pendiente real.")
+        if stale_or_expired_count:
+            lines.append(f"Ademas hay {stale_or_expired_count} aprobaciones viejas/expiradas fuera del resumen operativo.")
+        if duplicate_count or stale_or_expired_count:
+            lines.append("Si quieres, puedo limpiarlas con `Limpia aprobaciones duplicadas`.")
+        return lines
+
+    def _is_pending_task_blocker(self, record: Any) -> bool:
+        status = str(getattr(record, "status", "") or "").lower()
+        verification = str(getattr(record, "verification_status", "") or "").lower()
+        if not self._is_recent_pending_blocker(record):
+            return False
+        if status in {"queued", "running", "succeeded", "cancelled", "lost", "timed_out"}:
+            return False
+        if verification not in {"blocked", "missing_evidence", "pending_approval"}:
+            return False
+        text = " ".join(
+            str(getattr(record, field, "") or "")
+            for field in ("error", "summary", "objective")
+        ).lower()
+        actionable_markers = (
+            "waiting_for_user_input",
+            "blocked_by_capability",
+            "blocked_by_policy",
+            "policy_blocked",
+            "approval_required",
+            "requires_approval",
+            "missing_capability",
+            "capability",
+            "credential",
+            "permission",
+            "secret",
+        )
+        return any(marker in text for marker in actionable_markers)
+
+    def _is_recent_pending_blocker(self, record: Any, *, max_age_seconds: float = 24 * 3600) -> bool:
+        try:
+            updated_at = float(getattr(record, "updated_at", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return True
+        if updated_at <= 0:
+            return True
+        return time.time() - updated_at <= max_age_seconds
+
+    def _pending_task_blocker_detail(self, record: Any) -> str:
+        error = str(getattr(record, "error", "") or "").strip()
+        summary = str(getattr(record, "summary", "") or "").strip()
+        objective = str(getattr(record, "objective", "") or "").strip()
+        source = error or summary or objective or "bloqueo sin detalle"
+        normalized = _normalize_command_text(source)
+        if "waiting_for_user_input" in normalized:
+            source = re.sub(r"(?i)^waiting_for_user_input:\s*", "", source).strip()
+            return f"necesito confirmacion o dato faltante: {source[:180]}"
+        if "blocked_by_capability" in normalized or "missing_capability" in normalized or "capability" in normalized:
+            return f"bloqueada por capacidad faltante: {source[:180]}"
+        if "blocked_by_policy" in normalized or "policy_blocked" in normalized:
+            return f"bloqueada por politica: {source[:180]}"
+        if "approval_required" in normalized or "requires_approval" in normalized:
+            return f"requiere aprobacion explicita: {source[:180]}"
+        if "credential" in normalized or "secret" in normalized or "permission" in normalized:
+            return f"bloqueada por credenciales/permisos: {source[:180]}"
+        return (summary or objective or source)[:220]
+
+    def _maybe_handle_cleanup_status_query(self, text: str, *, session_id: str) -> str | None:
+        normalized = _normalize_command_text(text).strip(" \t\n\r.,;:!?¿¡")
+        compact = re.sub(r"[^a-z0-9]+", "", normalized)
+        if compact not in {"limpiaste", "yalimpiaste", "cleaned", "didyouclean", "didyoucleanup"}:
+            return None
         state = self.brain.memory.get_session_state(session_id)
+        active_object = state.get("active_object") or {}
+        if not isinstance(active_object, dict):
+            active_object = {}
+        last_result = active_object.get("last_action_result") or {}
+        if not isinstance(last_result, dict):
+            last_result = {}
+        if last_result.get("intent") == "approvals.cleanup_stale_duplicates":
+            archived = int(last_result.get("archived_count") or 0)
+            kept = int(last_result.get("kept_count") or 0)
+            failed = int(last_result.get("failed_count") or 0)
+            status = str(last_result.get("status") or "unknown")
+            task_id = str(last_result.get("task_id") or "sin_task_id")
+            return (
+                f"Sí. Última limpieza registrada: `{status}`.\n"
+                f"Archivadas: {archived}; conservadas: {kept}; fallidas: {failed}.\n"
+                f"Task: `{task_id}`."
+            )
+        try:
+            approvals = self.approvals.list_pending() if self.approvals is not None else []
+        except Exception:
+            approvals = []
+        audit = self._classify_pending_approvals(approvals)
+        return (
+            "No tengo una limpieza registrada en esta sesión.\n"
+            "Estado actual: "
+            f"{len(approvals)} aprobaciones pendientes; "
+            f"{audit['still_needed']} activas; {audit['stale']} stale; "
+            f"{audit['duplicate']} duplicadas."
+        )
+
+    def _quality_guard_response(
+        self,
+        session_id: str,
+        user_text: str,
+        response: str | None,
+        *,
+        source: str,
+    ) -> str:
+        text = str(response or "").strip()
+        if text and text.strip(" .,…!¡?¿-_") != "":
+            return text
+        safe = self._safe_status_response(session_id, reason=f"invalid_response:{source}")
+        self._emit_safe(
+            "quality_guard_triggered",
+            {
+                "session_id": session_id,
+                "source": source,
+                "user_text_preview": user_text[:120],
+                "original_length": len(str(response or "")),
+            },
+        )
+        return safe
+
+    def _safe_status_response(self, session_id: str, *, reason: str) -> str:
+        web_port = int(getattr(self.config, "web_chat_port", 8765)) if self.config is not None else 8765
+        runtime = "vivo" if self._runtime_alive() else "sin respuesta local"
+        approvals = []
+        try:
+            approvals = self.approvals.list_pending() if self.approvals is not None else []
+        except Exception:
+            approvals = []
+        return "\n".join(
+            [
+                "Estoy vivo, pero reemplacé una respuesta inválida.",
+                f"Motivo: {reason}",
+                f"Runtime local: {runtime} en :{web_port}",
+                f"Aprobaciones pendientes: {len(approvals)}",
+            ]
+        )
+
+    def _approval_summary_lines(self, approvals: list[dict[str, Any]]) -> list[str]:
+        approvals_for_audit = self._sorted_approvals_for_audit(approvals)
+        audit = self._classify_pending_approvals(approvals_for_audit)
+        lines = [
+            (
+                "Aprobaciones pendientes: "
+                f"{len(approvals)} total; "
+                f"{audit['still_needed']} activas; "
+                f"{audit['stale']} stale; "
+                f"{audit['expired']} expiradas; "
+                f"{audit['duplicate']} duplicadas."
+            )
+        ]
+        seen_actions: set[str] = set()
+        for item in approvals_for_audit[:5]:
+            summary = str(item.get("summary") or item.get("action") or "aprobacion pendiente").strip()
+            age_hours = self._approval_age_hours(item)
+            classification = self._classify_approval(item, seen_actions=seen_actions)
+            lines.append(
+                f"- {classification}: {summary[:160]} (edad ~{age_hours:.1f}h). "
+                "No auto-apruebo; revisar vigencia antes de aprobar."
+            )
+        return lines
+
+    def _sorted_approvals_for_audit(self, approvals: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return sorted(approvals, key=lambda item: self._approval_created_at(item), reverse=True)
+
+    def _approval_created_at(self, item: dict[str, Any]) -> float:
+        try:
+            return float(item.get("created_at") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _approval_age_hours(self, item: dict[str, Any]) -> float:
+        created_at = self._approval_created_at(item)
+        if created_at <= 0:
+            return 0.0
+        return max(0.0, (time.time() - created_at) / 3600.0)
+
+    def _approval_risk_tier(self, item: dict[str, Any]) -> str:
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        raw = str(metadata.get("risk_tier") or item.get("risk_tier") or "").lower()
+        if "critical" in raw or "tier_3" in raw or "tier3" in raw:
+            return "critical"
+        if "medium" in raw or "tier_2" in raw or "tier2" in raw:
+            return "medium"
+        action = str(item.get("action") or item.get("summary") or "")
+        if is_destructive_or_external_objective(action):
+            return "critical"
+        return "low"
+
+    def _classify_approval(self, item: dict[str, Any], *, seen_actions: set[str]) -> str:
+        status = str(item.get("status") or "")
+        if status == "expired":
+            return "expired"
+        action_key = str(item.get("action") or item.get("summary") or "").strip()
+        if action_key in seen_actions:
+            return "duplicate"
+        seen_actions.add(action_key)
+        age_hours = self._approval_age_hours(item)
+        risk = self._approval_risk_tier(item)
+        if risk == "low" and age_hours >= 24:
+            return "stale"
+        if risk == "medium" and age_hours >= 72:
+            return "stale"
+        if risk == "critical" and age_hours >= 72:
+            return "stale"
+        return "still_needed"
+
+    def _classify_pending_approvals(self, approvals: list[dict[str, Any]]) -> dict[str, int]:
+        counts = {
+            "still_needed": 0,
+            "stale": 0,
+            "superseded": 0,
+            "blocked": 0,
+            "expired": 0,
+            "duplicate": 0,
+        }
+        seen_actions: set[str] = set()
+        for item in self._sorted_approvals_for_audit(approvals):
+            classification = self._classify_approval(item, seen_actions=seen_actions)
+            counts[classification] = counts.get(classification, 0) + 1
+        return counts
+
+    def _maybe_handle_telegram_imperative_request(
+        self,
+        text: str,
+        *,
+        session_id: str,
+        runtime_channel: str | None,
+    ) -> tuple[str | _BrainShortcut | None, str, str | None]:
+        if (runtime_channel or "").strip().lower() != "telegram":
+            return None, "not_telegram_channel", None
+        intent = detect_telegram_imperative(text)
+        if intent is None:
+            if looks_like_actionable_telegram_message(text):
+                response = self._handle_actionable_no_match(text, session_id=session_id)
+                return response, "actionable_no_match", "actionable_no_match"
+            return None, "telegram_imperative_no_match", None
+        self._emit_safe(
+            "telegram_imperative_detected",
+            {
+                "session_id": session_id,
+                "intent": intent.intent,
+                "target_hint": intent.target_hint,
+                "artifact_hint": intent.artifact_hint,
+                "requires_ui_read": intent.requires_ui_read,
+                "requires_ui_write": intent.requires_ui_write,
+                "requires_submit": intent.requires_submit,
+            },
+        )
+        if self._telegram_ui_imperative_should_fallthrough(intent, text, session_id=session_id):
+            self._emit_safe(
+                "telegram_imperative_contextual_fallthrough",
+                {
+                    "session_id": session_id,
+                    "intent": intent.intent,
+                    "reason": "contextual_ui_target_or_artifact_unresolved",
+                    "target_hint": intent.target_hint,
+                    "artifact_hint": intent.artifact_hint,
+                },
+            )
+            return None, f"telegram_imperative:{intent.intent}:contextual_fallthrough", intent.matched_pattern
+        if intent.intent == "task.continue_active_mission":
+            stateful_followup, resolution_source = self._maybe_resolve_telegram_continuation(
+                text,
+                session_id=session_id,
+            )
+            if stateful_followup is not None:
+                self._emit_safe(
+                    "telegram_continuation_stateful_resolved",
+                    {
+                        "session_id": session_id,
+                        "intent": intent.intent,
+                        "resolution_source": resolution_source,
+                        "resolution_kind": (
+                            "brain_shortcut"
+                            if isinstance(stateful_followup, _BrainShortcut)
+                            else "clarification"
+                        ),
+                    },
+                )
+                return stateful_followup, f"telegram_imperative:{intent.intent}:stateful", intent.matched_pattern
+            self._emit_safe(
+                "telegram_imperative_clarification",
+                {"session_id": session_id, "intent": intent.intent, "reason": "continuation_context_not_found"},
+            )
+            return (
+                "No encontré una misión, propuesta, aprobación o tarea reciente para continuar. "
+                "Respóndeme con el número/opción de la tarea activa o el target específico."
+            ), f"telegram_imperative:{intent.intent}:no_context", intent.matched_pattern
+        response = self._handle_telegram_imperative(intent, text, session_id=session_id)
+        return response, f"telegram_imperative:{intent.intent}", intent.matched_pattern
+
+    def _telegram_ui_imperative_should_fallthrough(
+        self,
+        intent: TelegramImperativeIntent,
+        text: str,
+        *,
+        session_id: str,
+    ) -> bool:
+        if intent.intent not in {"ui.submit_prompt", "ui.paste_text"}:
+            return False
+        normalized = _normalize_command_text(text)
+        contextual_terms = (
+            "esto",
+            "eso",
+            "aqui",
+            "aca",
+            "lo",
+            "la",
+            "prototipo",
+            "prompt",
+            "envialo",
+            "mandalo",
+            "pegalo",
+            "descarga",
+        )
+        if not any(re.search(rf"\b{re.escape(term)}\b", normalized) for term in contextual_terms):
+            return False
+        try:
+            state = self.brain.memory.get_session_state(session_id)
+            mission = self._active_mission_context(state)
+            target = self._resolve_telegram_target(intent, mission)
+            artifact = self._resolve_telegram_artifact(intent, state, mission)
+            artifact_text = self._resolve_telegram_artifact_text(intent, state, mission)
+        except Exception:
+            return True
+        if not target:
+            return True
+        if intent.artifact_hint and not (artifact or artifact_text):
+            return True
+        return False
+
+    def _maybe_resolve_telegram_continuation(
+        self,
+        text: str,
+        *,
+        session_id: str,
+    ) -> tuple[str | _BrainShortcut | None, str | None]:
+        state = self.brain.memory.get_session_state(session_id)
+        missions = self._telegram_active_mission_candidates(session_id, state)
+        if len(missions) > 1:
+            return self._format_telegram_mission_choice(missions), "active_mission_ambiguous"
+        if len(missions) == 1:
+            objective = self._mission_continuation_objective(missions[0], state)
+            if objective:
+                return self._telegram_continuation_shortcut(
+                    session_id,
+                    text,
+                    objective,
+                    source="active_mission",
+                    state=state,
+                ), "active_mission"
+
+        proposal = self._proposal_from_reply_context(state)
+        if proposal:
+            return self._telegram_continuation_shortcut(
+                session_id,
+                text,
+                proposal,
+                source="reply_context",
+                state=state,
+            ), "reply_context"
+
         pending_action = str(state.get("pending_action") or "").strip()
         if pending_action:
-            found = True
-            lines.append(f"Accion pendiente de sesion: {pending_action[:180]}")
-        if not found:
-            lines.append("No veo aprobaciones, tareas activas ni blockers recientes en esta conversacion.")
+            return self._telegram_continuation_shortcut(
+                session_id,
+                text,
+                pending_action,
+                source="pending_action",
+                state=state,
+            ), "pending_action"
+
+        proposal = self._last_actionable_proposal(state)
+        if proposal:
+            return self._telegram_continuation_shortcut(
+                session_id,
+                text,
+                proposal,
+                source="last_actionable_proposal",
+                state=state,
+            ), "last_actionable_proposal"
+
+        pending_approval = self._latest_pending_approval_context(session_id, state)
+        if pending_approval is not None:
+            approval_id = str(pending_approval.get("approval_id") or "").strip()
+            summary = str(pending_approval.get("summary") or pending_approval.get("action") or "").strip()
+            lines = ["Hay una aprobación pendiente antes de continuar."]
+            if approval_id:
+                lines.append(f"approval_id: `{approval_id}`")
+            if summary:
+                lines.append(f"Acción: {summary[:240]}")
+            lines.append("Usa `/task_pending` para ver el comando de aprobación o responde con autorización explícita.")
+            return "\n".join(lines), "pending_approval"
+
+        waiting_task = self._recent_waiting_for_user_task(session_id)
+        if waiting_task is not None:
+            return self._telegram_continuation_shortcut(
+                session_id,
+                text,
+                waiting_task.objective,
+                source="waiting_for_user_input_task",
+                state=state,
+                task_id=waiting_task.task_id,
+            ), "waiting_for_user_input_task"
+
+        continuable_task = self._recent_continuable_durable_task(session_id)
+        if continuable_task is not None:
+            return self._telegram_continuation_shortcut(
+                session_id,
+                text,
+                continuable_task.objective,
+                source="recent_durable_task",
+                state=state,
+                task_id=continuable_task.task_id,
+            ), "recent_durable_task"
+
+        proposal = self._proposal_from_recent_assistant(session_id)
+        if proposal:
+            return self._telegram_continuation_shortcut(
+                session_id,
+                text,
+                proposal,
+                source="recent_assistant",
+                state=state,
+            ), "recent_assistant"
+
+        if len(missions) == 1:
+            target = self._mission_target(missions[0])
+            if target:
+                objective = f"Continuar misión activa para {target}"
+                return self._telegram_continuation_shortcut(
+                    session_id,
+                    text,
+                    objective,
+                    source="active_mission_target",
+                    state=state,
+                ), "active_mission_target"
+
+        return None, None
+
+    def _telegram_continuation_shortcut(
+        self,
+        session_id: str,
+        user_text: str,
+        objective: str,
+        *,
+        source: str,
+        state: dict[str, Any],
+        task_id: str | None = None,
+    ) -> _BrainShortcut:
+        objective = " ".join(str(objective or "").split()).strip()
+        active_object = dict(state.get("active_object") or {})
+        active_object["last_continuation_resolution"] = {
+            "source": source,
+            "objective": objective[:300],
+            "task_id": task_id,
+            "updated_at": time.time(),
+        }
+        active_object["pending_action_meta"] = {
+            "created_at": time.time(),
+            "source": source,
+            "ttl_seconds": 30 * 60,
+            "tier_hint": "unknown",
+            "topic": objective[:140],
+        }
+        self.brain.memory.update_session_state(
+            session_id,
+            pending_action=objective,
+            active_object=active_object,
+            verification_status="pending",
+        )
+        checkpoint = state.get("last_checkpoint") or {}
+        checkpoint_text = json.dumps(checkpoint, ensure_ascii=True, sort_keys=True) if checkpoint else "{}"
+        task_line = f"\nTask previa: {task_id}" if task_id else ""
+        self._emit_safe(
+            "continuation_resolved",
+            {
+                "session_id": session_id,
+                "source": source,
+                "proposal_preview": objective[:160],
+                "user_text_preview": user_text[:80],
+                "task_id": task_id,
+            },
+        )
+        self._emit_safe(
+            "pending_action_execution_started",
+            {"session_id": session_id, "pending_action_preview": objective[:160]},
+        )
+        return _BrainShortcut(
+            text=(
+                f"Continúa con esta acción pendiente: {objective}\n"
+                f"Mensaje de aprobación del usuario: {user_text}\n"
+                f"Origen del contexto: {source}{task_line}\n"
+                f"Checkpoint actual: {checkpoint_text}"
+            ),
+            memory_text=user_text,
+        )
+
+    def _telegram_active_mission_candidates(
+        self,
+        session_id: str,
+        state: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        candidates: list[dict[str, Any]] = []
+
+        def add_from_state(candidate_state: dict[str, Any], source_session_id: str) -> None:
+            active_object = candidate_state.get("active_object") or {}
+            if not isinstance(active_object, dict):
+                return
+            raw_missions: list[Any] = []
+            for key in ("active_mission", "_mission"):
+                value = active_object.get(key)
+                if isinstance(value, dict):
+                    raw_missions.append(value)
+            for key in ("active_missions", "missions"):
+                value = active_object.get(key)
+                if isinstance(value, list):
+                    raw_missions.extend(item for item in value if isinstance(item, dict))
+            for raw in raw_missions:
+                mission = dict(raw)
+                if not self._telegram_mission_matches_session(mission, session_id, source_session_id):
+                    continue
+                if not self._telegram_mission_is_active(mission):
+                    continue
+                mission["_source_session_id"] = source_session_id
+                key = str(mission.get("mission_id") or f"{source_session_id}:{mission.get('active_target')}")
+                if any(str(existing.get("mission_id") or "") == key for existing in candidates):
+                    continue
+                candidates.append(mission)
+
+        add_from_state(state, session_id)
+        if not candidates:
+            try:
+                recent_states = self.brain.memory.list_session_states(limit=20)
+            except Exception:
+                recent_states = []
+            for item in recent_states:
+                source_session_id = str(item.get("session_id") or "")
+                if source_session_id == session_id:
+                    continue
+                add_from_state(item, source_session_id)
+        return candidates[:5]
+
+    @staticmethod
+    def _telegram_session_aliases(session_id: str) -> set[str]:
+        aliases = {str(session_id)}
+        if session_id.startswith("tg-"):
+            aliases.add(session_id[3:])
+        return {alias for alias in aliases if alias}
+
+    def _telegram_mission_matches_session(
+        self,
+        mission: dict[str, Any],
+        session_id: str,
+        source_session_id: str,
+    ) -> bool:
+        if source_session_id == session_id:
+            return True
+        channel = str(mission.get("channel") or "").strip().lower()
+        if channel and channel != "telegram":
+            return False
+        aliases = self._telegram_session_aliases(session_id)
+        for key in ("chat_id", "user_id", "session_id", "external_session_id", "external_user_id"):
+            value = str(mission.get(key) or "").strip()
+            if value and value in aliases:
+                return True
+        return False
+
+    @staticmethod
+    def _telegram_mission_is_active(mission: dict[str, Any]) -> bool:
+        status = str(mission.get("status") or mission.get("state") or "active").strip().lower()
+        if status in {"completed", "succeeded", "failed", "cancelled", "closed", "done"}:
+            return False
+        expires_at = mission.get("expires_at")
+        try:
+            if expires_at is not None and time.time() > float(expires_at):
+                return False
+        except (TypeError, ValueError):
+            return False
+        return True
+
+    def _mission_continuation_objective(
+        self,
+        mission: dict[str, Any],
+        state: dict[str, Any],
+    ) -> str | None:
+        active_task = mission.get("active_task")
+        if isinstance(active_task, dict):
+            objective = str(active_task.get("objective") or "").strip()
+            if objective:
+                return objective
+        for key in ("pending_action", "objective", "current_goal", "last_user_goal", "summary"):
+            objective = str(mission.get(key) or "").strip()
+            if objective:
+                return objective
+        active_object = state.get("active_object") or {}
+        if isinstance(active_object, dict):
+            active_task = active_object.get("active_task") or {}
+            if isinstance(active_task, dict):
+                objective = str(active_task.get("objective") or "").strip()
+                status = str(active_task.get("status") or "").strip().lower()
+                if objective and status not in {"completed", "succeeded", "done"}:
+                    return objective
+        pending_action = str(state.get("pending_action") or "").strip()
+        if pending_action:
+            return pending_action
+        target = self._mission_target(mission)
+        if target:
+            return f"Continuar misión activa para {target}"
+        return None
+
+    def _format_telegram_mission_choice(self, missions: list[dict[str, Any]]) -> str:
+        lines = ["Tengo varias misiones activas para este chat. ¿Cuál continúo?"]
+        for index, mission in enumerate(missions[:5], start=1):
+            target = self._mission_target(mission) or "target sin nombre"
+            objective = self._mission_continuation_objective(mission, {}) or str(mission.get("summary") or "").strip()
+            if objective:
+                lines.append(f"{index}. {target}: {objective[:180]}")
+            else:
+                lines.append(f"{index}. {target}")
         return "\n".join(lines)
+
+    def _proposal_from_reply_context(self, state: dict[str, Any]) -> str | None:
+        try:
+            proposal = self._state_handler._extract_proposal_from_reply_context(state)
+        except Exception:
+            proposal = None
+        return str(proposal or "").strip() or None
+
+    def _proposal_from_recent_assistant(self, session_id: str) -> str | None:
+        try:
+            proposal = self._state_handler._extract_proposal_from_recent_assistant(session_id)
+        except Exception:
+            proposal = None
+        return str(proposal or "").strip() or None
+
+    @staticmethod
+    def _last_actionable_proposal(state: dict[str, Any]) -> str | None:
+        active_object = state.get("active_object") or {}
+        if not isinstance(active_object, dict):
+            return None
+        proposal = active_object.get("last_actionable_proposal") or {}
+        if isinstance(proposal, str):
+            return proposal.strip() or None
+        if not isinstance(proposal, dict):
+            return None
+        for key in ("objective", "pending_action", "summary", "text"):
+            value = str(proposal.get(key) or "").strip()
+            if value:
+                return value
+        return None
+
+    def _latest_pending_approval_context(
+        self,
+        session_id: str,
+        state: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        pending = state.get("pending_approvals") or []
+        if isinstance(pending, list):
+            for item in reversed(pending):
+                if isinstance(item, dict) and str(item.get("status") or "pending") == "pending":
+                    return item
+        checkpoint = state.get("last_checkpoint") or {}
+        if isinstance(checkpoint, dict) and checkpoint.get("approval_id"):
+            return {
+                "approval_id": checkpoint.get("approval_id"),
+                "summary": checkpoint.get("summary") or checkpoint.get("pending_action") or "",
+            }
+        if self.approvals is not None:
+            try:
+                approvals = self.approvals.list_pending()
+            except Exception:
+                approvals = []
+            aliases = self._telegram_session_aliases(session_id)
+            for item in reversed(approvals):
+                metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+                item_session = str(metadata.get("session_id") or metadata.get("external_session_id") or "").strip()
+                if item_session and item_session in aliases:
+                    return item
+        return None
+
+    def _recent_waiting_for_user_task(self, session_id: str) -> Any | None:
+        if self.task_ledger is None:
+            return None
+        try:
+            records = self.task_ledger.list(session_id=session_id, limit=20)
+        except Exception:
+            return None
+        for record in records:
+            haystack = " ".join(
+                [
+                    str(getattr(record, "error", "") or ""),
+                    str(getattr(record, "summary", "") or ""),
+                    json.dumps(getattr(record, "metadata", {}) or {}, sort_keys=True),
+                ]
+            ).lower()
+            if "waiting_for_user_input" in haystack and str(getattr(record, "objective", "") or "").strip():
+                return record
+        return None
+
+    def _recent_continuable_durable_task(self, session_id: str) -> Any | None:
+        if self.task_ledger is None:
+            return None
+        try:
+            records = self.task_ledger.list(session_id=session_id, limit=20)
+        except Exception:
+            return None
+        now = time.time()
+        for record in records:
+            try:
+                age = now - float(getattr(record, "updated_at", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                age = 0.0
+            if age > 24 * 3600:
+                continue
+            verification = str(getattr(record, "verification_status", "") or "").strip().lower()
+            status = str(getattr(record, "status", "") or "").strip().lower()
+            metadata = getattr(record, "metadata", {}) or {}
+            metadata_status = str(metadata.get("status") or metadata.get("result_status") or "").strip().lower()
+            if (
+                status in {"running", "queued"}
+                or verification in {"awaiting_continue", "needs_verification", "pending"}
+                or metadata_status in {"awaiting_continue", "needs_verification"}
+            ) and str(getattr(record, "objective", "") or "").strip():
+                return record
+        return None
+
+    def _handle_actionable_no_match(self, text: str, *, session_id: str) -> str | None:
+        """Telemetry-only emit; returns None so dispatch chain continues to
+        the brain. The brain has session memory/mission context and produces
+        a natural reply instead of a robotic plantilla."""
+        state = self.brain.memory.get_session_state(session_id)
+        mission = self._active_mission_context(state)
+        candidate_target = self._mission_target(mission) or "desconocido"
+        normalized = _normalize_command_text(text)
+        candidate_action = "unknown"
+        if "app" in normalized:
+            candidate_action = "ui.unknown_app_action"
+        elif any(token in normalized for token in ("eso", "lo", "haz", "orquesta", "orchestrate")):
+            candidate_action = "task.contextual_action"
+        self._emit_safe(
+            "actionable_no_match",
+            {
+                "channel": "telegram",
+                "session_id": session_id,
+                "message_text_hash": self._stable_text_hash(text),
+                "candidate_action": candidate_action,
+                "candidate_target": candidate_target,
+                "active_mission_id": str((mission or {}).get("mission_id") or ""),
+                "reason": "no_route_match",
+            },
+        )
+        self._emit_safe("telegram_actionable_no_match", {"session_id": session_id, "candidate_action": candidate_action})
+        return None
+
+    @staticmethod
+    def _stable_text_hash(text: str) -> str:
+        import hashlib
+
+        return hashlib.sha256((text or "").encode("utf-8")).hexdigest()[:16]
+
+    def _handle_telegram_imperative(
+        self,
+        intent: TelegramImperativeIntent,
+        text: str,
+        *,
+        session_id: str,
+    ) -> str:
+        state = self.brain.memory.get_session_state(session_id)
+        mission = self._active_mission_context(state)
+        target = self._resolve_telegram_target(intent, mission)
+        artifact = self._resolve_telegram_artifact(intent, state, mission)
+        artifact_text = self._resolve_telegram_artifact_text(intent, state, mission)
+        if intent.needs_context and not target and intent.intent in {
+            "ui.paste_text",
+            "ui.set_instructions",
+            "ui.submit_prompt",
+            "ui.inspect_app",
+            "task.continue_active_mission",
+        }:
+            self._emit_safe(
+                "active_mission_resolution_failed",
+                {"session_id": session_id, "intent": intent.intent, "reason": "missing_target"},
+            )
+            self._emit_safe("telegram_imperative_clarification", {"session_id": session_id, "intent": intent.intent})
+            return (
+                "Necesito una aclaración mínima: ¿en qué app o target ejecuto esto?\n"
+                f"Intent detectado: `{intent.intent}`."
+            )
+        if intent.artifact_hint and not artifact:
+            self._emit_safe(
+                "active_mission_resolution_failed",
+                {"session_id": session_id, "intent": intent.intent, "reason": "missing_artifact"},
+            )
+            self._emit_safe("telegram_imperative_clarification", {"session_id": session_id, "intent": intent.intent})
+            return (
+                "Necesito una aclaración mínima: ¿qué prompt/instrucciones uso?\n"
+                f"Intent detectado: `{intent.intent}`; target: `{target or 'desconocido'}`."
+            )
+        if intent.intent in {"ui.paste_text", "ui.set_instructions"} and not artifact_text:
+            self._emit_safe(
+                "active_mission_resolution_failed",
+                {"session_id": session_id, "intent": intent.intent, "reason": "missing_artifact_text"},
+            )
+            self._emit_safe("telegram_imperative_clarification", {"session_id": session_id, "intent": intent.intent})
+            return (
+                "Necesito una aclaración mínima: tengo la referencia del prompt/instrucciones, "
+                "pero no encontré el texto exacto para pegar.\n"
+                f"Intent detectado: `{intent.intent}`; target: `{target or 'desconocido'}`."
+            )
+        if mission:
+            self._emit_safe(
+                "active_mission_resolution_success",
+                {
+                    "session_id": session_id,
+                    "intent": intent.intent,
+                    "target": target,
+                    "artifact": artifact,
+                    "mission_id": str(mission.get("mission_id") or ""),
+                },
+            )
+        if intent.intent == "approvals.cleanup_stale_duplicates":
+            return self._handle_approval_cleanup_imperative(intent, text, session_id=session_id)
+        if target:
+            self._remember_telegram_mission(
+                session_id,
+                target=target,
+                artifact=artifact,
+                last_user_goal=text,
+                pending_action=self._objective_for_imperative(intent, target=target, artifact=artifact),
+            )
+        if intent.intent == "task.continue_active_mission":
+            objective = self._objective_for_imperative(intent, target=target, artifact=artifact)
+            if objective:
+                task_id = self._record_telegram_imperative_task(
+                    session_id=session_id,
+                    text=text,
+                    intent=intent,
+                    target=target,
+                    artifact=artifact,
+                    result_status="partial_success",
+                    capability=None,
+                    summary="Active mission continuation resolved but not auto-executed by UI router.",
+                )
+                self._emit_safe("telegram_imperative_routed", {"session_id": session_id, "intent": intent.intent, "task_id": task_id})
+                return (
+                    "Resolví la continuación de la misión activa.\n"
+                    f"Intent: `{intent.intent}`\n"
+                    f"Target: `{target}`\n"
+                    f"Task: `{task_id}`\n"
+                    "Estado: `partial_success` — falta una acción concreta o capacidad de ejecución."
+                )
+        missing_capability = self._missing_ui_capability(intent)
+        if missing_capability:
+            task_id = self._record_telegram_imperative_task(
+                session_id=session_id,
+                text=text,
+                intent=intent,
+                target=target,
+                artifact=artifact,
+                result_status="blocked_by_capability",
+                capability=missing_capability,
+                summary=f"{intent.intent} blocked because {missing_capability} is unavailable.",
+            )
+            self._emit_safe(
+                "telegram_imperative_blocked",
+                {
+                    "session_id": session_id,
+                    "intent": intent.intent,
+                    "task_id": task_id,
+                    "blocked_reason": "blocked_by_capability",
+                    "capability": missing_capability,
+                },
+            )
+            fallback = ""
+            if intent.intent in {"ui.paste_text", "ui.set_instructions"}:
+                fallback = "\nFallback seguro: puedo preparar/copiar el texto, pero eso no equivale a pegarlo en la app."
+            return (
+                f"Resultado: `blocked_by_capability`\n"
+                f"Intent: `{intent.intent}`\n"
+                f"Target: `{target or 'desconocido'}`\n"
+                f"Artifact: `{artifact or 'desconocido'}`\n"
+                f"Capability faltante: `{missing_capability}`\n"
+                f"Task: `{task_id}`"
+                f"{fallback}"
+            )
+        execution_response = self._execute_telegram_imperative_via_computer(
+            intent,
+            text,
+            session_id=session_id,
+            target=target,
+            artifact=artifact,
+            artifact_text=artifact_text,
+        )
+        if execution_response is not None:
+            return execution_response
+        task_id = self._record_telegram_imperative_task(
+            session_id=session_id,
+            text=text,
+            intent=intent,
+            target=target,
+            artifact=artifact,
+            result_status="pending_approval" if intent.requires_submit else "partial_success",
+            capability=None,
+            summary=f"{intent.intent} routed for execution.",
+        )
+        self._emit_safe(
+            "telegram_imperative_routed",
+            {"session_id": session_id, "intent": intent.intent, "task_id": task_id},
+        )
+        return (
+            f"Intent routed: `{intent.intent}`\n"
+            f"Target: `{target or 'desconocido'}`\n"
+            f"Artifact: `{artifact or 'desconocido'}`\n"
+            f"Estado: `partial_success`\n"
+            f"Task: `{task_id}`"
+        )
+
+    def _active_mission_context(self, state: dict[str, Any]) -> dict[str, Any] | None:
+        active_object = state.get("active_object") or {}
+        if not isinstance(active_object, dict):
+            return None
+        mission = active_object.get("active_mission") or {}
+        if not isinstance(mission, dict):
+            return None
+        expires_at = mission.get("expires_at")
+        try:
+            if expires_at is not None and time.time() > float(expires_at):
+                return None
+        except (TypeError, ValueError):
+            return None
+        return mission
+
+    def _mission_target(self, mission: dict[str, Any] | None) -> str | None:
+        if not mission:
+            return None
+        target = str(mission.get("active_target") or "").strip()
+        return target or None
+
+    def _resolve_telegram_target(
+        self,
+        intent: TelegramImperativeIntent,
+        mission: dict[str, Any] | None,
+    ) -> str | None:
+        if intent.target_hint:
+            return intent.target_hint
+        return self._mission_target(mission)
+
+    def _resolve_telegram_artifact(
+        self,
+        intent: TelegramImperativeIntent,
+        state: dict[str, Any],
+        mission: dict[str, Any] | None,
+    ) -> str | None:
+        active_object = state.get("active_object") or {}
+        if not isinstance(active_object, dict):
+            active_object = {}
+        if intent.artifact_hint == "prompt":
+            prompt = active_object.get("active_prompt") or {}
+            if isinstance(prompt, dict):
+                return str(prompt.get("summary") or prompt.get("kind") or "prompt").strip() or None
+            if isinstance(prompt, str) and prompt.strip():
+                return "prompt"
+            if self._prompt_text_from_reply_context(state):
+                return "prompt from reply context"
+        if intent.artifact_hint == "instructions":
+            prompt = active_object.get("active_prompt") or active_object.get("active_instructions") or {}
+            if isinstance(prompt, dict):
+                return str(prompt.get("summary") or "instructions").strip() or None
+            if isinstance(prompt, str) and prompt.strip():
+                return "instructions"
+        if mission:
+            artifact = str(mission.get("active_artifact") or "").strip()
+            if artifact:
+                return artifact
+        pending = str(state.get("pending_action") or "").strip()
+        if pending and intent.artifact_hint:
+            return pending[:120]
+        return None
+
+    def _resolve_telegram_artifact_text(
+        self,
+        intent: TelegramImperativeIntent,
+        state: dict[str, Any],
+        mission: dict[str, Any] | None,
+    ) -> str | None:
+        if intent.artifact_hint not in {"prompt", "instructions"}:
+            return None
+        active_object = state.get("active_object") or {}
+        if not isinstance(active_object, dict):
+            active_object = {}
+        candidates: list[Any] = []
+        if intent.artifact_hint == "prompt":
+            candidates.extend(
+                [
+                    active_object.get("active_prompt"),
+                    active_object.get("latest_prompt"),
+                    active_object.get("pending_prompt"),
+                ]
+            )
+        else:
+            candidates.extend(
+                [
+                    active_object.get("active_instructions"),
+                    active_object.get("active_prompt"),
+                    active_object.get("latest_instructions"),
+                ]
+            )
+        if mission:
+            candidates.extend(
+                [
+                    mission.get("active_artifact_text"),
+                    mission.get("active_prompt_text"),
+                    mission.get("instructions_text"),
+                ]
+            )
+        for candidate in candidates:
+            text = self._artifact_text_from_candidate(candidate)
+            if text:
+                return text
+        if intent.artifact_hint == "prompt":
+            text = self._prompt_text_from_reply_context(state)
+            if text:
+                return text
+        return None
+
+    @staticmethod
+    def _artifact_text_from_candidate(candidate: Any) -> str | None:
+        if isinstance(candidate, str):
+            value = candidate.strip()
+            return value or None
+        if not isinstance(candidate, dict):
+            return None
+        for key in ("text", "content", "prompt", "instructions", "body"):
+            value = candidate.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
+
+    @staticmethod
+    def _prompt_text_from_reply_context(state: dict[str, Any]) -> str | None:
+        active_object = state.get("active_object") or {}
+        if not isinstance(active_object, dict):
+            return None
+        reply_context = active_object.get("reply_context") or {}
+        if not isinstance(reply_context, dict):
+            return None
+        text = str(reply_context.get("text") or "")
+        if not text.strip():
+            return None
+        lines = text.splitlines()
+        marker_index: int | None = None
+        for index, line in enumerate(lines):
+            normalized = _normalize_command_text(line)
+            if "prompt que voy a pegar" in normalized or "prompt to paste" in normalized:
+                marker_index = index
+                break
+        search_lines = lines[marker_index + 1 :] if marker_index is not None else lines
+        collected: list[str] = []
+        started = False
+        for line in search_lines:
+            stripped = line.strip()
+            if stripped.startswith(">"):
+                started = True
+                collected.append(stripped[1:].lstrip())
+                continue
+            if started and stripped == "":
+                collected.append("")
+                continue
+            if started:
+                break
+        prompt = "\n".join(collected).strip()
+        return prompt or None
+
+    def _remember_telegram_mission(
+        self,
+        session_id: str,
+        *,
+        target: str,
+        artifact: str | None,
+        last_user_goal: str,
+        pending_action: str | None,
+    ) -> None:
+        state = self.brain.memory.get_session_state(session_id)
+        active_object = dict(state.get("active_object") or {})
+        mission = dict(active_object.get("active_mission") or {})
+        mission.update(
+            {
+                "channel": "telegram",
+                "chat_id": session_id,
+                "mission_id": mission.get("mission_id") or f"mission:{session_id}:{int(time.time())}",
+                "active_target": target,
+                "active_artifact": artifact or mission.get("active_artifact") or "",
+                "last_user_goal": last_user_goal[:240],
+                "pending_action": pending_action or "",
+                "updated_at": time.time(),
+                "expires_at": time.time() + 30 * 60,
+            }
+        )
+        active_object["active_mission"] = mission
+        last_result = active_object.get("last_action_result")
+        current_goal_candidate = (pending_action or last_user_goal).strip()
+        self.brain.memory.update_session_state(
+            session_id,
+            mode="ops",
+            current_goal=(
+                current_goal_candidate[:280]
+                if self._looks_like_persistable_current_goal(current_goal_candidate)
+                else ""
+            ),
+            pending_action=pending_action or state.get("pending_action"),
+            active_object=active_object,
+            last_checkpoint={
+                "summary": f"Telegram imperative routed: {pending_action or last_user_goal[:160]}",
+                "verification_status": "pending",
+                "active_target": target,
+                "last_action_result": last_result,
+            },
+        )
+
+    def _objective_for_imperative(
+        self,
+        intent: TelegramImperativeIntent,
+        *,
+        target: str | None,
+        artifact: str | None,
+    ) -> str:
+        target_text = target or "active target"
+        if intent.intent == "ui.open_app":
+            return f"Open/focus {target_text}"
+        if intent.intent == "ui.inspect_app":
+            return f"Inspect {target_text}"
+        if intent.intent == "ui.paste_text":
+            return f"Paste {artifact or 'active prompt'} into {target_text}"
+        if intent.intent == "ui.set_instructions":
+            return f"Give {artifact or 'instructions'} to {target_text}"
+        if intent.intent == "ui.submit_prompt":
+            return f"Submit prompt in {target_text}"
+        if intent.intent == "approvals.cleanup_stale_duplicates":
+            return "Archive stale or duplicate pending approvals"
+        return f"Continue active mission for {target_text}"
+
+    def _handle_approval_cleanup_imperative(
+        self,
+        intent: TelegramImperativeIntent,
+        text: str,
+        *,
+        session_id: str,
+    ) -> str:
+        if self.approvals is None:
+            task_id = self._record_telegram_imperative_task(
+                session_id=session_id,
+                text=text,
+                intent=intent,
+                target=None,
+                artifact="approval backlog",
+                result_status="blocked_by_capability",
+                capability="approval_manager",
+                summary="Approval cleanup blocked because ApprovalManager is unavailable.",
+            )
+            self._emit_safe(
+                "telegram_imperative_blocked",
+                {
+                    "session_id": session_id,
+                    "intent": intent.intent,
+                    "task_id": task_id,
+                    "blocked_reason": "blocked_by_capability",
+                    "capability": "approval_manager",
+                },
+            )
+            return (
+                "Resultado: `blocked_by_capability`\n"
+                "Intent: `approvals.cleanup_stale_duplicates`\n"
+                "Capability faltante: `approval_manager`\n"
+                f"Task: `{task_id}`"
+            )
+        try:
+            approvals = self.approvals.list_pending()
+        except Exception as exc:
+            task_id = self._record_telegram_imperative_task(
+                session_id=session_id,
+                text=text,
+                intent=intent,
+                target=None,
+                artifact="approval backlog",
+                result_status="failed",
+                capability=None,
+                summary=f"Approval cleanup failed while listing approvals: {exc}",
+            )
+            self._emit_safe(
+                "telegram_imperative_execution_failed",
+                {"session_id": session_id, "intent": intent.intent, "task_id": task_id, "error": str(exc)[:240]},
+            )
+            return (
+                "Resultado: `failed`\n"
+                "Intent: `approvals.cleanup_stale_duplicates`\n"
+                f"Error: {str(exc)[:240]}\n"
+                f"Task: `{task_id}`"
+            )
+        candidates = self._approval_cleanup_candidates(approvals)
+        archived: list[tuple[str, str]] = []
+        failed: list[tuple[str, str]] = []
+        for item, classification in candidates:
+            approval_id = str(item.get("approval_id") or "")
+            if not approval_id:
+                failed.append(("", "missing_approval_id"))
+                continue
+            try:
+                ok = self.approvals.archive(approval_id, reason=f"telegram_cleanup:{classification}")
+            except Exception as exc:
+                failed.append((approval_id, str(exc)[:160]))
+                continue
+            if ok:
+                archived.append((approval_id, classification))
+            else:
+                failed.append((approval_id, "archive_returned_false"))
+        kept_count = max(0, len(approvals) - len(archived) - len(failed))
+        if failed and archived:
+            result_status = "partial_success"
+        elif failed:
+            result_status = "failed"
+        else:
+            result_status = "succeeded"
+        summary = (
+            f"Approval cleanup archived {len(archived)} stale/duplicate approvals; "
+            f"kept {kept_count}; failed {len(failed)}."
+        )
+        handler_lines = [
+            summary,
+            "Archived IDs: " + (", ".join(f"{approval_id}:{reason}" for approval_id, reason in archived) or "none"),
+        ]
+        if failed:
+            handler_lines.append("Failed IDs: " + ", ".join(f"{approval_id or 'unknown'}:{reason}" for approval_id, reason in failed))
+        task_id = self._record_telegram_imperative_task(
+            session_id=session_id,
+            text=text,
+            intent=intent,
+            target=None,
+            artifact="approval backlog",
+            result_status=result_status,
+            capability=None,
+            summary=summary,
+            handler_result="\n".join(handler_lines),
+            execution_backend="approval_manager",
+        )
+        self._remember_approval_cleanup_result(
+            session_id,
+            task_id=task_id,
+            status=result_status,
+            archived_count=len(archived),
+            kept_count=kept_count,
+            failed_count=len(failed),
+        )
+        event_payload = {
+            "session_id": session_id,
+            "intent": intent.intent,
+            "task_id": task_id,
+            "status": result_status,
+            "archived_count": len(archived),
+            "kept_count": kept_count,
+            "failed_count": len(failed),
+        }
+        if result_status == "failed":
+            self._emit_safe("telegram_imperative_execution_failed", event_payload)
+        else:
+            self._emit_safe("telegram_imperative_executed", event_payload)
+            self._emit_safe("telegram_imperative_routed", event_payload)
+            self._emit_safe("approval_cleanup_executed", event_payload)
+        response_lines = [
+            f"Intent: `{intent.intent}`",
+            f"Estado: `{result_status}`",
+            f"Archivadas: {len(archived)}",
+            f"Conservadas: {kept_count}",
+            f"Fallidas: {len(failed)}",
+            f"Task: `{task_id}`",
+        ]
+        if archived:
+            response_lines.append("IDs archivadas: " + ", ".join(approval_id for approval_id, _ in archived[:8]))
+        if failed:
+            response_lines.append("Fallos: " + ", ".join(f"{approval_id or 'unknown'}:{reason}" for approval_id, reason in failed[:5]))
+        return "\n".join(response_lines)
+
+    def _approval_cleanup_candidates(self, approvals: list[dict[str, Any]]) -> list[tuple[dict[str, Any], str]]:
+        candidates: list[tuple[dict[str, Any], str]] = []
+        seen_actions: set[str] = set()
+        for item in self._sorted_approvals_for_audit(approvals):
+            classification = self._classify_approval(item, seen_actions=seen_actions)
+            if classification in {"stale", "duplicate", "expired"}:
+                candidates.append((item, classification))
+        return candidates
+
+    def _remember_approval_cleanup_result(
+        self,
+        session_id: str,
+        *,
+        task_id: str,
+        status: str,
+        archived_count: int,
+        kept_count: int,
+        failed_count: int,
+    ) -> None:
+        state = self.brain.memory.get_session_state(session_id)
+        active_object = dict(state.get("active_object") or {})
+        last_result = dict(active_object.get("last_action_result") or {})
+        last_result.update(
+            {
+                "task_id": task_id,
+                "status": status,
+                "intent": "approvals.cleanup_stale_duplicates",
+                "archived_count": archived_count,
+                "kept_count": kept_count,
+                "failed_count": failed_count,
+                "updated_at": time.time(),
+            }
+        )
+        active_object["last_action_result"] = last_result
+        self.brain.memory.update_session_state(
+            session_id,
+            mode="ops",
+            verification_status=status,
+            active_object=active_object,
+            last_checkpoint={
+                "summary": (
+                    f"Approval cleanup {status}: archived={archived_count}, "
+                    f"kept={kept_count}, failed={failed_count}"
+                ),
+                "verification_status": status,
+                "task_id": task_id,
+                "intent": "approvals.cleanup_stale_duplicates",
+            },
+        )
+
+    def _execute_telegram_imperative_via_computer(
+        self,
+        intent: TelegramImperativeIntent,
+        text: str,
+        *,
+        session_id: str,
+        target: str | None,
+        artifact: str | None,
+        artifact_text: str | None,
+    ) -> str | None:
+        if intent.intent not in {
+            "ui.open_app",
+            "ui.inspect_app",
+            "ui.paste_text",
+            "ui.set_instructions",
+            "ui.submit_prompt",
+        }:
+            return None
+        instruction = self._computer_instruction_for_telegram_imperative(
+            intent,
+            target=target,
+            artifact_text=artifact_text,
+        )
+        if instruction is None:
+            return None
+        if intent.intent == "ui.open_app":
+            return self._execute_local_open_app_imperative(
+                intent,
+                text,
+                session_id=session_id,
+                target=target,
+                artifact=artifact,
+            )
+        if intent.intent == "ui.paste_text":
+            return self._execute_local_paste_text_imperative(
+                intent,
+                text,
+                session_id=session_id,
+                target=target,
+                artifact=artifact,
+                artifact_text=artifact_text,
+            )
+        self._emit_safe(
+            "telegram_imperative_execution_started",
+            {
+                "session_id": session_id,
+                "intent": intent.intent,
+                "target": target,
+                "instruction_hash": self._stable_text_hash(instruction),
+            },
+        )
+        if intent.intent == "ui.inspect_app":
+            handler_result = self._computer_handler.computer_response(instruction, session_id)
+            execution_backend = "computer_read"
+        else:
+            handler_result = self._computer_handler.action_response(instruction, session_id)
+            execution_backend = "computer_control"
+        result_status = self._classify_computer_handler_result(handler_result)
+        approval_id = None
+        if result_status == "pending_approval":
+            pending = self._latest_pending_computer_approval(session_id)
+            if pending is not None:
+                approval_id = str(pending.get("approval_id") or "") or None
+        task_id = self._record_telegram_imperative_task(
+            session_id=session_id,
+            text=text,
+            intent=intent,
+            target=target,
+            artifact=artifact,
+            result_status=result_status,
+            capability=None if result_status != "blocked_by_capability" else "computer_control",
+            summary=f"{intent.intent} executed through {execution_backend}: {result_status}.",
+            handler_result=handler_result,
+            approval_id=approval_id,
+            execution_backend=execution_backend,
+        )
+        event_payload = {
+            "session_id": session_id,
+            "intent": intent.intent,
+            "task_id": task_id,
+            "target": target,
+            "status": result_status,
+            "backend": execution_backend,
+            "approval_id": approval_id,
+        }
+        if result_status == "pending_approval":
+            self._emit_safe("telegram_imperative_pending_approval", event_payload)
+        elif result_status == "blocked_by_capability":
+            self._emit_safe(
+                "telegram_imperative_blocked",
+                {**event_payload, "blocked_reason": "blocked_by_capability", "capability": "computer_control"},
+            )
+        elif result_status == "failed":
+            self._emit_safe("telegram_imperative_execution_failed", event_payload)
+        else:
+            self._emit_safe("telegram_imperative_executed", event_payload)
+            self._emit_safe("telegram_imperative_routed", event_payload)
+        lines = [
+            f"Intent: `{intent.intent}`",
+            f"Target: `{target or 'desconocido'}`",
+            f"Estado: `{result_status}`",
+            f"Task: `{task_id}`",
+        ]
+        if approval_id:
+            lines.append(f"approval_id: `{approval_id}`")
+        if handler_result:
+            lines.append("")
+            lines.append(str(handler_result))
+        return "\n".join(lines)
+
+    def _execute_local_paste_text_imperative(
+        self,
+        intent: TelegramImperativeIntent,
+        text: str,
+        *,
+        session_id: str,
+        target: str | None,
+        artifact: str | None,
+        artifact_text: str | None,
+    ) -> str:
+        app_name = self._local_app_name_for_target(target)
+        execution_backend = "local_clipboard_paste"
+        if app_name is None:
+            result_status = "failed"
+            handler_result = "No pude resolver un nombre de app seguro para pegar."
+        elif not artifact_text:
+            result_status = "failed"
+            handler_result = "No encontré texto preparado para pegar."
+        else:
+            self._emit_safe(
+                "telegram_imperative_execution_started",
+                {
+                    "session_id": session_id,
+                    "intent": intent.intent,
+                    "target": target,
+                    "backend": execution_backend,
+                },
+            )
+            try:
+                open_result = subprocess.run(
+                    ["open", "-a", app_name],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                if open_result.returncode != 0:
+                    detail = (open_result.stderr or open_result.stdout or "open returned non-zero").strip()
+                    raise RuntimeError(f"open failed: {redact_sensitive(detail[:240])}")
+                time.sleep(0.4)
+                copy_result = subprocess.run(
+                    ["pbcopy"],
+                    input=artifact_text,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                if copy_result.returncode != 0:
+                    detail = (copy_result.stderr or copy_result.stdout or "pbcopy returned non-zero").strip()
+                    raise RuntimeError(f"pbcopy failed: {redact_sensitive(detail[:240])}")
+                paste_result = subprocess.run(
+                    [
+                        "osascript",
+                        "-e",
+                        'tell application "System Events" to keystroke "v" using command down',
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                if paste_result.returncode != 0:
+                    detail = (paste_result.stderr or paste_result.stdout or "osascript returned non-zero").strip()
+                    raise RuntimeError(f"paste failed: {redact_sensitive(detail[:240])}")
+            except Exception as exc:
+                result_status = "failed"
+                handler_result = f"No pude pegar en `{app_name}`: {str(exc)[:240]}"
+            else:
+                result_status = "succeeded"
+                handler_result = f"Texto pegado en `{app_name}` sin enviar."
+        task_id = self._record_telegram_imperative_task(
+            session_id=session_id,
+            text=text,
+            intent=intent,
+            target=target,
+            artifact=artifact,
+            result_status=result_status,
+            capability=None if result_status == "succeeded" else execution_backend,
+            summary=f"{intent.intent} executed through {execution_backend}: {result_status}.",
+            handler_result=handler_result,
+            execution_backend=execution_backend,
+            notify_policy="none",
+        )
+        event_payload = {
+            "session_id": session_id,
+            "intent": intent.intent,
+            "task_id": task_id,
+            "target": target,
+            "status": result_status,
+            "backend": execution_backend,
+            "approval_id": None,
+        }
+        if result_status == "failed":
+            self._emit_safe("telegram_imperative_execution_failed", event_payload)
+        else:
+            self._emit_safe("telegram_imperative_executed", event_payload)
+            self._emit_safe("telegram_imperative_routed", event_payload)
+        return "\n".join(
+            [
+                f"Intent: `{intent.intent}`",
+                f"Target: `{target or 'desconocido'}`",
+                f"Estado: `{result_status}`",
+                f"Task: `{task_id}`",
+                "",
+                handler_result,
+            ]
+        )
+
+    def _execute_local_open_app_imperative(
+        self,
+        intent: TelegramImperativeIntent,
+        text: str,
+        *,
+        session_id: str,
+        target: str | None,
+        artifact: str | None,
+    ) -> str:
+        app_name = self._local_app_name_for_target(target)
+        execution_backend = "local_app_open"
+        if app_name is None:
+            result_status = "failed"
+            handler_result = "No pude resolver un nombre de app seguro para abrir."
+        else:
+            self._emit_safe(
+                "telegram_imperative_execution_started",
+                {
+                    "session_id": session_id,
+                    "intent": intent.intent,
+                    "target": target,
+                    "backend": execution_backend,
+                },
+            )
+            try:
+                completed = subprocess.run(
+                    ["open", "-a", app_name],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+            except Exception as exc:
+                result_status = "failed"
+                handler_result = f"No pude abrir `{app_name}`: {str(exc)[:240]}"
+            else:
+                if completed.returncode == 0:
+                    result_status = "succeeded"
+                    handler_result = f"`{app_name}` abierto/enfocado."
+                else:
+                    result_status = "failed"
+                    detail = (completed.stderr or completed.stdout or "open returned non-zero").strip()
+                    handler_result = f"No pude abrir `{app_name}`: {redact_sensitive(detail[:240])}"
+        task_id = self._record_telegram_imperative_task(
+            session_id=session_id,
+            text=text,
+            intent=intent,
+            target=target,
+            artifact=artifact,
+            result_status=result_status,
+            capability=None if result_status == "succeeded" else execution_backend,
+            summary=f"{intent.intent} executed through {execution_backend}: {result_status}.",
+            handler_result=handler_result,
+            execution_backend=execution_backend,
+            notify_policy="none",
+        )
+        event_payload = {
+            "session_id": session_id,
+            "intent": intent.intent,
+            "task_id": task_id,
+            "target": target,
+            "status": result_status,
+            "backend": execution_backend,
+            "approval_id": None,
+        }
+        if result_status == "failed":
+            self._emit_safe("telegram_imperative_execution_failed", event_payload)
+        else:
+            self._emit_safe("telegram_imperative_executed", event_payload)
+            self._emit_safe("telegram_imperative_routed", event_payload)
+        return "\n".join(
+            [
+                f"Intent: `{intent.intent}`",
+                f"Target: `{target or 'desconocido'}`",
+                f"Estado: `{result_status}`",
+                f"Task: `{task_id}`",
+                "",
+                handler_result,
+            ]
+        )
+
+    @staticmethod
+    def _local_app_name_for_target(target: str | None) -> str | None:
+        if not target:
+            return None
+        normalized = _normalize_command_text(target)
+        if "codex" in normalized:
+            return "Codex"
+        if "chatgpt" in normalized or "chat gpt" in normalized:
+            return "ChatGPT"
+        if "claude" in normalized:
+            return "Claude"
+        if "chrome" in normalized:
+            return "Google Chrome"
+        cleaned = re.sub(r"\bapp\b", "", str(target), flags=re.IGNORECASE).strip(" ._-")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._+-]{0,79}", cleaned):
+            return None
+        return cleaned
+
+    def _computer_instruction_for_telegram_imperative(
+        self,
+        intent: TelegramImperativeIntent,
+        *,
+        target: str | None,
+        artifact_text: str | None,
+    ) -> str | None:
+        target_text = target or "the active app"
+        if intent.intent == "ui.open_app":
+            return (
+                f"Open or focus {target_text}. "
+                "Stop once the app is visible and focused. "
+                "Do not paste, type, submit, send, run, or change content."
+            )
+        if intent.intent == "ui.inspect_app":
+            return (
+                f"Inspect {target_text} from the current screen and report what is visible, "
+                "whether it is ready for the active mission, and any blocker. "
+                "Do not click, type, paste, submit, send, run, or change content."
+            )
+        if intent.intent == "ui.paste_text":
+            if not artifact_text:
+                return None
+            return (
+                f"Focus the appropriate input in {target_text} and paste the following text exactly. "
+                "Do not press Enter. Do not click Send. Do not submit, run, or execute it.\n\n"
+                "<text_to_paste>\n"
+                f"{artifact_text}\n"
+                "</text_to_paste>"
+            )
+        if intent.intent == "ui.set_instructions":
+            if not artifact_text:
+                return None
+            return (
+                f"Focus the instruction or prompt input in {target_text} and paste these instructions exactly. "
+                "Do not press Enter. Do not click Send. Do not submit, run, or execute it.\n\n"
+                "<instructions_to_paste>\n"
+                f"{artifact_text}\n"
+                "</instructions_to_paste>"
+            )
+        if intent.intent == "ui.submit_prompt":
+            return (
+                f"In {target_text}, submit or run the already prepared prompt by pressing Enter "
+                "or clicking the app's submit/run/send control. Do not edit or replace the prompt text."
+            )
+        return None
+
+    @staticmethod
+    def _classify_computer_handler_result(result: str | None) -> str:
+        text = str(result or "").strip()
+        normalized = _normalize_command_text(text)
+        if not text:
+            return "failed"
+        if (
+            "necesito tu autorizacion" in normalized
+            or "needs approval" in normalized
+            or "requires approval" in normalized
+            or "awaiting approval" in normalized
+        ):
+            return "pending_approval"
+        if "unavailable" in normalized or "desactivado" in normalized:
+            return "blocked_by_capability"
+        if (
+            normalized.startswith("computer use error")
+            or normalized.startswith("computer screenshot error")
+            or normalized.startswith("screenshot error")
+            or " timed out" in normalized
+        ):
+            return "failed"
+        return "succeeded"
+
+    def _local_ui_read_available(self) -> bool:
+        return self.computer is not None and self._capability_available("computer_use")
+
+    def _local_ui_write_available(self) -> bool:
+        return self.computer is not None and self._capability_available("computer_control")
+
+    def _missing_ui_capability(self, intent: TelegramImperativeIntent) -> str | None:
+        if intent.requires_ui_write and not self._local_ui_write_available():
+            return "local_ui_write"
+        if intent.requires_ui_read and not self._local_ui_read_available():
+            return "local_ui_read"
+        return None
+
+    def _record_telegram_imperative_task(
+        self,
+        *,
+        session_id: str,
+        text: str,
+        intent: TelegramImperativeIntent,
+        target: str | None,
+        artifact: str | None,
+        result_status: str,
+        capability: str | None,
+        summary: str,
+        handler_result: str | None = None,
+        approval_id: str | None = None,
+        execution_backend: str | None = None,
+        notify_policy: str = "done_only",
+    ) -> str:
+        task_id = f"{session_id}:telegram-imperative:{time.time_ns()}"
+        action_result = {
+            "status": result_status,
+            "intent": intent.intent,
+            "target": target,
+            "artifact": artifact,
+            "capability": capability,
+            "approval_id": approval_id,
+            "execution_backend": execution_backend,
+        }
+        artifacts = {
+            "action_result": action_result,
+            "substeps": [
+                {
+                    "action": intent.intent,
+                    "status": result_status,
+                    "reason": capability or result_status,
+                }
+            ],
+            "evidence": {"router_result": action_result},
+        }
+        if handler_result:
+            artifacts["handler_result"] = str(handler_result)[:4000]
+        metadata = {
+            "origin": "telegram_imperative_router",
+            "intent": intent.intent,
+            "target": target,
+            "artifact": artifact,
+            "source_message": text[:500],
+            "result_status": result_status,
+            "blocked_reason": result_status if result_status.startswith("blocked") else "",
+            "approval_id": approval_id,
+            "execution_backend": execution_backend,
+        }
+        if self.task_ledger is not None:
+            self.task_ledger.create(
+                task_id=task_id,
+                session_id=session_id,
+                objective=self._objective_for_imperative(intent, target=target, artifact=artifact),
+                runtime="telegram_imperative",
+                mode="ops",
+                status="running",
+                notify_policy=notify_policy,
+                metadata=metadata,
+                artifacts=artifacts,
+            )
+            if result_status != "pending_approval":
+                terminal_status = "failed" if result_status.startswith("blocked") or result_status == "failed" else "succeeded"
+                if result_status == "succeeded":
+                    verification = "passed"
+                elif result_status == "partial_success":
+                    verification = "pending"
+                else:
+                    verification = result_status
+                self.task_ledger.mark_terminal(
+                    task_id,
+                    status=terminal_status,
+                    summary=summary,
+                    error=capability or "",
+                    verification_status=verification,
+                    artifacts=artifacts,
+                )
+        state = self.brain.memory.get_session_state(session_id)
+        active_object = dict(state.get("active_object") or {})
+        active_object["last_action_result"] = {
+            "task_id": task_id,
+            **action_result,
+            "updated_at": time.time(),
+        }
+        self.brain.memory.update_session_state(
+            session_id,
+            verification_status=result_status,
+            active_object=active_object,
+            last_checkpoint={
+                "summary": summary,
+                "verification_status": result_status,
+                "task_id": task_id,
+                "intent": intent.intent,
+                "target": target,
+                "artifact": artifact,
+            },
+        )
+        return task_id
+
+    def _maybe_handle_owner_delegation_request(
+        self,
+        text: str,
+        *,
+        session_id: str,
+        runtime_channel: str | None,
+    ) -> str | None:
+        """PR 0C — owner-delegation kernel.
+
+        Detects "córrelo tú", "decide tú", "te toca a ti", etc. and turns
+        them into durable, task-scoped delegated work. Runs BEFORE
+        actionable_task_request / task_intent / capability_route / brain
+        fallback so it cannot be silenced by CLAW_DISABLE_* flags or by an
+        assisted session.
+
+        Resolution and safety policy live in StateHandler.resolve_delegated_objective
+        and bot_helpers.is_destructive_or_external_objective. This method
+        is just the dispatcher: classify → resolve → branch (safe → start
+        delegated task; risky → approval question; unresolved → clarify).
+        """
+        intent = detect_owner_delegation(text)
+        if intent is None:
+            if self.observe is not None:
+                try:
+                    self.observe.emit(
+                        "owner_delegation_no_match",
+                        payload={"session_id": session_id},
+                    )
+                except Exception:
+                    logger.debug("owner_delegation_no_match emit failed", exc_info=True)
+            return None
+        if self.observe is not None:
+            try:
+                self.observe.emit(
+                    "owner_delegation_match",
+                    payload={
+                        "session_id": session_id,
+                        "kind": intent.kind,
+                        "confidence": intent.confidence,
+                        "normalized_text": intent.normalized_text,
+                        "requires_resolution": intent.requires_resolution,
+                        "explicit_action_hint": intent.explicit_action_hint,
+                        "runtime_channel": (runtime_channel or "").lower() or None,
+                    },
+                )
+            except Exception:
+                logger.debug("owner_delegation_match emit failed", exc_info=True)
+        self._emit_dispatch_decision(
+            handler="owner_delegation",
+            route="intercepted",
+            reason=f"owner_delegation:{intent.kind}",
+            session_id=session_id,
+            text=text,
+            captured=True,
+            matched_pattern=f"owner_delegation:{intent.kind}",
+        )
+        resolution = self._state_handler.resolve_delegated_objective(
+            session_id=session_id, text=text, intent=intent
+        )
+        # Unresolved → one concrete clarifying question. We do NOT say
+        # "decide tú" / "elige tú" — the resolver enforces that.
+        if resolution.objective is None:
+            event_name = (
+                "owner_delegation_approval_required"
+                if resolution.is_risky
+                else "owner_delegation_unresolved"
+            )
+            if self.observe is not None:
+                try:
+                    self.observe.emit(
+                        event_name,
+                        payload={
+                            "session_id": session_id,
+                            "kind": intent.kind,
+                            "resolution_source": resolution.resolution_source,
+                        },
+                    )
+                except Exception:
+                    logger.debug("%s emit failed", event_name, exc_info=True)
+            return resolution.clarifying_question or (
+                "Lo tomo como tuyo, pero dime en una frase imperativa que "
+                "accion concreta ejecuto."
+            )
+        # Risky / external / destructive → ask one approval question.
+        if resolution.is_risky:
+            if self.observe is not None:
+                try:
+                    self.observe.emit(
+                        "owner_delegation_approval_required",
+                        payload={
+                            "session_id": session_id,
+                            "kind": intent.kind,
+                            "resolution_source": resolution.resolution_source,
+                            "mode": resolution.mode,
+                        },
+                    )
+                except Exception:
+                    logger.debug(
+                        "owner_delegation_approval_required emit failed", exc_info=True
+                    )
+            objective_preview = (resolution.objective or "")[:200]
+            return (
+                "Lo que pides toca algo externo, destructivo o con costo "
+                "(deploy / merge / publish / send / payment / secret / "
+                "delete / production). No lo ejecuto sin tu aprobacion "
+                "explicita.\n\n"
+                f"Objetivo resuelto: {objective_preview}\n\n"
+                "Responde \"aprobado\" para que proceda, o aclara el alcance."
+            )
+        # Safe + resolved → start a durable task-scoped delegated coordinator
+        # run. We intentionally do NOT flip the session autonomy_mode; the
+        # autonomy is scoped to this task via delegation_metadata.
+        delegation_metadata = {
+            "owner_delegation": True,
+            "delegated_by_owner": True,
+            "source_message": text[:500],
+            "resolution_source": resolution.resolution_source,
+            "verification_required": True,
+            "autonomy_scope": "task",
+            "manual_handoff_forbidden": True,
+            "delegation_kind": intent.kind,
+            "runtime_channel": (runtime_channel or "").lower() or None,
+        }
+        try:
+            response = self._task_handler.start_autonomous_task(
+                session_id,
+                resolution.objective,
+                mode=resolution.mode,
+                delegation_metadata=delegation_metadata,
+            )
+        except Exception:
+            logger.exception("owner_delegation start_autonomous_task failed")
+            if self.observe is not None:
+                try:
+                    self.observe.emit(
+                        "owner_delegation_blocked",
+                        payload={
+                            "session_id": session_id,
+                            "kind": intent.kind,
+                            "resolution_source": resolution.resolution_source,
+                            "reason": "start_autonomous_task_exception",
+                        },
+                    )
+                except Exception:
+                    logger.debug("owner_delegation_blocked emit failed", exc_info=True)
+            return (
+                "Intente arrancar la tarea delegada pero el coordinador "
+                "fallo. Reporto sin disimulo: revisa los logs y dime si "
+                "reintento."
+            )
+        if self.observe is not None:
+            try:
+                self.observe.emit(
+                    "owner_delegation_started_task",
+                    payload={
+                        "session_id": session_id,
+                        "kind": intent.kind,
+                        "resolution_source": resolution.resolution_source,
+                        "mode": resolution.mode,
+                    },
+                )
+            except Exception:
+                logger.debug("owner_delegation_started_task emit failed", exc_info=True)
+        prefix = "Lo tomo como tarea delegada.\n\n"
+        return prefix + (response or "")
 
     def _maybe_handle_actionable_task_request(
         self,
@@ -3757,21 +7814,68 @@ class BotService:
         *,
         session_id: str,
         runtime_channel: str | None,
+        semantic_turn: SemanticTurn | None = None,
     ) -> str | None:
         if (runtime_channel or "").strip().lower() != "telegram":
             return None
         if not text or text.startswith("/"):
             return None
+        if (
+            semantic_turn is not None
+            and semantic_turn.intent in {"continue_active_mission", "approval_response"}
+            and not self._looks_like_direct_actionable_task(text)
+        ):
+            self._emit_safe(
+                "actionable_task_router_skipped_semantic_continuation",
+                {
+                    "session_id": session_id,
+                    "semantic_intent": semantic_turn.intent,
+                    "text_preview": text[:80],
+                },
+            )
+            return None
         state = self.brain.memory.get_session_state(session_id)
         objective, source = self._resolve_actionable_task_objective(text, state=state)
         if objective is None:
             if self._looks_like_actionable_followup(text):
+                continuation, continuation_source = self._maybe_resolve_telegram_continuation(
+                    text,
+                    session_id=session_id,
+                )
+                if isinstance(continuation, _BrainShortcut):
+                    self._emit_safe(
+                        "telegram_continuation_stateful_resolved",
+                        {
+                            "session_id": session_id,
+                            "intent": "task.continue_active_mission",
+                            "resolution_source": continuation_source,
+                            "resolution_kind": "brain_shortcut",
+                        },
+                    )
+                    state = self.brain.memory.get_session_state(session_id)
+                    objective, source = self._resolve_actionable_task_objective(text, state=state)
+                elif continuation is not None:
+                    self._emit_safe(
+                        "telegram_continuation_stateful_resolved",
+                        {
+                            "session_id": session_id,
+                            "intent": "task.continue_active_mission",
+                            "resolution_source": continuation_source,
+                            "resolution_kind": "clarification",
+                        },
+                    )
+                    return continuation
+            if objective is None and self._looks_like_actionable_followup(text):
                 self._emit_safe(
                     "clarification_requested_after_context_lookup",
                     {"session_id": session_id, "reason": "actionable_task_context_not_found"},
                 )
-                return "¿Qué acción concreta quieres que ejecute?"
-            return None
+                return (
+                    "No encontré una misión, propuesta, aprobación o tarea reciente para continuar. "
+                    "Respóndeme con el número/opción de la tarea activa o el target específico."
+                )
+            if objective is None:
+                return None
         if os.getenv("CLAW_DISABLE_TELEGRAM_ACTIONABLE_TASK_ROUTER", "0") == "1":
             self._emit_safe(
                 "actionable_task_router_disabled",
@@ -3847,7 +7951,11 @@ class BotService:
             if checkpoint_action:
                 return checkpoint_action, "last_checkpoint"
         current_goal = str(state.get("current_goal") or "").strip()
-        if current_goal and not self._looks_like_actionable_followup(current_goal):
+        if (
+            current_goal
+            and self._looks_like_persistable_current_goal(current_goal)
+            and not self._looks_like_actionable_followup(current_goal)
+        ):
             return current_goal, "current_goal"
         active_object = state.get("active_object") or {}
         if isinstance(active_object, dict):
@@ -3858,6 +7966,56 @@ class BotService:
                 if objective and status not in {"completed", "succeeded"}:
                     return objective, "active_task"
         return None, "missing_context"
+
+    @staticmethod
+    def _looks_like_persistable_current_goal(text: str) -> bool:
+        normalized = _normalize_command_text(text).strip(" \t\n\r.,;:!?¿¡")
+        if len(normalized) < 8 or _looks_like_proceed_request(text):
+            return False
+        complaint_markers = (
+            "no has ",
+            "no haz ",
+            "no habias ",
+            "no abriste",
+            "no has abierto",
+            "mentiste",
+            "deja de mentir",
+            "porque perdiste",
+            "perdiste el contexto",
+            "eso no es",
+        )
+        if any(marker in normalized for marker in complaint_markers):
+            return False
+        goal_markers = (
+            "abre",
+            "abrir",
+            "open",
+            "focus",
+            "inspect",
+            "revisa",
+            "revisar",
+            "lee ",
+            "leer ",
+            "busca",
+            "buscar",
+            "crea",
+            "crear",
+            "implementa",
+            "implementar",
+            "arregla",
+            "corrige",
+            "actualiza",
+            "ejecuta",
+            "corre",
+            "verifica",
+            "valida",
+            "termina",
+            "completa",
+            "regenera",
+            "haz ",
+            "hacer ",
+        )
+        return any(marker in normalized for marker in goal_markers)
 
     @staticmethod
     def _looks_like_direct_actionable_task(text: str) -> bool:
@@ -3956,9 +8114,10 @@ class BotService:
     def _maybe_handle_operational_status(self, text: str, *, session_id: str) -> str | None:
         normalized = _normalize_command_text(text).strip()
         compact = re.sub(r"[^a-z0-9]+", "", normalized)
-        if normalized not in {
+        status_phrases = {
             "status",
             "estado",
+            "estatus",
             "estas",
             "estas?",
             "estas ?",
@@ -3968,7 +8127,28 @@ class BotService:
             "estas ahi?",
             "estas ahi ?",
             "ping",
-        } and compact not in {"estas", "estasvivo", "estasviva", "estasahi"}:
+            "como vamos",
+            "cómo vamos",
+            "que hay pendiente",
+            "qué hay pendiente",
+            "daily status",
+        }
+        greeting_status = (
+            any(greeting in normalized for greeting in ("buen dia", "buenos dias", "good morning", "hola"))
+            and any(token in normalized for token in ("status", "estado", "estatus"))
+        )
+        contains_status_request = normalized in status_phrases or compact in {
+            "estas",
+            "estasvivo",
+            "estasviva",
+            "estasahi",
+            "buendiastatus",
+            "buenosdiasstatus",
+            "dailystatus",
+            "comovamos",
+            "quehaypendiente",
+        }
+        if not (contains_status_request or greeting_status):
             return None
         active_count = 0
         latest_line = "sin tareas recientes"
@@ -3985,13 +8165,257 @@ class BotService:
                 )
         web_port = int(getattr(self.config, "web_chat_port", 8765)) if self.config is not None else 8765
         runtime = "vivo" if self._runtime_alive() else "sin respuesta local"
-        return (
-            "Estoy vivo.\n"
-            f"Runtime local: {runtime} en :{web_port}\n"
-            f"Tareas activas en esta sesión: {active_count}\n"
-            f"Última tarea: {latest_line}\n"
-            "Comandos útiles: `/jobs`, `/tasks`, `/quality`, `/restart`."
+        try:
+            approvals = self.approvals.list_pending() if self.approvals is not None else []
+        except Exception:
+            approvals = []
+        lines = [
+            "Estoy vivo.",
+            f"Runtime local: {runtime} en :{web_port}",
+            f"Tareas activas en esta sesión: {active_count}",
+            f"Última tarea: {latest_line}",
+        ]
+        if approvals:
+            lines.extend(self._approval_summary_lines(approvals))
+        else:
+            lines.append("Aprobaciones pendientes: 0")
+        lines.append("Comandos útiles: `/jobs`, `/tasks`, `/quality`, `/restart`.")
+        return "\n".join(lines)
+
+    def _maybe_handle_operational_failure_summary(self, text: str, *, session_id: str) -> str | None:
+        normalized = _normalize_command_text(text).strip()
+        if not self._matches_operational_failure_summary_request(normalized):
+            return None
+        return self._format_operational_failure_summary(session_id)
+
+    @staticmethod
+    def _matches_operational_failure_summary_request(normalized: str) -> bool:
+        if not normalized:
+            return False
+        specific_task_failure = (
+            "por que fallo la tarea",
+            "porque fallo la tarea",
+            "por que fallo el task",
+            "porque fallo el task",
+            "por que fallaste la tarea",
+            "porque fallaste la tarea",
         )
+        broad_report_markers = (
+            "resumen",
+            "recuento",
+            "auditoria",
+            "auditoría",
+            "fallos",
+            "errores",
+            "hoy",
+            "sesion",
+            "sesión",
+            "ninguna tarea",
+            "tareas",
+        )
+        if any(phrase in normalized for phrase in specific_task_failure) and not any(
+            marker in normalized for marker in broad_report_markers
+        ):
+            return False
+        direct_complaints = (
+            "no puede completar ninguna tarea",
+            "no puedes completar ninguna tarea",
+            "no estas completando ninguna tarea",
+            "no estás completando ninguna tarea",
+            "no completa ninguna tarea",
+            "no estas completando tareas",
+            "no estás completando tareas",
+        )
+        if any(phrase in normalized for phrase in direct_complaints):
+            return True
+        if (
+            "ninguna tarea" not in normalized
+            and (
+                "por que no completas" in normalized
+                or "por qué no completas" in normalized
+                or "porque no completas" in normalized
+            )
+        ):
+            return False
+        failure_terms = (
+            "fallo",
+            "fallos",
+            "fallaste",
+            "fallado",
+            "error",
+            "errores",
+            "problema",
+            "problemas",
+            "perdido",
+            "perdida",
+            "bloqueo",
+            "bloqueos",
+            "no complet",
+        )
+        report_terms = (
+            "resumen",
+            "recuento",
+            "auditoria",
+            "auditoría",
+            "reporte",
+            "explica",
+            "porque",
+            "por que",
+            "por qué",
+            "hoy",
+            "sesion",
+            "sesión",
+            "today",
+            "summary",
+        )
+        return any(term in normalized for term in failure_terms) and any(
+            term in normalized for term in report_terms
+        )
+
+    def _format_operational_failure_summary(self, session_id: str) -> str:
+        today_prefix = time.strftime("%Y-%m-%d", time.gmtime())
+        events = self._recent_today_observe_events(limit=700, today_prefix=today_prefix)
+        event_counts: dict[str, int] = {}
+        for event in events:
+            event_type = str(event.get("event_type") or "")
+            event_counts[event_type] = event_counts.get(event_type, 0) + 1
+
+        recent_messages = self._recent_session_messages(session_id, limit=80)
+        defensive_template_count = sum(
+            1
+            for msg in recent_messages
+            if msg.get("role") == "assistant"
+            and "no digo `arrancando`" in _normalize_command_text(str(msg.get("content") or ""))
+        )
+        clarification_count = sum(
+            1
+            for msg in recent_messages
+            if msg.get("role") == "assistant"
+            and (
+                "que accion concreta quieres que ejecute" in _normalize_command_text(str(msg.get("content") or ""))
+                or "necesito una aclaracion minima" in _normalize_command_text(str(msg.get("content") or ""))
+            )
+        )
+
+        lines = [
+            f"Resumen operativo de fallos de hoy ({today_prefix}), con evidencia local:",
+        ]
+        findings: list[str] = []
+        imperative_bounces = (
+            event_counts.get("telegram_imperative_clarification", 0)
+            + event_counts.get("active_mission_resolution_failed", 0)
+        )
+        if imperative_bounces:
+            findings.append(
+                f"Continuidad: {imperative_bounces} evento(s) de continuación terminaron en aclaración/bounce en vez de usar contexto."
+            )
+        blocked_start = event_counts.get("evidence_gate_blocked_start_claim", 0)
+        if blocked_start or defensive_template_count:
+            findings.append(
+                "Gate de evidencia: "
+                f"{blocked_start} bloqueo(s) observados y {defensive_template_count} respuesta(s) visibles con plantilla defensiva."
+            )
+        if clarification_count:
+            findings.append(
+                f"Contexto conversacional: {clarification_count} respuesta(s) pidieron una acción concreta aunque había contexto previo."
+            )
+        routed_continuations = event_counts.get("stateful_continuation_routed_to_actionable_task", 0)
+        if routed_continuations:
+            findings.append(
+                f"Continuación stateful: {routed_continuations} continuación(es) ya fueron convertidas en tarea durable."
+            )
+        worker_retry = event_counts.get("coordinator_worker_retry", 0)
+        if worker_retry:
+            latest_retry = self._latest_event_payload(events, "coordinator_worker_retry")
+            retry_error = _compact_summary(
+                str(redact_sensitive(latest_retry.get("error") or "", limit=240)),
+                limit=180,
+            )
+            findings.append(
+                f"Coordinador: {worker_retry} retry(s) de worker; último error: {retry_error or 'sin detalle'}."
+            )
+        autostash = event_counts.get("worktree_autostash", 0)
+        if autostash:
+            findings.append(
+                f"Worktree: {autostash} autostash registrado; eso puede ocultar cambios dirty durante una tarea autónoma."
+            )
+        if not findings:
+            findings.append("No encontré fallos operativos recientes en `observe_stream`; revisé el ledger y mensajes recientes.")
+        lines.extend(f"- {finding}" for finding in findings[:6])
+
+        task_lines = self._operational_failure_task_lines(session_id)
+        if task_lines:
+            lines.append("")
+            lines.append("Ledger:")
+            lines.extend(task_lines)
+        lines.append("")
+        lines.append(
+            "Diagnóstico: los reportes de fallos no deben caer al brain genérico; deben responder desde ledger/observe. "
+            "Las tareas no deben contarse como completadas hasta tener estado terminal en `agent_tasks`."
+        )
+        return "\n".join(lines)
+
+    def _recent_today_observe_events(self, *, limit: int, today_prefix: str) -> list[dict[str, Any]]:
+        if self.observe is None:
+            return []
+        try:
+            events = self.observe.recent_events(limit=limit)
+        except Exception:
+            logger.debug("failed to read observe_stream for failure summary", exc_info=True)
+            return []
+        today = [
+            event
+            for event in events
+            if str(event.get("timestamp") or "").startswith(today_prefix)
+        ]
+        return today or events
+
+    def _recent_session_messages(self, session_id: str, *, limit: int) -> list[dict[str, Any]]:
+        try:
+            return list(self.brain.memory.get_recent_messages(session_id, limit=limit))
+        except Exception:
+            logger.debug("failed to read recent messages for failure summary", exc_info=True)
+            return []
+
+    @staticmethod
+    def _latest_event_payload(events: list[dict[str, Any]], event_type: str) -> dict[str, Any]:
+        for event in events:
+            if event.get("event_type") == event_type:
+                payload = event.get("payload") or {}
+                return payload if isinstance(payload, dict) else {}
+        return {}
+
+    def _operational_failure_task_lines(self, session_id: str) -> list[str]:
+        if self.task_ledger is None:
+            return []
+        try:
+            records = self.task_ledger.list(session_id=session_id, limit=6)
+        except Exception:
+            logger.debug("failed to read task ledger for failure summary", exc_info=True)
+            return []
+        if not records:
+            return ["- Sin tareas recientes en esta sesión."]
+        lines: list[str] = []
+        for record in records[:4]:
+            task_id = _compact_summary(str(getattr(record, "task_id", "") or ""), limit=80)
+            status = _compact_summary(str(getattr(record, "status", "unknown") or "unknown"), limit=40)
+            verification = _compact_summary(
+                str(getattr(record, "verification_status", "unknown") or "unknown"),
+                limit=60,
+            )
+            objective = _compact_summary(
+                str(redact_sensitive(getattr(record, "objective", "") or "", limit=300)),
+                limit=180,
+            )
+            error = _compact_summary(
+                str(redact_sensitive(getattr(record, "error", "") or "", limit=240)),
+                limit=140,
+            )
+            detail = f" - {error}" if error else ""
+            lines.append(
+                f"- `{task_id}`: {status} / {verification} - {objective or 'sin objetivo'}{detail}"
+            )
+        return lines
 
     def _maybe_handle_boot_context_status(
         self,

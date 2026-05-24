@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import os
 import re
 import threading
 import time
+import urllib.request
 from pathlib import Path
 from typing import Any, Callable
 
@@ -15,6 +17,7 @@ from claw_v2.bot_helpers import (
     _computer_instruction_requires_actions,
     _format_computer_pending_summary,
 )
+from claw_v2.redaction import redact_text
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +68,7 @@ class ComputerHandler:
             BotCommand(
                 "computer",
                 self.handle_command,
-                exact=("/screen", "/computer"),
+                exact=("/screen", "/computer", "/computer_diag", "/computer_diagnostics"),
                 prefixes=("/computer_abort", "/computer "),
             ),
             BotCommand(
@@ -79,6 +82,8 @@ class ComputerHandler:
         stripped = context.stripped
         if stripped == "/screen":
             return self.screen_response()
+        if stripped in {"/computer_diag", "/computer_diagnostics"}:
+            return self.diagnostics_response(context.session_id)
         if stripped == "/computer":
             return "usage: /computer <instruction>"
         if stripped.startswith("/computer_abort"):
@@ -109,7 +114,19 @@ class ComputerHandler:
         try:
             screenshot = self.computer.capture_screenshot()
         except Exception as exc:
+            self._emit(
+                "computer_screenshot_failed",
+                {"source": "screen_command", "error": _error_message(exc)[:200]},
+            )
             return f"screenshot error: {exc}"
+        self._emit(
+            "computer_screenshot_captured",
+            {
+                "source": "screen_command",
+                "media_type": screenshot.get("media_type"),
+                "encoded_bytes": len(str(screenshot.get("data") or "")),
+            },
+        )
         return json.dumps({"screenshot_data": screenshot["data"][:100] + "...", "media_type": screenshot["media_type"]})
 
     def computer_response(self, instruction: str, session_id: str) -> str:
@@ -123,7 +140,26 @@ class ComputerHandler:
         try:
             screenshot = self.computer.capture_screenshot()
         except Exception as exc:
+            self._emit(
+                "computer_screenshot_failed",
+                {
+                    "source": "computer_read",
+                    "session_id": session_id,
+                    "instruction_hash": _instruction_hash(instruction),
+                    "error": _error_message(exc)[:200],
+                },
+            )
             return f"computer screenshot error: {exc}"
+        self._emit(
+            "computer_screenshot_captured",
+            {
+                "source": "computer_read",
+                "session_id": session_id,
+                "instruction_hash": _instruction_hash(instruction),
+                "media_type": screenshot.get("media_type"),
+                "encoded_bytes": len(str(screenshot.get("data") or "")),
+            },
+        )
 
         content_blocks = [
             {"type": "text", "text": instruction},
@@ -149,6 +185,10 @@ class ComputerHandler:
             active = self._sessions.get(session_id)
             if active is not None:
                 active.status = "aborted"
+                self._emit(
+                    "computer_session_superseded",
+                    {"session_id": session_id, "previous_status": "aborted"},
+                )
             current_url = self._resolve_current_url(session_id, instruction)
             session = ComputerSession(
                 task=instruction,
@@ -162,12 +202,32 @@ class ComputerHandler:
                     "task": instruction,
                 }
             self._sessions[session_id] = session
+        self._emit(
+            "computer_session_started",
+            {
+                "session_id": session_id,
+                "backend": self._session_backend(session),
+                "current_url": current_url,
+                "instruction_hash": _instruction_hash(instruction),
+                "instruction_preview": _instruction_preview(instruction),
+            },
+        )
         return self._run_session(session_id)
 
     def _run_session(self, session_id: str) -> str:
         session = self._sessions.get(session_id)
         if session is None:
             return "no active computer session"
+        backend = self._session_backend(session)
+        self._emit(
+            "computer_backend_selected",
+            {
+                "session_id": session_id,
+                "backend": backend,
+                "status": getattr(session, "status", None),
+                "current_url": getattr(session, "current_url", None),
+            },
+        )
         try:
             if self._is_browser_use_session(session):
                 result = self._run_browser_use_session(session)
@@ -187,6 +247,27 @@ class ComputerHandler:
             self._sessions.pop(session_id, None)
             message = _error_message(exc)
             logger.exception("computer use failed for %s", session_id)
+            if backend == "browser_use" and "timed out" in message.lower():
+                self._emit(
+                    "computer_browser_use_timeout",
+                    {
+                        "session_id": session_id,
+                        "backend": backend,
+                        "timeout_seconds": BROWSER_USE_TIMEOUT_SECONDS,
+                        "current_url": getattr(session, "current_url", None),
+                        "instruction_hash": _instruction_hash(getattr(session, "task", "")),
+                    },
+                )
+            self._emit(
+                "computer_session_failed",
+                {
+                    "session_id": session_id,
+                    "backend": backend,
+                    "status": getattr(session, "status", None),
+                    "error": message[:200],
+                    "instruction_hash": _instruction_hash(getattr(session, "task", "")),
+                },
+            )
             if self.observe is not None:
                 self.observe.emit("error", payload={"source": "computer_use", "error": message[:200]})
             return f"computer use error: {message}"
@@ -195,6 +276,10 @@ class ComputerHandler:
             if self.approvals is None:
                 session.status = "aborted"
                 self._sessions.pop(session_id, None)
+                self._emit(
+                    "computer_approval_unavailable",
+                    {"session_id": session_id, "backend": backend},
+                )
                 return "computer action requires approval, but approvals are unavailable"
             pending = dict(session.pending_action or {})
             screenshot_metadata = self._capture_approval_screenshot(session_id, session)
@@ -216,6 +301,18 @@ class ComputerHandler:
                 "approval_id": pending_approval.approval_id,
                 "approval_token": pending_approval.token,
             }
+            self._emit(
+                "computer_approval_pending",
+                {
+                    "session_id": session_id,
+                    "backend": self._session_backend(session),
+                    "approval_id": pending_approval.approval_id,
+                    "action": str(pending.get("action") or pending.get("type") or "computer_action"),
+                    "current_url": getattr(session, "current_url", None),
+                    "screenshot_captured": "screenshot_path" in screenshot_metadata,
+                    "screenshot_error": screenshot_metadata.get("screenshot_error"),
+                },
+            )
             return (
                 "Necesito tu autorización para continuar con esta acción de escritorio.\n"
                 f"Acción: {summary}\n"
@@ -224,6 +321,15 @@ class ComputerHandler:
 
         if session.status in {"done", "aborted"}:
             self._sessions.pop(session_id, None)
+        if session.status == "done":
+            self._emit(
+                "computer_session_completed",
+                {
+                    "session_id": session_id,
+                    "backend": backend,
+                    "result_chars": len(str(result or "")),
+                },
+            )
         return result
 
     def _get_client(self) -> Any:
@@ -256,6 +362,7 @@ class ComputerHandler:
         if session is None:
             return "no active computer session"
         session.status = "aborted"
+        self._emit("computer_session_aborted", {"session_id": session_id})
         return "computer session aborted"
 
     def action_approve_response(self, approval_id: str, token: str) -> str:
@@ -296,15 +403,26 @@ class ComputerHandler:
             return "approved"
         session_id = metadata.get("session_id")
         if not isinstance(session_id, str):
+            self._emit("computer_approval_resume_blocked", {"approval_id": approval_id, "reason": "missing_session_id"})
             return "approved, but no computer session metadata was found"
         session = self._sessions.get(session_id)
         if session is None:
+            self._emit("computer_approval_resume_blocked", {"approval_id": approval_id, "session_id": session_id, "reason": "session_not_active"})
             return "approved, but the computer session is no longer active"
         if session.pending_action is not None and session.pending_action.get("approval_id") != approval_id:
+            self._emit("computer_approval_resume_blocked", {"approval_id": approval_id, "session_id": session_id, "reason": "approval_mismatch"})
             return "approved, but no matching pending computer action was found"
         if session.pending_action is not None:
             session.pending_action["approved"] = True
         session.status = "running"
+        self._emit(
+            "computer_approval_resume_started",
+            {
+                "approval_id": approval_id,
+                "session_id": session_id,
+                "backend": self._session_backend(session),
+            },
+        )
         return self._run_session(session_id)
 
     def action_abort_response(self, approval_id: str) -> str:
@@ -367,12 +485,37 @@ class ComputerHandler:
                 "backend": "browser_use",
                 "task": session.task,
             }
+            self._emit(
+                "computer_browser_use_approval_required",
+                {
+                    "backend": "browser_use",
+                    "current_url": getattr(session, "current_url", None),
+                    "instruction_hash": _instruction_hash(getattr(session, "task", "")),
+                },
+            )
             return "Browser automation needs approval before executing authenticated browser actions."
         if self.browser_use is None:
             raise RuntimeError("browser_use unavailable for approved browser automation")
+        self._emit(
+            "computer_browser_use_task_started",
+            {
+                "backend": "browser_use",
+                "timeout_seconds": BROWSER_USE_TIMEOUT_SECONDS,
+                "current_url": getattr(session, "current_url", None),
+                "instruction_hash": _instruction_hash(getattr(session, "task", "")),
+            },
+        )
         result = self._run_browser_use_task(session.task)
         session.pending_action = None
         session.status = "done"
+        self._emit(
+            "computer_browser_use_task_succeeded",
+            {
+                "backend": "browser_use",
+                "result_chars": len(str(result or "")),
+                "instruction_hash": _instruction_hash(getattr(session, "task", "")),
+            },
+        )
         return result
 
     def _run_browser_use_task(self, instruction: str) -> str:
@@ -429,10 +572,144 @@ class ComputerHandler:
             path = target_dir / f"{safe_session}-{int(time.time() * 1000)}{suffix}"
             path.write_bytes(raw)
             session.screenshot_path = str(path)
+            self._emit(
+                "computer_approval_screenshot_captured",
+                {
+                    "session_id": session_id,
+                    "media_type": media_type,
+                    "bytes": len(raw),
+                },
+            )
             return {
                 "screenshot_path": str(path),
                 "screenshot_media_type": media_type,
             }
         except Exception as exc:
             logger.warning("approval screenshot capture failed for %s: %s", session_id, exc)
+            self._emit(
+                "computer_approval_screenshot_failed",
+                {"session_id": session_id, "error": _error_message(exc)[:200]},
+            )
             return {"screenshot_error": str(exc)[:200]}
+
+    def diagnostics_response(self, session_id: str) -> str:
+        self._emit("computer_diagnostic_started", {"session_id": session_id})
+        checks: list[tuple[str, str, str]] = []
+        backend = self._configured_backend()
+
+        use_degraded = self._check_capability("computer_use", "computer use unavailable")
+        control_degraded = self._check_capability("computer_control", "computer control unavailable")
+        checks.append(("computer_use", "degraded" if use_degraded else "ok", use_degraded or "available"))
+        checks.append(("computer_control", "degraded" if control_degraded else "ok", control_degraded or "available"))
+        checks.append(("backend", "ok" if backend != "unavailable" else "degraded", backend))
+
+        checks.append(self._diagnose_pyautogui_display())
+        checks.append(self._diagnose_screenshot())
+        checks.append(self._diagnose_browser_use())
+        checks.append(self._diagnose_model_credentials(backend))
+
+        status = "ok" if all(item[1] == "ok" for item in checks) else "degraded"
+        payload = {
+            "session_id": session_id,
+            "status": status,
+            "backend": backend,
+            "checks": [
+                {"name": name, "status": check_status, "detail": detail}
+                for name, check_status, detail in checks
+            ],
+        }
+        self._emit("computer_diagnostic_result", payload)
+
+        lines = [f"Diagnostico Computer Use: {status}", f"Backend configurado: {backend}", "Checks:"]
+        for name, check_status, detail in checks:
+            lines.append(f"- {name}: {check_status} - {detail}")
+        return "\n".join(lines)
+
+    def _diagnose_pyautogui_display(self) -> tuple[str, str, str]:
+        try:
+            import pyautogui
+
+            size = pyautogui.size()
+            width = int(getattr(size, "width", 0))
+            height = int(getattr(size, "height", 0))
+        except Exception as exc:
+            return ("pyautogui_display", "degraded", _error_message(exc)[:160])
+        if width <= 0 or height <= 0:
+            return ("pyautogui_display", "degraded", f"{width}x{height}")
+        return ("pyautogui_display", "ok", f"{width}x{height}")
+
+    def _diagnose_screenshot(self) -> tuple[str, str, str]:
+        if self.computer is None or not hasattr(self.computer, "capture_screenshot"):
+            return ("screenshot", "degraded", "computer service unavailable")
+        try:
+            try:
+                screenshot = self.computer.capture_screenshot(exclude_terminals=False)
+            except TypeError:
+                screenshot = self.computer.capture_screenshot()
+            encoded = str(screenshot.get("data") or "")
+            media_type = str(screenshot.get("media_type") or "unknown")
+            if not encoded:
+                return ("screenshot", "degraded", f"empty screenshot data; media_type={media_type}")
+            return ("screenshot", "ok", f"{media_type}; encoded_bytes={len(encoded)}")
+        except Exception as exc:
+            return ("screenshot", "degraded", _error_message(exc)[:160])
+
+    def _diagnose_browser_use(self) -> tuple[str, str, str]:
+        if self.browser_use is None:
+            return ("browser_use", "degraded", "browser_use service unavailable")
+        cdp_url = str(getattr(self.browser_use, "cdp_url", "") or "").rstrip("/")
+        if not cdp_url:
+            return ("browser_use", "degraded", "missing cdp_url")
+        try:
+            with urllib.request.urlopen(f"{cdp_url}/json/version", timeout=2) as response:
+                raw = response.read(8192)
+            data = json.loads(raw.decode("utf-8"))
+            browser = str(data.get("Browser") or "unknown")
+            user_agent = str(data.get("User-Agent") or "")
+            headless = "headless" in user_agent.lower()
+            detail = f"{browser}; headless={headless}; cdp={cdp_url}"
+            return ("browser_use_cdp", "ok", detail)
+        except Exception as exc:
+            return ("browser_use_cdp", "degraded", f"{cdp_url}: {_error_message(exc)[:120]}")
+
+    def _diagnose_model_credentials(self, backend: str) -> tuple[str, str, str]:
+        if backend == "openai":
+            return (
+                "openai_api_key",
+                "ok" if bool(os.getenv("OPENAI_API_KEY")) else "degraded",
+                "configured" if bool(os.getenv("OPENAI_API_KEY")) else "missing",
+            )
+        if backend == "codex":
+            codex_backend = getattr(self.computer, "codex_backend", None)
+            cli_path = str(getattr(codex_backend, "cli_path", "") or "codex")
+            return ("codex_cli", "ok", cli_path)
+        return ("model_credentials", "degraded", "backend unavailable")
+
+    def _configured_backend(self) -> str:
+        if self.computer is None:
+            return "unavailable"
+        if getattr(self.computer, "codex_backend", None) is not None:
+            return "codex"
+        return "openai"
+
+    def _session_backend(self, session: Any) -> str:
+        if self._is_browser_use_session(session):
+            return "browser_use"
+        return self._configured_backend()
+
+    def _emit(self, event_type: str, payload: dict[str, Any]) -> None:
+        if self.observe is None:
+            return
+        try:
+            self.observe.emit(event_type, payload=payload)
+        except Exception:
+            logger.debug("computer diagnostic emit failed: %s", event_type, exc_info=True)
+
+
+def _instruction_hash(instruction: str) -> str:
+    return hashlib.sha256((instruction or "").encode("utf-8")).hexdigest()[:16]
+
+
+def _instruction_preview(instruction: str) -> str:
+    compact = " ".join((instruction or "").split())
+    return redact_text(compact, limit=180)

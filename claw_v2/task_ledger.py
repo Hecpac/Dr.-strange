@@ -9,10 +9,12 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from claw_v2.redaction import redact_sensitive
+from claw_v2.sqlite_runtime import connect_runtime_sqlite
 from claw_v2.task_completion import COMPLETION_CANDIDATES, validate_completion
+from claw_v2.turn_context import current_turn_id
 
 
-TERMINAL_STATUSES = frozenset({"succeeded", "failed", "timed_out", "cancelled", "lost"})
+TERMINAL_STATUSES = frozenset({"succeeded", "failed", "timed_out", "cancelled", "lost", "completed_unverified"})
 VALID_STATUSES = frozenset({"queued", "running", *TERMINAL_STATUSES})
 
 
@@ -28,7 +30,7 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
     runtime TEXT NOT NULL,
     provider TEXT,
     model TEXT,
-    status TEXT NOT NULL CHECK(status IN ('queued', 'running', 'succeeded', 'failed', 'timed_out', 'cancelled', 'lost')),
+    status TEXT NOT NULL CHECK(status IN ('queued', 'running', 'succeeded', 'failed', 'timed_out', 'cancelled', 'lost', 'completed_unverified')),
     notify_policy TEXT NOT NULL DEFAULT 'done_only',
     created_at REAL NOT NULL,
     started_at REAL,
@@ -90,12 +92,51 @@ class TaskLedger:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.observe = observe
-        self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
+        self._conn = connect_runtime_sqlite(self.db_path)
         self._lock = threading.Lock()
         with self._lock:
             self._conn.executescript(TASK_LEDGER_SCHEMA)
+            self._ensure_completed_unverified_status_locked()
             self._conn.commit()
+
+    def _ensure_completed_unverified_status_locked(self) -> None:
+        row = self._conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'agent_tasks'"
+        ).fetchone()
+        table_sql = str(row["sql"] if isinstance(row, sqlite3.Row) else row[0]) if row else ""
+        if "completed_unverified" in table_sql:
+            return
+        self._conn.executescript(
+            """
+            ALTER TABLE agent_tasks RENAME TO agent_tasks_old;
+            """
+        )
+        self._conn.executescript(TASK_LEDGER_SCHEMA)
+        self._conn.execute(
+            """
+            INSERT INTO agent_tasks (
+                task_id, session_id, channel, external_session_id, external_user_id,
+                objective, mode, runtime, provider, model, status, notify_policy,
+                created_at, started_at, completed_at, summary, error, verification_status,
+                artifacts_json, route_json, metadata_json, updated_at
+            )
+            SELECT
+                task_id, session_id, channel, external_session_id, external_user_id,
+                objective, mode, runtime, provider, model, status, notify_policy,
+                created_at, started_at, completed_at, summary, error, verification_status,
+                artifacts_json, route_json, metadata_json, updated_at
+            FROM agent_tasks_old
+            """
+        )
+        self._conn.execute("DROP TABLE agent_tasks_old")
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_agent_tasks_session_updated "
+            "ON agent_tasks(session_id, updated_at DESC)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_agent_tasks_status_updated "
+            "ON agent_tasks(status, updated_at DESC)"
+        )
 
     def create(
         self,
@@ -119,6 +160,11 @@ class TaskLedger:
         route = redact_sensitive(dict(route or {}), limit=0)
         metadata = redact_sensitive(dict(metadata or {}), limit=0)
         artifacts = redact_sensitive(dict(artifacts or {}), limit=0)
+        # P0-B: stamp the active turn_id (if any) so behavior receipts can
+        # join `agent_tasks.metadata_json.turn_id` with observe + approvals.
+        active_turn_id = current_turn_id()
+        if active_turn_id and isinstance(metadata, dict) and "turn_id" not in metadata:
+            metadata["turn_id"] = active_turn_id
         record = TaskRecord(
             task_id=task_id,
             session_id=session_id,
@@ -292,6 +338,15 @@ class TaskLedger:
         cutoff = time.time() - older_than_seconds
         now = time.time()
         with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT *
+                FROM agent_tasks
+                WHERE status = 'running'
+                  AND updated_at < ?
+                """,
+                (cutoff,),
+            ).fetchall()
             cur = self._conn.execute(
                 """
                 UPDATE agent_tasks
@@ -307,8 +362,12 @@ class TaskLedger:
             )
             self._conn.commit()
             changed = cur.rowcount
+        reconciled = [self.get(str(row["task_id"])) for row in rows]
         if changed:
             self._emit("task_ledger_reconciled_lost", {"count": changed, "older_than_seconds": older_than_seconds})
+            for record in reconciled:
+                if record is not None:
+                    self._emit("task_ledger_terminal", record.to_dict())
         return int(changed or 0)
 
     def reconcile_false_successes(self, *, limit: int = 100) -> int:
@@ -355,8 +414,8 @@ class TaskLedger:
                 self._conn.execute(
                     """
                     UPDATE agent_tasks
-                    SET status = 'failed',
-                        completed_at = COALESCE(completed_at, ?),
+                    SET status = 'running',
+                        completed_at = NULL,
                         error = ?,
                         verification_status = ?,
                         metadata_json = ?,
@@ -364,7 +423,6 @@ class TaskLedger:
                     WHERE task_id = ?
                     """,
                     (
-                        now,
                         error,
                         verification_status,
                         json.dumps(metadata, sort_keys=True),

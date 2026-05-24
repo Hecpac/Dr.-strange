@@ -21,11 +21,14 @@ Two flavors:
 from __future__ import annotations
 
 import contextlib
+import logging
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Iterator
 
 from claw_v2.approval import ApprovalManager, PendingApproval
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:  # avoid circular at runtime
     from claw_v2.tools import ApprovalGate, ToolDefinition
@@ -109,7 +112,8 @@ def build_telegram_approval_gate(
 
     `notifier`, if provided, is invoked synchronously with the PendingApproval
     so the bot can push a Telegram alert to Hector. Notifier failures are
-    swallowed — the approval record itself is the source of truth.
+    logged at ERROR level but do not block — the approval record itself is
+    the source of truth.
     """
 
     def gate(definition: "ToolDefinition", args: dict) -> None:
@@ -135,7 +139,9 @@ def build_telegram_approval_gate(
             try:
                 notifier(pending)
             except Exception:
-                pass
+                logger.exception(
+                    "approval notifier failed for %s", pending.approval_id
+                )
         raise ApprovalPending(
             approval_id=pending.approval_id,
             token=pending.token,

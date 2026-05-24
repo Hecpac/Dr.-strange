@@ -142,10 +142,9 @@ class ToolPolicyDataclassTests(unittest.TestCase):
         self.assertTrue(policy.read_only)
         self.assertIn("daemon", policy.allowed_contexts)
 
-    def test_unknown_tool_returns_default(self) -> None:
-        policy = policy_for("never.heard.of")
-        self.assertEqual(policy.name, "<default>")
-        self.assertFalse(policy.read_only)
+    def test_unknown_tool_fails_closed(self) -> None:
+        with self.assertRaises(KeyError):
+            policy_for("never.heard.of")
 
 
 class StrictToolSchemaTests(unittest.TestCase):
@@ -376,12 +375,31 @@ class ConfigLoadingTests(unittest.TestCase):
             "Write",
             "Edit",
             "Bash",
+            "Glob",
+            "Grep",
+            "WebSearch",
+            "WebFetch",
+            "SearchMemory",
+            "WikiSearch",
+            "WikiLint",
+            "WikiGraph",
+            "SkillList",
+            "SkillGenerate",
             "social.publish",
             "deploy.production",
             "git.force_push",
             "file.delete",
             "WikiDelete",
+            "A2ASend",
+            "HeyGenVideo",
+            "GPTImage",
+            "AnalyzeImage",
+            "FirecrawlScrape",
+            "FirecrawlSearch",
+            "FirecrawlExtract",
             "SkillExecute",
+            "terminal.open",
+            "notebooklm.create",
         }
         missing = required - set(TOOL_POLICIES.keys())
         self.assertFalse(missing, msg=f"missing tools after JSON load: {missing}")

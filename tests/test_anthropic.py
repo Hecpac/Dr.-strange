@@ -12,6 +12,7 @@ from claw_v2.adapters.anthropic import (
     IDENTITY_OVERRIDE,
     SILENCE_DIRECTIVE,
     create_claude_sdk_executor,
+    _safe_runtime_policy_reason,
 )
 from claw_v2.adapters.base import AdapterError, AdapterUnavailableError, LLMRequest
 from claw_v2.llm import LLMRouter
@@ -21,6 +22,15 @@ from tests.helpers import make_config
 
 
 class AnthropicIntegrationTests(unittest.TestCase):
+    def test_runtime_policy_reason_hides_raw_whitelist_error(self) -> None:
+        reason = _safe_runtime_policy_reason(
+            "binary 'brew' requires higher privilege level (not in the allowed whitelist)"
+        )
+
+        self.assertEqual(reason, "command 'brew' is blocked by local execution policy")
+        self.assertNotIn("allowed whitelist", reason)
+        self.assertNotIn("higher privilege level", reason)
+
     def test_executor_fails_explicitly_when_sdk_package_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = make_config(Path(tmpdir))
