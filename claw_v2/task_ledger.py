@@ -11,6 +11,7 @@ from typing import Any, Iterable
 from claw_v2.redaction import redact_sensitive
 from claw_v2.sqlite_runtime import connect_runtime_sqlite
 from claw_v2.task_completion import COMPLETION_CANDIDATES, validate_completion
+from claw_v2.turn_context import current_turn_id
 
 
 TERMINAL_STATUSES = frozenset({"succeeded", "failed", "timed_out", "cancelled", "lost", "completed_unverified"})
@@ -159,6 +160,11 @@ class TaskLedger:
         route = redact_sensitive(dict(route or {}), limit=0)
         metadata = redact_sensitive(dict(metadata or {}), limit=0)
         artifacts = redact_sensitive(dict(artifacts or {}), limit=0)
+        # P0-B: stamp the active turn_id (if any) so behavior receipts can
+        # join `agent_tasks.metadata_json.turn_id` with observe + approvals.
+        active_turn_id = current_turn_id()
+        if active_turn_id and isinstance(metadata, dict) and "turn_id" not in metadata:
+            metadata["turn_id"] = active_turn_id
         record = TaskRecord(
             task_id=task_id,
             session_id=session_id,

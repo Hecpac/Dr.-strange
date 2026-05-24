@@ -94,7 +94,7 @@ CREATE TABLE IF NOT EXISTS task_outcomes (
     task_id TEXT NOT NULL,
     description TEXT NOT NULL,
     approach TEXT NOT NULL,
-    outcome TEXT NOT NULL CHECK(outcome IN ('success', 'failure', 'partial')),
+    outcome TEXT NOT NULL CHECK(outcome IN ('success', 'failure', 'partial', 'usable_reply_unverified')),
     lesson TEXT NOT NULL,
     error_snippet TEXT,
     retries INTEGER NOT NULL DEFAULT 0,
@@ -362,6 +362,159 @@ class MemoryStore:
         self._lock = threading.Lock()
         self._migrate()
 
+    def _ensure_task_outcome_usable_reply_unverified_locked(self) -> None:
+        """Crash-safe migration that widens task_outcomes.outcome CHECK to
+        include ``usable_reply_unverified``.
+
+        Three input states are handled:
+          1. Steady state — new CHECK present, no ``task_outcomes_old``.
+             Fast path: nothing to do.
+          2. Legacy state — old CHECK present, no ``task_outcomes_old``.
+             Run the full migration (RENAME → CREATE → INSERT → DROP)
+             inside a single ``BEGIN IMMEDIATE`` transaction.
+          3. Orphan state — ``task_outcomes_old`` survives a previous
+             crash mid-migration. Resume: ensure the new-CHECK table
+             exists, copy rows from ``task_outcomes_old``, verify count
+             equality, drop the orphan.
+
+        Verifies row count before dropping so a partial copy never
+        silently destroys data. Any error rolls back the whole step.
+        """
+        live_row = self._conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='task_outcomes'"
+        ).fetchone()
+        has_new_check = bool(live_row and "usable_reply_unverified" in str(live_row[0] or ""))
+        has_orphan_old = (
+            self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_outcomes_old'"
+            ).fetchone()
+            is not None
+        )
+        # Fast path: steady state.
+        if has_new_check and not has_orphan_old:
+            return
+
+        # Column constraints must match the production post-ADD-COLUMN
+        # shape: `tags` is NOT NULL DEFAULT '[]' since
+        # _MIGRATION_ADD_OUTCOME_TAGS. Matching the live shape keeps
+        # downstream consumers stable when the migration recreates the
+        # table.
+        new_check_schema = (
+            """
+            CREATE TABLE task_outcomes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_type TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                description TEXT NOT NULL,
+                approach TEXT NOT NULL,
+                outcome TEXT NOT NULL CHECK(outcome IN ('success', 'failure', 'partial', 'usable_reply_unverified')),
+                lesson TEXT NOT NULL,
+                error_snippet TEXT,
+                retries INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                tags TEXT NOT NULL DEFAULT '[]',
+                predicted_confidence REAL,
+                feedback TEXT
+            )
+            """
+        )
+
+        with self._lock:
+            try:
+                # Use a single BEGIN IMMEDIATE so any failure (including
+                # power loss) rolls back to a consistent pre-step state
+                # instead of leaving an orphan + missing new table.
+                self._conn.execute("BEGIN IMMEDIATE")
+
+                live_sql_row = self._conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='task_outcomes'"
+                ).fetchone()
+                live_has_new_check = bool(
+                    live_sql_row and "usable_reply_unverified" in str(live_sql_row[0] or "")
+                )
+                orphan_present = (
+                    self._conn.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_outcomes_old'"
+                    ).fetchone()
+                    is not None
+                )
+
+                # Step 1: make sure a new-CHECK ``task_outcomes`` exists.
+                if not live_has_new_check:
+                    if live_sql_row is not None:
+                        # Legacy live table — rename to _old so we can copy
+                        # from it after creating the new schema.
+                        if orphan_present:
+                            # Defensive: should never happen because a live
+                            # legacy table cannot coexist with an orphan
+                            # named the same way, but cover the case.
+                            raise sqlite3.OperationalError(
+                                "both task_outcomes (legacy CHECK) and "
+                                "task_outcomes_old exist; manual review needed"
+                            )
+                        self._conn.execute(
+                            "ALTER TABLE task_outcomes RENAME TO task_outcomes_old"
+                        )
+                        orphan_present = True
+                    self._conn.execute(new_check_schema)
+
+                # Step 2: if an orphan _old exists (either from a previous
+                # crash OR from the rename just above), drain it into the
+                # new table and verify the copy is lossless.
+                orphan_present = (
+                    self._conn.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_outcomes_old'"
+                    ).fetchone()
+                    is not None
+                )
+                if orphan_present:
+                    old_count = int(
+                        self._conn.execute("SELECT COUNT(*) FROM task_outcomes_old").fetchone()[0]
+                    )
+                    new_count_before = int(
+                        self._conn.execute("SELECT COUNT(*) FROM task_outcomes").fetchone()[0]
+                    )
+                    # Only do the copy when the new table is empty. A
+                    # partially-filled new table indicates a developer-driven
+                    # interleave that is not in the canonical migration path;
+                    # in that case we still validate counts below and refuse
+                    # to drop _old if anything looks lossy.
+                    if new_count_before == 0:
+                        old_pragma = self._conn.execute(
+                            "PRAGMA table_info(task_outcomes_old)"
+                        ).fetchall()
+                        new_pragma = self._conn.execute(
+                            "PRAGMA table_info(task_outcomes)"
+                        ).fetchall()
+                        new_cols = {r[1] for r in new_pragma}
+                        shared = [r[1] for r in old_pragma if r[1] in new_cols]
+                        if not shared:
+                            raise sqlite3.OperationalError(
+                                "task_outcomes_old has no columns in common with the new schema"
+                            )
+                        col_list = ", ".join(shared)
+                        self._conn.execute(
+                            f"INSERT INTO task_outcomes ({col_list}) "
+                            f"SELECT {col_list} FROM task_outcomes_old"
+                        )
+                    new_count_after = int(
+                        self._conn.execute("SELECT COUNT(*) FROM task_outcomes").fetchone()[0]
+                    )
+                    # Lossless guard: never drop _old if rows would be lost.
+                    if new_count_after < old_count:
+                        raise sqlite3.OperationalError(
+                            f"task_outcomes copy lossy: old={old_count} new={new_count_after}"
+                        )
+                    self._conn.execute("DROP TABLE task_outcomes_old")
+
+                self._conn.commit()
+            except sqlite3.Error as exc:
+                try:
+                    self._conn.rollback()
+                except sqlite3.Error:
+                    logger.debug("task_outcomes migration rollback failed", exc_info=True)
+                logger.warning("task_outcomes CHECK migration skipped: %s", exc)
+
     def _migrate(self) -> None:
         cursor = self._conn.execute("PRAGMA table_info(facts)")
         columns = {row[1] for row in cursor.fetchall()}
@@ -384,6 +537,11 @@ class MemoryStore:
                     self._conn.commit()
                 except sqlite3.OperationalError:
                     pass
+        # P0-E: extend the outcome CHECK constraint so we can distinguish
+        # "brain produced a usable reply but tools were not verified" from
+        # plain success. Existing rows are all valid in both old and new
+        # constraints, so the copy is lossless.
+        self._ensure_task_outcome_usable_reply_unverified_locked()
         cursor_cal = self._conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='calibration_stats'"
         )
@@ -891,6 +1049,39 @@ class MemoryStore:
             cursor = self._conn.execute("DELETE FROM facts WHERE key = ?", (key,))
             self._conn.commit()
             return cursor.rowcount > 0
+
+    def get_fact(self, key: str) -> dict | None:
+        row = self._conn.execute(
+            """
+            SELECT id, key, value, source, source_trust, confidence, entity_tags, agent_name, created_at
+            FROM facts
+            WHERE key = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (key,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def bump_fact_confidence(self, key: str, delta: float = 0.05, *, cap: float = 1.0) -> float | None:
+        """Increase confidence of the most recent fact with `key` by `delta`,
+        capped at `cap`. Returns the new confidence, or None if no row matched.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id, confidence FROM facts WHERE key = ? ORDER BY id DESC LIMIT 1",
+                (key,),
+            ).fetchone()
+            if row is None:
+                return None
+            current = float(row["confidence"] or 0.0)
+            new_value = min(cap, current + float(delta))
+            self._conn.execute(
+                "UPDATE facts SET confidence = ? WHERE id = ?",
+                (new_value, int(row["id"])),
+            )
+            self._conn.commit()
+            return new_value
 
     def search_facts(self, query: str, limit: int = 10, agent_name: str | None = None) -> list[dict]:
         if agent_name:
