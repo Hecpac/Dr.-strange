@@ -14,6 +14,23 @@ from claw_v2.turn_context import current_turn_id
 
 APPROVAL_TTL_SECONDS = 900  # 15 minutes
 
+# Semantic axes — referenced by ApprovalManager.create defaults and by
+# downstream consumers (telegram notifier, backpressure counter, audit).
+DEFAULT_REQUESTED_BY = "unknown"
+RESOLVED_BY_HUMAN = "human"
+RESOLVED_BY_SYSTEM_AUTO = "system_auto"
+RESOLVED_BY_EXPIRED = "expired"
+
+# Default values applied when reading an approval JSON file that pre-dates
+# the semantic-fields migration. Centralised so adding another axis only
+# requires one update.
+_SEMANTIC_DEFAULTS: dict[str, object] = {
+    "risk_basis": None,
+    "requested_by": DEFAULT_REQUESTED_BY,
+    "visible_to_user": True,
+    "resolved_by": None,
+}
+
 
 @dataclass(slots=True)
 class PendingApproval:
@@ -29,7 +46,16 @@ class ApprovalManager:
         self.root.mkdir(parents=True, exist_ok=True)
         self.secret = secret.encode("utf-8")
 
-    def create(self, action: str, summary: str, metadata: dict | None = None) -> PendingApproval:
+    def create(
+        self,
+        action: str,
+        summary: str,
+        metadata: dict | None = None,
+        *,
+        risk_basis: str | None = None,
+        requested_by: str | None = None,
+        visible_to_user: bool = True,
+    ) -> PendingApproval:
         approval_id = secrets.token_hex(8)
         token = secrets.token_urlsafe(12)
         # P0-B: stamp the active turn_id on approval metadata so a single
@@ -46,6 +72,11 @@ class ApprovalManager:
             "token_hash": self._digest(token),
             "status": "pending",
             "created_at": time.time(),
+            # P2 wave: semantic axes (R3 of the 2026-05-23 audit).
+            "risk_basis": risk_basis,
+            "requested_by": requested_by if requested_by is not None else DEFAULT_REQUESTED_BY,
+            "visible_to_user": bool(visible_to_user),
+            "resolved_by": None,
         }
         self._path_for(approval_id).write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return PendingApproval(approval_id=approval_id, action=action, summary=summary, token=token)
@@ -55,10 +86,14 @@ class ApprovalManager:
             created = payload.get("created_at", 0)
             if time.time() - created > APPROVAL_TTL_SECONDS:
                 payload["status"] = "expired"
+                payload["resolved_by"] = RESOLVED_BY_EXPIRED
+                payload["resolved_at"] = time.time()
                 payload["_result"] = False
                 return
             valid = hmac.compare_digest(payload["token_hash"], self._digest(token))
             payload["status"] = "approved" if valid else "rejected"
+            payload["resolved_by"] = RESOLVED_BY_HUMAN
+            payload["resolved_at"] = time.time()
             payload["_result"] = valid
         result = self._locked_update(approval_id, _do_approve)
         return result.pop("_result", False)
@@ -68,16 +103,25 @@ class ApprovalManager:
             created = payload.get("created_at", 0)
             if time.time() - created > APPROVAL_TTL_SECONDS:
                 payload["status"] = "expired"
+                payload["resolved_by"] = RESOLVED_BY_EXPIRED
+                payload["resolved_at"] = time.time()
                 payload["_result"] = False
                 return
             payload["status"] = "approved"
+            payload["resolved_by"] = RESOLVED_BY_SYSTEM_AUTO
+            payload["resolved_at"] = time.time()
             payload["_result"] = True
 
         result = self._locked_update(approval_id, _do_approve)
         return result.pop("_result", False)
 
     def reject(self, approval_id: str) -> None:
-        self._locked_update(approval_id, lambda p: p.__setitem__("status", "rejected"))
+        def _do_reject(payload: dict) -> None:
+            payload["status"] = "rejected"
+            payload["resolved_by"] = RESOLVED_BY_HUMAN
+            payload["resolved_at"] = time.time()
+
+        self._locked_update(approval_id, _do_reject)
 
     def archive(self, approval_id: str, *, reason: str = "") -> bool:
         def _do_archive(payload: dict) -> None:
@@ -86,6 +130,8 @@ class ApprovalManager:
                 return
             payload["status"] = "archived"
             payload["archived_at"] = time.time()
+            payload["resolved_by"] = RESOLVED_BY_HUMAN
+            payload["resolved_at"] = time.time()
             if reason:
                 payload["archive_reason"] = reason
             payload["_result"] = True
@@ -122,7 +168,12 @@ class ApprovalManager:
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
-        return json.loads(raw.decode("utf-8"))
+        payload = json.loads(raw.decode("utf-8"))
+        # Backwards-compat: approvals persisted before the semantic-fields
+        # migration must still surface every axis to callers.
+        for key, default in _SEMANTIC_DEFAULTS.items():
+            payload.setdefault(key, default)
+        return payload
 
     def list_pending(self) -> list[dict]:
         pending: list[dict] = []
@@ -131,6 +182,14 @@ class ApprovalManager:
             if payload.get("status") == "pending":
                 pending.append(payload)
         return pending
+
+    def list_pending_visible_to_user(self) -> list[dict]:
+        """Subset of ``list_pending()`` restricted to approvals that should
+        be surfaced in Telegram. Daemon-internal kairos approvals can opt
+        out via ``visible_to_user=False`` so the user-facing inbox stays
+        focused on the ones that genuinely need a human signal.
+        """
+        return [p for p in self.list_pending() if p.get("visible_to_user", True)]
 
     def _path_for(self, approval_id: str) -> Path:
         return self.root / f"{approval_id}.json"
