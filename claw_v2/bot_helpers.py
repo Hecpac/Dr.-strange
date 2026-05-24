@@ -12,6 +12,11 @@ from urllib.parse import urlsplit
 from dataclasses import dataclass
 
 from claw_v2.coordinator import CoordinatorResult, WorkerTask
+from claw_v2.turn_context import (  # P0-B: re-export the turn_id helpers from bot_helpers for callers that already pull from this module.
+    current_turn_id,
+    new_turn_id,
+    turn_id_context,
+)
 
 _CRITICAL_WORKER_ERROR_PREFIX = "critical_worker_error:"
 _CRITICAL_WORKER_VISIBLE_MESSAGE = (
@@ -21,7 +26,10 @@ _CRITICAL_WORKER_VISIBLE_MESSAGE = (
 
 __all__ = [
     "current_meta_introspection_kind",
+    "current_turn_id",
     "meta_introspection_context",
+    "new_turn_id",
+    "turn_id_context",
     "MetaIntrospectionIntent",
     "OwnerDelegationIntent",
     "TelegramImperativeIntent",

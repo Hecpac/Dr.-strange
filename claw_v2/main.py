@@ -24,6 +24,10 @@ from claw_v2.agents import (
     wiki_quality_evaluator,
 )
 from claw_v2.approval import ApprovalManager
+from claw_v2.self_improve_backpressure import (
+    SELF_IMPROVE_MAX_PENDING_PER_ACTION,
+    should_pause_self_improve,
+)
 from claw_v2.approval_gate import (
     build_system_auto_approve_gate,
     build_telegram_approval_gate,
@@ -965,6 +969,7 @@ def _setup_scheduler(
     task_ledger: TaskLedger,
     pipeline: PipelineService,
     startup_health: StartupHealthReport,
+    approvals: ApprovalManager,
 ) -> tuple[CronScheduler, AutoDreamService, WikiService, SkillRegistry, A2AService]:
     def _cron_error_sink(job: ScheduledJob, exc: BaseException) -> None:
         observe.emit(
@@ -1050,9 +1055,28 @@ def _setup_scheduler(
             )
 
         agents = auto_research.list_agents()
+        agents_paused_for_backlog = 0
         for agent_name in agents:
             state = auto_research.inspect(agent_name)
             if state.get("paused"):
+                continue
+            # P0-G: skip experiments when this agent's promote_* backlog is
+            # already saturated; spamming Hector with duplicate proposals
+            # turns the approval queue into noise.
+            paused_for_backlog, pending_count = should_pause_self_improve(
+                approvals, agent_name
+            )
+            if paused_for_backlog:
+                agents_paused_for_backlog += 1
+                observe.emit(
+                    "self_improve_paused_backlog_too_high",
+                    payload={
+                        "agent": agent_name,
+                        "pending_count": pending_count,
+                        "action_kind": f"promote_{agent_name}",
+                        "threshold": SELF_IMPROVE_MAX_PENDING_PER_ACTION,
+                    },
+                )
                 continue
             result = auto_research.run_loop(agent_name, max_experiments=5)
             observe.emit(
@@ -1065,7 +1089,13 @@ def _setup_scheduler(
                     "last_metric": result.last_metric,
                 },
             )
-        observe.emit("self_improve_complete", payload={"agents_run": len(agents)})
+        observe.emit(
+            "self_improve_complete",
+            payload={
+                "agents_run": len(agents),
+                "agents_paused_for_backlog": agents_paused_for_backlog,
+            },
+        )
 
     def _morning_brief_handler() -> None:
         agents = auto_research.list_agents()
@@ -1465,6 +1495,7 @@ def build_runtime(
         task_ledger=task_ledger,
         pipeline=pipeline,
         startup_health=startup_health,
+        approvals=approvals,
     )
     daemon.scheduler = scheduler
     brain.wiki = wiki

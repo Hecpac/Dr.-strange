@@ -8,6 +8,10 @@ from pathlib import Path
 from typing import Callable
 
 from claw_v2.sqlite_runtime import connect_runtime_sqlite
+from claw_v2.turn_context import (
+    CRITICAL_OBSERVE_EVENTS_REQUIRING_TURN_ID,
+    current_turn_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +89,22 @@ class ObserveStream:
         from claw_v2.redaction import redact_sensitive
 
         clean_payload = redact_sensitive(scrub_for_persistence(payload or {}), limit=0)
+        # P0-B: stamp the active turn_id (if any) on every persisted payload so
+        # behavior receipts can join observe, task ledger, and approval rows by
+        # one column instead of fragile timestamp windows. When a critical
+        # event fires WITHOUT a turn_id context, emit a sibling
+        # ``turn_id_missing`` so the gap is visible.
+        active_turn_id = current_turn_id()
+        if isinstance(clean_payload, dict):
+            if active_turn_id and "turn_id" not in clean_payload:
+                clean_payload["turn_id"] = active_turn_id
+            emit_turn_id_missing = (
+                event_type in CRITICAL_OBSERVE_EVENTS_REQUIRING_TURN_ID
+                and "turn_id" not in clean_payload
+                and event_type != "turn_id_missing"
+            )
+        else:
+            emit_turn_id_missing = False
         with self._lock:
             self._conn.execute(
                 """
@@ -118,6 +138,13 @@ class ObserveStream:
                     cb(event_payload)
                 except Exception:
                     logger.exception("observe subscriber for %s failed", event_type)
+        if emit_turn_id_missing:
+            # Recurse with a sentinel payload; the early `event_type !=
+            # "turn_id_missing"` guard above prevents infinite recursion.
+            self.emit(
+                "turn_id_missing",
+                payload={"origin_event": event_type},
+            )
 
     def _ensure_schema(self) -> None:
         existing = {

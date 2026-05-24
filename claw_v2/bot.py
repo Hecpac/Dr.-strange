@@ -3785,35 +3785,106 @@ class BotService:
         content = self._final_render(session_id, content)
         if content != raw_content:
             self.brain.memory.replace_latest_assistant_message(session_id, raw_content, content)
-        if content == "Recibido. ¿Qué quieres que haga con esto?":
-            self._browse_handler._record_learning_outcome(
-                task_type="telegram_message",
-                session_id=session_id,
-                description=f"Bot returned fallback for message: {source_text[:200]}",
-                approach="brain.handle_message",
-                outcome="failure",
-                error_snippet=(raw_content or "empty_response")[:500],
-                lesson="When the brain returns empty output, ask a clarifying question and inspect prompt/context assembly.",
-                predicted_confidence=self.brain._last_confidence.get(session_id) or None,
-            )
-        else:
-            self._browse_handler._record_learning_outcome(
-                task_type="telegram_message",
-                session_id=session_id,
-                description=f"Handled message: {source_text[:200]}",
-                approach="brain.handle_message",
-                outcome="success",
-                lesson="The brain produced a usable reply for this conversational request.",
-                predicted_confidence=self.brain._last_confidence.get(session_id) or None,
-            )
-        self._remember_assistant_turn_state(session_id, source_text, content)
+        # P0-E: attach the brain tool-use ledger FIRST so the learning
+        # outcome can be derived from the ledger's terminal state
+        # (success / completed_unverified / failed) instead of being
+        # hardcoded to "success" for every non-empty reply.
         self._attach_brain_tool_use_ledger(
             session_id=session_id,
             response=response,
             source_text=source_text,
             runtime_channel=runtime_channel,
         )
+        brain_tool_use_record = self._lookup_recent_brain_tool_use_record(session_id)
+        self._remember_assistant_turn_state(session_id, source_text, content)
+        if content == "Recibido. ¿Qué quieres que haga con esto?":
+            outcome = self._classify_brain_outcome_value(
+                brain_tool_use_record, fallback="failure"
+            )
+            self._browse_handler._record_learning_outcome(
+                task_type="telegram_message",
+                session_id=session_id,
+                description=f"Bot returned fallback for message: {source_text[:200]}",
+                approach="brain.handle_message",
+                outcome=outcome,
+                error_snippet=(raw_content or "empty_response")[:500],
+                lesson="When the brain returns empty output, ask a clarifying question and inspect prompt/context assembly.",
+                predicted_confidence=self.brain._last_confidence.get(session_id) or None,
+            )
+        else:
+            outcome = self._classify_brain_outcome_value(
+                brain_tool_use_record, fallback="success"
+            )
+            lesson = (
+                "The brain produced a usable reply but the tool-use ledger is unverified; verifier should reconcile."
+                if outcome == "usable_reply_unverified"
+                else "The brain produced a usable reply for this conversational request."
+            )
+            self._browse_handler._record_learning_outcome(
+                task_type="telegram_message",
+                session_id=session_id,
+                description=f"Handled message: {source_text[:200]}",
+                approach="brain.handle_message",
+                outcome=outcome,
+                lesson=lesson,
+                predicted_confidence=self.brain._last_confidence.get(session_id) or None,
+            )
         return content
+
+    def _lookup_recent_brain_tool_use_record(self, session_id: str) -> Any:
+        """P0-E: return the most recent brain-fallback ledger row for this
+        session if one was created in the current turn (≤ 60s window).
+        Returns None when no brain tool-use ledger row exists yet — meaning
+        the turn was a pure chat with no tool calls.
+        """
+        if getattr(self, "task_ledger", None) is None:
+            return None
+        try:
+            candidates = self.task_ledger.list(session_id=session_id, limit=3)
+        except Exception:
+            return None
+        now = time.time()
+        for candidate in candidates:
+            if getattr(candidate, "mode", "") != "brain_fallback":
+                continue
+            updated_at = float(getattr(candidate, "updated_at", 0.0) or 0.0)
+            if updated_at <= 0.0 or now - updated_at > 60.0:
+                continue
+            return candidate
+        return None
+
+    @staticmethod
+    def _classify_brain_outcome_value(record: Any, *, fallback: str = "success") -> str:
+        """P0-E: choose the task_outcomes.outcome value that matches the
+        brain tool-use ledger's terminal state.
+
+        Args:
+          record: the brain tool-use ``TaskRecord`` (or None when no tools ran).
+          fallback: outcome to return when ``record`` is None (i.e. pure chat
+            with no tools). Caller may pass ``"failure"`` for empty replies.
+
+        Returns one of: "success", "usable_reply_unverified", "failure".
+        Behavioral audit found 144 success rows aligned against 91
+        completed_unverified ledger rows; this classifier closes that gap.
+        """
+        if record is None:
+            return fallback
+        status = str(getattr(record, "status", "") or "").lower()
+        verification = str(getattr(record, "verification_status", "") or "").lower()
+        if status == "failed" or verification == "failed":
+            return "failure"
+        if status == "completed_unverified" or verification in {
+            "needs_verification",
+            "missing_evidence",
+            "unverified",
+        }:
+            return "usable_reply_unverified"
+        if status == "succeeded" and verification in {"passed", "verified", "ok"}:
+            return "success"
+        # Defensive default: if the brain produced tools and we cannot
+        # confidently call them verified, treat the outcome as
+        # usable_reply_unverified rather than silently inflating success.
+        return "usable_reply_unverified"
 
     def _attach_brain_tool_use_ledger(
         self,
@@ -4009,6 +4080,18 @@ class BotService:
             "approval_event_count": len(approval_events),
             "substeps": self._brain_tooluse_substeps(tool_events, tool_failure_events, approval_events),
         }
+        # P0-D: populate `route` so the agent_tasks.channel column is
+        # non-NULL. Behavioral audit found 99/100 brain-tooluse rows had
+        # channel=NULL because this caller historically omitted `route=`.
+        # Channel preference: explicit runtime_channel → infer from session_id
+        # prefix → omit (column stays NULL for unknown surfaces).
+        route_channel = (runtime_channel or "").strip().lower() or (
+            "telegram" if session_id.startswith("tg-") else None
+        )
+        route_payload: dict[str, Any] = {}
+        if route_channel:
+            route_payload["channel"] = route_channel
+            route_payload["external_session_id"] = session_id
         try:
             self.task_ledger.create(
                 task_id=task_id,
@@ -4018,6 +4101,7 @@ class BotService:
                 mode="brain_fallback",
                 status="running",
                 notify_policy="none",
+                route=route_payload,
                 metadata=metadata,
                 artifacts=brain_artifacts,
             )

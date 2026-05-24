@@ -10,6 +10,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from claw_v2.turn_context import current_turn_id
+
 APPROVAL_TTL_SECONDS = 900  # 15 minutes
 
 
@@ -30,11 +32,17 @@ class ApprovalManager:
     def create(self, action: str, summary: str, metadata: dict | None = None) -> PendingApproval:
         approval_id = secrets.token_hex(8)
         token = secrets.token_urlsafe(12)
+        # P0-B: stamp the active turn_id on approval metadata so a single
+        # turn_id query can pull message + tools + ledger + approval together.
+        merged_metadata = dict(metadata or {})
+        active_turn_id = current_turn_id()
+        if active_turn_id and "turn_id" not in merged_metadata:
+            merged_metadata["turn_id"] = active_turn_id
         payload = {
             "approval_id": approval_id,
             "action": action,
             "summary": summary,
-            "metadata": metadata or {},
+            "metadata": merged_metadata,
             "token_hash": self._digest(token),
             "status": "pending",
             "created_at": time.time(),
