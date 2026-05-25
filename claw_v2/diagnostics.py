@@ -93,65 +93,68 @@ def _database_summary(
     except sqlite3.Error as exc:
         return {"present": True, "error": str(exc)}
     try:
-        summary: dict[str, Any] = {"present": True}
-        if _table_exists(conn, "observe_stream"):
-            summary["heartbeat"] = _heartbeat_summary(conn)
-            latest_errors = _latest_events(
-                conn,
-                event_types=(
-                    "scheduled_job_error",
-                    "daemon_tick_error",
-                    "llm_circuit_open",
-                    "llm_circuit_blocked",
-                    "nlm_research_failed",
-                    "nlm_research_degraded",
-                    "firecrawl_paused",
-                    "auto_research_adapter_error",
-                    "perf_optimizer_paused",
-                    "pipeline_poll_degraded",
-                    "telegram_transport_stop_error",
-                    "computer_session_failed",
-                    "computer_browser_use_timeout",
-                    "computer_screenshot_failed",
-                    "computer_approval_screenshot_failed",
-                ),
-                limit=limit,
-                hours=24,
-            )
-            latest_errors = _merge_events(
-                latest_errors,
-                _latest_computer_use_errors(conn, limit=limit, hours=24),
-                limit=limit,
-            )
-            actionable_errors, acknowledged_errors = _partition_acknowledged_events(
-                latest_errors,
-                acknowledgements or {},
-            )
-            summary["observe"] = {
-                "recent_events": _recent_events(conn, limit=limit),
-                "event_counts_24h": _event_counts_24h(conn),
-                "latest_errors": actionable_errors,
-                "acknowledged_errors": acknowledged_errors,
-            }
-        else:
-            summary["observe"] = {"present": False}
-        if _table_exists(conn, "agent_jobs"):
-            summary["jobs"] = {
-                "counts": _status_counts(conn, "agent_jobs"),
-                "active": _active_jobs(conn, limit=limit),
-            }
-        else:
-            summary["jobs"] = {"present": False}
-        if _table_exists(conn, "agent_tasks"):
-            summary["tasks"] = {
-                "counts": _status_counts(conn, "agent_tasks"),
-                "active": _active_tasks(conn, limit=limit),
-            }
-        else:
-            summary["tasks"] = {"present": False}
-        if _table_exists(conn, "cron_state"):
-            summary["cron"] = _cron_state(conn, limit=limit)
-        return summary
+        try:
+            summary: dict[str, Any] = {"present": True}
+            if _table_exists(conn, "observe_stream"):
+                summary["heartbeat"] = _heartbeat_summary(conn)
+                latest_errors = _latest_events(
+                    conn,
+                    event_types=(
+                        "scheduled_job_error",
+                        "daemon_tick_error",
+                        "llm_circuit_open",
+                        "llm_circuit_blocked",
+                        "nlm_research_failed",
+                        "nlm_research_degraded",
+                        "firecrawl_paused",
+                        "auto_research_adapter_error",
+                        "perf_optimizer_paused",
+                        "pipeline_poll_degraded",
+                        "telegram_transport_stop_error",
+                        "computer_session_failed",
+                        "computer_browser_use_timeout",
+                        "computer_screenshot_failed",
+                        "computer_approval_screenshot_failed",
+                    ),
+                    limit=limit,
+                    hours=24,
+                )
+                latest_errors = _merge_events(
+                    latest_errors,
+                    _latest_computer_use_errors(conn, limit=limit, hours=24),
+                    limit=limit,
+                )
+                actionable_errors, acknowledged_errors = _partition_acknowledged_events(
+                    latest_errors,
+                    acknowledgements or {},
+                )
+                summary["observe"] = {
+                    "recent_events": _recent_events(conn, limit=limit),
+                    "event_counts_24h": _event_counts_24h(conn),
+                    "latest_errors": actionable_errors,
+                    "acknowledged_errors": acknowledged_errors,
+                }
+            else:
+                summary["observe"] = {"present": False}
+            if _table_exists(conn, "agent_jobs"):
+                summary["jobs"] = {
+                    "counts": _status_counts(conn, "agent_jobs"),
+                    "active": _active_jobs(conn, limit=limit),
+                }
+            else:
+                summary["jobs"] = {"present": False}
+            if _table_exists(conn, "agent_tasks"):
+                summary["tasks"] = {
+                    "counts": _status_counts(conn, "agent_tasks"),
+                    "active": _active_tasks(conn, limit=limit),
+                }
+            else:
+                summary["tasks"] = {"present": False}
+            if _table_exists(conn, "cron_state"):
+                summary["cron"] = _cron_state(conn, limit=limit)
+            return summary
+        except sqlite3.Error as exc:
+            return {"present": True, "error": str(exc)}
     finally:
         conn.close()
 
@@ -500,8 +503,21 @@ def _checks(*, commands: dict[str, dict[str, Any]], database: dict[str, Any], po
     )
     web_serving_known = heartbeat.get("web_transport_serving")
     web_thread_dead = web_serving_known is False
+    fresh_heartbeat = heartbeat_present and not heartbeat_stale
+    transient_port_probe_failure = (
+        not port_ok
+        and process_ok
+        and fresh_heartbeat
+        and not web_thread_dead
+    )
     status = "healthy" if process_ok and port_ok and db_ok and launchd_ok and latest_errors == 0 and not heartbeat_stale and not web_thread_dead else "attention"
-    if not process_ok or not port_ok or not db_ok or heartbeat_stale or web_thread_dead:
+    if (
+        not process_ok
+        or not db_ok
+        or heartbeat_stale
+        or web_thread_dead
+        or (not port_ok and not transient_port_probe_failure)
+    ):
         status = "critical"
     return {
         "status": status,

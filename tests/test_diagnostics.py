@@ -49,6 +49,18 @@ def _sandboxed_process_runner(args: list[str], **_: object) -> subprocess.Comple
     return _completed(args, 1, "", "unknown command")
 
 
+def _port_probe_failure_runner(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+    if args[:2] == ["launchctl", "list"]:
+        return _completed(args, 0, "123\t0\tcom.pachano.claw\n")
+    if args[:2] == ["launchctl", "print"]:
+        return _completed(args, 0, "state = running\n")
+    if args[:2] == ["pgrep", "-fl"]:
+        return _completed(args, 0, "123 .venv/bin/python -m claw_v2.main\n")
+    if args and args[0] == "lsof":
+        return _completed(args, 1, "", "")
+    return _completed(args, 1, "", "unknown command")
+
+
 def _leaky_runner(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
     if args[:2] == ["launchctl", "list"]:
         return _completed(args, 0, "OPENAI_API_KEY=sk-test-very-secret-token-123456\n")
@@ -121,6 +133,18 @@ class DiagnosticsTests(unittest.TestCase):
             self.assertEqual(report["checks"]["status"], "critical")
             self.assertFalse(report["checks"]["database_readable"])
             self.assertEqual(report["database"], {"present": False, "error": "database not found"})
+
+    def test_malformed_database_reports_error_without_raising(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            db_path.write_text("not sqlite", encoding="utf-8")
+
+            report = collect_diagnostics(db_path=db_path, port=8765, runner=_healthy_runner)
+
+            self.assertEqual(report["checks"]["status"], "critical")
+            self.assertFalse(report["checks"]["database_readable"])
+            self.assertTrue(report["database"]["present"])
+            self.assertIn("file is not a database", report["database"]["error"])
 
     def test_old_actionable_events_do_not_keep_status_in_attention(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -243,6 +267,45 @@ class HeartbeatTests(unittest.TestCase):
 
             self.assertEqual(report["checks"]["status"], "critical")
             self.assertEqual(report["checks"]["web_transport_serving"], False)
+
+    def test_fresh_heartbeat_prevents_transient_port_probe_from_restartable_critical(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            observe = ObserveStream(db_path)
+            observe.emit(
+                "daemon_heartbeat",
+                payload={"pid": 99, "ts": time.time(), "web_transport_serving": True},
+            )
+
+            report = collect_diagnostics(
+                db_path=db_path,
+                port=8765,
+                runner=_port_probe_failure_runner,
+            )
+
+            self.assertEqual(report["checks"]["status"], "attention")
+            self.assertFalse(report["checks"]["port_listening"])
+            self.assertTrue(report["checks"]["heartbeat_present"])
+            self.assertFalse(report["checks"]["heartbeat_stale"])
+
+    def test_fresh_liveness_heartbeat_without_web_state_prevents_port_probe_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            observe = ObserveStream(db_path)
+            observe.emit(
+                "daemon_heartbeat",
+                payload={"pid": 99, "ts": time.time(), "source": "daemon_liveness_loop"},
+            )
+
+            report = collect_diagnostics(
+                db_path=db_path,
+                port=8765,
+                runner=_port_probe_failure_runner,
+            )
+
+            self.assertEqual(report["checks"]["status"], "attention")
+            self.assertFalse(report["checks"]["port_listening"])
+            self.assertIsNone(report["checks"]["web_transport_serving"])
 
     def test_missing_heartbeat_does_not_penalize_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
