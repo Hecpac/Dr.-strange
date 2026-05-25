@@ -206,12 +206,22 @@ class HeygenDeliveryService:
             url, data=body, method="POST",
             headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
         )
+
+        def _redact(text: str) -> str:
+            return text.replace(token, "[REDACTED_TOKEN]") if token else text
+
         try:
             with urllib.request.urlopen(req, timeout=300) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             return {"ok": False, "http_error": e.code,
-                    "body": e.read().decode("utf-8", errors="replace")}
+                    "body": _redact(e.read().decode("utf-8", errors="replace"))}
+        except urllib.error.URLError as e:
+            return {"ok": False, "error": "telegram_url_error",
+                    "detail": _redact(str(getattr(e, "reason", e)))}
+        except Exception as e:
+            return {"ok": False, "error": "telegram_unexpected_error",
+                    "detail": _redact(f"{type(e).__name__}: {e}")}
 
     def auto_deliver(
         self,

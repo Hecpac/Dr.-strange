@@ -49,6 +49,28 @@ class RequestLooksActionableTests(unittest.TestCase):
         self.assertFalse(_request_looks_actionable("ok"))
         self.assertFalse(_request_looks_actionable("status"))
 
+    def test_common_spanish_imperatives_match(self) -> None:
+        """Regression: prior allowlist missed verbs Hector actually types,
+        causing recovery to drop the task on provider error."""
+        for phrase in (
+            "parchea el bug del login que se rompió ayer",
+            "finaliza el deploy a producción",
+            "termina la migración de la tabla users",
+            "continúa con la tarea del onboarding",
+            "continua con eso por favor",
+            "sigue con la auditoría de los webhooks",
+            "dale al pipeline de QTS",
+            "aplica el patch en main",
+            "borra el branch viejo de feature/x",
+            "elimina las filas duplicadas en orders",
+            "envía el reporte de fallos al admin",
+            "cierra el ticket de stripe",
+        ):
+            self.assertTrue(
+                _request_looks_actionable(phrase),
+                f"expected actionable: {phrase!r}",
+            )
+
 
 class _BrainRecoveryHarness(unittest.TestCase):
     def setUp(self) -> None:

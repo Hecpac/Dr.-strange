@@ -302,7 +302,7 @@ try:
             const title = (document.querySelector('meta[property=\"og:title\"]')?.content) || '';
             const headerText = (document.querySelector('header')?.innerText || '').slice(0,1200);
             const notFound = (document.body.innerText||'').includes('no está disponible') || (document.body.innerText||'').includes(\"Sorry, this page isn't available\");
-            const linkEls = Array.from(document.querySelectorAll('article a')).map(a => a.href).filter(h => /\\\\/p\\\\/|\\\\/reel\\\\//.test(h));
+            const linkEls = Array.from(document.querySelectorAll('article a')).map(a => a.href).filter(h => h.indexOf('/p/') !== -1 || h.indexOf('/reel/') !== -1);
             return {{ meta, title, headerText, notFound, postLinks: Array.from(new Set(linkEls)).slice(0, RECENT) }};
         }}''')
         if data.get('notFound'):

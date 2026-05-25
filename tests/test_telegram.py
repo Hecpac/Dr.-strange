@@ -94,6 +94,40 @@ class TransportStartTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("online", joined.lower())
         await transport.stop()
 
+    @patch("claw_v2.telegram.ApplicationBuilder")
+    @patch("claw_v2.telegram.acquire_polling_lock")
+    async def test_start_does_not_overwrite_pid_file_on_lock_conflict(
+        self, mock_acquire, mock_builder_cls
+    ) -> None:
+        """Regression: PollingLockConflict during start() must NOT clobber the
+        on-disk PID file with our PID. Otherwise the next launch's watchdog
+        reads a lying pidfile and SIGTERMs the wrong process."""
+        import os
+        from claw_v2.telegram import PollingLockConflict, TelegramTransport
+
+        tmp_pid_file = Path(tempfile.mkstemp(suffix=".pid")[1])
+        other_pid = "999999"
+        tmp_pid_file.write_text(other_pid)
+
+        mock_acquire.side_effect = PollingLockConflict(123456, Path("/tmp/fake.lock"))
+
+        transport = TelegramTransport(bot_service=MagicMock(), token="test-token")
+        try:
+            with patch.object(TelegramTransport, "_PID_FILE", tmp_pid_file):
+                with patch("subprocess.run") as mock_run:
+                    mock_run.return_value = SimpleNamespace(stdout="", returncode=0)
+                    await transport.start()
+            content = tmp_pid_file.read_text().strip() if tmp_pid_file.exists() else ""
+            self.assertNotEqual(
+                content,
+                str(os.getpid()),
+                "PID file was overwritten with our PID despite PollingLockConflict",
+            )
+            self.assertEqual(content, other_pid)
+            mock_builder_cls.assert_not_called()
+        finally:
+            tmp_pid_file.unlink(missing_ok=True)
+
     async def test_stop_swallows_pool_cleanup_errors_and_emits_observe_event(self) -> None:
         bot_service = MagicMock()
         bot_service.observe = MagicMock()

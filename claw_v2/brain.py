@@ -159,6 +159,10 @@ def _request_looks_actionable(text: str) -> bool:
         "revisa", "lee ", "crea ", "crea un", "crea una",
         "fix ", "fixes", "implementa", "implementar",
         "agrega", "monta", "instala", "deploy",
+        "parchea", "parcha", "finaliza", "termina", "termínalo",
+        "continúa", "continua", "sigue ", "sigue con", "dale ",
+        "aplica", "borra", "elimina", "envía", "envia",
+        "cierra ", "cierra el", "cierra la",
     )
     return any(marker in normalized for marker in action_markers)
 

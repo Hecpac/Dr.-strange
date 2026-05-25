@@ -147,6 +147,57 @@ def test_brain_tool_registered_with_schema():
     assert "operator" in tool.allowed_agent_classes
 
 
+def test_send_to_telegram_urlerror_does_not_leak_token(svc, monkeypatch, tmp_path):
+    """URLError (DNS/socket) must not surface the bot token in the returned dict."""
+    import urllib.error
+    fake_token = "1234567890:AAH_secret_token_xyz"
+    fake_chat = "9999"
+    monkeypatch.setattr(
+        "claw_v2.heygen_delivery._load_env",
+        lambda: {"TELEGRAM_BOT_TOKEN": fake_token, "TELEGRAM_ALLOWED_USER_ID": fake_chat},
+    )
+
+    def _boom(req, timeout=None):
+        raise urllib.error.URLError(
+            f"<urlopen error [Errno 8] nodename lookup failed for {req.full_url}>"
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", _boom)
+
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"x" * 1024)
+
+    result = svc.send_to_telegram(video, caption="hi")
+
+    assert result["ok"] is False
+    assert result["error"] == "telegram_url_error"
+    serialized = json.dumps(result)
+    assert fake_token not in serialized, "bot token leaked in URLError response"
+
+
+def test_send_to_telegram_generic_exception_does_not_leak_token(svc, monkeypatch, tmp_path):
+    """An unexpected exception type must also be scrubbed before returning."""
+    fake_token = "9876543210:ZZH_other_secret"
+    monkeypatch.setattr(
+        "claw_v2.heygen_delivery._load_env",
+        lambda: {"TELEGRAM_BOT_TOKEN": fake_token, "TELEGRAM_ALLOWED_USER_ID": "42"},
+    )
+
+    def _boom(req, timeout=None):
+        raise RuntimeError(f"surprise! url was {req.full_url}")
+
+    monkeypatch.setattr("urllib.request.urlopen", _boom)
+
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"x" * 512)
+
+    result = svc.send_to_telegram(video)
+
+    assert result["ok"] is False
+    assert result["error"] == "telegram_unexpected_error"
+    assert fake_token not in json.dumps(result)
+
+
 def test_telegram_send_failure_propagates(svc, tmp_path, monkeypatch):
     completed = {
         "status": "completed",

@@ -1302,10 +1302,14 @@ class ToolRegistry:
 
         def social_competitor_research(args: dict) -> dict:
             from claw_v2.social_media import research_competitor
-            return research_competitor(
-                handle=args.get("handle", ""),
-                recent_post_count=int(args.get("recent_post_count", 6)),
-            ).to_dict()
+            kwargs: dict = {
+                "handle": args.get("handle", ""),
+                "recent_post_count": int(args.get("recent_post_count", 6)),
+            }
+            cdp_url = args.get("cdp_url")
+            if cdp_url:
+                kwargs["cdp_url"] = cdp_url
+            return research_competitor(**kwargs).to_dict()
 
         registry.register(ToolDefinition(
             name="SocialCaptionScaffold",
@@ -1325,11 +1329,11 @@ class ToolRegistry:
         ))
         registry.register(ToolDefinition(
             name="SocialCompetitorResearch",
-            description="Scrape a public Instagram profile via Chrome CDP: header stats + recent post captions + hook-pattern classification. Read-only. Args: handle (str), recent_post_count (int, default 6).",
+            description="Scrape a public Instagram profile via Chrome CDP: header stats + recent post captions + hook-pattern classification. Read-only. Args: handle (str), recent_post_count (int, default 6), cdp_url (str, optional — override default http://localhost:9250).",
             allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["SocialCompetitorResearch"],
             handler=social_competitor_research, mutates_state=False, requires_network=True,
             tier=TIER_READ_ONLY,
-            parameter_schema={"type": "object", "properties": {"handle": {"type": "string"}, "recent_post_count": {"type": "integer"}}, "required": ["handle"]},
+            parameter_schema={"type": "object", "properties": {"handle": {"type": "string"}, "recent_post_count": {"type": "integer"}, "cdp_url": {"type": "string"}}, "required": ["handle"]},
         ))
 
         # --- GPT Image generation tool ---

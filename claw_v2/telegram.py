@@ -437,9 +437,10 @@ class TelegramTransport:
                 pass
         self._PID_FILE.parent.mkdir(parents=True, exist_ok=True)
         import os
-        self._PID_FILE.write_text(str(os.getpid()))
-        # P0 hotfix E: acquire token-hash flock so two daemons on different
-        # PIDs cannot race the same Telegram bot's getUpdates loop.
+        # P0 hotfix E: acquire token-hash flock BEFORE writing the PID file.
+        # If a conflict aborts startup, we must not leave a pidfile that lies
+        # about who owns polling — the watchdog would SIGTERM the wrong PID
+        # on the next launch.
         try:
             self._polling_lock_fh = acquire_polling_lock(
                 self._token, observe=self._emit_polling_event
@@ -450,6 +451,7 @@ class TelegramTransport:
                 exc.owner_pid,
             )
             return
+        self._PID_FILE.write_text(str(os.getpid()))
         builder = ApplicationBuilder().token(self._token)
         builder.connection_pool_size(self._connection_pool_size)
         builder.pool_timeout(self._pool_timeout)
