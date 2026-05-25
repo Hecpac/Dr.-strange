@@ -150,7 +150,7 @@ def _looks_like_supported_image(raw: bytes, suffix: str) -> bool:
 #       sub-tools of any tier; without tier-introspection of the skill body the
 #       conservative default is to treat every skill run as approval-gated.
 #   Tier 2: Write, Edit, Bash, WikiLint, SkillGenerate, AnalyzeImage
-#   Tier 3: WikiDelete, A2ASend, HeyGenVideo, GPTImage, SkillExecute
+#   Tier 3: WikiDelete, A2ASend, HeyGenVideo, HeyGenDeliver, GPTImage, SkillExecute
 TIER_READ_ONLY = 1
 TIER_LOCAL_MUTATION = 2
 TIER_REQUIRES_APPROVAL = 3
@@ -208,6 +208,10 @@ DEFAULT_TOOL_AGENT_CLASSES: dict[str, tuple[AgentClass, ...]] = {
     "A2APeers": ("researcher", "operator", "deployer"),
     "A2ASend": ("operator", "deployer"),
     "HeyGenVideo": ("operator", "deployer"),
+    "HeyGenDeliver": ("operator", "deployer"),
+    "SocialCaptionScaffold": ("researcher", "operator", "deployer"),
+    "SocialReplyScaffold": ("researcher", "operator", "deployer"),
+    "SocialCompetitorResearch": ("researcher", "operator", "deployer"),
 }
 
 
@@ -1220,6 +1224,112 @@ class ToolRegistry:
             handler=heygen_video, mutates_state=True, requires_network=True,
             tier=TIER_REQUIRES_APPROVAL,
             parameter_schema={"type": "object", "properties": {"text": {"type": "string"}, "avatar_id": {"type": "string"}, "voice_id": {"type": "string"}, "title": {"type": "string"}}, "required": ["text"]},
+        ))
+
+        # --- HeyGen Deliver tool: poll → download → compress → send to Telegram ---
+        def heygen_deliver(args: dict) -> dict:
+            from claw_v2.heygen_delivery import HeygenDeliveryService
+
+            video_id = (args.get("video_id") or "").strip()
+            latest = bool(args.get("latest"))
+            if not video_id and not latest:
+                raise ValueError("Provide video_id or set latest=true")
+
+            if latest:
+                api_key = _heygen_api_key()
+                req = Request(
+                    "https://api.heygen.com/v1/video.list?limit=1",
+                    headers={"X-Api-Key": api_key},
+                )
+                with urlopen(req, timeout=30) as resp:
+                    payload = json.loads(resp.read())
+                videos = (payload.get("data") or {}).get("videos") or []
+                if not videos:
+                    raise RuntimeError("no_videos_in_account")
+                video_id = videos[0]["video_id"]
+
+            svc = HeygenDeliveryService()
+            result = svc.auto_deliver(
+                video_id=video_id,
+                caption=args.get("caption"),
+                chat_id=args.get("chat_id"),
+                slug=args.get("slug"),
+            )
+            return result.to_dict()
+
+        registry.register(ToolDefinition(
+            name="HeyGenDeliver",
+            description=(
+                "Poll a HeyGen render until complete, download, transcode for "
+                "Telegram's 50MB Bot API cap, and deliver via sendVideo. "
+                "Args: video_id (str, optional if latest=true), latest (bool, "
+                "optional - picks most recent), caption (str, optional), "
+                "chat_id (str, optional - defaults to TELEGRAM_ALLOWED_USER_ID), "
+                "slug (str, optional - filename slug)."
+            ),
+            allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["HeyGenDeliver"],
+            handler=heygen_deliver, mutates_state=True, requires_network=True,
+            tier=TIER_REQUIRES_APPROVAL,
+            parameter_schema={
+                "type": "object",
+                "properties": {
+                    "video_id": {"type": "string"},
+                    "latest": {"type": "boolean"},
+                    "caption": {"type": "string"},
+                    "chat_id": {"type": "string"},
+                    "slug": {"type": "string"},
+                },
+            },
+        ))
+
+        # --- Social media skills (scaffolds + competitor research) ---
+        def social_caption_scaffold(args: dict) -> dict:
+            from claw_v2.social_media import draft_caption_scaffold
+            return draft_caption_scaffold(
+                topic=args.get("topic", ""),
+                platform=args.get("platform", "instagram_reel"),
+                voice=args.get("voice", "punchy_contrarian"),
+                hook_style=args.get("hook_style", "contrarian"),
+            ).to_dict()
+
+        def social_reply_scaffold(args: dict) -> dict:
+            from claw_v2.social_media import suggest_reply_scaffold
+            return suggest_reply_scaffold(
+                incoming_comment=args.get("incoming_comment", ""),
+                platform=args.get("platform", "instagram_feed"),
+                tone=args.get("tone", "warm"),
+            ).to_dict()
+
+        def social_competitor_research(args: dict) -> dict:
+            from claw_v2.social_media import research_competitor
+            return research_competitor(
+                handle=args.get("handle", ""),
+                recent_post_count=int(args.get("recent_post_count", 6)),
+            ).to_dict()
+
+        registry.register(ToolDefinition(
+            name="SocialCaptionScaffold",
+            description="Return platform-aware scaffold for caption drafting: char limits, hashtag caps, hook patterns, structure. The model writes the actual copy. Args: topic (str), platform (instagram_feed|instagram_reel|instagram_story|linkedin|x|threads), voice (punchy_contrarian|warm_authority|story_driven), hook_style (contrarian|specific_number|concrete_story|question_loop).",
+            allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["SocialCaptionScaffold"],
+            handler=social_caption_scaffold, mutates_state=False, requires_network=False,
+            tier=TIER_READ_ONLY,
+            parameter_schema={"type": "object", "properties": {"topic": {"type": "string"}, "platform": {"type": "string"}, "voice": {"type": "string"}, "hook_style": {"type": "string"}}, "required": ["topic"]},
+        ))
+        registry.register(ToolDefinition(
+            name="SocialReplyScaffold",
+            description="Return tone + length + structure guidance for replying to a comment. Does not publish. Args: incoming_comment (str), platform (str), tone (warm|expert|playful|direct).",
+            allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["SocialReplyScaffold"],
+            handler=social_reply_scaffold, mutates_state=False, requires_network=False,
+            tier=TIER_READ_ONLY,
+            parameter_schema={"type": "object", "properties": {"incoming_comment": {"type": "string"}, "platform": {"type": "string"}, "tone": {"type": "string"}}, "required": ["incoming_comment"]},
+        ))
+        registry.register(ToolDefinition(
+            name="SocialCompetitorResearch",
+            description="Scrape a public Instagram profile via Chrome CDP: header stats + recent post captions + hook-pattern classification. Read-only. Args: handle (str), recent_post_count (int, default 6).",
+            allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["SocialCompetitorResearch"],
+            handler=social_competitor_research, mutates_state=False, requires_network=True,
+            tier=TIER_READ_ONLY,
+            parameter_schema={"type": "object", "properties": {"handle": {"type": "string"}, "recent_post_count": {"type": "integer"}}, "required": ["handle"]},
         ))
 
         # --- GPT Image generation tool ---
