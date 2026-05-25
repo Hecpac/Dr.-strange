@@ -44,6 +44,19 @@ class TaskLifecycleNotificationTests(unittest.TestCase):
 
         self.assertFalse(should_notify_task_ledger_terminal(payload, set()))
 
+    def test_skips_inline_preflight_blocker_task(self) -> None:
+        payload = {
+            "task_id": "tg-123:blocked:999",
+            "session_id": "tg-123",
+            "runtime": "telegram_preflight",
+            "status": "failed",
+            "verification_status": "blocked",
+            "notify_policy": "none",
+            "summary": "Task blocked during capability preflight",
+        }
+
+        self.assertFalse(should_notify_task_ledger_terminal(payload, set()))
+
     def test_skips_regular_coordinator_terminal_task_to_avoid_duplicate(self) -> None:
         payload = {
             "task_id": "task-1",

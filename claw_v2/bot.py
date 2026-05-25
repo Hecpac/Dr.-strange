@@ -301,6 +301,30 @@ def _looks_like_identity_drift(text: str) -> bool:
     return False
 
 
+def _contains_substantive_operational_content(text: str) -> bool:
+    normalized = _normalize_command_text(text)
+    if len(normalized) < 180:
+        return False
+    markers = (
+        "accion",
+        "acciones",
+        "audit",
+        "auditoria",
+        "evidencia",
+        "hallazgo",
+        "inventario",
+        "mcp",
+        "resultado",
+        "riesgo",
+        "server",
+        "tabla",
+        "verificado",
+    )
+    return any(marker in normalized for marker in markers) or bool(
+        re.search(r"^\s*(?:[-*#]|\|)", text, flags=re.MULTILINE)
+    )
+
+
 def _looks_like_manual_handoff(text: str) -> bool:
     normalized = _normalize_command_text(text)
     normalized = re.sub(r"\s+", " ", normalized)
@@ -1813,7 +1837,7 @@ class BotService:
                 )
                 content = corrected
         elif _looks_like_identity_drift(content):
-            corrected = self._identity_binding_response()
+            corrected = self._identity_drift_corrected_response(content)
             self._emit_identity_capability_binding_guard(
                 "identity_drift_guard_triggered",
                 session_id,
@@ -4472,6 +4496,33 @@ class BotService:
             "Claude, Codex, OpenAI y ChatGPT son proveedores o herramientas internas, no mi identidad. "
             "Retomo desde el runtime: ejecuto la accion concreta disponible, pido aprobacion o reporto el bloqueo verificado."
         )
+
+    def _identity_drift_corrected_response(self, content: str) -> str:
+        if not _contains_substantive_operational_content(content):
+            return self._identity_binding_response()
+        replacement = (
+            "Contexto corregido: soy Dr. Strange en el daemon local de Hector; "
+            "Claude, Codex, OpenAI y ChatGPT son proveedores o herramientas locales, no mi identidad."
+        )
+        parts = re.split(r"(?<=[.!?])\s+|\n+", content)
+        kept: list[str] = []
+        dropped = False
+        for part in parts:
+            stripped = part.strip()
+            if not stripped:
+                continue
+            if _looks_like_identity_drift(stripped):
+                dropped = True
+                continue
+            kept.append(stripped)
+        if not dropped:
+            return self._identity_binding_response()
+        cleaned = "\n".join(kept).strip()
+        if not cleaned or not _contains_substantive_operational_content(cleaned):
+            return self._identity_binding_response()
+        if _normalize_command_text(cleaned).startswith(_normalize_command_text(replacement)):
+            return cleaned
+        return f"{replacement}\n\n{cleaned}"
 
     def _operator_handoff_binding_response(self) -> str:
         return (
@@ -8126,7 +8177,7 @@ class BotService:
             if check.status == "command_not_found":
                 details.append(f"{check.binary}: no disponible")
             elif check.status == "policy_blocked":
-                details.append(f"{check.binary}: bloqueado por policy")
+                details.append(f"{check.binary}: bloqueado por política")
             else:
                 details.append(f"{check.binary}: {check.status}")
         if not details:
@@ -8134,7 +8185,7 @@ class BotService:
         return (
             "Creé la tarea, pero quedó bloqueada en preflight antes de ejecutar.\n"
             + "\n".join(f"- {item}" for item in details[:5])
-            + "\nSiguiente paso: habilitar el comando específico o darme una ruta segura alternativa."
+            + "\nPara continuar necesito que habilites el comando específico o me des una ruta segura alternativa."
         )
 
     def _emit_safe(self, event_type: str, payload: dict[str, Any]) -> None:
@@ -8226,6 +8277,16 @@ class BotService:
     def _matches_operational_failure_summary_request(normalized: str) -> bool:
         if not normalized:
             return False
+        stop_or_scope_markers = (
+            "no continuemos",
+            "no sigamos",
+            "no avancemos",
+            "paremos",
+            "detengamos",
+            "dejemos esto",
+        )
+        if any(marker in normalized for marker in stop_or_scope_markers):
+            return False
         specific_task_failure = (
             "por que fallo la tarea",
             "porque fallo la tarea",
@@ -8286,24 +8347,43 @@ class BotService:
             "bloqueos",
             "no complet",
         )
-        report_terms = (
+        explicit_report_terms = (
             "resumen",
             "recuento",
             "auditoria",
             "auditoría",
             "reporte",
             "explica",
-            "porque",
-            "por que",
-            "por qué",
             "hoy",
             "sesion",
             "sesión",
             "today",
             "summary",
         )
-        return any(term in normalized for term in failure_terms) and any(
-            term in normalized for term in report_terms
+        causal_terms = ("porque", "por que", "por qué")
+        task_context_terms = (
+            "agente",
+            "bot",
+            "daemon",
+            "tarea",
+            "tareas",
+            "task",
+            "complet",
+            "fallaste",
+            "fallo",
+            "fallos",
+            "error",
+            "errores",
+            "bloqueo",
+            "bloqueos",
+        )
+        has_failure_term = any(term in normalized for term in failure_terms)
+        if not has_failure_term:
+            return False
+        if any(term in normalized for term in explicit_report_terms):
+            return True
+        return any(term in normalized for term in causal_terms) and any(
+            term in normalized for term in task_context_terms
         )
 
     def _format_operational_failure_summary(self, session_id: str) -> str:
@@ -8374,18 +8454,21 @@ class BotService:
                 f"Worktree: {autostash} autostash registrado; eso puede ocultar cambios dirty durante una tarea autónoma."
             )
         if not findings:
-            findings.append("No encontré fallos operativos recientes en `observe_stream`; revisé el ledger y mensajes recientes.")
+            findings.append(
+                "No encontré fallos operativos recientes en la telemetría local; "
+                "revisé el historial de tareas y mensajes recientes."
+            )
         lines.extend(f"- {finding}" for finding in findings[:6])
 
         task_lines = self._operational_failure_task_lines(session_id)
         if task_lines:
             lines.append("")
-            lines.append("Ledger:")
+            lines.append("Tareas recientes:")
             lines.extend(task_lines)
         lines.append("")
         lines.append(
-            "Diagnóstico: los reportes de fallos no deben caer al brain genérico; deben responder desde ledger/observe. "
-            "Las tareas no deben contarse como completadas hasta tener estado terminal en `agent_tasks`."
+            "Diagnóstico: los reportes de fallos deben salir del resumen operativo verificado, "
+            "no de una respuesta genérica. No debo reportar tareas como cerradas sin verificación final."
         )
         return "\n".join(lines)
 
@@ -8431,11 +8514,11 @@ class BotService:
             return ["- Sin tareas recientes en esta sesión."]
         lines: list[str] = []
         for record in records[:4]:
-            task_id = _compact_summary(str(getattr(record, "task_id", "") or ""), limit=80)
-            status = _compact_summary(str(getattr(record, "status", "unknown") or "unknown"), limit=40)
-            verification = _compact_summary(
-                str(getattr(record, "verification_status", "unknown") or "unknown"),
-                limit=60,
+            status = self._public_operational_task_state(
+                str(getattr(record, "status", "unknown") or "unknown")
+            )
+            verification = self._public_operational_task_state(
+                str(getattr(record, "verification_status", "unknown") or "unknown")
             )
             objective = _compact_summary(
                 str(redact_sensitive(getattr(record, "objective", "") or "", limit=300)),
@@ -8447,9 +8530,28 @@ class BotService:
             )
             detail = f" - {error}" if error else ""
             lines.append(
-                f"- `{task_id}`: {status} / {verification} - {objective or 'sin objetivo'}{detail}"
+                f"- {status} / {verification}: {objective or 'sin objetivo'}{detail}"
             )
         return lines
+
+    @staticmethod
+    def _public_operational_task_state(value: str) -> str:
+        normalized = str(value or "").strip().lower()
+        return {
+            "completed_unverified": "completada sin verificación final",
+            "needs_verification": "pendiente de verificación",
+            "running_needs_verification": "en verificación",
+            "succeeded": "completada",
+            "passed": "verificada",
+            "failed": "fallida",
+            "blocked": "bloqueada",
+            "running": "en curso",
+            "queued": "en cola",
+            "timed_out": "agotada por tiempo",
+            "cancelled": "cancelada",
+            "lost": "sin estado ejecutable",
+            "unknown": "desconocida",
+        }.get(normalized, normalized.replace("_", " ") or "desconocida")
 
     def _maybe_handle_boot_context_status(
         self,

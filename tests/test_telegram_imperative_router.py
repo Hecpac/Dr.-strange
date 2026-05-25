@@ -163,7 +163,14 @@ def test_failure_summary_routes_to_operational_evidence_not_brain(bot) -> None:
     assert "Gate de evidencia" in response
     assert "Coordinador" in response
     assert "Codex CLI timed out" in response
-    assert "`tg-test:running`" in response
+    assert "en curso / desconocida" in response
+    assert "`tg-test:running`" not in response
+    assert "Ledger:" not in response
+    assert "observe_stream" not in response
+    assert "agent_tasks" not in response
+    assert "completed_unverified" not in response
+    assert "needs_verification" not in response
+    assert "[tarea interna omitida]" not in response
     assert "No digo `arrancando` sin haber creado" not in response
     assert any(
         ev.get("handler") == "operational_failure_summary"
@@ -188,13 +195,33 @@ def test_task_completion_complaint_routes_to_operational_evidence_not_brain(bot)
 
     assert response
     assert "Resumen operativo de fallos de hoy" in response
-    assert "`tg-test:active`" in response
+    assert "en curso / desconocida" in response
+    assert "`tg-test:active`" not in response
     assert any(
         ev.get("handler") == "operational_failure_summary"
         and ev.get("route") == "intercepted"
         for ev in decisions
     ), decisions
     _assert_not_brain_fallback(response, decisions)
+
+
+def test_stop_due_to_role_fit_problem_does_not_match_failure_summary(bot) -> None:
+    response, decisions, _events = _drive(
+        bot,
+        "No continuemos porque ingles nativo es un problema si la entrevista es conversational",
+    )
+
+    assert response == "BRAIN_FALLBACK_USED"
+    assert any(
+        ev.get("handler") == "operational_failure_summary"
+        and ev.get("route") == "fall_through"
+        for ev in decisions
+    ), decisions
+    assert not any(
+        ev.get("handler") == "operational_failure_summary"
+        and ev.get("route") == "intercepted"
+        for ev in decisions
+    ), decisions
 
 
 def test_task_status_overview_routes_to_deterministic_summary_not_brain(bot) -> None:
@@ -288,7 +315,8 @@ def test_multimodal_task_completion_complaint_routes_to_operational_evidence_not
 
     assert response
     assert "Resumen operativo de fallos de hoy" in response
-    assert "`tg-test:active`" in response
+    assert "en curso / desconocida" in response
+    assert "`tg-test:active`" not in response
     assert response != "BRAIN_FALLBACK_USED"
 
 

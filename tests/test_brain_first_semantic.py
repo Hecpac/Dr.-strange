@@ -70,6 +70,7 @@ def test_semantic_classifier_recognizes_operational_tasks_and_option_picks() -> 
         "Crear el\nCuaderno",
         "Verifica que el daemon Levanto",
         "Haz un barrido por X de las noticias",
+        "Haz la auditoria de los MCps",
     ]
 
     for text in task_samples:
@@ -81,6 +82,12 @@ def test_semantic_classifier_recognizes_operational_tasks_and_option_picks() -> 
     option_turn = classify_semantic_turn("Opción 1")
     assert option_turn.intent == "continue_active_mission"
     assert option_turn.explicit_continuation is True
+
+    stop_turn = classify_semantic_turn(
+        "No continuemos porque ingles nativo es un problema si la entrevista es conversational"
+    )
+    assert stop_turn.intent == "correction_or_behavior_instruction"
+    assert stop_turn.clear_goal is False
 
 
 def test_natural_language_renderer_hides_internal_labels_in_normal_mode() -> None:

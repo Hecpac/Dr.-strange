@@ -73,9 +73,12 @@ class BotHelperRegressionTests(unittest.TestCase):
 
     def test_visible_chat_response_redacts_task_ledger_internals(self) -> None:
         text = (
+            "Ledger:\n"
             "Task: tg-574707975:evidence-gate:1779207757786634000 "
             "brain-tooluse:tg-574707975:1779208007773945000 "
             "status=running_needs_verification "
+            "terminal=completed_unverified "
+            "tables=observe_stream,agent_tasks "
             "reason=brain_tooluse_with_manifest_pending_verification "
             "error=runtime lost authoritative backing state"
         )
@@ -86,8 +89,17 @@ class BotHelperRegressionTests(unittest.TestCase):
         self.assertNotIn("evidence-gate", sanitized)
         self.assertNotIn("brain-tooluse", sanitized)
         self.assertNotIn("needs_verification", sanitized)
+        self.assertNotIn("completed_unverified", sanitized)
+        self.assertNotIn("observe_stream", sanitized)
+        self.assertNotIn("agent_tasks", sanitized)
+        self.assertNotIn("Ledger:", sanitized)
+        self.assertNotIn("[tarea interna omitida]", sanitized)
         self.assertNotIn("runtime lost authoritative backing state", sanitized)
         self.assertIn("pendiente de verificacion", sanitized)
+        self.assertIn("completada sin verificacion final", sanitized)
+        self.assertIn("telemetria local", sanitized)
+        self.assertIn("registro de tareas", sanitized)
+        self.assertIn("Historial de tareas:", sanitized)
 
     def test_visible_chat_response_redacts_raw_sandbox_host_diagnostics(self) -> None:
         text = (

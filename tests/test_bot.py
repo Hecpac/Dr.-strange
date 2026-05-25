@@ -1005,15 +1005,20 @@ class BotTests(unittest.TestCase):
 
                 self.assertIn("Creé la tarea", reply)
                 self.assertIn("preflight", reply)
+                self.assertIn("bloqueado por política", reply)
+                self.assertNotIn("Siguiente paso:", reply)
                 self.assertNotIn("PreToolUse", reply)
                 self.assertNotIn("tg-", reply)
                 records = runtime.task_ledger.list(session_id="s1", limit=5)
                 self.assertEqual(len(records), 1)
                 self.assertEqual(records[0].status, "failed")
                 self.assertEqual(records[0].verification_status, "blocked")
+                self.assertEqual(records[0].notify_policy, "none")
                 self.assertEqual(records[0].metadata["task_kind"], "maintenance_update_tools")
                 self.assertEqual(records[0].metadata["source_message"], "Actualiza Codex, Claude Code y Codex app")
                 self.assertTrue(records[0].metadata["blockers"])
+                state = runtime.memory.get_session_state("s1")
+                self.assertEqual(state["pending_action"], "")
                 events = [event["event_type"] for event in runtime.observe.recent_events(limit=30)]
                 self.assertIn("capability_preflight_started", events)
                 self.assertIn("capability_preflight_result", events)
@@ -4411,6 +4416,55 @@ class BotTests(unittest.TestCase):
                 self.assertNotIn("Soy Claude Code", result)
                 self.assertNotIn("este CLI", result)
                 events = [event["event_type"] for event in runtime.observe.recent_events(limit=20)]
+                self.assertIn("identity_drift_guard_triggered", events)
+
+    def test_identity_drift_guard_preserves_substantive_audit_response(self) -> None:
+        def audit_with_identity_drift(request: LLMRequest) -> LLMResponse:
+            return LLMResponse(
+                content=(
+                    "<response>Hice el inventario real de MCPs.\n\n"
+                    "Soy Claude Code en este CLI, no Dr. Strange.\n\n"
+                    "**Inventario verificado:**\n"
+                    "- Figma: activo; datos de diseño; gate Tier 3 no verificado.\n"
+                    "- Gmail: activo; PII alta; gate Tier 3 requerido.\n\n"
+                    "| Server | Estado | Riesgo |\n"
+                    "|---|---|---|\n"
+                    "| Figma | activo | prompt injection |\n"
+                    "</response>"
+                ),
+                lane=request.lane,
+                provider="anthropic",
+                model=request.model,
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=audit_with_identity_drift)
+
+                result = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="Haz la auditoria de los MCps",
+                    runtime_channel="telegram",
+                )
+
+                self.assertIn("Contexto corregido", result)
+                self.assertIn("Inventario verificado", result)
+                self.assertIn("Figma", result)
+                self.assertIn("Gmail", result)
+                self.assertNotIn("Soy Claude Code", result)
+                self.assertNotIn("este CLI", result)
+                self.assertNotIn("Retomo desde el runtime", result)
+                events = [event["event_type"] for event in runtime.observe.recent_events(limit=30)]
                 self.assertIn("identity_drift_guard_triggered", events)
 
     def test_operator_handoff_binding_blocks_manual_final_step_for_action(self) -> None:

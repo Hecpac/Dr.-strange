@@ -1290,8 +1290,10 @@ _INTERNAL_LEAK_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bbrain-tooluse:[^\s`]+", re.IGNORECASE),
     re.compile(r"(?:\[id interno omitido\]|tg-[A-Za-z0-9_-]+):evidence-gate:\d+", re.IGNORECASE),
     re.compile(r"\b(?:needs_verification|running_needs_verification)\b", re.IGNORECASE),
+    re.compile(r"\bcompleted_unverified\b", re.IGNORECASE),
     re.compile(r"\bbrain_tooluse_with_manifest_pending_verification\b", re.IGNORECASE),
     re.compile(r"\bruntime lost authoritative backing state\b", re.IGNORECASE),
+    re.compile(r"\b(?:observe_stream|agent_tasks)\b", re.IGNORECASE),
     re.compile(r"\bbinary\s+'[^']+'\s+requires higher privilege level\b", re.IGNORECASE),
     re.compile(r"\b(?:allowed whitelist|sandbox\.excludedCommands|Seatbelt OS-level|runtime host|CLI host|Bash tool|tool Bash)\b", re.IGNORECASE),
     re.compile(r"\bsandbox\s+(?:embebido|del entorno local|que est[aá] bloqueando|carga policies)\b", re.IGNORECASE),
@@ -1329,13 +1331,13 @@ def _sanitize_chat_response(text: str) -> str:
     sanitized = re.sub(r"</?\s*system-reminder\s*>", "[redacted: internal marker]", sanitized, flags=re.IGNORECASE)
     sanitized = re.sub(
         r"\bbrain-tooluse:[^\s`]+",
-        "[tarea interna omitida]",
+        "tarea local",
         sanitized,
         flags=re.IGNORECASE,
     )
     sanitized = re.sub(
         r"(?:\[id interno omitido\]|tg-[A-Za-z0-9_-]+):evidence-gate:\d+",
-        "[tarea interna omitida]",
+        "tarea local",
         sanitized,
         flags=re.IGNORECASE,
     )
@@ -1345,7 +1347,7 @@ def _sanitize_chat_response(text: str) -> str:
     sanitized = re.sub(r"\btg-[A-Za-z0-9_-]+\b", "[id interno omitido]", sanitized)
     sanitized = re.sub(
         r"\[id interno omitido\]:evidence-gate:\d+",
-        "[tarea interna omitida]",
+        "tarea local",
         sanitized,
         flags=re.IGNORECASE,
     )
@@ -1370,6 +1372,30 @@ def _sanitize_chat_response(text: str) -> str:
         "pendiente de verificacion",
         sanitized,
         flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"\bcompleted_unverified\b",
+        "completada sin verificacion final",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"\bobserve_stream\b",
+        "telemetria local",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"\bagent_tasks\b",
+        "registro de tareas",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"^\s*Ledger\s*:",
+        "Historial de tareas:",
+        sanitized,
+        flags=re.IGNORECASE | re.MULTILINE,
     )
     sanitized = re.sub(
         r"\bruntime lost authoritative backing state\b",

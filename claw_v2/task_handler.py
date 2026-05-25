@@ -411,6 +411,7 @@ class TaskHandler:
                 mode=mode,
                 runtime="telegram_preflight",
                 status="running",
+                notify_policy="none",
                 route=route,
                 metadata=metadata,
                 artifacts=artifacts,

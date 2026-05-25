@@ -79,6 +79,8 @@ _DEBUG_MARKERS = (
     "debug",
     "audita",
     "auditar",
+    "auditoria",
+    "auditoría",
     "audit ",
     "logs",
     "trace",
@@ -100,15 +102,21 @@ _CORRECTION_MARKERS = (
     "corrige tu comportamiento",
     "aprende que",
     "recuerda que",
+    "no continuemos",
+    "no sigamos",
+    "no avancemos",
+    "paremos",
+    "detengamos",
+    "dejemos esto",
 )
 
 _NEW_TASK_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(pattern)
     for pattern in (
-        r"\b(?:crea|crear|creame|créame|genera|generame|haz|hazme|prepara|armame|arma)\b.+\b(?:mision|misión|tarea|task|smoke|prueba|test|plan|replay|cuaderno|notebook|notebooklm|podcast|noticias|barrido|research)\b",
+        r"\b(?:crea|crear|creame|créame|genera|generame|haz|hazme|prepara|armame|arma)\b.+\b(?:mision|misión|tarea|task|smoke|prueba|test|plan|replay|cuaderno|notebook|notebooklm|podcast|noticias|barrido|research|audit|auditoria|mcp|mcps)\b",
         r"\b(?:implementa|parchea|corrige|arregla|agrega|modifica|actualiza|regenera|completa|termina|finaliza)\b",
         r"\b(?:verifica|comprueba|valida)\b.+\b(?:daemon|servicio|launchd|runtime|bot|cuaderno|notebook|notebooklm|tarea|task)\b",
-        r"\b(?:investiga|revisa|audita)\b.+\b(?:bug|fallo|falla|logs?|trazas?|router|runtime|telegram|test|smoke)\b",
+        r"\b(?:investiga|revisa|audita)\b.+\b(?:bug|fallo|falla|logs?|trazas?|router|runtime|telegram|test|smoke|mcp|mcps)\b",
         r"\b(?:create|generate|prepare|implement|patch|fix|add|modify|update|complete|finish|review|investigate|audit)\b",
     )
 )
