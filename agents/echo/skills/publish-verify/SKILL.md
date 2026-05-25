@@ -16,10 +16,11 @@ Echo's safety net. Closes the loop on "did this actually publish?" — a questio
 
 | Input | Source | Required |
 |---|---|---|
-| Surface | `instagram_post` / `instagram_reel` / `instagram_comment` / `linkedin_post` / `linkedin_comment` / `linkedin_reply` / `x_tweet` / `x_reply` / `threads_post` | ✅ Sí |
-| Submitted text | The exact text Echo just submitted | ✅ Sí |
+| Surface | `instagram_post` / `instagram_reel` / `instagram_comment` / `instagram_profile_edit` / `linkedin_post` / `linkedin_comment` / `linkedin_reply` / `x_tweet` / `x_reply` / `threads_post` | ✅ Sí |
+| Submitted text | The exact text Echo just submitted (bio body, comment text, caption — whichever applies) | ✅ Sí |
 | Expected author handle | Hector's handle on that platform | ✅ Sí |
-| CDP URL | Default `http://localhost:9250` | Default |
+| Field key (for profile edits only) | `bio` / `display_name` / `username` / `category` / `website` | Only for `instagram_profile_edit` |
+| CDP URL | Default `http://localhost:9222` (production CDP profile). Fallback `http://localhost:9250` for the legacy headless instance. | Default |
 | Pre-submit screenshot path (optional) | Useful for diffing before/after | Recomendado |
 
 ## Canonical selectors (memory: feedback_verify_publish_actually_succeeded)
@@ -34,6 +35,8 @@ Echo's safety net. Closes the loop on "did this actually publish?" — a questio
 | Instagram post | Top of the profile grid at `/<handle>/` shows the new post (verify by navigation, not by overlay) |
 | Instagram reel | `/reels/` tab on the profile shows the new reel as first item |
 | Instagram comment | Comment list on the post URL contains the submitted text + Hector's handle |
+| Instagram profile edit — bio | `header section ._ap3a + div, header section h1 ~ div._ap3a` containing submitted bio text. **Do NOT** use `header section`.inner_text — the IG Notes bubble (text starts with `Nota…`) sits at the top of `header section` and dominates `.first.inner_text()` results. |
+| Instagram profile edit — display name | `header section h1` text equals submitted display name. **Skip** the Notes bubble: filter the locator to elements whose text does NOT start with `Nota`. |
 | Threads post | The post appears in the user's profile `/threads` feed |
 
 If the canonical selector returns zero matches → the publish FAILED. Period. Do not soften this with "may have published" — report the failure plainly.
@@ -61,6 +64,7 @@ For Instagram: navigate to `/<handle>/` (or `/p/<id>` if the URL was returned po
   - LinkedIn comment failed via Cmd+Enter? → retry via explicit "Comment" button click. **MEMORY:** LinkedIn comment editor does NOT accept Cmd+Enter as submit — button click is the only working path.
   - X reply failed via button click? → retry via Cmd+Enter (X DOES accept Cmd+Enter).
   - LinkedIn post modal failed via Cmd+Enter? → retry via the "Post" button click at coords (1010, 482) in viewport 1400×950 — canonical coords from memory.
+  - **Meta Accounts Center / IG profile field** failed because Submit stayed disabled? → the form is React-controlled. `el.fill(value)` does NOT trigger change detection. Retry with `page.keyboard.type(value, delay=30)` after clearing via `Meta+A` + `Backspace`. The save button label in Meta Accounts Center is **"Listo"** (or "Done" in EN locale) — NOT "Guardar".
 - **Second fail:** do NOT retry again. Report the failure with: the surface, what selector returned zero, the alternate submit attempted, a fresh screenshot, and a recommended Hector-side fallback (e.g. "open the platform manually, the draft is still in the editor at <url>").
 
 ## Output format
@@ -107,3 +111,4 @@ For Instagram: navigate to `/<handle>/` (or `/p/<id>` if the URL was returned po
 - `feedback_verify_publish_actually_succeeded` (2026-05-22) — origin incident on Andrew Ng post comment that failed silently.
 - `project_weekly_content_cadence` (2026-05-22) — canonical LinkedIn UI coords for the Post button.
 - `feedback_linkedin_easyapply_works` (2026-05-15) — proves Chrome CDP submit works on native LinkedIn forms when verification is selector-specific.
+- `2026-05-25 bio push` (this session) — first proven IG profile edit via Playwright CDP. Lessons folded in: (1) display name moved from `/accounts/edit/` to Accounts Center `/profiles/<id>/` in 2024+, IG desktop edit page does NOT contain a name input. (2) `get_by_text(<handle>, exact=True)` is required when navigating Accounts Center because the handle also appears in the contact-email row and substring match opens the wrong panel. (3) IG enforces "max 2 name changes per 14 days" — relay to user before second push.
