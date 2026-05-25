@@ -262,6 +262,8 @@ class SubAgentServiceTests(unittest.TestCase):
         response.content = "task complete"
         response.provider = "anthropic"
         response.model = "claude-sonnet-4-6"
+        response.degraded_mode = False
+        response.artifacts = {}
         router.ask.return_value = response
         store = MagicMock()
         service = SubAgentService(definitions_root=Path("/tmp"), router=router, store=store)
@@ -306,6 +308,8 @@ class SubAgentServiceTests(unittest.TestCase):
         fallback_response.content = "ok via fallback"
         fallback_response.provider = "openai"
         fallback_response.model = "gpt-5.4"
+        fallback_response.degraded_mode = False
+        fallback_response.artifacts = {}
         router.ask.side_effect = [
             AdapterError("primary unavailable"),
             fallback_response,
@@ -318,9 +322,50 @@ class SubAgentServiceTests(unittest.TestCase):
 
         self.assertEqual(result.status, "succeeded")
         self.assertEqual(result.summary, "ok via fallback")
-        self.assertEqual(len(result.failures), 1)
+        # Two failures expected: outer exception + provider mismatch (openai != anthropic).
+        self.assertEqual(len(result.failures), 2)
         self.assertTrue(result.failures[0].startswith("preferred_provider_unavailable:"))
         self.assertIn("AdapterError", result.failures[0])
+        self.assertTrue(result.failures[1].startswith("silent_fallback:"))
+        self.assertIn("requested=anthropic:claude-sonnet-4-6", result.failures[1])
+        self.assertIn("served=openai:gpt-5.4", result.failures[1])
+
+    def test_dispatch_typed_surfaces_router_internal_silent_fallback(self) -> None:
+        """Bug from 2026-05-24: router.ask succeeds (no exception) but returns
+        a degraded_mode response after internal anthropic→openai fallback.
+        Echo's first invocation served openai:gpt-5.4-mini despite SOUL
+        requesting claude-opus-4-7, with failures=() — invisible to caller."""
+        defn = SubAgentDefinition(
+            name="echo",
+            display_name="Echo",
+            provider="anthropic",
+            model="claude-opus-4-7",
+            soul="- **Name:** Echo\n",
+            heartbeat_config="",
+            user_context="",
+        )
+        router = MagicMock()
+        degraded = MagicMock()
+        degraded.content = "served by openai"
+        degraded.provider = "openai"
+        degraded.model = "gpt-5.4-mini"
+        degraded.degraded_mode = True
+        degraded.artifacts = {"fallback_reason": "anthropic_rate_limited"}
+        router.ask.return_value = degraded
+        store = MagicMock()
+        service = SubAgentService(definitions_root=Path("/tmp"), router=router, store=store)
+        service._agents["echo"] = defn
+
+        result = service.dispatch_typed("echo", "draft a caption")
+
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(result.summary, "served by openai")
+        self.assertEqual(result.evidence[0].ref, "openai:gpt-5.4-mini")
+        self.assertEqual(len(result.failures), 1)
+        self.assertTrue(result.failures[0].startswith("silent_fallback:"))
+        self.assertIn("requested=anthropic:claude-opus-4-7", result.failures[0])
+        self.assertIn("served=openai:gpt-5.4-mini", result.failures[0])
+        self.assertIn("reason=anthropic_rate_limited", result.failures[0])
 
 
 if __name__ == "__main__":

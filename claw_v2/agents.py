@@ -1237,10 +1237,10 @@ class SubAgentService:
             return ("google", "gemini-2.5-pro")
         if "gpt-5.5" in text:
             return ("openai", "gpt-5.5")
-        if "gpt-5.4" in text:
-            return ("openai", "gpt-5.4")
         if "gpt-5.4-mini" in text:
             return ("openai", "gpt-5.4-mini")
+        if "gpt-5.4" in text:
+            return ("openai", "gpt-5.4")
         if "gpt-4.1" in text:
             return ("openai", "gpt-4.1")
         if "gpt" in text:
@@ -1306,10 +1306,26 @@ class SubAgentService:
                 lane=lane,
                 evidence_pack={"sub_agent": defn.name, "display_name": defn.display_name},
             )
+        # Surface router-internal silent fallback (anthropic→openai etc.) so
+        # callers see the actual provider/model served vs. what the SOUL
+        # requested. Without this the dispatcher reports failures=() while
+        # the response is degraded — exactly the bug Hector hit on Echo's
+        # first invocation (SOUL=claude-opus-4-7, served=openai:gpt-5.4-mini).
+        served_provider = getattr(response, "provider", "") or ""
+        served_model = getattr(response, "model", "") or ""
+        if getattr(response, "degraded_mode", False) or (
+            served_provider and served_provider != defn.provider
+        ):
+            artifacts = getattr(response, "artifacts", {}) or {}
+            reason = artifacts.get("fallback_reason") or "router_internal_fallback"
+            failures.append(
+                f"silent_fallback:requested={defn.provider}:{defn.model}:"
+                f"served={served_provider}:{served_model}:reason={reason}"
+            )
         evidence = (
             ArtifactEvidence(
                 kind="model_response",
-                ref=f"{response.provider}:{response.model}",
+                ref=f"{served_provider}:{served_model}",
                 summary=response.content[:200],
             ),
         )
