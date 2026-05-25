@@ -1606,14 +1606,24 @@ class BotTests(unittest.TestCase):
                 )
 
                 lowered = reply.lower()
-                self.assertIn("Tuve un error preparando la respuesta", reply)
+                # Hotfix F: actionable internal_trace_repeated turns now
+                # land in the recovery_jobs queue and the user sees the
+                # recovery message (with job number) instead of the bare
+                # apology.
+                self.assertIn("cola de recovery", lowered)
+                self.assertIn("trace interno", lowered)
                 self.assertNotIn("user:", lowered)
+                jobs = runtime.memory.list_pending_recovery_jobs("s1")
+                self.assertEqual(len(jobs), 1)
+                self.assertEqual(jobs[0]["failure_reason"], "provider_repeated_internal_trace")
+                self.assertIn(f"#{jobs[0]['id']}", reply)
                 state = runtime.memory.get_session_state("s1")
                 self.assertEqual(state["pending_action"], "Olvidate del budget y completa Los fixes")
                 self.assertEqual(state["task_queue"][0]["summary"], "Olvidate del budget y completa Los fixes")
                 self.assertEqual(state["task_queue"][0]["source"], "sanitizer_recovery")
                 events = [event["event_type"] for event in runtime.observe.recent_events(limit=80)]
                 self.assertIn("pending_action_persisted_after_suppression", events)
+                self.assertIn("recovery_job_created", events)
 
     def test_pending_action_resumes_after_internal_trace_suppression(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

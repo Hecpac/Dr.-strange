@@ -1,12 +1,95 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import re
 import shutil
 import tempfile
+import time
 from pathlib import Path
+from typing import Callable
 
 logger = logging.getLogger(__name__)
+
+# --- P0 hotfix D: Realtime TTS 24h cooldown on beta-shape errors -----------
+#
+# The OpenAI Realtime API was returning WS 4000 invalid_request_error with
+# `beta_api_shape_disabled` on every voice note on 2026-05-24. Each call
+# paid a websocket round-trip before falling back to batch. We persist a
+# disable record so the cooldown survives daemon restarts.
+
+REALTIME_DISABLE_DURATION_SECONDS = 24 * 60 * 60
+
+_DEFAULT_REALTIME_DISABLE_STATE_PATH = Path.home() / ".claw" / "realtime_tts_state.json"
+_realtime_disable_state_path_override: Path | None = None
+
+_REALTIME_BETA_SHAPE_PATTERNS = (
+    re.compile(r"beta_api_shape_disabled", re.IGNORECASE),
+    re.compile(r"\b4000\b.*invalid_request_error", re.IGNORECASE),
+    re.compile(r"invalid_request_error[^\n]*\b4000\b", re.IGNORECASE),
+)
+
+
+def set_realtime_disable_state_path(path: Path | None) -> None:
+    """Test seam — point the disable state file at a tmpdir during unit tests."""
+    global _realtime_disable_state_path_override
+    _realtime_disable_state_path_override = path
+
+
+def _realtime_disable_state_path() -> Path:
+    return (
+        _realtime_disable_state_path_override
+        if _realtime_disable_state_path_override is not None
+        else _DEFAULT_REALTIME_DISABLE_STATE_PATH
+    )
+
+
+def realtime_tts_disabled_until() -> float | None:
+    path = _realtime_disable_state_path()
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    value = data.get("disabled_until")
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def is_realtime_tts_disabled() -> bool:
+    until = realtime_tts_disabled_until()
+    return until is not None and until > time.time()
+
+
+def disable_realtime_tts(
+    *,
+    reason: str,
+    duration_seconds: float = REALTIME_DISABLE_DURATION_SECONDS,
+) -> float:
+    """Persist a disable record. Returns the disabled_until epoch seconds."""
+    path = _realtime_disable_state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    until = time.time() + duration_seconds
+    payload = {
+        "disabled_until": until,
+        "reason": reason,
+        "set_at": time.time(),
+    }
+    path.write_text(json.dumps(payload, indent=2))
+    logger.warning(
+        "Realtime TTS disabled until %s (reason=%s)",
+        time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(until)),
+        reason,
+    )
+    return until
+
+
+def is_realtime_beta_shape_error(exc: BaseException) -> bool:
+    text = str(exc) if exc is not None else ""
+    return any(p.search(text) for p in _REALTIME_BETA_SHAPE_PATTERNS)
 
 
 class VoiceUnavailableError(RuntimeError):
@@ -291,6 +374,7 @@ async def synthesize_voice_note(
     prefer_realtime: bool = False,
     realtime_voice: str = REALTIME_DEFAULT_VOICE,
     realtime_model: str = REALTIME_DEFAULT_MODEL,
+    observe: Callable[[str, dict], None] | None = None,
 ) -> Path:
     """Text → OGG Opus voice note for Telegram.
 
@@ -298,21 +382,43 @@ async def synthesize_voice_note(
         xAI Grok TTS → OpenAI TTS-1 → Edge-TTS
     Backend priority when prefer_realtime=True:
         OpenAI Realtime (gpt-realtime, voice alloy) → xAI → OpenAI TTS-1 → Edge-TTS
+
+    ``observe`` receives ("realtime_tts_disabled_beta_shape", {...}) when the
+    Realtime backend trips a beta-shape error and the 24h cooldown kicks in.
     """
     truncated = text[:MAX_TTS_CHARS]
     mp3_path: Path | None = None
     wav_path: Path | None = None
 
     if prefer_realtime and api_key:
-        try:
-            wav_path = await _synthesize_realtime(
-                truncated,
-                api_key=api_key,
-                voice=realtime_voice,
-                model=realtime_model,
-            )
-        except Exception:
-            logger.warning("Realtime TTS failed, falling back to batch chain", exc_info=True)
+        if is_realtime_tts_disabled():
+            logger.info("Realtime TTS in cooldown; skipping to batch chain")
+        else:
+            try:
+                wav_path = await _synthesize_realtime(
+                    truncated,
+                    api_key=api_key,
+                    voice=realtime_voice,
+                    model=realtime_model,
+                )
+            except Exception as exc:
+                if is_realtime_beta_shape_error(exc):
+                    until = disable_realtime_tts(reason="beta_api_shape_disabled")
+                    if observe is not None:
+                        try:
+                            observe(
+                                "realtime_tts_disabled_beta_shape",
+                                {
+                                    "reason": "beta_api_shape_disabled",
+                                    "disabled_until": until,
+                                    "duration_seconds": REALTIME_DISABLE_DURATION_SECONDS,
+                                    "error": str(exc)[:300],
+                                },
+                            )
+                        except Exception:
+                            logger.debug("observe callback raised in voice", exc_info=True)
+                else:
+                    logger.warning("Realtime TTS failed, falling back to batch chain", exc_info=True)
 
     if wav_path is not None:
         try:

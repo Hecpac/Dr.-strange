@@ -2097,10 +2097,22 @@ class BotService:
                     self.brain.memory.clear_provider_session(session_id, provider)
             except Exception:
                 logger.debug("failed to remove failed clean retry turn", exc_info=True)
-            fallback = self._sanitize_visible_chat_response(
-                session_id,
-                self._internal_trace_recovery_fallback(source_text=source_text, pending_action=pending_action),
+            # Hotfix F: actionable requests land in the recovery_jobs queue
+            # with failure_reason=provider_repeated_internal_trace instead of
+            # being silently dropped behind the generic apology.
+            recovery = self.brain.queue_internal_trace_recovery_job(
+                session_id, source_text=source_text
             )
+            if recovery is not None:
+                _job_id, recovery_message = recovery
+                fallback = self._sanitize_visible_chat_response(session_id, recovery_message)
+            else:
+                fallback = self._sanitize_visible_chat_response(
+                    session_id,
+                    self._internal_trace_recovery_fallback(
+                        source_text=source_text, pending_action=pending_action
+                    ),
+                )
             self._persist_sanitizer_recovery_action(
                 session_id,
                 source_text=source_text,

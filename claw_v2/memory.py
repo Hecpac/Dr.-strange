@@ -132,6 +132,25 @@ CREATE TABLE IF NOT EXISTS outcome_entity_edges (
 
 CREATE INDEX IF NOT EXISTS idx_outcome_entity_tag
     ON outcome_entity_edges(entity_tag);
+
+-- P0 hotfix B: durable record of brain turns that died on a recoverable
+-- provider failure (image poison, repeated internal trace). Replaces the
+-- silent generic apology so the original actionable request is preserved
+-- and can be replayed once the cause clears.
+CREATE TABLE IF NOT EXISTS recovery_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    turn_id TEXT,
+    failure_reason TEXT NOT NULL,
+    original_request_sanitized TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending_recovery'
+        CHECK(status IN ('pending_recovery', 'resolved', 'dismissed')),
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    resolved_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_recovery_jobs_session_status
+    ON recovery_jobs(session_id, status);
 """
 
 
@@ -1331,6 +1350,80 @@ class MemoryStore:
             cursor = self._conn.execute("DELETE FROM provider_sessions")
             self._conn.commit()
             return int(cursor.rowcount)
+
+    # Recovery jobs (P0 hotfix B) -------------------------------------------------
+
+    def create_recovery_job(
+        self,
+        session_id: str,
+        *,
+        turn_id: str | None,
+        failure_reason: str,
+        original_request_sanitized: str,
+    ) -> int:
+        with self._lock:
+            cursor = self._conn.execute(
+                """
+                INSERT INTO recovery_jobs
+                    (session_id, turn_id, failure_reason, original_request_sanitized)
+                VALUES (?, ?, ?, ?)
+                """,
+                (session_id, turn_id, failure_reason, original_request_sanitized),
+            )
+            self._conn.commit()
+            return int(cursor.lastrowid or 0)
+
+    def list_pending_recovery_jobs(
+        self, session_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        if session_id is None:
+            cursor = self._conn.execute(
+                """
+                SELECT id, session_id, turn_id, failure_reason,
+                       original_request_sanitized, status, created_at, resolved_at
+                FROM recovery_jobs
+                WHERE status = 'pending_recovery'
+                ORDER BY id ASC
+                """
+            )
+        else:
+            cursor = self._conn.execute(
+                """
+                SELECT id, session_id, turn_id, failure_reason,
+                       original_request_sanitized, status, created_at, resolved_at
+                FROM recovery_jobs
+                WHERE session_id = ? AND status = 'pending_recovery'
+                ORDER BY id ASC
+                """,
+                (session_id,),
+            )
+        return [
+            {
+                "id": row[0],
+                "session_id": row[1],
+                "turn_id": row[2],
+                "failure_reason": row[3],
+                "original_request_sanitized": row[4],
+                "status": row[5],
+                "created_at": row[6],
+                "resolved_at": row[7],
+            }
+            for row in cursor.fetchall()
+        ]
+
+    def resolve_recovery_job(self, job_id: int, *, status: str = "resolved") -> None:
+        if status not in {"resolved", "dismissed"}:
+            raise ValueError(f"Invalid recovery_job status: {status!r}")
+        with self._lock:
+            self._conn.execute(
+                """
+                UPDATE recovery_jobs
+                SET status = ?, resolved_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND status = 'pending_recovery'
+                """,
+                (status, job_id),
+            )
+            self._conn.commit()
 
     def _mark_provider_session_reset_locked(
         self,

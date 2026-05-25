@@ -9,7 +9,18 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from claw_v2.memory import MemoryStore
-from claw_v2.telegram import TelegramTransport, _split_message
+from claw_v2.telegram import TelegramTransport, _polling_lock_path, _split_message
+
+
+def _purge_polling_lock(token: str) -> None:
+    """Remove any stale polling lock for ``token`` so cross-session PID
+    collisions cannot flake the start tests (the lock file persists with
+    the prior pytest run's PID and another live process may have reused
+    that slot)."""
+    try:
+        _polling_lock_path(token).unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 class SplitMessageTests(unittest.TestCase):
@@ -28,6 +39,13 @@ class SplitMessageTests(unittest.TestCase):
 
 
 class TransportStartTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        _purge_polling_lock("test-token")
+        self.addAsyncCleanup(self._purge_test_lock)
+
+    async def _purge_test_lock(self) -> None:
+        _purge_polling_lock("test-token")
+
     async def test_start_is_noop_without_token(self) -> None:
         transport = TelegramTransport(bot_service=MagicMock(), token=None)
         await transport.start()

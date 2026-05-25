@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import fcntl
+import hashlib
 import inspect
 import logging
 import mimetypes
@@ -9,10 +11,128 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Any
+from typing import IO, Any, Callable
 
 from telegram import LinkPreviewOptions, Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
+
+
+# --- P0 hotfix E: polling singleton lock keyed by token hash ---------------
+#
+# The PID file alone failed to prevent two daemons polling the same token
+# (we logged ``Conflict: terminated by other getUpdates request`` on
+# 2026-05-24). A token-hash flock + PID staleness check keeps two PIDs
+# from racing the same Telegram bot.
+
+_DEFAULT_POLLING_LOCK_DIR = Path.home() / ".claw"
+
+
+class PollingLockConflict(RuntimeError):
+    """Another live process already holds the polling lock for this token."""
+
+    def __init__(self, owner_pid: int, lock_path: Path) -> None:
+        super().__init__(
+            f"Telegram polling lock for this token is held by PID {owner_pid} ({lock_path})"
+        )
+        self.owner_pid = owner_pid
+        self.lock_path = lock_path
+
+
+def _token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+
+
+def _polling_lock_path(token: str, *, base_dir: Path | None = None) -> Path:
+    base = base_dir if base_dir is not None else _DEFAULT_POLLING_LOCK_DIR
+    return base / f"telegram-poll-{_token_hash(token)}.lock"
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except (PermissionError,):
+        # Permission denied means the PID exists but is owned by another
+        # user — treat as alive (conservative).
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+    return True
+
+
+def acquire_polling_lock(
+    token: str,
+    *,
+    base_dir: Path | None = None,
+    observe: Callable[[str, dict], None] | None = None,
+) -> IO[str]:
+    """Atomically claim the polling lock for ``token``.
+
+    Returns an open file handle that holds the flock for the lifetime of
+    the caller. Closing it releases the lock.
+
+    Raises ``PollingLockConflict`` if another live PID already polls the
+    same token. On conflict, the optional ``observe`` callback receives
+    ``("telegram_polling_duplicate_instance", {...})`` so the daemon can
+    log it without raw-token leakage.
+    """
+    lock_path = _polling_lock_path(token, base_dir=base_dir)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    existing_pid: int | None = None
+    if lock_path.exists():
+        try:
+            existing_pid = int(lock_path.read_text().strip())
+        except (OSError, ValueError):
+            existing_pid = None
+
+    if (
+        existing_pid is not None
+        and existing_pid != os.getpid()
+        and _pid_alive(existing_pid)
+    ):
+        if observe is not None:
+            try:
+                observe(
+                    "telegram_polling_duplicate_instance",
+                    {
+                        "owner_pid": existing_pid,
+                        "token_hash": _token_hash(token),
+                        "lock_path": str(lock_path),
+                    },
+                )
+            except Exception:
+                logger.debug("observe callback raised in acquire_polling_lock", exc_info=True)
+        raise PollingLockConflict(existing_pid, lock_path)
+
+    fh = open(lock_path, "w", encoding="utf-8")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        fh.close()
+        owner_pid = existing_pid if existing_pid is not None else -1
+        if observe is not None:
+            try:
+                observe(
+                    "telegram_polling_duplicate_instance",
+                    {
+                        "owner_pid": owner_pid,
+                        "token_hash": _token_hash(token),
+                        "lock_path": str(lock_path),
+                        "flock_error": str(exc)[:200],
+                    },
+                )
+            except Exception:
+                logger.debug("observe callback raised in acquire_polling_lock", exc_info=True)
+        raise PollingLockConflict(owner_pid, lock_path) from exc
+
+    fh.seek(0)
+    fh.truncate()
+    fh.write(str(os.getpid()))
+    fh.flush()
+    return fh
+
 
 _NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
@@ -237,6 +357,8 @@ class TelegramTransport:
         self._request_timeout = _env_float("TELEGRAM_REQUEST_TIMEOUT", DEFAULT_REQUEST_TIMEOUT)
         self._media_write_timeout = _env_float("TELEGRAM_MEDIA_WRITE_TIMEOUT", DEFAULT_MEDIA_WRITE_TIMEOUT)
         self._get_updates_pool_size = _env_int("TELEGRAM_GET_UPDATES_POOL_SIZE", DEFAULT_GET_UPDATES_POOL_SIZE)
+        # P0 hotfix E: held for the lifetime of the polling loop.
+        self._polling_lock_fh: IO[str] | None = None
 
     def _emit_transport_event(self, event_type: str, payload: dict[str, Any]) -> None:
         observe = getattr(self._bot_service, "observe", None)
@@ -246,6 +368,10 @@ class TelegramTransport:
             observe.emit(event_type, payload=payload)
         except Exception:
             logger.debug("Could not emit Telegram transport event", exc_info=True)
+
+    def _emit_polling_event(self, event_type: str, payload: dict[str, Any]) -> None:
+        """Callback signature acquire_polling_lock expects (event_type, payload)."""
+        self._emit_transport_event(event_type, payload)
 
     def _emit_latency(
         self,
@@ -312,6 +438,18 @@ class TelegramTransport:
         self._PID_FILE.parent.mkdir(parents=True, exist_ok=True)
         import os
         self._PID_FILE.write_text(str(os.getpid()))
+        # P0 hotfix E: acquire token-hash flock so two daemons on different
+        # PIDs cannot race the same Telegram bot's getUpdates loop.
+        try:
+            self._polling_lock_fh = acquire_polling_lock(
+                self._token, observe=self._emit_polling_event
+            )
+        except PollingLockConflict as exc:
+            logger.error(
+                "Refusing to start Telegram polling: another live process (PID %d) holds the lock",
+                exc.owner_pid,
+            )
+            return
         builder = ApplicationBuilder().token(self._token)
         builder.connection_pool_size(self._connection_pool_size)
         builder.pool_timeout(self._pool_timeout)
@@ -381,6 +519,13 @@ class TelegramTransport:
                 self._PID_FILE.unlink(missing_ok=True)
         except Exception:
             logger.debug("Could not clear Telegram PID file", exc_info=True)
+        # P0 hotfix E: release the polling singleton lock.
+        if self._polling_lock_fh is not None:
+            try:
+                self._polling_lock_fh.close()
+            except Exception:
+                logger.debug("Could not close Telegram polling lock", exc_info=True)
+            self._polling_lock_fh = None
 
     async def _set_commands(self) -> None:
         from telegram import BotCommand

@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
+from typing import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -20,11 +21,20 @@ class ChromeStartError(RuntimeError):
 class ManagedChrome:
     """Auto-managed Chrome process with CDP for the bot."""
 
-    def __init__(self, port: int = 9250, profile_dir: str = "~/.claw/chrome-profile") -> None:
+    def __init__(
+        self,
+        port: int = 9250,
+        profile_dir: str = "~/.claw/chrome-profile",
+        *,
+        observe: Callable[[str, dict], None] | None = None,
+    ) -> None:
         self.port = port
         self.profile_dir = str(Path(profile_dir).expanduser())
         self._process: subprocess.Popen | None = None
         self._attached_pid: int | None = None
+        # P0 hotfix C: callback for cdp_unavailable observability events.
+        # Optional so unit tests can omit it.
+        self._observe = observe
 
     @property
     def cdp_url(self) -> str:
@@ -54,16 +64,66 @@ class ManagedChrome:
         chrome_path = _find_chrome()
         Path(self.profile_dir).mkdir(parents=True, exist_ok=True)
         _wait_for_profile_free(self.profile_dir, timeout=5)
-        profile_pids = _profile_user_data_pids(self.profile_dir)
-        if profile_pids:
-            joined_pids = ", ".join(str(pid) for pid in profile_pids)
-            raise ChromeStartError(
-                f"Chrome profile {self.profile_dir} is already in use by PID(s) {joined_pids}, "
-                f"but CDP is not ready on port {self.port}. Close that Chrome or use a different "
-                "CLAW_CHROME_PORT/profile before starting ManagedChrome."
-            )
-        _remove_stale_singleton_lock(self.profile_dir)
 
+        # P0 hotfix C: kill stale PIDs holding *our* profile, retry once,
+        # then degrade with cdp_unavailable. Replaces the prior raise-on-first-
+        # conflict + "Port not free, proceeding anyway" silent fall-through.
+        last_error: ChromeStartError | None = None
+        for attempt in range(2):
+            self._reclaim_profile_if_busy()
+            _remove_stale_singleton_lock(self.profile_dir)
+            try:
+                self._spawn_chrome(chrome_path, headless=headless)
+                return
+            except ChromeStartError as exc:
+                last_error = exc
+                if attempt == 0:
+                    logger.warning(
+                        "Chrome launch attempt 1 failed (%s); reclaiming profile and retrying",
+                        exc,
+                    )
+                    if self._process is not None:
+                        try:
+                            self._process.terminate()
+                        except Exception:
+                            logger.debug("Could not terminate failed Chrome subprocess", exc_info=True)
+                        self._process = None
+                    continue
+                break
+
+        self._emit_observe(
+            "cdp_unavailable",
+            {
+                "port": self.port,
+                "profile_dir": self.profile_dir,
+                "error": str(last_error) if last_error else "unknown",
+            },
+        )
+        if last_error is not None:
+            raise last_error
+        raise ChromeStartError(
+            f"Chrome failed to launch on port {self.port}; CDP unavailable"
+        )
+
+    def _reclaim_profile_if_busy(self) -> None:
+        """Kill ONLY PIDs whose --user-data-dir matches self.profile_dir.
+
+        ``_profile_user_data_pids`` filters by exact user-data-dir, so the
+        user's regular Chrome (running a different profile) is never touched.
+        """
+        profile_pids = _profile_user_data_pids(self.profile_dir)
+        if not profile_pids:
+            return
+        logger.warning(
+            "Reclaiming profile %s held by PID(s) %s (only PIDs matching --user-data-dir)",
+            self.profile_dir,
+            profile_pids,
+        )
+        for pid in profile_pids:
+            _kill_pid(pid)
+        _wait_for_profile_free(self.profile_dir, timeout=5)
+
+    def _spawn_chrome(self, chrome_path: str, *, headless: bool) -> None:
         cmd = [
             chrome_path,
             f"--remote-debugging-port={self.port}",
@@ -78,7 +138,17 @@ class ManagedChrome:
             cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
         _wait_for_cdp_ready(self.port, timeout=10)
-        logger.info("ManagedChrome started on port %d (PID %d)", self.port, self._process.pid)
+        logger.info(
+            "ManagedChrome started on port %d (PID %d)", self.port, self._process.pid
+        )
+
+    def _emit_observe(self, event_type: str, payload: dict) -> None:
+        if self._observe is None:
+            return
+        try:
+            self._observe(event_type, payload)
+        except Exception:
+            logger.debug("observe callback raised in ManagedChrome", exc_info=True)
 
     def stop(self) -> None:
         """Stop Chrome. Kills the process whether it was launched or attached — that is
@@ -220,12 +290,17 @@ def _kill_pid(pid: int) -> None:
 
 
 def _wait_for_port_free(port: int, timeout: float = 5) -> None:
+    """Block until the port is free or raise ChromeStartError.
+
+    P0 hotfix C: no more "proceeding anyway" warning. If the port is still
+    held after timeout, fail loudly so the watchdog can degrade.
+    """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if not _check_port_pids(port):
             return
         time.sleep(0.5)
-    logger.warning("Port %d not free after %ds, proceeding anyway", port, timeout)
+    raise ChromeStartError(f"Port {port} still busy after {timeout}s")
 
 
 def _wait_for_profile_free(profile_dir: str, timeout: float = 5) -> None:

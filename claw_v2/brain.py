@@ -106,6 +106,91 @@ _INTERNAL_PROMPT_ECHO_PATTERNS = (
     re.compile(r"\byou are Dr\.?\s*Strange\b(?=[\s\S]{0,200}\bDo NOT\b)", re.IGNORECASE),
 )
 
+# Provider error phrases meaning a previously sent image cannot be processed
+# anymore. Repeating the same image guarantees the same failure, so the brain
+# quarantines image blocks and retries text-only once (P0 hotfix A).
+_IMAGE_PROCESSING_ERROR_PATTERNS = (
+    re.compile(r"image in the conversation could not be processed", re.IGNORECASE),
+    re.compile(r"could not process image", re.IGNORECASE),
+)
+
+_QUARANTINED_IMAGE_PLACEHOLDER = "[image omitted: provider_failed_processing]"
+
+
+def _is_image_processing_error(exc: BaseException) -> bool:
+    text = str(exc) if exc is not None else ""
+    return any(pattern.search(text) for pattern in _IMAGE_PROCESSING_ERROR_PATTERNS)
+
+
+def _quarantine_image_blocks(prompt: UserPrompt) -> tuple[UserPrompt, int]:
+    """Replace image content blocks with a safe text placeholder.
+
+    Returns the sanitized prompt and the number of blocks replaced. String
+    prompts are passed through unchanged.
+    """
+    if isinstance(prompt, str):
+        return prompt, 0
+    sanitized: list[UserContentBlock] = []
+    quarantined = 0
+    for block in prompt:
+        if isinstance(block, dict) and block.get("type") == "image":
+            sanitized.append({"type": "text", "text": _QUARANTINED_IMAGE_PLACEHOLDER})
+            quarantined += 1
+        else:
+            sanitized.append(block)
+    return sanitized, quarantined
+
+
+# P0 hotfix B: actionable-request detection + recovery-job message rendering.
+# Mirrors BotService._looks_like_recoverable_action_text but kept in brain.py
+# to avoid a bot_helpers import cycle.
+def _request_looks_actionable(text: str) -> bool:
+    normalized = (text or "").lower().strip()
+    if len(normalized) < 8:
+        return False
+    if normalized in {
+        "estatus", "status", "modo brujula", "procede", "ok", "si", "sí",
+        "hola", "hello", "buenas",
+    }:
+        return False
+    action_markers = (
+        "arregla", "corrige", "completa", "haz ", "hacer ", "manda ",
+        "sube", "subelo", "reinicia", "corre ", "ejecuta",
+        "revisa", "lee ", "crea ", "crea un", "crea una",
+        "fix ", "fixes", "implementa", "implementar",
+        "agrega", "monta", "instala", "deploy",
+    )
+    return any(marker in normalized for marker in action_markers)
+
+
+_RECOVERY_REASON_HINTS = {
+    "provider_context_media_poison": "el contexto traía una imagen que el provider no pudo procesar",
+    "provider_repeated_internal_trace": "el turno reincidió en un trace interno",
+    "provider_session_retry": "el provider falló incluso al refrescar la sesión",
+    "provider_error": "el provider falló preparando la respuesta",
+}
+
+
+def _format_recovery_message_body(reason: str, summary: str, job_id: int) -> str:
+    """Plain recovery message body (no <response> tags).
+
+    Used by callers that feed the message directly into the chat sanitizer
+    (e.g. bot.py internal_trace_repeated branch) instead of through the
+    brain response extractor.
+    """
+    short = summary if len(summary) <= 220 else summary[:217] + "..."
+    cause = _RECOVERY_REASON_HINTS.get(reason, _RECOVERY_REASON_HINTS["provider_error"])
+    return (
+        f"El turno falló porque {cause}. "
+        f"Dejé tu pedido en cola de recovery (job #{job_id}) para retomarlo "
+        f"cuando el contexto se limpie: \"{short}\"."
+    )
+
+
+def _format_recovery_response(reason: str, summary: str, job_id: int) -> str:
+    """Recovery message wrapped in <response> tags for the brain pipeline."""
+    return f"<response>{_format_recovery_message_body(reason, summary, job_id)}</response>"
+
 SELF_HEALING_LOOP_CONTRACT = """# Self-healing loop
 When a tool returns an error:
 1. Analyze: identify the likely cause, such as a missing dependency, wrong path, stale state, or invalid input.
@@ -217,6 +302,102 @@ class BrainService:
         if self.playbooks is None:
             self.playbooks = PlaybookLoader()
 
+    def queue_internal_trace_recovery_job(
+        self,
+        session_id: str,
+        *,
+        source_text: str,
+    ) -> tuple[int, str] | None:
+        """Persist a recovery_jobs entry for the internal_trace_repeated path.
+
+        Returns ``(job_id, plain_message_body)`` when ``source_text`` looks
+        actionable, ``None`` otherwise so the caller can keep its existing
+        fallback for smalltalk. The message body is plain text (no
+        <response> tags) since bot.py feeds it straight into the chat
+        sanitizer. Closes risk #3 from the P0 hotfix audit.
+        """
+        if not _request_looks_actionable(source_text):
+            return None
+        sanitized = source_text.strip()
+        if len(sanitized) > 400:
+            sanitized = sanitized[:397] + "..."
+        job_id = self.memory.create_recovery_job(
+            session_id,
+            turn_id=None,
+            failure_reason="provider_repeated_internal_trace",
+            original_request_sanitized=sanitized,
+        )
+        if self.observe is not None:
+            self.observe.emit(
+                "recovery_job_created",
+                lane="brain",
+                payload={
+                    "app_session_id": session_id,
+                    "job_id": job_id,
+                    "failure_reason": "provider_repeated_internal_trace",
+                    "original_request_preview": sanitized[:200],
+                },
+            )
+        message = _format_recovery_message_body(
+            "provider_repeated_internal_trace", sanitized, job_id
+        )
+        return job_id, message
+
+    def _queue_recovery_or_raise(
+        self,
+        *,
+        exc: AdapterError,
+        session_id: str,
+        stored_user_message: str,
+        trace: dict[str, Any],
+        failure_reason: str,
+    ) -> LLMResponse:
+        """P0 hotfix B: when brain failed on an actionable request, persist a
+        recovery job and return a recovery LLMResponse so the user gets a
+        useful reply instead of the bare INTERNAL_TOOL_TRACE_FALLBACK.
+        Non-actionable smalltalk still re-raises so existing callers behave
+        unchanged.
+        """
+        if not _request_looks_actionable(stored_user_message):
+            raise exc
+        sanitized = stored_user_message.strip()
+        if len(sanitized) > 400:
+            sanitized = sanitized[:397] + "..."
+        job_id = self.memory.create_recovery_job(
+            session_id,
+            turn_id=trace.get("trace_id"),
+            failure_reason=failure_reason,
+            original_request_sanitized=sanitized,
+        )
+        if self.observe is not None:
+            self.observe.emit(
+                "recovery_job_created",
+                lane="brain",
+                trace_id=trace.get("trace_id"),
+                root_trace_id=trace.get("root_trace_id"),
+                span_id=trace.get("span_id"),
+                parent_span_id=trace.get("parent_span_id"),
+                artifact_id=trace.get("artifact_id"),
+                payload={
+                    "app_session_id": session_id,
+                    "job_id": job_id,
+                    "failure_reason": failure_reason,
+                    "original_request_preview": sanitized[:200],
+                    "error": str(exc)[:300],
+                },
+            )
+        content = _format_recovery_response(failure_reason, sanitized, job_id)
+        return LLMResponse(
+            content=content,
+            lane="brain",
+            provider="claw_recovery",
+            model="recovery",
+            artifacts={
+                "recovery_job_id": job_id,
+                "recovery_failure_reason": failure_reason,
+            },
+        )
+
     def handle_message(
         self,
         session_id: str,
@@ -293,66 +474,176 @@ class BrainService:
                 timeout=300.0,
             )
         except AdapterError as exc:
-            if not resuming:
-                raise
-            # Session may be corrupted/too large — retry with a fresh session.
-            logger.warning("Session resume failed for %s, retrying with fresh session", session_id)
-            if self.observe is not None:
-                self.observe.emit(
-                    "session_resume_failed",
-                    lane="brain",
-                    provider=session_provider,
-                    trace_id=trace["trace_id"],
-                    root_trace_id=trace["root_trace_id"],
-                    span_id=trace["span_id"],
-                    parent_span_id=trace["parent_span_id"],
-                    artifact_id=trace["artifact_id"],
-                    payload={
-                        "app_session_id": session_id,
-                        "stale_session": provider_session_id,
-                        "error": str(exc)[:500],
-                    },
+            if _is_image_processing_error(exc):
+                # Image-poison recovery (P0 hotfix A): the provider rejected
+                # an image in the conversation; reusing the same prompt or
+                # the same provider session guarantees the same failure.
+                sanitized_prompt, quarantined = _quarantine_image_blocks(prompt)
+                if self.observe is not None:
+                    self.observe.emit(
+                        "media_context_quarantined",
+                        lane="brain",
+                        provider=session_provider,
+                        trace_id=trace["trace_id"],
+                        root_trace_id=trace["root_trace_id"],
+                        span_id=trace["span_id"],
+                        parent_span_id=trace["parent_span_id"],
+                        artifact_id=trace["artifact_id"],
+                        payload={
+                            "app_session_id": session_id,
+                            "stale_session": provider_session_id,
+                            "blocks_quarantined": quarantined,
+                            "error": str(exc)[:500],
+                        },
+                    )
+                self.memory.clear_provider_session(session_id, session_provider)
+                if self.observe is not None:
+                    self.observe.emit(
+                        "provider_session_reset",
+                        lane="brain",
+                        provider=session_provider,
+                        trace_id=trace["trace_id"],
+                        root_trace_id=trace["root_trace_id"],
+                        span_id=trace["span_id"],
+                        parent_span_id=trace["parent_span_id"],
+                        artifact_id=trace["artifact_id"],
+                        payload={
+                            "app_session_id": session_id,
+                            "stale_session": provider_session_id,
+                            "reason": "media_context_quarantined",
+                            "error": str(exc)[:500],
+                        },
+                    )
+                    self.observe.emit(
+                        "brain_retry_text_only",
+                        lane="brain",
+                        provider=session_provider,
+                        trace_id=trace["trace_id"],
+                        root_trace_id=trace["root_trace_id"],
+                        span_id=trace["span_id"],
+                        parent_span_id=trace["parent_span_id"],
+                        artifact_id=trace["artifact_id"],
+                        payload={
+                            "app_session_id": session_id,
+                            "blocks_quarantined": quarantined,
+                        },
+                    )
+                try:
+                    response = self.router.ask(
+                        sanitized_prompt,
+                        system_prompt=_brain_system_prompt(self.system_prompt),
+                        lane="brain",
+                        provider=model_override.provider if model_override else None,
+                        model=model_override.model if model_override else None,
+                        effort=model_override.effort if model_override else None,
+                        session_id=None,
+                        evidence_pack=attach_trace(
+                            {"app_session_id": session_id, "media_quarantine": True},
+                            trace,
+                        ),
+                        max_budget=_resolve_max_budget(self.router) * 0.75,
+                        timeout=300.0,
+                    )
+                except AdapterError as retry_exc:
+                    if self.observe is not None:
+                        self.observe.emit(
+                            "brain_retry_text_only_failed",
+                            lane="brain",
+                            provider=session_provider,
+                            trace_id=trace["trace_id"],
+                            root_trace_id=trace["root_trace_id"],
+                            span_id=trace["span_id"],
+                            parent_span_id=trace["parent_span_id"],
+                            artifact_id=trace["artifact_id"],
+                            payload={
+                                "app_session_id": session_id,
+                                "error": str(retry_exc)[:500],
+                                "blocks_quarantined": quarantined,
+                            },
+                        )
+                    response = self._queue_recovery_or_raise(
+                        exc=retry_exc,
+                        session_id=session_id,
+                        stored_user_message=stored_user_message,
+                        trace=trace,
+                        failure_reason="provider_context_media_poison",
+                    )
+            elif not resuming:
+                response = self._queue_recovery_or_raise(
+                    exc=exc,
+                    session_id=session_id,
+                    stored_user_message=stored_user_message,
+                    trace=trace,
+                    failure_reason="provider_error",
                 )
-                self.observe.emit(
-                    "provider_session_reset",
-                    lane="brain",
-                    provider=session_provider,
-                    trace_id=trace["trace_id"],
-                    root_trace_id=trace["root_trace_id"],
-                    span_id=trace["span_id"],
-                    parent_span_id=trace["parent_span_id"],
-                    artifact_id=trace["artifact_id"],
-                    payload={
-                        "app_session_id": session_id,
-                        "stale_session": provider_session_id,
-                        "reason": "session_resume_failed",
-                        "error": str(exc)[:500],
-                    },
+            else:
+                # Session may be corrupted/too large — retry with a fresh session.
+                logger.warning("Session resume failed for %s, retrying with fresh session", session_id)
+                if self.observe is not None:
+                    self.observe.emit(
+                        "session_resume_failed",
+                        lane="brain",
+                        provider=session_provider,
+                        trace_id=trace["trace_id"],
+                        root_trace_id=trace["root_trace_id"],
+                        span_id=trace["span_id"],
+                        parent_span_id=trace["parent_span_id"],
+                        artifact_id=trace["artifact_id"],
+                        payload={
+                            "app_session_id": session_id,
+                            "stale_session": provider_session_id,
+                            "error": str(exc)[:500],
+                        },
+                    )
+                    self.observe.emit(
+                        "provider_session_reset",
+                        lane="brain",
+                        provider=session_provider,
+                        trace_id=trace["trace_id"],
+                        root_trace_id=trace["root_trace_id"],
+                        span_id=trace["span_id"],
+                        parent_span_id=trace["parent_span_id"],
+                        artifact_id=trace["artifact_id"],
+                        payload={
+                            "app_session_id": session_id,
+                            "stale_session": provider_session_id,
+                            "reason": "session_resume_failed",
+                            "error": str(exc)[:500],
+                        },
+                    )
+                self.memory.clear_provider_session(session_id, session_provider)
+                prompt = self._build_prompt(
+                    session_id=session_id,
+                    message=message,
+                    stored_user_message=stored_user_message,
+                    include_history=True,
+                    compact_context=False,
+                    catchup_after_id=None,
+                    task_type=task_type,
                 )
-            self.memory.clear_provider_session(session_id, session_provider)
-            prompt = self._build_prompt(
-                session_id=session_id,
-                message=message,
-                stored_user_message=stored_user_message,
-                include_history=True,
-                compact_context=False,
-                catchup_after_id=None,
-                task_type=task_type,
-            )
-            response = self.router.ask(
-                prompt,
-                system_prompt=_brain_system_prompt(self.system_prompt),
-                lane="brain",
-                provider=model_override.provider if model_override else None,
-                model=model_override.model if model_override else None,
-                effort=model_override.effort if model_override else None,
-                session_id=None,
-                evidence_pack=attach_trace({"app_session_id": session_id}, trace),
-                # Resume retry: cap at 75% of normal budget to limit blast radius
-                # if the original turn already burned cycles before failing.
-                max_budget=_resolve_max_budget(self.router) * 0.75,
-                timeout=300.0,
-            )
+                try:
+                    response = self.router.ask(
+                        prompt,
+                        system_prompt=_brain_system_prompt(self.system_prompt),
+                        lane="brain",
+                        provider=model_override.provider if model_override else None,
+                        model=model_override.model if model_override else None,
+                        effort=model_override.effort if model_override else None,
+                        session_id=None,
+                        evidence_pack=attach_trace({"app_session_id": session_id}, trace),
+                        # Resume retry: cap at 75% of normal budget to limit blast radius
+                        # if the original turn already burned cycles before failing.
+                        max_budget=_resolve_max_budget(self.router) * 0.75,
+                        timeout=300.0,
+                    )
+                except AdapterError as retry_exc:
+                    response = self._queue_recovery_or_raise(
+                        exc=retry_exc,
+                        session_id=session_id,
+                        stored_user_message=stored_user_message,
+                        trace=trace,
+                        failure_reason="provider_session_retry",
+                    )
         response = _extract_visible_brain_response(response)
         self._last_confidence[session_id] = response.confidence
         if len(self._last_confidence) > 256:

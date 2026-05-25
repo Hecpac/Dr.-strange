@@ -119,14 +119,31 @@ class ManagedChromeTests(unittest.TestCase):
 
     @patch("claw_v2.chrome._check_port_pids")
     @patch("claw_v2.chrome._wait_for_profile_free")
-    def test_start_errors_when_profile_active_without_ready_cdp(self, mock_wait_profile, mock_pids) -> None:
+    @patch("claw_v2.chrome._kill_pid")
+    @patch("claw_v2.chrome._wait_for_cdp_ready")
+    @patch("subprocess.Popen")
+    def test_start_reclaims_profile_and_retries_then_raises_when_cdp_persistently_unavailable(
+        self,
+        mock_popen,
+        mock_wait_cdp,
+        mock_kill,
+        mock_wait_profile,
+        mock_pids,
+    ) -> None:
+        # P0 hotfix C update: profile-held stale PIDs no longer raise on
+        # first detection; the watchdog kills them and retries. If CDP
+        # still does not come up, ChromeStartError is raised (no silent
+        # "proceeding anyway").
         mock_pids.return_value = []
         self.mock_profile_user_data_pids.return_value = [4321]
+        mock_wait_cdp.side_effect = ChromeStartError("CDP timeout")
+        proc = MagicMock()
+        proc.poll.return_value = None
+        mock_popen.return_value = proc
         mc = ManagedChrome(port=9250, profile_dir="/tmp/test-profile")
-        with self.assertRaises(ChromeStartError) as ctx:
+        with self.assertRaises(ChromeStartError):
             mc.start()
-        self.assertIn("/tmp/test-profile", str(ctx.exception))
-        self.assertIn("4321", str(ctx.exception))
+        mock_kill.assert_any_call(4321)
 
     @patch("claw_v2.chrome._check_port_pids")
     @patch("subprocess.Popen")
