@@ -106,9 +106,16 @@ def main(argv: list[str] | None = None) -> int:
 
     t0 = time.time()
     if args.skill:
-        result = svc.run_skill("echo", args.skill, instruction, lane=args.lane)
+        summary = svc.run_skill("echo", args.skill, instruction, lane=args.lane)
+        status = "succeeded"
+        failures: tuple = ()
+        evidence: list = []
     else:
         result = svc.dispatch_typed("echo", instruction, lane=args.lane)
+        summary = result.summary
+        status = result.status
+        failures = result.failures
+        evidence = list(result.evidence)
     elapsed = time.time() - t0
 
     out_dir = Path(args.out_dir)
@@ -116,34 +123,34 @@ def main(argv: list[str] | None = None) -> int:
     ts = int(time.time())
     suffix = args.skill or "dispatch"
     txt_path = out_dir / f"echo_{suffix}_{ts}.md"
-    txt_path.write_text(result.summary, encoding="utf-8")
+    txt_path.write_text(summary, encoding="utf-8")
 
     meta_path = out_dir / f"echo_{suffix}_{ts}_meta.json"
     meta_path.write_text(
         json.dumps(
             {
-                "status": result.status,
+                "status": status,
                 "elapsed_sec": round(elapsed, 2),
-                "failures": list(result.failures),
+                "failures": list(failures),
                 "evidence": [
                     {"kind": e.kind, "ref": e.ref, "summary": e.summary}
-                    for e in result.evidence
+                    for e in evidence
                 ],
-                "chars": len(result.summary),
+                "chars": len(summary),
             },
             indent=2,
         ),
         encoding="utf-8",
     )
 
-    print(f"Status: {result.status}")
+    print(f"Status: {status}")
     print(f"Elapsed: {elapsed:.1f}s")
-    print(f"Chars: {len(result.summary)}")
-    print(f"Failures: {result.failures}")
-    print(f"Provider used: {result.evidence[0].ref if result.evidence else 'n/a'}")
+    print(f"Chars: {len(summary)}")
+    print(f"Failures: {failures}")
+    print(f"Provider used: {evidence[0].ref if evidence else 'n/a'}")
     print(f"Output: {txt_path}")
     print(f"Meta: {meta_path}")
-    return 0 if result.status == "succeeded" and not result.failures else 1
+    return 0 if status == "succeeded" and not failures else 1
 
 
 if __name__ == "__main__":
