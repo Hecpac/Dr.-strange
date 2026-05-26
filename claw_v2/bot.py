@@ -8485,6 +8485,15 @@ class BotService:
     def _matches_operational_failure_summary_request(normalized: str) -> bool:
         if not normalized:
             return False
+
+        def _contains_report_term(term: str) -> bool:
+            if " " in term:
+                return term in normalized
+            return re.search(
+                rf"(?<![a-z0-9_]){re.escape(term)}(?![a-z0-9_])",
+                normalized,
+            ) is not None
+
         stop_or_scope_markers = (
             "no continuemos",
             "no sigamos",
@@ -8588,7 +8597,7 @@ class BotService:
         has_failure_term = any(term in normalized for term in failure_terms)
         if not has_failure_term:
             return False
-        if any(term in normalized for term in explicit_report_terms):
+        if any(_contains_report_term(term) for term in explicit_report_terms):
             return True
         return any(term in normalized for term in causal_terms) and any(
             term in normalized for term in task_context_terms

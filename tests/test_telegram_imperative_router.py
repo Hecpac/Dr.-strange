@@ -224,6 +224,55 @@ def test_stop_due_to_role_fit_problem_does_not_match_failure_summary(bot) -> Non
     ), decisions
 
 
+def test_heygen_live_smoke_prompt_does_not_match_failure_summary(bot) -> None:
+    text = """OK explícito para ejecutar el live smoke F3b.2 de una sola llamada.
+
+Ejecuta exactamente:
+HeyGenDeliver(mode="read_only_live", endpoint="quota")
+
+Restricciones absolutas:
+1. Solo GET /v3/users/me.
+2. No GET /v3/videos.
+3. No endpoints legacy v1.
+4. No POST, PUT, PATCH o DELETE.
+5. No delivery real.
+6. No generar video.
+7. No reintentos automáticos.
+8. No más de una llamada.
+
+Grant autorizado:
+- grant_id: a46a4a2766d2a3a2
+- endpoint: quota
+- mapped_endpoint: GET /v3/users/me
+- max_calls: 1
+- mutation_allowed: false
+- allow_legacy_v1: false
+
+Después de la llamada:
+1. Reportar status: succeeded / failed / blocked / pending_verification
+2. response_summary redacted
+3. calls_made: 1 o 0 si bloqueó antes de red
+
+Si el grant está expirado:
+- NO llames HeyGen.
+- NO leas Keychain.
+- Devuelve status=blocked, reason=approval_expired."""
+
+    response, decisions, _events = _drive(bot, text)
+
+    assert response == "BRAIN_FALLBACK_USED"
+    assert any(
+        ev.get("handler") == "operational_failure_summary"
+        and ev.get("route") == "fall_through"
+        for ev in decisions
+    ), decisions
+    assert not any(
+        ev.get("handler") == "operational_failure_summary"
+        and ev.get("route") == "intercepted"
+        for ev in decisions
+    ), decisions
+
+
 def test_task_status_overview_routes_to_deterministic_summary_not_brain(bot) -> None:
     bot.task_ledger.create(
         task_id="tg-test:failed",
