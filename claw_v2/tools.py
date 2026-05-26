@@ -1230,6 +1230,24 @@ class ToolRegistry:
         def heygen_deliver(args: dict) -> dict:
             from claw_v2.heygen_delivery import HeygenDeliveryService
 
+            mode = str(args.get("mode") or "delivery").strip()
+            if mode == "read_only_live":
+                from claw_v2.heygen_readonly import HeyGenReadOnlyAdapter
+
+                endpoint = str(args.get("endpoint") or "quota").strip()
+                params: dict[str, object] = {}
+                if endpoint in {"video_status", "status", "/v1/video_status.get"}:
+                    params["video_id"] = str(args.get("video_id") or "").strip()
+                elif endpoint in {"video_list", "list", "/v1/video.list"}:
+                    params["limit"] = int(args.get("limit") or 5)
+                    params["offset"] = 0
+                adapter = HeyGenReadOnlyAdapter(
+                    workspace_root=registry.workspace_root,
+                    observe=registry.observe,
+                    allow_legacy_v1=bool(args.get("allow_legacy_v1")),
+                )
+                return adapter.read_only_call(endpoint, params).to_dict()
+
             video_id = (args.get("video_id") or "").strip()
             latest = bool(args.get("latest"))
             if not video_id and not latest:
@@ -1265,7 +1283,9 @@ class ToolRegistry:
                 "Args: video_id (str, optional if latest=true), latest (bool, "
                 "optional - picks most recent), caption (str, optional), "
                 "chat_id (str, optional - defaults to TELEGRAM_ALLOWED_USER_ID), "
-                "slug (str, optional - filename slug)."
+                "slug (str, optional - filename slug). For F3b.2, "
+                "mode=read_only_live performs gated HeyGen status inspection only. "
+                "Legacy v1 endpoints require allow_legacy_v1=true."
             ),
             allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["HeyGenDeliver"],
             handler=heygen_deliver, mutates_state=True, requires_network=True,
@@ -1273,8 +1293,15 @@ class ToolRegistry:
             parameter_schema={
                 "type": "object",
                 "properties": {
+                    "mode": {"type": "string", "enum": ["delivery", "read_only_live"]},
+                    "endpoint": {
+                        "type": "string",
+                        "enum": ["quota", "video_status", "video_list"],
+                    },
                     "video_id": {"type": "string"},
                     "latest": {"type": "boolean"},
+                    "limit": {"type": "integer"},
+                    "allow_legacy_v1": {"type": "boolean"},
                     "caption": {"type": "string"},
                     "chat_id": {"type": "string"},
                     "slug": {"type": "string"},
