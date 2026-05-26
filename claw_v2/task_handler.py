@@ -756,6 +756,28 @@ class TaskHandler:
                 else "failed" if verification_status == "failed"
                 else ""
             )
+            # F2.5 + F2.5.1 (2026-05-26) — promote gate: no task with a declared
+            # success_condition can land `succeeded` from tool.ok=True alone.
+            # FAIL-CLOSED on exception when a success_condition_artifact is present
+            # AND raw terminal_status was "succeeded". Legacy passthrough only when
+            # no artifact is declared.
+            from claw_v2.verification.promote_gate import apply_promote_gate_to_checkpoint
+            terminal_status, verification_status, completed_checkpoint, _gate_events = (
+                apply_promote_gate_to_checkpoint(
+                    raw_terminal_status=terminal_status,
+                    raw_verification_status=verification_status,
+                    completed_checkpoint=completed_checkpoint,
+                )
+            )
+            for _event_name, _event_payload in _gate_events:
+                self._emit(
+                    _event_name,
+                    {
+                        "session_id": session_id,
+                        "task_id": task_id,
+                        **_event_payload,
+                    },
+                )
             checkpoint_error = str(completed_checkpoint.get("error") or "")
             pending_action = str(completed_checkpoint.get("pending_action") or "")
             blocked_reason = ""

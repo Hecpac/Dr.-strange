@@ -1,0 +1,125 @@
+---
+publish_id: pachanodesign-2026-05-27-sycophancy
+status: queued
+tier: 3
+fire_at:
+  date: 2026-05-27
+  time: "11:00"
+  timezone: America/Chicago
+  window_start: "11:00"
+  window_end: "13:00"
+
+account:
+  platform: instagram
+  handle: pachanodesign
+  cdp_endpoint: http://localhost:9222
+  profile_dir: ~/.claw-chrome-cdp
+
+content:
+  format: reel
+  pillar: truth_first
+  day_in_plan: 3
+  asset:
+    path: artifacts/heygen/sycophancy_compressed.mp4
+    size_bytes: 14919468
+    notes: |
+      14.2 MB. IG reel upload limit is 4GB or 90s; we're well under both.
+      Vertical 9:16, 60s, captions gold-serif v3 ya quemados (no overlays sobre cara).
+  hook_pick: A
+  hook_text: "Mi AI me dijo que mi idea era mediocre. Le agradecí."
+  primary_caption_language: es
+  secondary_caption_language: en
+  source_draft: artifacts/content/echo_caption-craft_1779720548.md
+
+caption_es: |
+  Mi AI me dijo que mi idea era mediocre. Le agradecí.
+
+  Llevo meses construyendo agentes que no aplauden. Que hacen pushback. Que se atreven a decir "esto no resuelve el problema que dijiste querer resolver".
+
+  La sycophancy en LLMs no es un bug de UX. Es un riesgo de producto. Si tu modelo te valida todo, no estás iterando — estás escuchando un eco caro.
+
+  El truco no es apagar la cortesía. Es entrenar al sistema a separar "lo que el usuario quiere oír" de "lo que el usuario necesita saber".
+
+  Mi bio lo dice claro: corrección > halago.
+
+  ¿Cuándo fue la última vez que tu herramienta de IA te dijo que estabas equivocado? Dímelo en comentarios — estoy comparando notas.
+
+caption_es_chars: 672
+
+first_comment_en: |
+  My AI told me my idea was mid. I thanked it.
+
+  I've spent months building agents that don't applaud. That push back. That say "this doesn't solve the problem you said you wanted to solve."
+
+  Sycophancy isn't a UX bug. It's a product risk. If your model agrees with everything, you aren't iterating — you're paying for an echo.
+
+  The fix isn't killing politeness. It's teaching the system to separate "what the user wants to hear" from "what the user needs to know."
+
+  My bio says it plain: correction > flattery.
+
+  When was the last time your AI tool told you that you were wrong? Drop it in comments — I'm collecting examples.
+
+hashtag_bundle:
+  policy: warmup_5_max
+  location: first_comment
+  in_caption: 0
+  tags:
+    - "#AntiSycophancy"
+    - "#AIAgents"
+    - "#AIForFounders"
+    - "#BuildInPublic"
+    - "#AIBuilders"
+
+geo_tag:
+  enabled: true
+  location: "Dallas, Texas"
+
+collab_tag:
+  enabled: false
+  reason: "Primer post sin coautor real. Inventar collab-tag en Day 1 = señal anti-spam Meta."
+
+cover:
+  strategy: auto
+  notes: |
+    Si IG no auto-picks un frame con la cara visible al frente, override con
+    selector manual del segundo 2-3 del video (donde el hook se asienta).
+
+audience:
+  setting: public
+  meta_company_branded_content: false
+
+execution:
+  agent: dr.strange
+  approval_required:
+    - confirmation_token: hector_explicit_go_2026-05-27
+    - note: |
+        Hector must say "publica ahora" (or equivalent explicit go) ON 2026-05-27
+        within the publish window. NO publishing without that day-of confirmation.
+        Pre-locking the content here is structure, NOT pre-authorization.
+
+verification:
+  surface: instagram_reel
+  skill: publish-verify
+  selectors:
+    profile_grid_top: "main article:first-of-type a[href*='/reel/']"
+    new_reel_caption_match: "main article:first-of-type"
+  expected_first_80_chars: "Mi AI me dijo que mi idea era mediocre. Le agradecí."
+  retry_policy:
+    max_attempts: 1
+    alternate_submit: "click Share button via coords if button selector fails"
+
+post_publish_tasks:
+  - persist screenshot of grid with new reel visible to artifacts/instagram/publish_2026-05-27_proof.png
+  - persist canonical reel URL captured from grid <a href>
+  - log social_publish_verified event with timestamp + URL + first 80 chars
+  - update CONTENT_PLAN_2026-05-27.md status for Day 3 from "queued" to "published"
+  - notify Hector via Telegram with URL + first 80 chars + screenshot path
+
+reservations:
+  - Mobile-only fields (website link, contact buttons, category) ideally completed by Hector before this fires. Not a hard blocker, but the first viewer scroll lands on incomplete profile if not.
+  - Highlight covers (3 — about/agents/brand) ideally drafted by Echo and uploaded by Hector before this fires.
+
+source_attribution:
+  - hook_pick: Echo caption-craft 2026-05-25 (Opus 4.7, 131s, hook A confirmed by both Echo and Dr. Strange)
+  - hashtag_bundle: Echo warmup recommendation (Day 1 = 5 not 10)
+  - frame_alignment: ChatGPT strategy 2026-05-25 (sycophancy first reel matches bio thesis)

@@ -268,6 +268,13 @@ class ToolDefinition:
     ingests_external_content: bool = False
     sanitize_fields: tuple[str, ...] = ()
     tier: int = DEFAULT_TOOL_TIER
+    # F1 (2026-05-26) — opt-in success contract; warn-only at registration.
+    # The actual evaluator lives in claw_v2.verification and is invoked by
+    # callers in F3 (task_handler / coordinator_schema). Default None preserves
+    # full backward compatibility with all existing tool registrations.
+    success_condition: "object | None" = None      # SuccessCondition; quoted to avoid import cycle
+    preflight: "object | None" = None              # PreflightSpec
+    memory_load_bearing_keys: tuple[str, ...] = ()
 
 
 _CODE_FENCE_RE = re.compile(r"```[\s\S]*?```")
@@ -373,6 +380,23 @@ class ToolRegistry:
     def register(self, definition: ToolDefinition) -> None:
         if definition.parameter_schema is not None:
             definition.parameter_schema = _ensure_strict_schema(definition.parameter_schema)
+        # F1 warn-only contract check (hard-gate planned for F4).
+        # Avoids breaking any existing tool registration while making the
+        # contract violation visible in logs / pytest warnings.
+        try:
+            from claw_v2.verification import warn_if_contract_missing, ToolContractWarning  # local import to avoid cycle
+            msg = warn_if_contract_missing(
+                tool_name=definition.name,
+                tier=int(definition.tier),
+                has_sc=definition.success_condition is not None,
+                has_pf=definition.preflight is not None,
+            )
+            if msg:
+                import warnings
+                warnings.warn(msg, ToolContractWarning, stacklevel=2)
+                logger.warning("tool_contract_warning name=%s tier=%s msg=%s", definition.name, definition.tier, msg)
+        except Exception:  # pragma: no cover — never block real registration on the contract check
+            logger.exception("warn_if_contract_missing failed for tool %s", definition.name)
         self._definitions[definition.name] = definition
 
     def get(self, name: str) -> ToolDefinition:
@@ -476,6 +500,21 @@ class ToolRegistry:
             result=None,
             claims=[],
         )
+        # F3a.1+F3a.2 — snapshot pre-state for state_delta_check BEFORE the
+        # handler runs. If observation itself fails, we still continue (handler
+        # must run) but we record the failure so the artifact-attach step
+        # below sees a "no_observation" pre-state and emits the contract marker
+        # without an artifact — the gate then blocks fail-closed.
+        _pre_state: dict | None = None
+        _pre_state_error: str | None = None
+        if definition.success_condition is not None:
+            try:
+                from claw_v2.verification.local_tool_runner import observe_pre_state
+                _pre_state = observe_pre_state(definition.name, args)
+            except Exception as exc:
+                _pre_state_error = f"{type(exc).__name__}: {exc}"[:200]
+                logger.exception("observe_pre_state failed for tool %s", definition.name)
+                _pre_state = None
         try:
             result = definition.handler(args)
         except Exception as exc:
@@ -520,6 +559,34 @@ class ToolRegistry:
             result=ActionResult(status="success", output_hash=_result_hash(result), error=None),
             claims=[claim_id] if claim_id else [],
         )
+        # F3a.1+F3a.2 — attach `_success_condition_artifact` to the result.
+        # FAIL-CLOSED: if the tool declared a contract, ALWAYS mark the result
+        # with `_contract_required=True` first, BEFORE attach is attempted.
+        # Even if attach_artifact_to_result raises, the marker survives and
+        # the downstream gate will block silently-succeeded tasks.
+        if definition.success_condition is not None and isinstance(result, dict):
+            from claw_v2.verification.local_tool_runner import (
+                CONTRACT_REQUIRED_KEY,
+                attach_artifact_to_result,
+            )
+            result[CONTRACT_REQUIRED_KEY] = True
+            if _pre_state_error is not None:
+                # Pre-state observation failed → record cause so gate event is descriptive.
+                result["_pre_state_error"] = _pre_state_error
+            try:
+                result = attach_artifact_to_result(
+                    tool_name=definition.name,
+                    args=args,
+                    result=result,
+                    pre_state=_pre_state or {},
+                    workspace_root=str(self.workspace_root) if hasattr(self, "workspace_root") else None,
+                )
+            except Exception as exc:
+                # The marker is already on the result; the gate will detect
+                # the missing artifact and block. We surface a structured
+                # error field instead of silently swallowing.
+                logger.exception("attach_artifact_to_result failed for tool %s", definition.name)
+                result["_artifact_build_error"] = f"{type(exc).__name__}: {exc}"[:200]
         if definition.ingests_external_content and isinstance(result, dict):
             return sanitize_tool_output(definition, result, agent_class=agent_class)
         return result
@@ -935,6 +1002,13 @@ class ToolRegistry:
                 },
             )
         )
+        # F3a (2026-05-26) — local Tier-2 tools declare success conditions.
+        from claw_v2.verification.local_tool_contracts import LOCAL_TOOL_SUCCESS_CONDITIONS  # local import to avoid cycle
+        # F3b.0 (2026-05-26) — Tier-3 external tools declare contracts + preflight.
+        from claw_v2.verification.external_tool_contracts import (
+            EXTERNAL_TOOL_PREFLIGHTS,
+            EXTERNAL_TOOL_SUCCESS_CONDITIONS,
+        )
         registry.register(
             ToolDefinition(
                 name="Write",
@@ -943,6 +1017,7 @@ class ToolRegistry:
                 handler=write_file,
                 mutates_state=True,
                 parameter_schema={"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]},
+                success_condition=LOCAL_TOOL_SUCCESS_CONDITIONS["Write"],
             )
         )
         registry.register(
@@ -953,6 +1028,7 @@ class ToolRegistry:
                 handler=edit_file,
                 mutates_state=True,
                 parameter_schema={"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]},
+                success_condition=LOCAL_TOOL_SUCCESS_CONDITIONS["Edit"],
             )
         )
         registry.register(
@@ -983,6 +1059,7 @@ class ToolRegistry:
                 handler=external_stub,
                 mutates_state=True,
                 tier=TIER_LOCAL_MUTATION,
+                success_condition=LOCAL_TOOL_SUCCESS_CONDITIONS["Bash"],
             )
         )
         registry.register(
@@ -1051,6 +1128,7 @@ class ToolRegistry:
                 handler=wiki_lint,
                 tier=TIER_LOCAL_MUTATION,
                 parameter_schema={"type": "object", "properties": {"deep": {"type": "boolean", "default": False}, "auto_fix": {"type": "boolean", "default": False}}, "required": []},
+                success_condition=LOCAL_TOOL_SUCCESS_CONDITIONS["WikiLint"],
             )
         )
 
@@ -1083,6 +1161,8 @@ class ToolRegistry:
                 handler=wiki_delete,
                 mutates_state=True,
                 tier=TIER_REQUIRES_APPROVAL,
+                success_condition=EXTERNAL_TOOL_SUCCESS_CONDITIONS["WikiDelete"],
+                preflight=EXTERNAL_TOOL_PREFLIGHTS["WikiDelete"],
                 parameter_schema={"type": "object", "properties": {"slug": {"type": "string"}}, "required": ["slug"]},
             )
         )
@@ -1128,6 +1208,7 @@ class ToolRegistry:
             allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["SkillGenerate"],
             handler=skill_generate, mutates_state=True,
             tier=TIER_LOCAL_MUTATION,
+            success_condition=LOCAL_TOOL_SUCCESS_CONDITIONS["SkillGenerate"],
         ))
         registry.register(ToolDefinition(
             name="SkillExecute",
@@ -1135,6 +1216,8 @@ class ToolRegistry:
             allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["SkillExecute"],
             handler=skill_execute, mutates_state=True,
             tier=TIER_REQUIRES_APPROVAL,
+            success_condition=EXTERNAL_TOOL_SUCCESS_CONDITIONS["SkillExecute"],
+            preflight=EXTERNAL_TOOL_PREFLIGHTS["SkillExecute"],
         ))
 
         # --- A2A Protocol tools ---
@@ -1173,6 +1256,8 @@ class ToolRegistry:
             allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["A2ASend"],
             handler=a2a_send, mutates_state=True, requires_network=True,
             tier=TIER_REQUIRES_APPROVAL,
+            success_condition=EXTERNAL_TOOL_SUCCESS_CONDITIONS["A2ASend"],
+            preflight=EXTERNAL_TOOL_PREFLIGHTS["A2ASend"],
         ))
 
         # --- HeyGen Video tool ---
@@ -1223,6 +1308,8 @@ class ToolRegistry:
             allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["HeyGenVideo"],
             handler=heygen_video, mutates_state=True, requires_network=True,
             tier=TIER_REQUIRES_APPROVAL,
+            success_condition=EXTERNAL_TOOL_SUCCESS_CONDITIONS["HeyGenVideo"],
+            preflight=EXTERNAL_TOOL_PREFLIGHTS["HeyGenVideo"],
             parameter_schema={"type": "object", "properties": {"text": {"type": "string"}, "avatar_id": {"type": "string"}, "voice_id": {"type": "string"}, "title": {"type": "string"}}, "required": ["text"]},
         ))
 
@@ -1290,6 +1377,8 @@ class ToolRegistry:
             allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["HeyGenDeliver"],
             handler=heygen_deliver, mutates_state=True, requires_network=True,
             tier=TIER_REQUIRES_APPROVAL,
+            success_condition=EXTERNAL_TOOL_SUCCESS_CONDITIONS["HeyGenDeliver"],
+            preflight=EXTERNAL_TOOL_PREFLIGHTS["HeyGenDeliver"],
             parameter_schema={
                 "type": "object",
                 "properties": {
@@ -1425,6 +1514,8 @@ class ToolRegistry:
             allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["GPTImage"],
             handler=gpt_image, mutates_state=True, requires_network=True,
             tier=TIER_REQUIRES_APPROVAL,
+            success_condition=EXTERNAL_TOOL_SUCCESS_CONDITIONS["GPTImage"],
+            preflight=EXTERNAL_TOOL_PREFLIGHTS["GPTImage"],
             parameter_schema={"type": "object", "properties": {"prompt": {"type": "string", "description": "Image description"}, "size": {"type": "string", "enum": ["1024x1024", "1536x1024", "1024x1536"], "default": "1024x1024"}, "quality": {"type": "string", "enum": ["auto", "low", "medium", "high"], "default": "auto"}}, "required": ["prompt"]},
         ))
 
@@ -1471,6 +1562,7 @@ class ToolRegistry:
             allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["AnalyzeImage"],
             handler=analyze_image, requires_network=True,
             tier=TIER_LOCAL_MUTATION,
+            success_condition=LOCAL_TOOL_SUCCESS_CONDITIONS["AnalyzeImage"],
             parameter_schema={
                 "type": "object",
                 "properties": {

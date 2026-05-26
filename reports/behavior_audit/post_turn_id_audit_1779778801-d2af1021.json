@@ -1,0 +1,68 @@
+{
+  "run_id": "1779778801-d2af1021",
+  "since": "2026-05-24 03:32:26",
+  "baseline": {
+    "channel_null_brain_fallback_pct": 0.99,
+    "task_outcomes_success_with_unverified_status_pct": "high",
+    "completed_unverified_count": 91,
+    "task_outcomes_success_count": 144,
+    "turn_id_coverage_pct": 0.0,
+    "soul_update_suggestion_duplicate_count": 6,
+    "promote_perf_optimizer_pending_count": 17
+  },
+  "post": {
+    "since": "2026-05-24 03:32:26",
+    "total_events": 17173,
+    "events_with_turn_id": 4561,
+    "turn_id_coverage_pct": 0.2656,
+    "unique_turn_ids": 126,
+    "turn_id_missing_count": 4,
+    "critical_events_total": 1962,
+    "critical_events_with_turn_id": 1951,
+    "critical_coverage_pct": 0.9944,
+    "brain_fallback_tg_total": 87,
+    "brain_fallback_tg_channel_null": 0,
+    "brain_fallback_tg_channel_null_pct": 0.0,
+    "task_outcomes_by_kind": {
+      "failure": 2,
+      "success": 27,
+      "usable_reply_unverified": 87
+    },
+    "completed_unverified_total": 180,
+    "soul_suggestion_facts_total": 6
+  },
+  "diff": {
+    "channel_null_brain_fallback": {
+      "baseline_pct": 0.99,
+      "post_pct": 0.0,
+      "improved": true
+    },
+    "turn_id_coverage": {
+      "baseline_pct": 0.0,
+      "post_pct": 0.2656,
+      "critical_post_pct": 0.9944,
+      "improved": true
+    },
+    "completed_unverified": {
+      "baseline": 91,
+      "post_total": 180
+    },
+    "outcomes_alignment": {
+      "baseline_success_count": 144,
+      "post_by_kind": {
+        "failure": 2,
+        "success": 27,
+        "usable_reply_unverified": 87
+      },
+      "has_usable_reply_unverified": true
+    },
+    "soul_suggestion_dedup": {
+      "baseline_dup_count": 6,
+      "post_facts_total": 6
+    },
+    "turn_id_missing": {
+      "post_count": 4,
+      "comment": "non-zero means a critical event fired outside a turn_id_context (Kairos / heartbeat / recovery paths still need wiring)"
+    }
+  }
+}

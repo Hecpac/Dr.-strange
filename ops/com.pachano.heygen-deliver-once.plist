@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.pachano.heygen-deliver-once</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/hector/Projects/Dr.-strange/scripts/_heygen_deliver_watcher.sh</string>
+        <string>61ed50fdc6b4460dbb519e21a609503b</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>/tmp/heygen-deliver-anti-sycophancy.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/heygen-deliver-anti-sycophancy.err</string>
+    <key>WorkingDirectory</key>
+    <string>/Users/hector/Projects/Dr.-strange</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/Users/hector/.local/bin</string>
+    </dict>
+</dict>
+</plist>

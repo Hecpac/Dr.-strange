@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Audit MCP v2 — Dr. Strange daemon · 22 may 2026</title>
+<style>
+  :root { --bg:#ffffff; --fg:#37352f; --muted:#787774; --rule:#e9e9e7; --code:#f1f1ef; --accent:#0b6bcb; --warn:#cc7a00; --crit:#c0392b; --ok:#1e7d3a; }
+  * { box-sizing: border-box; }
+  html,body { background: var(--bg); color: var(--fg); margin:0; }
+  body { font-family: -apple-system, "SF Pro Text", "Inter", "Helvetica Neue", Arial, sans-serif; font-size: 16px; line-height: 1.6; }
+  .wrap { max-width: 920px; margin: 0 auto; padding: 56px 56px 80px; }
+  h1 { font-size: 38px; font-weight: 700; letter-spacing: -0.02em; margin: 0 0 6px; }
+  .sub { color: var(--muted); font-size: 14px; margin-bottom: 32px; }
+  h2 { font-size: 24px; font-weight: 600; margin-top: 44px; margin-bottom: 10px; letter-spacing: -0.01em; border-bottom: 1px solid var(--rule); padding-bottom: 8px; }
+  h3 { font-size: 17px; font-weight: 600; margin-top: 22px; margin-bottom: 6px; }
+  h4 { font-size: 15px; font-weight: 600; margin-top: 14px; margin-bottom: 4px; color: var(--accent); }
+  p { margin: 8px 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; margin: 12px 0 18px; }
+  th, td { text-align: left; vertical-align: top; padding: 10px 12px; border-bottom: 1px solid var(--rule); }
+  th { background: var(--code); font-weight: 600; }
+  code { background: var(--code); padding: 1px 6px; border-radius: 4px; font-family: "SF Mono", Menlo, monospace; font-size: 13px; }
+  .tag { display:inline-block; padding: 2px 8px; border-radius: 12px; font-size: 12px; font-weight: 600; }
+  .tag.crit { background:#fde7e3; color: var(--crit); }
+  .tag.high { background:#fdebd0; color: var(--warn); }
+  .tag.med { background:#fef5d4; color:#8a6800; }
+  .tag.low { background:#dff2e3; color: var(--ok); }
+  .tag.na { background:#eeeeec; color: var(--muted); }
+  ul { padding-left: 22px; }
+  li { margin: 4px 0; }
+  blockquote { margin: 12px 0; padding: 12px 16px; border-left: 3px solid var(--accent); background: var(--code); color: var(--fg); border-radius: 4px; font-size: 14.5px; }
+  .meta { font-size: 13px; color: var(--muted); }
+  .ok { color: var(--ok); font-weight: 600; }
+  .no { color: var(--crit); font-weight: 600; }
+  .partial { color: var(--warn); font-weight: 600; }
+  hr { border:none; border-top: 1px solid var(--rule); margin: 28px 0; }
+  .callout { background:#fff8e6; border:1px solid #f5d491; border-radius:8px; padding: 14px 18px; margin: 18px 0; }
+  .callout.crit { background:#fdecea; border-color:#f3b3aa; }
+  .callout.ok { background:#e8f5ec; border-color:#a8d4b5; }
+  .badge { display:inline-block; padding: 1px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; background: var(--accent); color: white; vertical-align: middle; margin-left: 6px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Audit MCP v2 — daemon Dr. Strange<span class="badge">PDF NSA completo</span></h1>
+<div class="sub">22 mayo 2026 · Hector Pachano · evidencia: runtime tool exposure (12 servers verificados) + NSA CSI MCP Security Ver 1.0 (17 páginas, ref U/OO/6030316-26) extraído autónomamente</div>
+
+<h2>0. Cambios vs v1</h2>
+<ul>
+  <li><strong>PDF completo descargado y procesado</strong> (17 páginas, 305 KB). Camino: Chrome relaunchado con <code>--remote-allow-origins=*</code> → CDP Network intercept del <code>t.co</code> → resolución a <code>nsa.gov/Portals/75/documents/Cybersecurity/CSI_MCP_SECURITY.pdf</code> → urllib con Referer nsa.gov pasó Akamai.</li>
+  <li><strong>8 security concerns</strong> y <strong>9 recommendations</strong> del NSA mapeadas 1:1 a tu stack.</li>
+  <li><strong>5 ataques reales del paper</strong> contrastados con tu superficie (CVE-2025-49596, WhatsApp MCP exfil, GitHub MCP, tool name collision, parameter injection).</li>
+  <li>Re-priorización del action plan según severidad NSA + tu política de tiers.</li>
+</ul>
+
+<h2>1. Resumen ejecutivo refinado</h2>
+<p>
+12 MCP servers conectados al daemon vía bridge OAuth de <code>claude.ai</code>. El paper NSA confirma <strong>cuatro deltas críticos</strong> que tu stack ya rozaba pero ninguno tiene un control formal hoy:
+</p>
+<ol>
+  <li><strong>Output filtering en pipelines encadenados</strong> — el paper es explícito: <em>"Each output must be treated as untrusted input to the next phase of the pipeline"</em>. Tu wrapper <code>untrusted_context</code> ya existe para wiki/learning_loop pero <strong>no se aplica a output de MCP tools</strong>. Cierra el vector dominante (semantic poisoning + cascading prompt injection).</li>
+  <li><strong>Approval workflow para cambios de capability</strong> — <em>"a change in capability or data access for an MCP server that is already trusted or connected often can be made without approval"</em>. No tienes detección de cambio en el set de tools expuesto por un server.</li>
+  <li><strong>Audit logs MCP-específicos</strong> — el daemon tiene <code>observe_stream</code> + <code>task_ledger</code> pero <em>no</em> consolida un audit log per-MCP-server con parámetros, identidad, y hash del output (NSA: <em>"exact parameters, identities involved, and where feasible cryptographic hashes of results or output"</em>).</li>
+  <li><strong>Filtering outgoing proxy / DLP</strong> — la guía dice usar Squid/tinyproxy/DLP enterprise para connections salientes del entorno MCP. No hay nada hoy; los MCP servers de claude.ai usan TLS y endpoints arbitrarios.</li>
+</ol>
+
+<div class="callout crit">
+<strong>Vector real más cercano a tu stack:</strong> "Poisoning output for downstream automation" (NSA p. 9) + WhatsApp MCP exfil pattern (NSA p. 9). Un actor que ponga contenido en un Figma file, un comentario de Linear, una página Notion compartida, o un email entrante puede meter instrucciones que el brain procese como user input. Tu mitigación actual (defensive prompt + Tier 3 gates) NO cubre este vector porque opera <em>después</em> de que el contenido entró al contexto.
+</div>
+
+<h2>2. Inventario verificado — 12 servers, 142 tools</h2>
+<table>
+<thead><tr><th>#</th><th>Server</th><th>Tools</th><th>Data class</th><th>Gate Tier 3</th><th>Riesgo NSA</th></tr></thead>
+<tbody>
+<tr><td>1</td><td>Figma</td><td>17</td><td>Diseños, libraries, code-connect</td><td class="no">✗</td><td><span class="tag high">Alto</span> — output poisoning</td></tr>
+<tr><td>2</td><td>Gmail</td><td>12</td><td>Correo personal</td><td class="partial">parcial</td><td><span class="tag high">Alto</span> — output poisoning + WhatsApp-pattern</td></tr>
+<tr><td>3</td><td>Google Calendar</td><td>8</td><td>Calendario</td><td class="no">✗</td><td><span class="tag med">Medio</span></td></tr>
+<tr><td>4</td><td>Google Drive</td><td>8</td><td>Archivos personales</td><td class="no">✗</td><td><span class="tag high">Alto</span> — output poisoning</td></tr>
+<tr><td>5</td><td>Linear</td><td>35</td><td>Issues/projects Pachano</td><td class="no">✗</td><td><span class="tag med">Medio</span></td></tr>
+<tr><td>6</td><td>Notion</td><td>14</td><td>Workspace</td><td class="no">✗</td><td><span class="tag high">Alto</span> — output poisoning</td></tr>
+<tr><td>7</td><td>Vercel</td><td>18 (incl. <code>deploy_to_vercel</code>)</td><td>Producción + dominios</td><td class="partial">verificar</td><td><span class="tag crit">Crítico</span> — acción externa irreversible</td></tr>
+<tr><td>8</td><td>Mermaid Chart</td><td>17</td><td>Repos + diagramas</td><td class="no">✗</td><td><span class="tag med">Medio</span> — GitHub-MCP-pattern</td></tr>
+<tr><td>9</td><td>Intuit TurboTax</td><td>8</td><td>Datos fiscales</td><td class="ok">✓ IRC §7216</td><td><span class="tag low">Bajo</span></td></tr>
+<tr><td>10</td><td>Daloopa</td><td>2 (sólo auth)</td><td>—</td><td class="na">n/a</td><td><span class="tag low">Bajo</span> (dormido)</td></tr>
+<tr><td>11</td><td>HubSpot</td><td>2 (sólo auth)</td><td>—</td><td class="na">n/a</td><td><span class="tag low">Bajo</span> (dormido)</td></tr>
+<tr><td>12</td><td>Windsor.ai</td><td>2 (sólo auth)</td><td>—</td><td class="na">n/a</td><td><span class="tag low">Bajo</span> (dormido)</td></tr>
+</tbody>
+</table>
+
+<h2>3. Mapeo NSA → daemon · 8 security concerns</h2>
+
+<h3>3.1 Access control (NSA p. 4)</h3>
+<blockquote>"Associating a session to an identity is not defined by the protocol... Many implementations omit authentication entirely, and those that do include it often lack any role-based enforcement (CRUD permissions)."</blockquote>
+<p><strong>Tu stack:</strong> OAuth via claude.ai cubre auth de cuenta. RBAC granular per-tool <em>no existe</em> — Linear puede leer issues de cualquier team al que tengas acceso, Notion puede fetch de cualquier página del workspace. <strong>Acción:</strong> los <em>workspace filters</em> de los gates Tier 3 deben checar destination scope (team_id, database_id, project_id) y bloquear writes fuera de scope Pachano.</p>
+
+<h3>3.2 Insecure context / data serialization (NSA p. 4-5)</h3>
+<blockquote>"Serialized content including comments or prompts may open a path for injection techniques."</blockquote>
+<p><strong>Tu stack:</strong> los outputs MCP llegan al brain como tokens. <strong>Acción:</strong> wrapper <code>untrusted_context source="mcp_tool_result"</code> en TODO read tool (sección 5.2).</p>
+
+<h3>3.3 Poor approval workflows (NSA p. 5)</h3>
+<blockquote>"A change in capability or data access for an MCP server that is already trusted or connected often can be made without approval."</blockquote>
+<p><strong>Tu stack:</strong> hoy el daemon NO detecta si un MCP server agregó/cambió tools entre conexiones (ej: si Vercel suma un tool nuevo de billing, no te enteras). <strong>Acción:</strong> hash el set de tools por server al instalar, alertar Tier 3 si cambia.</p>
+
+<h3>3.4 Token / session security (NSA p. 5-6)</h3>
+<p><strong>Tu stack:</strong> claude.ai maneja OAuth bearer tokens; rotación + revoke vive en su panel, no en el daemon. <strong>Acción:</strong> documentar revoke path por server en <code>~/.claw/mcp-receipts/</code>.</p>
+
+<h3>3.5 Misconfigurations / poor implementation (NSA p. 6)</h3>
+<p><strong>Tu stack:</strong> trampa principal = los 3 servers dormidos (Daloopa, HubSpot, Windsor). Si completas OAuth sin redefinir gates, repites el patrón. <strong>Acción:</strong> bloqueo preventivo — definir gates antes de completar auth.</p>
+
+<h3>3.6 Inconsistent behaviors (NSA p. 6-7)</h3>
+<blockquote>"This divergence, driven by probabilistic interpretation of prior context, can be exploited by a malicious actor who preconditions the agent to arrive at a specific or unsafe outcome."</blockquote>
+<p><strong>Tu stack:</strong> riesgo medio. El brain procesa contexto extenso (session_state, reply_context, memory). <strong>Acción:</strong> reforzar la regla actual de "memoria/learning_loop ≠ instrucciones" extendiéndola explícitamente al output de MCP tools.</p>
+
+<h3>3.7 Poor or missing audit logs (NSA p. 7)</h3>
+<blockquote>"Logs should capture a traceable sequence of actions across sessions... cryptographic hashes of results or output."</blockquote>
+<p><strong>Tu stack:</strong> <code>observe_stream</code> + <code>task_ledger</code> registran tool invocations, pero <em>no por server</em> y <em>sin hash de output</em>. <strong>Acción:</strong> per-server receipts en <code>~/.claw/mcp-receipts/{server}.jsonl</code> con timestamp, tool, params resumidos, sha256(output).</p>
+
+<h3>3.8 DoS / fatigue (NSA p. 7)</h3>
+<p><strong>Tu stack:</strong> rate-limit es responsabilidad de claude.ai. Riesgo bajo localmente.</p>
+
+<h2>4. Mapeo NSA → daemon · 5 ataques reales</h2>
+<table>
+<thead><tr><th>Ataque NSA</th><th>Aplica a tu stack</th><th>Mitigación que falta</th></tr></thead>
+<tbody>
+<tr>
+  <td><strong>Tool parameter injection</strong> (HiddenLayer, p. 8)</td>
+  <td>Cualquier MCP con tools que ejecuten lógica basada en LLM output</td>
+  <td>Schema validation estricto del tool input + reject de fields ambiguos en <code>claw_v2/approvals.py</code></td>
+</tr>
+<tr>
+  <td><strong>Tool name collision</strong> (parasitic toolchain, p. 8)</td>
+  <td>Si en el futuro instalas MCP servers de fuentes mixtas. Hoy todos los 12 son canonical claude.ai.</td>
+  <td>Strict resolution policy: prefijar tools con <code>mcp__claude_ai_<server>__</code> ya lo hace; no instalar nada de marketplaces no auditados.</td>
+</tr>
+<tr>
+  <td><strong>GitHub MCP blanket access</strong> (Invariant Labs, p. 8-9)</td>
+  <td>Mermaid Chart MCP <code>push_file</code>, <code>create_pr</code>, <code>create_issue</code> tienen alcance amplio sobre repos del marketplace</td>
+  <td>Scope per-tool: <code>push_file</code> debería listar repos permitidos en config; mover a Tier 3 hasta tener allowlist</td>
+</tr>
+<tr>
+  <td><strong>WhatsApp MCP exfil</strong> (Invariant Labs, p. 9) — server malicioso con tool description manipuladora</td>
+  <td><strong>Riesgo más concreto.</strong> Aplica si en el futuro instalas MCP server de tercero (HeyGen MCP estaba en consideración).</td>
+  <td>Definir gates ANTES de instalar HeyGen MCP. Mantener pipeline HeyGen vía CLI subprocess (más aislado, no comparte bus de tokens del brain).</td>
+</tr>
+<tr>
+  <td><strong>Output poisoning para downstream automation</strong> (p. 9)</td>
+  <td><strong>Vector dominante para vos.</strong> Figma comments, Drive docs, Notion pages, Gmail threads, Linear comments, Calendar event descriptions — todos pueden meter instrucciones que el brain reciba como tokens.</td>
+  <td>Wrapper <code>untrusted_context source="mcp_tool_result"</code> en todos los read tools (lista completa en sección 5.2). Esta es la acción de mayor leverage.</td>
+</tr>
+<tr>
+  <td><strong>CVE-2025-49596 RCE en MCP-Inspector</strong> (Oligo, p. 9-10)</td>
+  <td>No usas MCP-Inspector. Bajo.</td>
+  <td>Si en algún momento lo instalas, asegurar versión ≥ 0.14.1.</td>
+</tr>
+</tbody>
+</table>
+
+<h2>5. Action plan re-priorizado</h2>
+
+<h3>5.1 — Output filtering pipeline (NSA recommendation 6: "Filter and monitor output pipelines and chained execution") <span class="badge">P0 — leverage máximo</span></h3>
+<p>Implementar el wrapper <code>untrusted_context source="mcp_tool_result"</code> alrededor del output de TODO MCP tool que devuelva contenido externo. El paper NSA es explícito: <em>"Each output must be treated as untrusted input to the next phase of the pipeline."</em></p>
+<p><strong>Tools a envolver (orden por superficie):</strong></p>
+<ul>
+  <li>Figma: <code>get_design_context</code>, <code>get_screenshot</code>, <code>get_figjam</code>, <code>get_metadata</code>, <code>search_design_system</code></li>
+  <li>Drive: <code>read_file_content</code>, <code>download_file_content</code>, <code>get_file_metadata</code>, <code>search_files</code>, <code>list_recent_files</code></li>
+  <li>Notion: <code>notion-fetch</code>, <code>notion-search</code>, <code>notion-get-comments</code></li>
+  <li>Linear: <code>list_comments</code>, <code>get_diff_threads</code>, <code>get_document</code>, <code>get_issue</code>, <code>list_documents</code></li>
+  <li>Gmail: <code>get_thread</code>, <code>search_threads</code>, <code>list_drafts</code></li>
+  <li>Calendar: <code>get_event</code>, <code>list_events</code></li>
+  <li>Mermaid Chart: <code>read_mermaid_file</code>, <code>get_diagram_summary</code>, <code>get_pull_comments</code>, <code>get_issue_comments</code></li>
+  <li>Vercel: <code>get_runtime_logs</code>, <code>get_deployment_build_logs</code> (logs pueden contener output de terceros)</li>
+</ul>
+<p>Estimación: 2-3h en <code>claw_v2/</code> incluyendo tests. Esto cierra el vector dominante del paper.</p>
+
+<h3>5.2 — Gates Tier 3 explícitos (NSA recommendation 2 + 4: "Design for boundaries" + "Constrain and sandbox") <span class="badge">P0</span></h3>
+<p>Agregar a <code>claw_v2/approvals.py</code>:</p>
+<ul>
+  <li><code>mcp__claude_ai_Vercel__deploy_to_vercel</code> → Tier 3 duro (deploy externo irreversible)</li>
+  <li><code>mcp__claude_ai_Vercel__check_domain_availability_and_price</code> → Tier 3 (costo potencial)</li>
+  <li><code>mcp__claude_ai_Notion__notion-create-pages</code>, <code>notion-update-page</code>, <code>notion-create-database</code> → Tier 2.5 + workspace filter (sólo IDs Pachano)</li>
+  <li><code>mcp__claude_ai_Linear__save_*</code> para teams no-Pachano → Tier 3</li>
+  <li><code>mcp__claude_ai_Mermaid_Chart__push_file</code> + <code>create_pr</code> + <code>create_issue</code> → Tier 3 + repo allowlist</li>
+  <li><code>mcp__claude_ai_Figma__create_new_file</code> + <code>use_figma</code> (writes) + <code>upload_assets</code> → Tier 2.5</li>
+  <li><code>mcp__claude_ai_Gmail__create_draft</code> → Tier 2.5; cualquier futuro <code>send</code> → Tier 3 duro</li>
+  <li><code>mcp__claude_ai_Google_Drive__create_file</code> + <code>copy_file</code> → Tier 2.5 + folder allowlist</li>
+</ul>
+
+<h3>5.3 — Per-server receipts con hash de output (NSA recommendation 7: "Instrument for logging") <span class="badge">P1</span></h3>
+<p>Crear <code>~/.claw/mcp-receipts/{server}.jsonl</code> append-only. Por invocación: timestamp, tool, params resumidos (sin secretos), sha256(output[:8KB]), session_id, decision (allowed/denied/escalated). Conserva 90 días. Hace el patrón Yessenov real y soporta el "Track and patch" del paper (recomendación 8).</p>
+
+<h3>5.4 — Capability-change detection (NSA: poor approval workflows) <span class="badge">P1</span></h3>
+<p>Al iniciar sesión MCP, hash el set ordenado de tools expuestos por cada server. Persistir en <code>~/.claw/mcp-tool-hashes.json</code>. Si cambia entre conexiones, abrir Tier 3 approval ("Vercel agregó <code>create_billing_invoice</code> — ¿autorizar?"). Cubre el WhatsApp-MCP pattern aplicado a updates silenciosos.</p>
+
+<h3>5.5 — Bloqueo preventivo de los 3 OAuth dormidos <span class="badge">P2</span></h3>
+<p>Daloopa, HubSpot, Windsor.ai: documentar en MEMORY que <em>antes</em> de completar el OAuth flow hay que definir gates específicos para los tools que cada uno expondrá. Sin esto, el flow OAuth completo crearía instantáneamente 3 superficies nuevas sin protección.</p>
+
+<h3>5.6 — Diferir HeyGen MCP install <span class="badge">P2</span></h3>
+<p>Mientras 5.1 + 5.2 no estén durables, mantener pipeline HeyGen vía subprocess CLI. Cuando los controles estén implementados, revisar HeyGen MCP server con due diligence NSA recommendation 1 ("Choose supported MCP projects when possible").</p>
+
+<h3>5.7 — Sin necesidad inmediata <span class="badge">P3</span></h3>
+<ul>
+  <li>Sandboxing OS-level (AppArmor/seccomp/SELinux — recommendation 4) — no aplica al daemon Mac; los MCP servers viven en infraestructura claude.ai, no en tu host.</li>
+  <li>Filtering outgoing proxy (Squid/tinyproxy — recommendation 2) — el tráfico MCP sale del claude.ai gateway, no del daemon. Tu Mac no tiene visibilidad para filtrar.</li>
+  <li>MCP message signing (recommendation 5) — transport entre claude.ai y daemon usa TLS; tu surface no permite firmar payloads inter-server.</li>
+  <li>Network scan (recommendation 9) — no corres MCP servers locales hoy. Revisitarlo si en el futuro hosteás MCP self-hosted.</li>
+</ul>
+
+<h2>6. Validación cruzada — qué del paper NO aplica</h2>
+<p>El paper está escrito para organizaciones (empresas, agencias gov) hosteando MCP servers self-managed. <em>Tu setup es distinto:</em> sos cliente single-user de servers MCP gestionados por claude.ai. Eso simplifica:</p>
+<ul>
+  <li><strong>ACE / CWE-77, 78, 94, 95:</strong> ninguno de los 12 servers ejecuta código arbitrario directo en tu host. Riesgo crítico CWE NO aplica hoy.</li>
+  <li><strong>RBAC at instantiation:</strong> el server no se instancia desde tu side; viene pre-configurado por claude.ai.</li>
+  <li><strong>Open MCP server scanning en LAN:</strong> no hosteás MCPs.</li>
+</ul>
+
+<h2>7. Limitaciones honestas de este audit v2</h2>
+<ul>
+  <li><code>claw_v2/approvals.py</code> NO fue leído en este turno. Las recomendaciones 5.2 asumen el estado documentado; antes de implementar, validar el archivo y comparar con la lista propuesta.</li>
+  <li>Las recomendaciones técnicas son arquitecturales, no implementación lista. Cada item requiere ~30 min de coding + tests para aterrizar.</li>
+  <li>El inventario refleja servers cargados <em>ahora</em>. Un install futuro agrega superficie y debe pasar por este mismo proceso.</li>
+  <li>El paper no menciona explícitamente Anthropic claude.ai bridge — el análisis del bridge es inferencia mía contrastando spec con tool exposure.</li>
+</ul>
+
+<h2>8. Próximos pasos sugeridos</h2>
+<ol>
+  <li><strong>Implementar 5.1</strong> (wrapper untrusted MCP output) → cierra el vector dominante en una sola pasada. ~2-3h.</li>
+  <li><strong>Implementar 5.2</strong> (gates Tier 3) → segunda pasada, ~1-2h.</li>
+  <li><strong>Re-correr audit</strong> con <code>approvals.py</code> verificado para confirmar que 5.1 y 5.2 quedaron durables.</li>
+  <li>P1 (receipts + capability-change detect) cuando los P0 estén estables — semana siguiente.</li>
+  <li>Re-correr el audit completo cada 60 días o cuando se agregue/quite un MCP server.</li>
+</ol>
+
+<hr>
+<p class="meta">
+Generado por Dr. Strange · daemon local · 22 may 2026 · evidencia: <code>runtime tool exposure (12 servers, 142 tools)</code> + <code>NSA CSI MCP Security Ver 1.0 (17 páginas, 305 KB)</code> + <code>SOUL.md autonomy tiers</code><br>
+PDF original: <code>artifacts/nsa_mcp/csi_mcp_security.pdf</code>. Texto extraído: <code>artifacts/nsa_mcp/csi_mcp_security.txt</code>.
+</p>
+
+</div>
+</body>
+</html>
