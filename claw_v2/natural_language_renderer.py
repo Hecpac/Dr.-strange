@@ -23,6 +23,11 @@ _LINE_DROP_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bApprove via\b|\bAbort via\b", re.IGNORECASE),
     re.compile(r"^\s*(?:Comando|Command)\s*:", re.IGNORECASE),
     re.compile(r"/(?:task_approve|task_abort|action_approve|action_abort|approve|approval_status)\b", re.IGNORECASE),
+    re.compile(r"^\s*(?:\*\*)?\s*pido\s+tu\s+ok\s+antes\s+de\s+tocar\b.*$", re.IGNORECASE),
+    re.compile(r"^\s*una\s+palabra\s*:\s*`?(?:dale|todo)`?\b.*$", re.IGNORECASE),
+)
+_SECTION_DROP_HEADING_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^\s*(?:#{1,6}\s*)?(?:\*\*)?\s*checkpoint\s*:?\s*(?:\*\*)?\s*$", re.IGNORECASE),
 )
 
 _REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
@@ -60,7 +65,18 @@ class NaturalLanguageRenderer:
         if not text:
             return text
         lines: list[str] = []
+        dropping_section = False
         for line in str(text).splitlines():
+            if dropping_section:
+                if not line.strip():
+                    dropping_section = False
+                elif re.match(r"^\s*#{1,6}\s+\S", line):
+                    dropping_section = False
+                else:
+                    continue
+            if any(pattern.search(line) for pattern in _SECTION_DROP_HEADING_PATTERNS):
+                dropping_section = True
+                continue
             if any(pattern.search(line) for pattern in _LINE_DROP_PATTERNS):
                 continue
             lines.append(line)

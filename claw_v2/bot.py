@@ -274,6 +274,42 @@ _STARTING_ACTION_OBJECT_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\b(?:clean|cleanup|archive|execute|run|apply|update|fix)\w*\b"),
     re.compile(r"\b(?:approval|approvals|aprobaciones|ledger|cola|archivo|file|comando|command|task|tarea)\b"),
 )
+_PLAN_STATUS_SOURCE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bprimero\s+(?:entrega|prepara|dame|devuelve)\s+(?:el\s+)?plan\b"),
+    re.compile(r"\b(?:entrega|prepara|dame|devuelve)\s+(?:el\s+)?plan\s+[a-z0-9_.-]+\b"),
+    re.compile(r"\b(?:preflight|requerido|required)\b"),
+    re.compile(r"\bexternal_check\b"),
+    re.compile(r"\bevidence_uri\b"),
+    re.compile(r"\bendpoints?\s+(?:o\s+fuentes\s+)?read-only\b"),
+    re.compile(r"\bcondiciones exactas\b"),
+)
+_STATUS_ACK_SOURCE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bok\s+final\s*:\s*marca\b"),
+    re.compile(r"\bmarca\s+[a-z0-9_.+-]+\s+como\s+(?:done|succeeded|completed|list[oa]|cerrad[oa]|terminad[oa])\b"),
+    re.compile(r"\bdeja\s+[a-z0-9_.+-]+\s+como\s+(?:done|succeeded|completed|list[oa]|cerrad[oa]|terminad[oa])\b"),
+)
+_PLAN_STATUS_RESPONSE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^\s*#+\s*plan\b", re.MULTILINE),
+    re.compile(r"\bplan\s+[a-z0-9_.-]+\b"),
+    re.compile(r"\bendpoints?\s+(?:o\s+fuentes\s+)?read-only\b"),
+    re.compile(r"\bpreflight\b"),
+    re.compile(r"\bexternal_check\b"),
+    re.compile(r"\bevidence_uri\b"),
+    re.compile(r"\bcondiciones exactas\b"),
+    re.compile(r"\btests?\s+mock\b"),
+    re.compile(r"\bmarcad[ao]s?\s+(?:como\s+)?(?:done|succeeded|completed|list[oa]s?)\b"),
+)
+_EXPLICIT_EXECUTION_REPORT_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"\b(?:cambie|actualice|modifique|edite|cree|agregue|borre|elimine|publique|envie|mande|desplegue|pushee|mergee|commitee|instale|arregle|corregi|limpie)\b"
+    ),
+    re.compile(
+        r"\b(?:corri|ejecute|lance)\s+(?:el\s+|los\s+|las\s+)?(?:test|tests|pytest|comando|script|smoke|smokes)\b"
+    ),
+    re.compile(
+        r"\b(?:i\s+fixed|i\s+changed|i\s+updated|i\s+created|i\s+deleted|i\s+sent|i\s+published|i\s+deployed|ran\s+tests?|i\s+ran)\b"
+    ),
+)
 
 
 def _looks_like_unverified_capability_denial(text: str) -> bool:
@@ -372,6 +408,48 @@ def _looks_like_starting_side_effect_claim(text: str) -> bool:
     if not any(pattern.search(normalized) for pattern in _STARTING_ACTION_CLAIM_PATTERNS):
         return False
     return any(pattern.search(normalized) for pattern in _STARTING_ACTION_OBJECT_PATTERNS)
+
+
+def _looks_like_plan_or_status_only_source(text: str) -> bool:
+    normalized = _normalize_command_text(text)
+    if not normalized.strip():
+        return False
+    has_plan_shape = any(pattern.search(normalized) for pattern in _PLAN_STATUS_SOURCE_PATTERNS)
+    has_status_ack = any(pattern.search(normalized) for pattern in _STATUS_ACK_SOURCE_PATTERNS)
+    has_execution_guard = any(
+        marker in normalized
+        for marker in (
+            "no ejecutes",
+            "no ejecutes tools",
+            "no hagas llamadas reales",
+            "no llamadas reales",
+            "cero tools",
+            "cero llamadas reales",
+            "read-only/status-only",
+            "solo plan",
+            "solamente plan",
+        )
+    )
+    return has_status_ack or (has_plan_shape and has_execution_guard)
+
+
+def _looks_like_plan_or_status_response(text: str) -> bool:
+    normalized = _normalize_command_text(text)
+    if not normalized.strip():
+        return False
+    if any(pattern.search(normalized) for pattern in _EXPLICIT_EXECUTION_REPORT_PATTERNS):
+        return False
+    return any(pattern.search(normalized) for pattern in _PLAN_STATUS_RESPONSE_PATTERNS)
+
+
+def _evidence_gate_plan_status_skip_reason(source_text: str, content: str) -> str | None:
+    if not _looks_like_plan_or_status_only_source(source_text):
+        return None
+    if not _looks_like_plan_or_status_response(content):
+        return None
+    return "plan_or_status_ack_without_execution"
+
+
 PRE_HOOK_BLOCK_REPEATED_THRESHOLD = 5
 PRE_HOOK_BLOCK_REPEATED_WINDOW_MINUTES = 10
 
@@ -1909,6 +1987,17 @@ class BotService:
             return False
         if not _looks_like_starting_side_effect_claim(content):
             return False
+        skip_reason = _evidence_gate_plan_status_skip_reason(source_text, content)
+        if skip_reason is not None:
+            self._emit_safe(
+                "evidence_gate_skipped_plan_status",
+                {
+                    "session_id": session_id,
+                    "claim_type": "start",
+                    "reason": skip_reason,
+                },
+            )
+            return False
         if self._response_has_evidence_signal(response):
             return False
         if self._session_has_fresh_evidence(session_id):
@@ -1927,6 +2016,17 @@ class BotService:
         if not _looks_like_operator_action_request(source_text):
             return False
         if not _looks_like_completion_side_effect_claim(content):
+            return False
+        skip_reason = _evidence_gate_plan_status_skip_reason(source_text, content)
+        if skip_reason is not None:
+            self._emit_safe(
+                "evidence_gate_skipped_plan_status",
+                {
+                    "session_id": session_id,
+                    "claim_type": "completion",
+                    "reason": skip_reason,
+                },
+            )
             return False
         if self._link_analysis_context_has_evidence(link_analysis_context):
             return False
@@ -5548,14 +5648,122 @@ class BotService:
             return self._task_resume_previous_response(session_id)
         return None
 
+    # F3b.1.5 (2026-05-26) — markers that turn a message into an imperative
+    # command instead of a status query. Regression of 2026-05-17 fix:
+    # mensajes largos con instrucciones + "Procede con esto" deben caer al
+    # brain, no al handler de pending-tasks.
+    #
+    # F3b.1.5.1 (2026-05-26) — "go" eliminado del set: substring matching lo
+    # disparaba en falsos positivos como "tengo", "algo", "luego", "pago".
+    # Conservamos "go ahead" (8 chars, no ambiguo) y "dale ya" (compuesto).
+    # Cualquier marker corto (<= 3 chars) usa word-boundary matching.
+    _IMPERATIVE_INTENT_MARKERS: tuple[str, ...] = (
+        "procede",
+        "procedé",
+        "procedere",
+        "ejecuta",
+        "ejecutalo",
+        "ejecutar",
+        "hazlo",
+        "haz lo",
+        "implementa",
+        "implementar",
+        "aprobado",
+        "aprobar",
+        "autorizado",
+        "ok final",
+        "ok final:",
+        "arranca",
+        "arrancar",
+        "arrancalo",
+        "continua",
+        "continuar",
+        "continúa",
+        "continualo",
+        "marca como done",
+        "marca f",
+        "marca el",
+        "márcalo",
+        "marcalo",
+        "dale",
+        "dale ya",
+        "go ahead",
+        "publica",
+        "publícalo",
+        "publicalo",
+        "borra",
+        "elimina",
+        "push",
+        "merge",
+        "deploy",
+        "commit",
+        "corre el",
+        "corre este",
+        "corre los",
+        "run the",
+        "execute",
+        "apply",
+    )
+
+    def _has_imperative_intent(self, text: str) -> bool:
+        """Detect imperative-command intent that should bypass status handlers.
+
+        F3b.1.5: pending-tasks handler must only fire for explicit status
+        queries. Long imperative blocks with "Procede con esto" / "OK final"
+        must fall through to the brain.
+
+        F3b.1.5.1: markers ≤ 3 chars use word-boundary regex to avoid
+        substring false positives (e.g. "go" inside "tengo", "luego").
+        """
+        normalized = _normalize_command_text(text)
+        # Long messages (>= 300 chars after normalisation) carrying instruction
+        # blocks are almost certainly imperatives, not status queries.
+        if len(normalized) >= 300:
+            return True
+        for marker in self._IMPERATIVE_INTENT_MARKERS:
+            if len(marker) <= 3:
+                # Word-boundary match for short tokens — F3b.1.5.1 safety
+                if re.search(rf"(?<![a-záéíóúñ]){re.escape(marker)}(?![a-záéíóúñ])", normalized):
+                    return True
+            elif marker in normalized:
+                return True
+        return False
+
     def _pending_tasks_query_matches(self, text: str) -> bool:
         normalized = _normalize_command_text(text).strip(" \t\n\r.,;:!?¿¡")
         compact = re.sub(r"[^a-z0-9]+", "", normalized)
-        return (
+        base_match = (
             ("tareas" in normalized and "pendient" in normalized)
             or self._task_status_overview_query_matches(normalized)
             or compact in {"pendientes", "tareaspendientes", "pendietes", "tareaspendietes"}
         )
+        if not base_match:
+            return False
+        # F3b.1.5 — veto when the message carries imperative intent or is a
+        # long instruction block. Emit observability event so the bypass is
+        # visible in telemetry.
+        if self._has_imperative_intent(text):
+            self._emit_dispatcher_fallthrough(
+                source="pending_tasks_query_matches",
+                reason="imperative_intent_detected",
+                text=text,
+            )
+            return False
+        return True
+
+    def _emit_dispatcher_fallthrough(self, *, source: str, reason: str, text: str) -> None:
+        """F3b.1.5 — emit observability when a pre-brain dispatcher would
+        have captured an imperative message but explicitly falls through."""
+        payload = {
+            "source": source,
+            "reason": reason,
+            "text_head": (text or "")[:120],
+            "text_len": len(text or ""),
+        }
+        try:
+            self.observe.emit("dispatcher_fallthrough_imperative", payload=payload)
+        except Exception:
+            logger.debug("dispatcher_fallthrough_imperative emit failed", exc_info=True)
 
     def _handle_pending_tasks_query(
         self,

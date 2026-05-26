@@ -112,6 +112,14 @@ _ADVERSARIAL_INPUTS = [
         "needs_approval — approval_id: `xyz`",
         id="replace_and_drop_same_line",
     ),
+    pytest.param(
+        "**Pido tu OK antes de tocar:** `claw_v2/bot.py` es codigo de safety.\n\n"
+        "Contenido valido del diagnostico.\n\n"
+        "**Checkpoint:**\n"
+        "- bug identificado\n"
+        "- espero tu OK\n",
+        id="normal_mode_drops_ok_deferral_and_checkpoint",
+    ),
 ]
 
 
@@ -259,3 +267,25 @@ def test_final_render_empty_and_none_safe() -> None:
             once = runtime.bot._final_render(session_id="tg-smoke", content="   ")
             twice = runtime.bot._final_render(session_id="tg-smoke", content=once)
             assert once == twice
+
+
+def test_final_render_suppresses_internal_ok_deferral_and_checkpoint() -> None:
+    raw = (
+        "**Bug encontrado y root-caused.**\n\n"
+        "**Pido tu OK antes de tocar:** `claw_v2/bot.py` es codigo de safety.\n\n"
+        "Fix local reversible identificado.\n\n"
+        "**Checkpoint:**\n"
+        "- espero tu OK para aplicar fix\n"
+        "- F3b.2 live NO ejecutado\n"
+    )
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        runtime, env = _make_bot_for_render_only(root)
+        with patch.dict(os.environ, env, clear=False):
+            out = runtime.bot._final_render(session_id="tg-smoke", content=raw)
+
+    lowered = out.lower()
+    assert "fix local reversible identificado" in lowered
+    assert "pido tu ok" not in lowered
+    assert "checkpoint" not in lowered
+    assert "espero tu ok" not in lowered
