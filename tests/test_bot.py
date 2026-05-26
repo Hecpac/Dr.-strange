@@ -1581,6 +1581,66 @@ class BotTests(unittest.TestCase):
                 self.assertIn("clean_retry_started", events)
                 self.assertIn("clean_retry_completed", events)
 
+    def test_truncated_context_prompt_echo_retries_clean_without_visible_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            prompts: list[str] = []
+
+            def scripted_executor(request: LLMRequest) -> LLMResponse:
+                prompt_text = request.prompt if isinstance(request.prompt, str) else json.dumps(request.prompt)
+                prompts.append(prompt_text)
+                if len(prompts) == 1:
+                    return LLMResponse(
+                        content=(
+                            "[se cortó]\n"
+                            "user: Dale Pero antes asegurate de que no Bypass las funciones de seguridad\n"
+                            "user: [Imagen adjunta] path: /Users/hector/.claw/images/AQADNAxrG8ZDsUR-.jpg\n"
+                            "Bien\n"
+                            "user: Dame nuevamente el plan F3b.2\n\n"
+                            "Now respond to the user's most recent message."
+                        ),
+                        lane=request.lane,
+                        provider="anthropic",
+                        model=request.model,
+                    )
+                return LLMResponse(
+                    content="<response>Plan F3b.2: consulto fuentes read-only y reporto evidencia.</response>",
+                    lane=request.lane,
+                    provider="anthropic",
+                    model=request.model,
+                )
+
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=scripted_executor)
+
+                reply = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="Dame nuevamente el plan F3b.2",
+                )
+
+                lowered = reply.lower()
+                self.assertEqual(reply, "Plan F3b.2: consulto fuentes read-only y reporto evidencia.")
+                self.assertNotIn("[se cortó]", lowered)
+                self.assertNotIn("user:", lowered)
+                self.assertNotIn("now respond", lowered)
+                self.assertNotIn("/users/hector", lowered)
+                self.assertGreaterEqual(len(prompts), 2)
+                self.assertIn("Dame nuevamente el plan F3b.2", prompts[-1])
+                events = [event["event_type"] for event in runtime.observe.recent_events(limit=50)]
+                self.assertIn("internal_trace_detected", events)
+                self.assertIn("internal_trace_suppressed_from_chat", events)
+                self.assertIn("clean_retry_started", events)
+                self.assertIn("clean_retry_completed", events)
+
     def test_repeated_prompt_echo_persists_recoverable_action(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

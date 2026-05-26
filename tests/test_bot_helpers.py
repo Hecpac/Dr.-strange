@@ -146,6 +146,14 @@ class BotHelperRegressionTests(unittest.TestCase):
         samples = [
             "# Telegram message\nReply ONLY to that latest message.",
             "user: Estatus",
+            (
+                "[se cortó]\n"
+                "user: Dale Pero antes asegurate de que no Bypass las funciones de seguridad\n"
+                "user: [Imagen adjunta] path: /Users/hector/.claw/images/AQADNAxrG8ZDsUR-.jpg\n"
+                "Bien\n"
+                "user: Dame nuevamente el plan F3b.2\n\n"
+                "Now respond to the user's most recent message."
+            ),
             "</system-reminder>",
             "&lt;/system-reminder&gt;",
         ]
@@ -157,6 +165,7 @@ class BotHelperRegressionTests(unittest.TestCase):
                 self.assertFalse(_chat_response_has_internal_leak(sanitized))
                 self.assertNotIn("telegram message", lowered)
                 self.assertNotIn("reply only", lowered)
+                self.assertNotIn("now respond", lowered)
                 self.assertNotIn("user:", lowered)
                 self.assertNotIn("system-reminder", lowered)
 

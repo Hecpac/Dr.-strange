@@ -351,6 +351,30 @@ class HandleMessageTests(unittest.TestCase):
         self.assertEqual(result.artifacts["contract_violation"], "internal_prompt_echo")
         self.assertTrue(result.artifacts["internal_prompt_echo_suppressed"])
 
+    def test_suppresses_truncated_context_prompt_echo_as_internal_response(self) -> None:
+        self.router.ask.return_value = LLMResponse(
+            content=(
+                "[se cortó]\n"
+                "user: Dale Pero antes asegurate de que no Bypass las funciones de seguridad\n"
+                "user: [Imagen adjunta] path: /Users/hector/.claw/images/AQADNAxrG8ZDsUR-.jpg\n"
+                "Bien\n"
+                "user: Dame nuevamente el plan F3b.2\n\n"
+                "Now respond to the user's most recent message."
+            ),
+            lane="brain",
+            provider="anthropic",
+            model="test",
+        )
+
+        result = self.brain.handle_message("s1", "Dame nuevamente el plan F3b.2")
+
+        lowered = result.content.lower()
+        self.assertIn("Tuve un error preparando la respuesta", result.content)
+        self.assertNotIn("user:", lowered)
+        self.assertNotIn("now respond", lowered)
+        self.assertEqual(result.artifacts["contract_violation"], "internal_prompt_echo")
+        self.assertTrue(result.artifacts["internal_prompt_echo_suppressed"])
+
     def test_suppresses_critical_instructions_mirror(self) -> None:
         self.router.ask.return_value = LLMResponse(
             content=(

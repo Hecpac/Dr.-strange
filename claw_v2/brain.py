@@ -95,11 +95,12 @@ _INTERNAL_TOOL_TRACE_PATTERNS = (
 _INTERNAL_PROMPT_ECHO_PATTERNS = (
     re.compile(r"^\s*#\s*Telegram message\b", re.IGNORECASE),
     re.compile(r"\bReply ONLY to (?:that|the) latest message\b", re.IGNORECASE),
+    re.compile(r"\bNow respond to the user[’']s most recent message\b", re.IGNORECASE),
     re.compile(r"\bReply\s+ONLY\b", re.IGNORECASE),
     re.compile(r"\bTelegram-friendly Markdown\b", re.IGNORECASE),
     re.compile(r"\bDo not include internal trace\b", re.IGNORECASE),
     re.compile(r"\bNo user-visible text is valid outside <response> tags\b", re.IGNORECASE),
-    re.compile(r"^\s*(?:user|assistant|system)\s*:\s*\S", re.IGNORECASE),
+    re.compile(r"(?m)^\s*(?:user|assistant|system)\s*:\s*\S", re.IGNORECASE),
     re.compile(r"^\s*#+\s*Critical\s+instructions?\b", re.IGNORECASE),
     re.compile(r"^\s*#+\s*(?:Instructions?|Rules|Directives|Guardrails)\s*$", re.IGNORECASE | re.MULTILINE),
     re.compile(r"\bDo NOT identify as Claude\b", re.IGNORECASE),

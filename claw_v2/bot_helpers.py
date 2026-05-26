@@ -1275,10 +1275,11 @@ _INTERNAL_LEAK_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\brepite la instrucci[oó]n\b", re.IGNORECASE),
     re.compile(r"^\s*#\s*Telegram message\b", re.IGNORECASE),
     re.compile(r"\bReply ONLY to (?:that|the) latest message\b", re.IGNORECASE),
+    re.compile(r"\bNow respond to the user[’']s most recent message\b", re.IGNORECASE),
     re.compile(r"\bTelegram-friendly Markdown\b", re.IGNORECASE),
     re.compile(r"\bDo not include internal trace\b", re.IGNORECASE),
     re.compile(r"\bNo user-visible text is valid outside <response> tags\b", re.IGNORECASE),
-    re.compile(r"^\s*(?:user|assistant|system)\s*:\s*\S", re.IGNORECASE),
+    re.compile(r"(?m)^\s*(?:user|assistant|system)\s*:\s*\S", re.IGNORECASE),
     re.compile(r"\bcontradice las capacidades\b", re.IGNORECASE),
     re.compile(r"\bcircuit breaker\b", re.IGNORECASE),
     re.compile(r"\bPID\s*[:#]?\s*\d+\b", re.IGNORECASE),
@@ -1306,7 +1307,7 @@ _INTERNAL_LEAK_PATTERNS: tuple[re.Pattern[str], ...] = (
 # verbatim prompt echoes. Soft phrases ("respuesta bloqueada", "trazas internas",
 # "circuit breaker", etc.) are inline-redacted further below so legitimate
 # technical references do not nuke an otherwise valid reply.
-_NUKE_PATTERN_INDICES: tuple[int, ...] = (4, 5, 6, 20, 21, 22, 23, 24, 25, 32, 33)
+_NUKE_PATTERN_INDICES: tuple[int, ...] = (4, 5, 6, 20, 21, 22, 23, 24, 25, 26, 33, 34)
 
 
 def _chat_response_has_internal_leak(text: str) -> bool:
