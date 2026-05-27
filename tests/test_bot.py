@@ -981,7 +981,7 @@ class BotTests(unittest.TestCase):
 
                 self.assertIn("Qué acción concreta", reply)
 
-    def test_telegram_update_request_creates_blocked_task_even_when_task_intent_flag_disabled(self) -> None:
+    def test_telegram_update_request_starts_task_after_safe_preflight_when_task_intent_flag_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             env = {
@@ -995,6 +995,7 @@ class BotTests(unittest.TestCase):
             }
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot._task_handler.start_autonomous_task = MagicMock(return_value="started")
 
                 reply = runtime.bot.handle_text(
                     user_id="123",
@@ -1003,27 +1004,22 @@ class BotTests(unittest.TestCase):
                     runtime_channel="telegram",
                 )
 
-                self.assertIn("Creé la tarea", reply)
-                self.assertIn("preflight", reply)
-                self.assertIn("bloqueado por política", reply)
-                self.assertNotIn("Siguiente paso:", reply)
-                self.assertNotIn("PreToolUse", reply)
-                self.assertNotIn("tg-", reply)
-                records = runtime.task_ledger.list(session_id="s1", limit=5)
-                self.assertEqual(len(records), 1)
-                self.assertEqual(records[0].status, "failed")
-                self.assertEqual(records[0].verification_status, "blocked")
-                self.assertEqual(records[0].notify_policy, "none")
-                self.assertEqual(records[0].metadata["task_kind"], "maintenance_update_tools")
-                self.assertEqual(records[0].metadata["source_message"], "Actualiza Codex, Claude Code y Codex app")
-                self.assertTrue(records[0].metadata["blockers"])
+                self.assertIn("Tomado. Creé una tarea autónoma", reply)
+                self.assertNotIn("bloqueado por política", reply)
+                runtime.bot._task_handler.start_autonomous_task.assert_called_once()
+                args, kwargs = runtime.bot._task_handler.start_autonomous_task.call_args
+                self.assertEqual(args[:2], ("s1", "Actualiza Codex, Claude Code y Codex app"))
+                self.assertEqual(kwargs["task_kind"], "maintenance_update_tools")
+                self.assertEqual(kwargs["source_text"], "Actualiza Codex, Claude Code y Codex app")
+                self.assertTrue(kwargs["preflight"]["allowed"])
+                self.assertEqual(kwargs["preflight"]["blockers"], [])
                 state = runtime.memory.get_session_state("s1")
-                self.assertEqual(state["pending_action"], "")
+                self.assertFalse(state.get("pending_action"))
                 events = [event["event_type"] for event in runtime.observe.recent_events(limit=30)]
                 self.assertIn("capability_preflight_started", events)
                 self.assertIn("capability_preflight_result", events)
-                self.assertIn("tool_blocker_detected", events)
-                self.assertIn("task_blocked_with_evidence", events)
+                self.assertNotIn("tool_blocker_detected", events)
+                self.assertNotIn("task_blocked_with_evidence", events)
 
     def test_telegram_contextual_update_followup_creates_durable_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1038,6 +1034,7 @@ class BotTests(unittest.TestCase):
             }
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot._task_handler.start_autonomous_task = MagicMock(return_value="started")
                 runtime.memory.update_session_state(
                     "s1",
                     current_goal="Actualiza Codex, Claude Code y Codex app",
@@ -1050,11 +1047,13 @@ class BotTests(unittest.TestCase):
                     runtime_channel="telegram",
                 )
 
-                self.assertIn("Creé la tarea", reply)
-                records = runtime.task_ledger.list(session_id="s1", limit=5)
-                self.assertEqual(records[0].objective, "Actualiza Codex, Claude Code y Codex app")
-                self.assertEqual(records[0].verification_status, "blocked")
-                self.assertEqual(records[0].metadata["source_message"], "Debes actualizarlas tú")
+                self.assertIn("Tomado. Creé una tarea autónoma", reply)
+                runtime.bot._task_handler.start_autonomous_task.assert_called_once()
+                args, kwargs = runtime.bot._task_handler.start_autonomous_task.call_args
+                self.assertEqual(args[:2], ("s1", "Actualiza Codex, Claude Code y Codex app"))
+                self.assertEqual(kwargs["task_kind"], "maintenance_update_tools")
+                self.assertEqual(kwargs["source_text"], "Debes actualizarlas tú")
+                self.assertTrue(kwargs["preflight"]["allowed"])
 
     def test_telegram_actionable_router_disabled_reports_blocker_not_chat(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

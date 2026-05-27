@@ -98,6 +98,7 @@ PYTHON_SAFE_MODULES = frozenset(
 )
 NODE_INTERPRETERS = frozenset({"node"})
 VERSION_OR_HELP_FLAGS = frozenset({"--version", "-V", "-VV", "--help", "-h"})
+VERSION_OR_HELP_ONLY_BINARIES = frozenset({"claude", "codex"})
 WORKSPACE_SCRIPT_SUFFIXES = (".sh",)
 
 
@@ -185,6 +186,10 @@ def check_command(command: str, policy: SandboxPolicy) -> str | None:
     if _network_disabled(policy) and base_cmd in {"curl", "wget"}:
         return "network access not allowed for this agent"
     if base_cmd not in policy.active_profile_binaries:
+        if base_cmd in VERSION_OR_HELP_ONLY_BINARIES:
+            if _contains_only_version_or_help_flags(tokens[1:]):
+                return None
+            return f"binary '{base_cmd}' is limited to version/help checks in this policy"
         return f"binary '{base_cmd}' requires higher privilege level (not in the allowed whitelist)"
     interpreter_violation = _check_interpreter_invocation(base_cmd, tokens, policy)
     if interpreter_violation:

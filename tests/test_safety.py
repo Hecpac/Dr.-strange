@@ -211,6 +211,16 @@ class SafetyTests(unittest.TestCase):
             self.assertIsNone(check_command("gemini --version", policy))
             self.assertIsNone(check_command("osascript -e 'id of app \"Codex\"'", policy))
 
+    def test_engineer_profile_allows_codex_and_claude_version_checks_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            policy = SandboxPolicy(workspace_root=workspace, capability_profile="engineer")
+            self.assertIsNone(check_command("codex --version", policy))
+            self.assertIsNone(check_command("claude --version", policy))
+            self.assertIn("version/help", check_command("codex exec test", policy) or "")
+            self.assertIn("version/help", check_command("claude update", policy) or "")
+
     def test_engineer_profile_allows_explicit_workspace_shell_scripts(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir) / "workspace"

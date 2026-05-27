@@ -248,7 +248,7 @@ class BotHelperRegressionTests(unittest.TestCase):
 
     def test_permission_preflight_distinguishes_allowed_missing_and_policy_blocked(self) -> None:
         policy = SandboxPolicy(workspace_root=Path("/tmp"), capability_profile="engineer")
-        which = lambda binary: f"/usr/bin/{binary}" if binary in {"python3", "codex"} else None
+        which = lambda binary: f"/usr/bin/{binary}" if binary in {"python3", "codex", "claude"} else None
 
         allowed = preflight_command(
             CommandSpec("python3 --version", "python_check"),
@@ -260,8 +260,13 @@ class BotHelperRegressionTests(unittest.TestCase):
             policy=policy,
             which=which,
         )
-        blocked = preflight_command(
+        version_only = preflight_command(
             CommandSpec("codex --version", "codex_check"),
+            policy=policy,
+            which=which,
+        )
+        claude_version = preflight_command(
+            CommandSpec("claude --version", "claude_check"),
             policy=policy,
             which=which,
         )
@@ -269,8 +274,8 @@ class BotHelperRegressionTests(unittest.TestCase):
         self.assertEqual(allowed.status, "allowed")
         self.assertEqual(missing.status, "command_not_found")
         self.assertIn("command_not_found:poetry", missing.blocker)
-        self.assertEqual(blocked.status, "policy_blocked")
-        self.assertIn("policy_blocked:codex", blocked.blocker)
+        self.assertEqual(version_only.status, "allowed")
+        self.assertEqual(claude_version.status, "allowed")
 
     def test_qts_lock_preflight_records_poetry_blocker(self) -> None:
         result = preflight_objective(

@@ -280,7 +280,7 @@ def _is_explicit_authorization(compact: str) -> bool:
 def _looks_like_option_combo(compact: str) -> bool:
     return bool(
         re.fullmatch(
-            r"(?:opcion\s+)?[a-e](?:\s+(?:y|and|e|\+|,)\s+(?:opcion\s+)?[a-e])+",
+            r"(?:opcion\s+)?[a-e](?:\s+(?:(?:y|and|e|\+|,)\s+)?(?:opcion\s+)?[a-e])+",
             compact,
         )
     )
