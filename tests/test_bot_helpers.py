@@ -23,6 +23,10 @@ class BotHelperRegressionTests(unittest.TestCase):
         self.assertEqual(_extract_option_reference("Vamos con la 2"), 2)
         self.assertEqual(_extract_option_reference("vamos con opción 2"), 2)
 
+    def test_letter_option_selects_option(self) -> None:
+        self.assertEqual(_extract_option_reference("Opción A"), 1)
+        self.assertEqual(_extract_option_reference("opcion b"), 2)
+
     def test_ratio_context_extracts_both_pending_ratios(self) -> None:
         text = "Te tiro los otros 2 ratios: 9:16 vertical para Reels y 1:1 cuadrado para feed."
         self.assertEqual(

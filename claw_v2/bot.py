@@ -100,13 +100,20 @@ _CHATGPT_OPEN_TOKENS = (
 _BACKGROUND_MONITOR_PROMISE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bwatcher\b", re.IGNORECASE),
     re.compile(r"\b(?:en|in)\s+background\b|\bbackground\s+(?:task|job|watcher|process|worker)\b", re.IGNORECASE),
+    re.compile(r"\bdispatch\s+durable\b", re.IGNORECASE),
+    re.compile(r"\bsobreviv[ae]\s+(?:a\s+)?interrupciones?\b", re.IGNORECASE),
     re.compile(r"\bmonitore(?:ar|o|ando|aré|are|e|é)\b", re.IGNORECASE),
     re.compile(r"\bte\s+aviso\s+cuando\b", re.IGNORECASE),
     re.compile(r"\blo\s+dejo\s+(?:corriendo|trabajando|en\s+background)\b", re.IGNORECASE),
     re.compile(r"\bsin\s+intervenci[oó]n\s+tuya\b", re.IGNORECASE),
     re.compile(r"\bno\s+necesit[aá]s\s+hacer\s+nada\b", re.IGNORECASE),
     re.compile(r"\bpolling\b|\bpoll(?:ea|ear|ando|ando)\b", re.IGNORECASE),
-    re.compile(r"\bcuando\s+.+?\btermine\b.+?\b(?:descarg|extra|notific|avis|renombr)", re.IGNORECASE | re.DOTALL),
+    re.compile(r"\bcuando\s+.+?\btermine\b.+?\b(?:descarg|extra|notific|avis|renombr|entreg|mand|envi|devuelv|report)", re.IGNORECASE | re.DOTALL),
+)
+_DURABLE_DISPATCH_CLAIM_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bdispatch\s+durable\b", re.IGNORECASE),
+    re.compile(r"\bsobreviv[ae]\s+(?:a\s+)?interrupciones?\b", re.IGNORECASE),
+    re.compile(r"\bno\s+es\s+una\s+promesa\s+de\s+background\b", re.IGNORECASE),
 )
 _BACKGROUND_MONITOR_ACTIVE_JOB_STATUSES = ("queued", "running", "waiting_approval", "retrying")
 _BACKGROUND_MONITOR_ACTIVE_TASK_STATUSES = ("queued", "running")
@@ -1728,6 +1735,13 @@ class BotService:
                 evidence = self._background_monitor_evidence(session_id, response_text)
         if evidence.get("durable"):
             return content
+        durable_dispatch_claim = self._claims_durable_dispatch(content)
+        if durable_dispatch_claim:
+            return self._background_monitor_replacement(
+                session_id=session_id,
+                user_text=user_text,
+                reason=evidence.get("reason") or "no_durable_monitor",
+            )
         stripped = self._strip_unsupported_background_monitor_claims(content)
         if stripped != content and stripped and not self._claims_background_monitor(stripped):
             self._emit_safe(
@@ -1739,6 +1753,19 @@ class BotService:
                 },
             )
             return stripped
+        return self._background_monitor_replacement(
+            session_id=session_id,
+            user_text=user_text,
+            reason=evidence.get("reason") or "no_durable_monitor",
+        )
+
+    def _background_monitor_replacement(
+        self,
+        *,
+        session_id: str,
+        user_text: str,
+        reason: str,
+    ) -> str:
         replacement = (
             "Preparé o disparé parte de la acción, pero no quedó un monitor "
             "durable registrado. No puedo prometer aviso automático ni trabajo "
@@ -1750,7 +1777,7 @@ class BotService:
             {
                 "session_id": session_id,
                 "user_text_preview": user_text[:120],
-                "reason": evidence.get("reason") or "no_durable_monitor",
+                "reason": reason,
             },
         )
         return replacement
@@ -1876,6 +1903,12 @@ class BotService:
         if not text:
             return False
         return any(pattern.search(text) for pattern in _BACKGROUND_MONITOR_PROMISE_PATTERNS)
+
+    @staticmethod
+    def _claims_durable_dispatch(text: str) -> bool:
+        if not text:
+            return False
+        return any(pattern.search(text) for pattern in _DURABLE_DISPATCH_CLAIM_PATTERNS)
 
     def _background_monitor_evidence(self, session_id: str, response_text: str) -> dict[str, Any]:
         active_task = self._active_notifying_task(session_id)

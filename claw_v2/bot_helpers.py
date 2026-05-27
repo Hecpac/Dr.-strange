@@ -370,6 +370,11 @@ _PROCEED_TOKENS = (
     "adelante",
 )
 _OPTION_ORDINALS = {
+    "a": 1,
+    "b": 2,
+    "c": 3,
+    "d": 4,
+    "e": 5,
     "primera": 1,
     "first": 1,
     "segunda": 2,
@@ -1186,9 +1191,10 @@ def _stable_task_id(summary: str, *, mode: str, source: str) -> str:
 
 def _extract_option_reference(text: str) -> int | None:
     normalized = _normalize_command_text(text).strip()
-    match = re.fullmatch(r"(?:opcion|option)\s+(\d+)", normalized)
+    match = re.fullmatch(r"(?:opcion|option)\s+([a-e]|\d+)", normalized)
     if match:
-        return int(match.group(1))
+        value = match.group(1)
+        return int(value) if value.isdigit() else _OPTION_ORDINALS.get(value)
     match = re.fullmatch(r"(?:vamos|vete|ve|dale|procede|continua|sigue)\s+con\s+(?:la\s+)?(?:opcion\s+)?(\d+)", normalized)
     if match:
         return int(match.group(1))

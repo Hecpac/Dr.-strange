@@ -83,6 +83,14 @@ def test_semantic_classifier_recognizes_operational_tasks_and_option_picks() -> 
     assert option_turn.intent == "continue_active_mission"
     assert option_turn.explicit_continuation is True
 
+    letter_turn = classify_semantic_turn("Opción A")
+    assert letter_turn.intent == "continue_active_mission"
+    assert letter_turn.explicit_continuation is True
+
+    combo_turn = classify_semantic_turn("A y B")
+    assert combo_turn.intent == "continue_active_mission"
+    assert combo_turn.explicit_continuation is True
+
     stop_turn = classify_semantic_turn(
         "No continuemos porque ingles nativo es un problema si la entrevista es conversational"
     )

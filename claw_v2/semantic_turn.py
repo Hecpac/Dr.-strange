@@ -145,6 +145,7 @@ def classify_semantic_turn(text: str) -> SemanticTurn:
     explicit_continuation = _looks_like_proceed_request(stripped)
     explicit_authorization = _is_explicit_authorization(compact)
     option_reference = _extract_option_reference(stripped)
+    option_combo = _looks_like_option_combo(compact)
     telegram_intent = detect_telegram_imperative(stripped)
     owner_delegation = detect_owner_delegation(stripped)
     meta_intent = detect_meta_introspection_request(stripped)
@@ -176,7 +177,7 @@ def classify_semantic_turn(text: str) -> SemanticTurn:
             reasons=("approval_phrase",),
         )
 
-    if option_reference is not None:
+    if option_reference is not None or option_combo:
         return SemanticTurn(
             intent="continue_active_mission",
             objective=None,
@@ -185,7 +186,7 @@ def classify_semantic_turn(text: str) -> SemanticTurn:
             explicit_authorization=False,
             explicit_continuation=True,
             debug_mode=debug_mode,
-            reasons=("option_reference",),
+            reasons=("option_reference",) if option_reference is not None else ("option_combo",),
         )
 
     if (
@@ -271,6 +272,15 @@ def _is_explicit_authorization(compact: str) -> bool:
     return bool(
         re.fullmatch(
             r"(?:te\s+)?(?:autorizo|apruebo|confirmo)(?:\s+(?:esto|eso|la accion|el paso))?",
+            compact,
+        )
+    )
+
+
+def _looks_like_option_combo(compact: str) -> bool:
+    return bool(
+        re.fullmatch(
+            r"(?:opcion\s+)?[a-e](?:\s+(?:y|and|e|\+|,)\s+(?:opcion\s+)?[a-e])+",
             compact,
         )
     )

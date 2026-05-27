@@ -534,6 +534,30 @@ class BrainToolUseLedgerEdgeCasesTests(unittest.TestCase):
         events = [name for name, _ in observe.events]
         self.assertIn("background_monitor_claim_rejected", events)
 
+    def test_durable_dispatch_claim_is_rejected_without_durable_job(self) -> None:
+        observe = _RecordingObserve()
+        bot = _make_bot(observe, self.ledger)
+        content = (
+            "Va A+B encadenado.\n\n"
+            "**Disclosure operativo:** voy a hacer dispatch durable para que "
+            "esto sobreviva interrupciones. Cuando termine, te entrego el "
+            "digest con links y screenshots.\n\n"
+            "Disparo ahora."
+        )
+
+        rendered = bot._enforce_background_monitor_contract(
+            session_id="tg-test",
+            user_text="A y B",
+            content=content,
+            raw_content=content,
+        )
+
+        self.assertIn("no quedó un monitor durable registrado", rendered)
+        self.assertNotIn("Disparo ahora", rendered)
+        events = [name for name, _ in observe.events]
+        self.assertIn("background_monitor_claim_rejected", events)
+        self.assertNotIn("background_monitor_claim_stripped", events)
+
     def test_background_monitor_claim_is_stripped_from_mixed_response(self) -> None:
         observe = _RecordingObserve()
         bot = _make_bot(observe, self.ledger)
