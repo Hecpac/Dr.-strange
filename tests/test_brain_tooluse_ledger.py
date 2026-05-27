@@ -534,6 +534,50 @@ class BrainToolUseLedgerEdgeCasesTests(unittest.TestCase):
         events = [name for name, _ in observe.events]
         self.assertIn("background_monitor_claim_rejected", events)
 
+    def test_background_monitor_claim_is_stripped_from_mixed_response(self) -> None:
+        observe = _RecordingObserve()
+        bot = _make_bot(observe, self.ledger)
+        content = (
+            "Perfecto. Mensaje enviado a Drew.\n\n"
+            "**Lo guardé en contexto para retomar cuando responda:**\n"
+            "- Equipo Samantha: Sting GU11 D Oldham\n"
+            "- Pendiente: confirmar número de jersey disponible\n\n"
+            "**Volviendo a lo que dejamos antes de Sting:**\n"
+            "- Watcher de NotebookLM sigue corriendo en background — te aviso cuando termine podcast + informe\n"
+            "- F3b.2 sigue bloqueado por Keychain de HeyGen\n"
+            "- Thread X del martes listo para draftear\n\n"
+            "¿Movés algo de eso o lo dejamos hasta que Drew responda?"
+        )
+
+        rendered = bot._enforce_background_monitor_contract(
+            session_id="tg-test",
+            user_text="Listo ya quedo",
+            content=content,
+            raw_content=content,
+        )
+
+        self.assertIn("Perfecto. Mensaje enviado a Drew.", rendered)
+        self.assertIn("F3b.2 sigue bloqueado", rendered)
+        self.assertNotIn("Watcher de NotebookLM", rendered)
+        self.assertNotIn("no quedó un monitor durable registrado", rendered)
+        events = [name for name, _ in observe.events]
+        self.assertIn("background_monitor_claim_stripped", events)
+        self.assertNotIn("background_monitor_claim_rejected", events)
+
+    def test_background_monitor_claim_in_raw_trace_only_is_not_blocked(self) -> None:
+        observe = _RecordingObserve()
+        bot = _make_bot(observe, self.ledger)
+
+        rendered = bot._enforce_background_monitor_contract(
+            session_id="tg-test",
+            user_text="Listo ya quedo",
+            content="Perfecto. Queda así.",
+            raw_content="<trace>Watcher de NotebookLM sigue corriendo en background.</trace>",
+        )
+
+        self.assertEqual(rendered, "Perfecto. Queda así.")
+        self.assertEqual(observe.events, [])
+
     def test_background_monitor_claim_allowed_with_related_active_job(self) -> None:
         observe = _RecordingObserve()
         jobs = JobService(Path(self._tmp.name) / "claw.db")

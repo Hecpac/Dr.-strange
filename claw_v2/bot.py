@@ -1715,7 +1715,7 @@ class BotService:
         terminal audit records, not execution handles, so they do not satisfy
         this contract.
         """
-        if not self._claims_background_monitor(content) and not self._claims_background_monitor(raw_content):
+        if not self._claims_background_monitor(content):
             return content
         response_text = f"{content}\n{raw_content}"
         evidence = self._background_monitor_evidence(session_id, response_text)
@@ -1728,6 +1728,17 @@ class BotService:
                 evidence = self._background_monitor_evidence(session_id, response_text)
         if evidence.get("durable"):
             return content
+        stripped = self._strip_unsupported_background_monitor_claims(content)
+        if stripped != content and stripped and not self._claims_background_monitor(stripped):
+            self._emit_safe(
+                "background_monitor_claim_stripped",
+                {
+                    "session_id": session_id,
+                    "user_text_preview": user_text[:120],
+                    "reason": evidence.get("reason") or "no_durable_monitor",
+                },
+            )
+            return stripped
         replacement = (
             "Preparé o disparé parte de la acción, pero no quedó un monitor "
             "durable registrado. No puedo prometer aviso automático ni trabajo "
@@ -1743,6 +1754,27 @@ class BotService:
             },
         )
         return replacement
+
+    def _strip_unsupported_background_monitor_claims(self, content: str) -> str:
+        lines = str(content or "").splitlines()
+        kept: list[str] = []
+        stripped_any = False
+        for line in lines:
+            if self._claims_background_monitor(line):
+                stripped_any = True
+                continue
+            kept.append(line)
+        if not stripped_any:
+            return content
+        collapsed: list[str] = []
+        previous_blank = False
+        for line in kept:
+            blank = not line.strip()
+            if blank and previous_blank:
+                continue
+            collapsed.append(line)
+            previous_blank = blank
+        return "\n".join(collapsed).strip()
 
     def _maybe_register_notebooklm_background_monitor(
         self,
