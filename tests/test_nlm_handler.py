@@ -10,6 +10,7 @@ class _FakeNotebookLM:
     def __init__(self) -> None:
         self.created_titles: list[str] = []
         self.podcast_targets: list[str] = []
+        self.orchestration_calls: list[tuple[str, str | None]] = []
 
     def create_notebook(self, title: str) -> dict[str, str]:
         self.created_titles.append(title)
@@ -21,6 +22,10 @@ class _FakeNotebookLM:
     def start_podcast(self, notebook_id: str) -> str:
         self.podcast_targets.append(notebook_id)
         return f"Generando podcast para {notebook_id}"
+
+    def start_orchestration(self, notebook_id: str, *, session_id: str | None = None) -> str:
+        self.orchestration_calls.append((notebook_id, session_id))
+        return f"Orquestación durable de NotebookLM registrada para {notebook_id}"
 
     def list_notebooks(self) -> list[dict[str, str]]:
         return []
@@ -76,6 +81,21 @@ class NlmHandlerContextualTopicTests(unittest.TestCase):
         assert response is not None
         self.assertIn("¿De cuál tema", response)
         self.assertEqual(service.created_titles, [])
+
+    def test_monitor_outputs_request_uses_durable_orchestration_job(self) -> None:
+        service = _FakeNotebookLM()
+        handler = NlmHandler(get_session_state=lambda _session_id: {})
+        handler.notebooklm = service
+        handler._set_active_notebook("s1", "nb-active", "Active Notebook")
+
+        response = handler.natural_language_response(
+            "s1",
+            "Monitorea el cuaderno en NotebookLM y cuando termine descarga el podcast e informe",
+        )
+
+        self.assertIsNotNone(response)
+        self.assertIn("Orquestación durable", response)
+        self.assertEqual(service.orchestration_calls, [("nb-active", "s1")])
 
 
 if __name__ == "__main__":

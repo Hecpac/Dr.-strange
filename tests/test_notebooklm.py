@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from claw_v2 import notebooklm_cdp
 from claw_v2.jobs import JobService
 from claw_v2.notebooklm import NotebookLMService, classify_notebooklm_failure
 
@@ -702,6 +703,134 @@ class CdpArtifactTests(unittest.TestCase):
         svc._cdp_artifact_fn = lambda nb, kind: None
         with self.assertRaises(ValueError):
             svc.start_artifact("nb-id", "totally-invalid-kind")
+
+
+class NotebookLMOrchestrationTests(unittest.TestCase):
+    def test_orchestration_registers_durable_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            job_service = JobService(Path(tmpdir) / "claw.db")
+            svc = NotebookLMService(job_service=job_service)
+
+            message = svc.start_orchestration("nb-full-id", session_id="tg-test")
+
+            self.assertIn("Orquestación durable", message)
+            jobs = job_service.list()
+            self.assertEqual(len(jobs), 1)
+            job = jobs[0]
+            self.assertEqual(job.kind, "notebooklm.orchestrate")
+            self.assertEqual(job.status, "queued")
+            self.assertEqual(job.resume_key, "notebooklm:orchestrate:nb-full-id")
+            self.assertEqual(job.payload["session_id"], "tg-test")
+            self.assertEqual(job.payload["outputs"], ["podcast", "blog"])
+
+    def test_orchestration_pending_step_reschedules_without_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            job_service = JobService(Path(tmpdir) / "claw.db")
+            svc = NotebookLMService(job_service=job_service)
+
+            def fake_step(notebook_id: str, checkpoint: dict[str, object], outputs: tuple[str, ...]) -> dict[str, object]:
+                return {
+                    "status": "pending",
+                    "stage": "outputs_generating",
+                    "next_delay_seconds": 5,
+                    "summary": {"audio_generating": True},
+                }
+
+            svc._cdp_orchestrate_step_fn = fake_step
+            svc.start_orchestration("nb-full-id", session_id="tg-test")
+
+            processed = svc.poll_orchestrations(limit=1)
+
+            self.assertEqual(processed, 1)
+            job = job_service.list()[0]
+            self.assertEqual(job.status, "retrying")
+            self.assertEqual(job.error, "")
+            self.assertEqual(job.checkpoint["stage"], "outputs_generating")
+            self.assertEqual(job.result["last_status"], "pending")
+
+    def test_orchestration_completed_step_notifies_and_completes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            notify = MagicMock()
+            job_service = JobService(Path(tmpdir) / "claw.db")
+            svc = NotebookLMService(notify=notify, job_service=job_service)
+
+            def fake_step(notebook_id: str, checkpoint: dict[str, object], outputs: tuple[str, ...]) -> dict[str, object]:
+                return {
+                    "status": "completed",
+                    "stage": "outputs_ready",
+                    "evidence_uri": "artifacts/notebooklm/evidence.json",
+                    "summary": {"audio_ready": True, "blog_ready": True},
+                }
+
+            svc._cdp_orchestrate_step_fn = fake_step
+            svc.start_orchestration("nb-full-id", session_id="tg-test")
+
+            processed = svc.poll_orchestrations(limit=1)
+
+            self.assertEqual(processed, 1)
+            job = job_service.list()[0]
+            self.assertEqual(job.status, "completed")
+            self.assertEqual(job.result["stage"], "outputs_ready")
+            notify.assert_called_once()
+            self.assertIn("NotebookLM terminó", notify.call_args.args[0])
+
+    def test_orchestration_retrying_job_resumes_after_new_service_instance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            job_service = JobService(db_path)
+            first = NotebookLMService(job_service=job_service)
+            first._cdp_orchestrate_step_fn = lambda nb, checkpoint, outputs: {
+                "status": "pending",
+                "stage": "waiting_research",
+                "next_delay_seconds": 1,
+            }
+            first.start_orchestration("nb-full-id", session_id="tg-test", poll_interval_seconds=1)
+            first.poll_orchestrations(limit=1)
+
+            resumed_jobs = JobService(db_path)
+            second = NotebookLMService(job_service=resumed_jobs)
+            second._cdp_orchestrate_step_fn = lambda nb, checkpoint, outputs: {
+                "status": "completed",
+                "stage": "outputs_ready",
+            }
+            time.sleep(1.05)
+
+            processed = second.poll_orchestrations(limit=1)
+
+            self.assertEqual(processed, 1)
+            self.assertEqual(resumed_jobs.list()[0].status, "completed")
+
+
+class NotebookLMOrchestrationStateTests(unittest.TestCase):
+    def test_analizando_resultados_is_running_state(self) -> None:
+        state = notebooklm_cdp.classify_orchestration_state(
+            "Fuentes\nAnalizando resultados...\nLas fuentes que guardes aparecerán aquí"
+        )
+
+        self.assertTrue(state["research_running"])
+        self.assertFalse(state["import_ready"])
+        self.assertEqual(state["sources_count"], 0)
+
+    def test_generando_outputs_stays_pending_not_ready(self) -> None:
+        state = notebooklm_cdp.classify_orchestration_state(
+            "45 fuentes\nGenerando informe… con base en 45 fuentes\n"
+            "Generando resumen de audio… Regresa en unos minutos"
+        )
+
+        self.assertEqual(state["sources_count"], 45)
+        self.assertTrue(state["audio_generating"])
+        self.assertTrue(state["blog_generating"])
+        self.assertFalse(state["audio_ready"])
+        self.assertFalse(state["blog_ready"])
+
+    def test_ready_outputs_are_detected(self) -> None:
+        state = notebooklm_cdp.classify_orchestration_state(
+            "45 fuentes\nResumen en audio \"Dignidad humana\" está listo.\n"
+            "¿El fin de la autoría humana?\nBlog Post · 45 fuentes · Hace 12 min"
+        )
+
+        self.assertTrue(state["audio_ready"])
+        self.assertTrue(state["blog_ready"])
 
 
 if __name__ == "__main__":

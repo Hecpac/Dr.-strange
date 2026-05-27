@@ -5,6 +5,7 @@ import contextlib
 import logging
 import re
 import threading
+import time
 from typing import TYPE_CHECKING, Any, Callable
 
 from claw_v2 import notebooklm_cdp
@@ -118,6 +119,9 @@ class NotebookLMService:
         self._cdp_create_notebook_fn: Callable[[str], dict] | None = None
         self._cdp_research_fn: Callable[[str, str], int] | None = None
         self._cdp_artifact_fn: Callable[[str, str], None] | None = None
+        self._cdp_orchestrate_step_fn: (
+            Callable[[str, dict[str, object], tuple[str, ...]], dict[str, object]] | None
+        ) = None
         self._sdk_available = self._detect_sdk()
 
     @staticmethod
@@ -629,6 +633,191 @@ class NotebookLMService:
 
     def start_podcast(self, notebook_id: str) -> str:
         return self.start_artifact(notebook_id, "podcast")
+
+    def start_orchestration(
+        self,
+        notebook_id: str,
+        *,
+        session_id: str | None = None,
+        outputs: tuple[str, ...] = ("podcast", "blog"),
+        poll_interval_seconds: float = 60.0,
+    ) -> str:
+        """Register a durable NotebookLM orchestration job.
+
+        This is intentionally job-backed only. A caller must not claim that
+        NotebookLM is being monitored unless this enqueue succeeds.
+        """
+        full_id = notebook_id.strip()
+        if not full_id:
+            raise ValueError("notebook_id is required")
+        normalized_outputs = tuple(
+            output.strip().lower()
+            for output in outputs
+            if output and output.strip().lower() in {"podcast", "blog"}
+        ) or ("podcast", "blog")
+        self._enforce_policy(
+            "notebooklm.start_artifact",
+            {
+                "notebook_id": full_id,
+                "kind": "orchestrate",
+                "outputs": list(normalized_outputs),
+            },
+            mutates_state=True,
+            requires_network=True,
+        )
+        if self._job_service is None:
+            return (
+                "No quedó monitor durable registrado: NotebookLM orchestration "
+                "requiere JobService activo."
+            )
+        title = self._get_notebook_title(full_id)
+        job = self._job_service.enqueue(
+            kind="notebooklm.orchestrate",
+            payload={
+                "notebook_id": full_id,
+                "outputs": list(normalized_outputs),
+                "session_id": session_id,
+                "poll_interval_seconds": float(poll_interval_seconds),
+            },
+            resume_key=f"notebooklm:orchestrate:{full_id}",
+            metadata={"notebook_title": title, "session_id": session_id},
+            max_attempts=120,
+        )
+        self._emit(
+            "nlm_orchestration_registered",
+            notebook_id=full_id,
+            job_id=job.job_id,
+            session_id=session_id,
+            outputs=list(normalized_outputs),
+        )
+        return (
+            "Orquestación durable de NotebookLM registrada.\n"
+            f"Job: {job.job_id}\n"
+            f"Notebook: {title} ({full_id[:8]})\n"
+            f"Outputs: {', '.join(normalized_outputs)}"
+        )
+
+    def poll_orchestrations(self, *, limit: int = 3) -> int:
+        if self._job_service is None:
+            return 0
+        processed = 0
+        for _ in range(max(1, int(limit))):
+            job = self._job_service.claim_next(
+                worker_id="notebooklm",
+                kinds=("notebooklm.orchestrate",),
+            )
+            if job is None:
+                break
+            processed += 1
+            self._run_orchestration_job(job)
+        return processed
+
+    def _run_orchestration_job(self, job: Any) -> None:
+        assert self._job_service is not None
+        payload = dict(getattr(job, "payload", {}) or {})
+        checkpoint = dict(getattr(job, "checkpoint", {}) or {})
+        notebook_id = str(payload.get("notebook_id") or "").strip()
+        if not notebook_id:
+            self._job_service.fail(
+                job.job_id,
+                error="missing_notebook_id",
+                retry=False,
+                checkpoint={**checkpoint, "stage": "failed_missing_notebook_id"},
+            )
+            return
+        outputs = tuple(
+            str(item).strip().lower()
+            for item in payload.get("outputs", [])
+            if str(item).strip()
+        )
+        outputs = tuple(item for item in outputs if item in {"podcast", "blog"}) or ("podcast", "blog")
+        step_fn = self._cdp_orchestrate_step_fn
+        if step_fn is None:
+            def step_fn(
+                notebook_id_arg: str,
+                checkpoint_arg: dict[str, object],
+                outputs_arg: tuple[str, ...],
+            ) -> dict[str, object]:
+                return notebooklm_cdp.orchestrate_outputs_step(
+                    notebook_id_arg,
+                    checkpoint_arg,
+                    outputs=outputs_arg,
+                )
+        try:
+            result = step_fn(notebook_id, checkpoint, outputs)
+        except Exception as exc:
+            logger.exception("NotebookLM orchestration step failed for %s", notebook_id)
+            self._job_service.fail(
+                job.job_id,
+                error=str(exc),
+                retry=True,
+                retry_delay_seconds=float(payload.get("poll_interval_seconds") or 60.0),
+                checkpoint={**checkpoint, "stage": "step_error", "error": str(exc)[:300]},
+            )
+            self._emit(
+                "nlm_orchestration_step_error",
+                notebook_id=notebook_id,
+                job_id=job.job_id,
+                error=str(exc),
+            )
+            return
+
+        status = str(result.get("status") or "pending").lower()
+        merged_checkpoint = {
+            **checkpoint,
+            **dict(result.get("checkpoint") or {}),
+            "stage": str(result.get("stage") or checkpoint.get("stage") or "unknown"),
+            "last_summary": result.get("summary") or {},
+            "updated_at": time.time(),
+        }
+        if status == "completed":
+            self._job_service.checkpoint(job.job_id, merged_checkpoint)
+            self._job_service.complete(job.job_id, result=dict(result))
+            self._emit(
+                "nlm_orchestration_completed",
+                notebook_id=notebook_id,
+                job_id=job.job_id,
+                evidence_uri=result.get("evidence_uri"),
+            )
+            evidence = str(result.get("evidence_uri") or "").strip()
+            suffix = f"\nEvidence: {evidence}" if evidence else ""
+            self._notify(
+                "NotebookLM terminó la orquestación durable.\n"
+                f"Notebook: {notebook_id[:8]}\n"
+                f"Stage: {result.get('stage') or 'outputs_ready'}{suffix}"
+            )
+            return
+        if status == "failed":
+            self._job_service.fail(
+                job.job_id,
+                error=str(result.get("error") or "orchestration_failed"),
+                retry=bool(result.get("retry", False)),
+                checkpoint=merged_checkpoint,
+            )
+            self._emit(
+                "nlm_orchestration_failed",
+                notebook_id=notebook_id,
+                job_id=job.job_id,
+                stage=merged_checkpoint.get("stage"),
+            )
+            return
+
+        delay = float(
+            result.get("next_delay_seconds") or payload.get("poll_interval_seconds") or 60.0
+        )
+        self._job_service.reschedule(
+            job.job_id,
+            checkpoint=merged_checkpoint,
+            result={"last_status": status, "stage": merged_checkpoint.get("stage")},
+            next_run_at=time.time() + max(1.0, delay),
+        )
+        self._emit(
+            "nlm_orchestration_pending",
+            notebook_id=notebook_id,
+            job_id=job.job_id,
+            stage=merged_checkpoint.get("stage"),
+            next_delay_seconds=delay,
+        )
 
     def start_artifact(self, notebook_id: str, kind: str) -> str:
         normalized_kind = kind.strip().lower()

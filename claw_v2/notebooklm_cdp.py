@@ -11,9 +11,11 @@ background thread by the caller.
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -31,6 +33,7 @@ _SOURCE_COUNT_PATTERNS = (
 # IDs that NotebookLM uses transiently while a notebook is being provisioned.
 # We must wait for the URL to settle past these before capturing the real id.
 _TRANSIENT_NOTEBOOK_IDS = {"creating", "loading", "new"}
+_ORCHESTRATION_ARTIFACT_DIR = Path("artifacts/notebooklm")
 
 
 class CdpNotebookLMError(RuntimeError):
@@ -750,6 +753,267 @@ def generate_artifact(
         raise CdpNotebookLMError(
             f"Artifact '{kind}' did not complete within {poll_timeout:.0f}s"
         )
+    finally:
+        try:
+            browser.close()
+        except Exception:
+            pass
+        pw.stop()
+
+
+def classify_orchestration_state(body_text: str) -> dict[str, object]:
+    """Classify NotebookLM UI text for durable orchestration.
+
+    This intentionally recognizes the Spanish states observed in production:
+    "Analizando resultados...", "Generando informe..." and
+    "Generando resumen de audio...". They are pending states, not success.
+    """
+    body = str(body_text or "")
+    normalized = body.lower()
+    source_counts: list[int] = []
+    for pattern in _SOURCE_COUNT_PATTERNS:
+        for match in pattern.finditer(body):
+            try:
+                source_counts.append(int(match.group(1)))
+            except (TypeError, ValueError):
+                continue
+    sources_count = max(source_counts) if source_counts else 0
+    audio_ready = bool(
+        re.search(r"resumen\s+en\s+audio\s+.+?\best[áa]\s+listo\b", normalized)
+        or re.search(r"\bpodcast\b.+?\b(?:listo|ready)\b", normalized)
+        or (
+            "play_arrow" in normalized
+            and "resumen en audio" in normalized
+            and "hace " in normalized
+        )
+    )
+    blog_ready = bool(
+        "blog post" in normalized
+        or re.search(r"\binforme\b.+?\b(?:listo|ready)\b", normalized)
+    )
+    return {
+        "sources_count": sources_count,
+        "research_running": any(
+            marker in normalized
+            for marker in (
+                "planificando",
+                "investigando",
+                "analizando resultados",
+                "no salgas de esta página",
+                "do not leave this page",
+            )
+        ),
+        "import_ready": "importar" in normalized,
+        "audio_generating": (
+            "generando resumen de audio" in normalized
+            or "regresa en unos minutos" in normalized
+        ),
+        "blog_generating": (
+            "generando informe" in normalized
+            or "iniciando la generación de informe" in normalized
+        ),
+        "audio_ready": audio_ready,
+        "blog_ready": blog_ready,
+        "title": _extract_visible_title(body),
+    }
+
+
+def _extract_visible_title(body_text: str) -> str:
+    lines = [line.strip() for line in str(body_text or "").splitlines() if line.strip()]
+    for idx, line in enumerate(lines):
+        if line.lower() in {"personalizar", "photo_spark"} and idx + 1 < len(lines):
+            candidate = lines[idx + 1]
+            if 4 <= len(candidate) <= 180:
+                return candidate
+    return ""
+
+
+def _body_text(page) -> str:
+    try:
+        return page.locator("body").inner_text(timeout=4_000)
+    except Exception:
+        return ""
+
+
+def _click_first_visible(page, selectors: tuple[str, ...], *, timeout: float = 6.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for sel in selectors:
+            try:
+                loc = page.locator(sel)
+                count = min(loc.count(), 5)
+            except Exception:
+                continue
+            for idx in range(count):
+                try:
+                    item = loc.nth(idx)
+                    if item.is_visible(timeout=500) and item.is_enabled(timeout=500):
+                        item.click(timeout=2_000)
+                        return True
+                except Exception:
+                    continue
+        time.sleep(0.5)
+    return False
+
+
+def _write_orchestration_evidence(notebook_id: str, summary: dict[str, object]) -> str:
+    _ORCHESTRATION_ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+    safe_id = re.sub(r"[^A-Za-z0-9_-]+", "", notebook_id)[:12] or "notebook"
+    path = (
+        _ORCHESTRATION_ARTIFACT_DIR
+        / f"notebooklm_orchestrate_{int(time.time())}_{safe_id}.json"
+    )
+    payload = {
+        "phase": "notebooklm.orchestrate",
+        "notebook_id": notebook_id,
+        "summary": summary,
+        "timestamp_epoch": int(time.time()),
+    }
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
+    return str(path)
+
+
+def orchestrate_outputs_step(
+    notebook_id: str,
+    checkpoint: dict[str, object] | None = None,
+    *,
+    outputs: tuple[str, ...] = ("podcast", "blog"),
+    cdp_url: str = DEFAULT_CDP_URL,
+) -> dict[str, object]:
+    """Run one durable NotebookLM orchestration transition.
+
+    The caller owns scheduling. This function performs at most one short UI
+    transition and returns pending/completed/failed so the daemon can persist
+    the checkpoint and resume on the next tick.
+    """
+    checkpoint = dict(checkpoint or {})
+    pw, browser = _connect(cdp_url)
+    try:
+        page = _focus_notebook(browser, notebook_id)
+        body = _body_text(page)
+        state = classify_orchestration_state(body)
+        sources_count = int(state.get("sources_count") or 0)
+        requested = {output.strip().lower() for output in outputs if output}
+
+        if state.get("research_running") and not state.get("import_ready"):
+            return {
+                "status": "pending",
+                "stage": "waiting_research",
+                "next_delay_seconds": 60,
+                "summary": state,
+            }
+
+        if state.get("import_ready") and not checkpoint.get("import_clicked"):
+            if not _click_importar(page):
+                return {
+                    "status": "pending",
+                    "stage": "import_visible_click_failed",
+                    "next_delay_seconds": 60,
+                    "summary": state,
+                }
+            time.sleep(3)
+            state = classify_orchestration_state(_body_text(page))
+            return {
+                "status": "pending",
+                "stage": "import_clicked",
+                "next_delay_seconds": 60,
+                "checkpoint": {"import_clicked": True},
+                "summary": state,
+            }
+
+        if sources_count <= 0:
+            return {
+                "status": "pending",
+                "stage": "waiting_sources",
+                "next_delay_seconds": 60,
+                "summary": state,
+            }
+
+        if "podcast" in requested and not (
+            checkpoint.get("podcast_triggered")
+            or state.get("audio_generating")
+            or state.get("audio_ready")
+        ):
+            clicked = _click_first_visible(
+                page,
+                (
+                    'button:has-text("Resumen en audio")',
+                    '[role="button"]:has-text("Resumen en audio")',
+                    'button[aria-label*="Resumen en audio"]',
+                ),
+            )
+            if clicked:
+                time.sleep(1)
+                _click_first_visible(
+                    page,
+                    ('button:has-text("Generar")', 'button:has-text("Generate")'),
+                    timeout=3,
+                )
+            return {
+                "status": "pending",
+                "stage": "podcast_triggered" if clicked else "podcast_click_failed",
+                "next_delay_seconds": 60,
+                "checkpoint": {"podcast_triggered": clicked},
+                "summary": classify_orchestration_state(_body_text(page)),
+            }
+
+        if "blog" in requested and not (
+            checkpoint.get("blog_triggered")
+            or state.get("blog_generating")
+            or state.get("blog_ready")
+        ):
+            clicked = _click_first_visible(
+                page,
+                (
+                    'button:has-text("Informes")',
+                    '[role="button"]:has-text("Informes")',
+                    'button[aria-label*="Informes"]',
+                ),
+            )
+            if clicked:
+                time.sleep(1)
+                _click_first_visible(
+                    page,
+                    (
+                        'button:has-text("Entrada de blog")',
+                        'button[aria-label="Entrada de blog"]',
+                        'button:has-text("Publicación de blog")',
+                        'button:has-text("Blog post")',
+                    ),
+                    timeout=4,
+                )
+                time.sleep(1)
+                _click_first_visible(
+                    page,
+                    ('button:has-text("Generar")', "button.generate-button"),
+                    timeout=4,
+                )
+            return {
+                "status": "pending",
+                "stage": "blog_triggered" if clicked else "blog_click_failed",
+                "next_delay_seconds": 60,
+                "checkpoint": {"blog_triggered": clicked},
+                "summary": classify_orchestration_state(_body_text(page)),
+            }
+
+        state = classify_orchestration_state(_body_text(page))
+        audio_done = "podcast" not in requested or state.get("audio_ready")
+        blog_done = "blog" not in requested or state.get("blog_ready")
+        if audio_done and blog_done:
+            evidence_uri = _write_orchestration_evidence(notebook_id, state)
+            return {
+                "status": "completed",
+                "stage": "outputs_ready",
+                "evidence_uri": evidence_uri,
+                "summary": state,
+            }
+
+        return {
+            "status": "pending",
+            "stage": "outputs_generating",
+            "next_delay_seconds": 60,
+            "summary": state,
+        }
     finally:
         try:
             browser.close()

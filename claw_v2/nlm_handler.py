@@ -101,6 +101,8 @@ class NlmHandler:
         return evidence
 
     def _classify_intent(self, text: str) -> str | None:
+        if _looks_like_notebooklm_orchestration_request(text):
+            return "orchestrate_outputs"
         if _looks_like_recent_notebook_review(text):
             return "review_latest"
         if _looks_like_contextual_notebook_topic_request(text):
@@ -112,6 +114,12 @@ class NlmHandler:
         return None
 
     def _dispatch_intent(self, session_id: str, text: str, intent: str) -> str | None:
+        if intent == "orchestrate_outputs":
+            target = self._active_notebook_id(session_id)
+            if target is None:
+                return self._missing_notebook_response(session_id)
+            self._set_active_notebook(session_id, target)
+            return self.notebooklm.start_orchestration(target, session_id=session_id)
         if intent == "review_latest":
             return self._review_latest_response(session_id)
         if intent == "create_notebook":
@@ -241,6 +249,14 @@ class NlmHandler:
                 return self._podcast_response(session_id, nb_id)
             if command == "/nlm_podcast":
                 return self._podcast_response(session_id, None)
+            if command.startswith("/nlm_orchestrate "):
+                nb_id = command.split(maxsplit=1)[1]
+                return self.notebooklm.start_orchestration(nb_id, session_id=session_id)
+            if command == "/nlm_orchestrate":
+                target = self._active_notebook_id(session_id)
+                if target is None:
+                    return self._missing_notebook_response(session_id)
+                return self.notebooklm.start_orchestration(target, session_id=session_id)
             if command.startswith("/nlm_chat "):
                 parts = command.split(maxsplit=2)
                 if len(parts) < 3:
@@ -248,7 +264,7 @@ class NlmHandler:
                 return self._chat_response(parts[1], parts[2])
             if command == "/nlm_chat":
                 return "usage: /nlm_chat <notebook_id> <pregunta>"
-            return "Comando NLM no reconocido. Disponibles: /nlm_list, /nlm_create, /nlm_delete, /nlm_status, /nlm_sources, /nlm_text, /nlm_research, /nlm_podcast, /nlm_chat"
+            return "Comando NLM no reconocido. Disponibles: /nlm_list, /nlm_create, /nlm_delete, /nlm_status, /nlm_sources, /nlm_text, /nlm_research, /nlm_podcast, /nlm_orchestrate, /nlm_chat"
         except ValueError as exc:
             return f"Error: {exc}"
         except ApprovalPending:
@@ -431,6 +447,7 @@ class NlmHandler:
 _NLM_INTENT_TO_TASK_KIND: dict[str, str] = {
     "create_notebook": "notebooklm_create",
     "create_contextual_notebook": "notebooklm_create",
+    "orchestrate_outputs": "notebooklm_review",
     "review_latest": "notebooklm_review",
 }
 
@@ -451,6 +468,43 @@ def _looks_like_contextual_notebook_topic_request(text: str) -> bool:
     if not any(token in normalized for token in ("deep research", "research", "podcast", "cuaderno", "notebook")):
         return False
     return _contains_contextual_topic_reference(normalized)
+
+
+def _looks_like_notebooklm_orchestration_request(text: str) -> bool:
+    normalized = _normalize_nlm_text(text)
+    if _looks_like_nlm_meta_discussion_local(normalized):
+        return False
+    if not any(token in normalized for token in ("notebooklm", "notebook lm", "cuaderno", "notebook")):
+        return False
+    wants_monitor = any(
+        token in normalized
+        for token in (
+            "retry-loop",
+            "retry loop",
+            "monitorea",
+            "monitorear",
+            "monitorealo",
+            "monitorearlo",
+            "automaticamente",
+            "automáticamente",
+            "cuando termine",
+            "cuando esten listos",
+            "cuando estén listos",
+        )
+    )
+    wants_outputs = any(
+        token in normalized
+        for token in (
+            "resumen de audio",
+            "podcast",
+            "informe",
+            "blog",
+            "outputs",
+            "extraer",
+            "descargar",
+        )
+    )
+    return wants_monitor and wants_outputs
 
 
 def _contains_contextual_topic_reference(text: str) -> bool:

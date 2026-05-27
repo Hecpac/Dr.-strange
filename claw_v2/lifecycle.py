@@ -383,6 +383,12 @@ async def run() -> int:
         )
         runtime.bot.notebooklm = nlm_service
 
+        runtime.scheduler.register(_SJ(
+            name="notebooklm_orchestration_poll",
+            interval_seconds=60,
+            handler=lambda: nlm_service.poll_orchestrations(limit=3),
+        ))
+
         # NotebookLM → Wiki sync (every 12h)
         if runtime.bot.wiki is not None:
             from claw_v2.cron import ScheduledJob

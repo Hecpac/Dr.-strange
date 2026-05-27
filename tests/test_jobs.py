@@ -115,6 +115,29 @@ class JobServiceTests(unittest.TestCase):
             self.assertEqual(completed.result["pr"], "https://example.com/pr/1")
             self.assertIsNotNone(completed.completed_at)
 
+    def test_reschedule_keeps_pending_poller_active_without_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = JobService(Path(tmpdir) / "claw.db")
+            created = service.enqueue(kind="notebooklm.orchestrate")
+
+            claimed = service.claim_next(worker_id="notebooklm", now=time.time())
+            self.assertEqual(claimed.status, "running")
+
+            next_run_at = time.time() + 30
+            rescheduled = service.reschedule(
+                created.job_id,
+                checkpoint={"stage": "outputs_generating"},
+                result={"last_status": "pending"},
+                next_run_at=next_run_at,
+            )
+
+            self.assertEqual(rescheduled.status, "retrying")
+            self.assertEqual(rescheduled.error, "")
+            self.assertEqual(rescheduled.attempts, 1)
+            self.assertEqual(rescheduled.checkpoint["stage"], "outputs_generating")
+            self.assertEqual(rescheduled.result["last_status"], "pending")
+            self.assertGreaterEqual(rescheduled.next_run_at, next_run_at)
+
     def test_claim_next_is_transactional_across_service_instances(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "claw.db"

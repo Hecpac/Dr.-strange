@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from claw_v2.bot import BotService
+from claw_v2.jobs import JobService
 from claw_v2.task_ledger import TaskLedger
 
 
@@ -67,7 +68,12 @@ class _StubResponse:
     artifacts: dict[str, Any] = field(default_factory=dict)
 
 
-def _make_bot(observe: _RecordingObserve, task_ledger: TaskLedger, state: dict | None = None) -> BotService:
+def _make_bot(
+    observe: _RecordingObserve,
+    task_ledger: TaskLedger,
+    state: dict | None = None,
+    job_service: JobService | None = None,
+) -> BotService:
     """Construct just enough BotService surface for the ledger to run.
 
     BotService has a heavy __init__ (loads MCP/agents/etc.) so we
@@ -77,6 +83,7 @@ def _make_bot(observe: _RecordingObserve, task_ledger: TaskLedger, state: dict |
     bot = BotService.__new__(BotService)
     bot.observe = observe
     bot.task_ledger = task_ledger
+    bot.job_service = job_service
     bot.brain = _StubBrain(state)
     return bot
 
@@ -509,6 +516,42 @@ class BrainToolUseLedgerEdgeCasesTests(unittest.TestCase):
         )
         # Ledger must remain untouched on observe failure.
         self.assertEqual(self.ledger.list(limit=10), [])
+
+    def test_background_monitor_claim_is_rejected_without_durable_job(self) -> None:
+        observe = _RecordingObserve()
+        bot = _make_bot(observe, self.ledger)
+
+        rendered = bot._enforce_background_monitor_contract(
+            session_id="tg-test",
+            user_text="Opcion A",
+            content="Watcher corriendo en background. Te aviso cuando termine.",
+            raw_content="Watcher corriendo en background. Te aviso cuando termine.",
+        )
+
+        self.assertIn("no quedó un monitor durable registrado", rendered)
+        events = [name for name, _ in observe.events]
+        self.assertIn("background_monitor_claim_rejected", events)
+
+    def test_background_monitor_claim_allowed_with_related_active_job(self) -> None:
+        observe = _RecordingObserve()
+        jobs = JobService(Path(self._tmp.name) / "claw.db")
+        job = jobs.enqueue(
+            kind="notebooklm.orchestrate",
+            payload={"session_id": "tg-test", "notebook_id": "nb1"},
+            resume_key="notebooklm:orchestrate:nb1",
+        )
+        bot = _make_bot(observe, self.ledger, job_service=jobs)
+        content = f"Watcher corriendo en background. Job: {job.job_id}. Te aviso cuando termine."
+
+        rendered = bot._enforce_background_monitor_contract(
+            session_id="tg-test",
+            user_text="Opcion A",
+            content=content,
+            raw_content=content,
+        )
+
+        self.assertEqual(rendered, content)
+        self.assertEqual(observe.events, [])
 
 
 if __name__ == "__main__":

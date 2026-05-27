@@ -329,6 +329,28 @@ class JobService:
             self._emit("job_retrying" if record.status == "retrying" else "job_failed", record)
         return record
 
+    def reschedule(
+        self,
+        job_id: str,
+        *,
+        checkpoint: dict[str, Any] | None = None,
+        result: dict[str, Any] | None = None,
+        next_run_at: float | None = None,
+    ) -> JobRecord | None:
+        """Move a claimed job back to retrying without recording a failure.
+
+        This is for durable pollers whose current observation is legitimately
+        pending, e.g. a provider/UI still generating an artifact.
+        """
+        return self._update(
+            job_id,
+            status="retrying",
+            checkpoint=checkpoint,
+            result=result,
+            next_run_at=time.time() if next_run_at is None else next_run_at,
+            event_type="job_rescheduled",
+        )
+
     def cancel(self, job_id: str, *, reason: str = "cancelled") -> JobRecord | None:
         record = self.get(job_id)
         if record is None:

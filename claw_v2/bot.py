@@ -97,6 +97,19 @@ _CHATGPT_OPEN_TOKENS = (
     "nueva conversacion",
     "new chat",
 )
+_BACKGROUND_MONITOR_PROMISE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bwatcher\b", re.IGNORECASE),
+    re.compile(r"\b(?:en|in)\s+background\b|\bbackground\s+(?:task|job|watcher|process|worker)\b", re.IGNORECASE),
+    re.compile(r"\bmonitore(?:ar|o|ando|aré|are|e|é)\b", re.IGNORECASE),
+    re.compile(r"\bte\s+aviso\s+cuando\b", re.IGNORECASE),
+    re.compile(r"\blo\s+dejo\s+(?:corriendo|trabajando|en\s+background)\b", re.IGNORECASE),
+    re.compile(r"\bsin\s+intervenci[oó]n\s+tuya\b", re.IGNORECASE),
+    re.compile(r"\bno\s+necesit[aá]s\s+hacer\s+nada\b", re.IGNORECASE),
+    re.compile(r"\bpolling\b|\bpoll(?:ea|ear|ando|ando)\b", re.IGNORECASE),
+    re.compile(r"\bcuando\s+.+?\btermine\b.+?\b(?:descarg|extra|notific|avis|renombr)", re.IGNORECASE | re.DOTALL),
+)
+_BACKGROUND_MONITOR_ACTIVE_JOB_STATUSES = ("queued", "running", "waiting_approval", "retrying")
+_BACKGROUND_MONITOR_ACTIVE_TASK_STATUSES = ("queued", "running")
 _CHATGPT_INTERACTIVE_TOKENS = (
     "pidele",
     "pidelo",
@@ -1682,6 +1695,148 @@ class BotService:
             return content
         rendered = NaturalLanguageRenderer(mode="normal").render(content)
         return self._sanitize_visible_chat_response(session_id, rendered)
+
+    def _enforce_background_monitor_contract(
+        self,
+        *,
+        session_id: str,
+        user_text: str,
+        content: str,
+        raw_content: str,
+    ) -> str:
+        """Prevent false claims that long-running work is being monitored.
+
+        A visible promise to keep working after the turn must be backed by a
+        durable job/task or a verified launchd agent. Brain tool-use rows are
+        terminal audit records, not execution handles, so they do not satisfy
+        this contract.
+        """
+        if not self._claims_background_monitor(content) and not self._claims_background_monitor(raw_content):
+            return content
+        evidence = self._background_monitor_evidence(session_id, f"{content}\n{raw_content}")
+        if evidence.get("durable"):
+            return content
+        replacement = (
+            "Preparé o disparé parte de la acción, pero no quedó un monitor "
+            "durable registrado. No puedo prometer aviso automático ni trabajo "
+            "en background. Para dejarlo corriendo hace falta crear un job "
+            "durable o reanudarlo manualmente."
+        )
+        self._emit_safe(
+            "background_monitor_claim_rejected",
+            {
+                "session_id": session_id,
+                "user_text_preview": user_text[:120],
+                "reason": evidence.get("reason") or "no_durable_monitor",
+            },
+        )
+        return replacement
+
+    @staticmethod
+    def _claims_background_monitor(text: str) -> bool:
+        if not text:
+            return False
+        return any(pattern.search(text) for pattern in _BACKGROUND_MONITOR_PROMISE_PATTERNS)
+
+    def _background_monitor_evidence(self, session_id: str, response_text: str) -> dict[str, Any]:
+        active_task = self._active_notifying_task(session_id)
+        if active_task is not None:
+            return {
+                "durable": True,
+                "kind": "agent_task",
+                "task_id": getattr(active_task, "task_id", ""),
+            }
+        active_job = self._active_related_job(session_id, response_text)
+        if active_job is not None:
+            return {
+                "durable": True,
+                "kind": "agent_job",
+                "job_id": getattr(active_job, "job_id", ""),
+            }
+        launchd_label = self._verified_launchd_label(response_text)
+        if launchd_label:
+            return {"durable": True, "kind": "launchd", "label": launchd_label}
+        return {"durable": False, "reason": "no_active_job_task_or_launchd"}
+
+    def _active_notifying_task(self, session_id: str) -> Any | None:
+        if self.task_ledger is None:
+            return None
+        try:
+            tasks = self.task_ledger.list(
+                session_id=session_id,
+                statuses=_BACKGROUND_MONITOR_ACTIVE_TASK_STATUSES,
+                limit=20,
+            )
+        except Exception:
+            return None
+        for task in tasks:
+            notify_policy = str(getattr(task, "notify_policy", "") or "").lower()
+            mode = str(getattr(task, "mode", "") or "").lower()
+            if notify_policy == "none":
+                continue
+            if mode == "brain_fallback":
+                continue
+            return task
+        return None
+
+    def _active_related_job(self, session_id: str, response_text: str) -> Any | None:
+        if self.job_service is None:
+            return None
+        try:
+            jobs = self.job_service.list(
+                statuses=_BACKGROUND_MONITOR_ACTIVE_JOB_STATUSES,
+                limit=100,
+            )
+        except Exception:
+            return None
+        session_tokens = {session_id}
+        if session_id.startswith("tg-"):
+            session_tokens.add(session_id.removeprefix("tg-"))
+        response = response_text or ""
+        for job in jobs:
+            job_id = str(getattr(job, "job_id", "") or "")
+            resume_key = str(getattr(job, "resume_key", "") or "")
+            payload = getattr(job, "payload", {}) or {}
+            metadata = getattr(job, "metadata", {}) or {}
+            haystack = json.dumps(
+                {
+                    "job_id": job_id,
+                    "resume_key": resume_key,
+                    "payload": payload,
+                    "metadata": metadata,
+                },
+                sort_keys=True,
+                default=str,
+            )
+            if job_id and job_id in response:
+                return job
+            if any(token and token in haystack for token in session_tokens):
+                return job
+            notebook_id = str(payload.get("notebook_id") or "")
+            if notebook_id and notebook_id in response:
+                return job
+        return None
+
+    def _verified_launchd_label(self, response_text: str) -> str | None:
+        if not response_text or "launch" not in response_text.lower():
+            return None
+        labels = sorted(set(re.findall(r"\bcom\.[A-Za-z0-9_.-]+\b", response_text)))
+        if not labels:
+            return None
+        for label in labels[:5]:
+            try:
+                proc = subprocess.run(
+                    ["launchctl", "print", f"gui/{os.getuid()}/{label}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                    check=False,
+                )
+            except Exception:
+                continue
+            if proc.returncode == 0:
+                return label
+        return None
 
     def _emit_sanitizer_recovery_event(self, event_type: str, session_id: str, **payload: Any) -> None:
         if self.observe is None:
@@ -4032,6 +4187,18 @@ class BotService:
             source_text=source_text,
             runtime_channel=runtime_channel,
         )
+        contract_content = self._enforce_background_monitor_contract(
+            session_id=session_id,
+            user_text=source_text,
+            content=content,
+            raw_content=raw_content,
+        )
+        if contract_content != content:
+            try:
+                self.brain.memory.replace_latest_assistant_message(session_id, content, contract_content)
+            except Exception:
+                logger.debug("background monitor contract memory replacement failed", exc_info=True)
+            content = contract_content
         brain_tool_use_record = self._lookup_recent_brain_tool_use_record(session_id)
         self._remember_assistant_turn_state(session_id, source_text, content)
         if content == "Recibido. ¿Qué quieres que haga con esto?":
@@ -4774,6 +4941,8 @@ class BotService:
         return "Decime qué disparo y te lo ejecuto con evidencia."
 
     def _unexecuted_start_response(self, task_id: str | None = None) -> str:
+        if task_id:
+            return "No arranqué nada todavía. Decime qué disparo y te lo ejecuto con evidencia."
         return "Decime qué disparo y te lo ejecuto con evidencia."
 
     def _emit_identity_capability_binding_guard(
