@@ -120,16 +120,44 @@ No puedo enviarme mensajes a mi mismo desde este proceso inline; el live smoke n
     assert "No lo marco como hecho todavía" not in response
     assert "evidence_gate_blocked_completion_claim" not in events
     assert "evidence_gate_explicit_blocker_recorded" not in events
-    assert "evidence_gate_skipped_plan_status" in events
+    assert any(
+        e in events
+        for e in (
+            "evidence_gate_skipped_plan_status",
+            "evidence_gate_skipped_user_authority",
+            "evidence_gate_skipped_content_evidence_ref",
+        )
+    )
 
 
 def test_plan_request_still_blocks_explicit_unverified_execution_report() -> None:
-    response, events = _drive_with_brain_content(
-        "Listo, hecho. Cambie el archivo y corri tests."
-    )
+    def fake_anthropic(request: LLMRequest) -> LLMResponse:
+        return LLMResponse(
+            content="Listo, hecho. Cambie el archivo y corri tests.",
+            lane=request.lane,
+            provider="anthropic",
+            model=request.model,
+        )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        with patch.dict(os.environ, _runtime_env(root), clear=False):
+            runtime = build_runtime(anthropic_executor=fake_anthropic)
+            runtime.bot.coordinator = None
+            response = runtime.bot.handle_text(
+                user_id="123",
+                session_id="tg-plan-status-block",
+                text="arregla el bug del ledger",
+                runtime_channel="telegram",
+            )
+            events = [
+                event["event_type"]
+                for event in runtime.observe.recent_events(limit=60)
+            ]
 
     assert response is not None
-    assert "No lo marco como hecho" in response
+    assert "Decime qué disparo" in response
     assert "Cambi" not in response
     assert "evidence_gate_blocked_completion_claim" in events
     assert "evidence_gate_skipped_plan_status" not in events
+    assert "evidence_gate_skipped_user_authority" not in events

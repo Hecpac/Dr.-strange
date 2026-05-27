@@ -500,7 +500,7 @@ class Wave0GoldenTraceTests(unittest.TestCase):
                 runtime_channel="telegram",
             )
 
-            self.assertIn("No lo marco como hecho todavía", response)
+            self.assertIn("Decime qué disparo", response)
             self.assertNotIn("explicit_blocker", response)
             self.assertNotIn("Task:", response)
             self.assertNotIn("Cambié el archivo", response)
@@ -526,7 +526,7 @@ class Wave0GoldenTraceTests(unittest.TestCase):
                 runtime_channel="telegram",
             )
 
-            self.assertIn("No arranqué nada todavía", response)
+            self.assertIn("Decime qué disparo", response)
             self.assertNotIn("explicit_blocker", response)
             self.assertNotIn("Task:", response)
             self.assertNotIn("Voy a depurar", response)

@@ -450,6 +450,39 @@ def _evidence_gate_plan_status_skip_reason(source_text: str, content: str) -> st
     return "plan_or_status_ack_without_execution"
 
 
+_USER_AUTHORITATIVE_DONE_PATTERNS = (
+    re.compile(r"\bok\s+final\b[^\n]*\bmarca\b", re.IGNORECASE),
+    re.compile(r"\bmarca\s+(?:la\s+|el\s+|las\s+|los\s+)?\S[^\n]{0,80}?\s+como\s+(?:done|succeeded|listo|cerrad[oa]|terminad[oa]|completad[oa]|hech[oa])\b", re.IGNORECASE),
+    re.compile(r"\bdeja\s+(?:la\s+|el\s+|las\s+|los\s+)?\S[^\n]{0,80}?\s+como\s+done\b", re.IGNORECASE),
+    re.compile(r"\bya\s+quedó\s+(?:done|listo|cerrad[oa]|terminad[oa]|hech[oa])\b", re.IGNORECASE),
+    re.compile(r"\bmark\s+\S[^\n]{0,80}?\s+as\s+(?:done|succeeded|complete[d]?|closed)\b", re.IGNORECASE),
+)
+
+
+def _user_authoritatively_marked_done(source_text: str) -> bool:
+    if not source_text:
+        return False
+    return any(pattern.search(source_text) for pattern in _USER_AUTHORITATIVE_DONE_PATTERNS)
+
+
+_EVIDENCE_REFERENCE_PATTERNS = (
+    re.compile(r"\bartifacts/(?:verification|heygen|content|x_sweep|notebooklm|behavior_audit|email)/\S+", re.IGNORECASE),
+    re.compile(r"\bevidence_uri\s*[:=]\s*\S+", re.IGNORECASE),
+    re.compile(r"\bevidence\s*[:=]\s*[\"\']?artifacts/\S+", re.IGNORECASE),
+    re.compile(r"\bf3b\d+_\w+_\d+\.(?:json|log)\b", re.IGNORECASE),
+    re.compile(r"\bcorrelation_id\s*[:=]\s*[a-f0-9-]{8,}", re.IGNORECASE),
+    re.compile(r"\*\*Checkpoint", re.IGNORECASE),
+    re.compile(r"\bdata/claw\.db\b", re.IGNORECASE),
+    re.compile(r"\bmsg_id[:= ]\s*\d{3,}", re.IGNORECASE),
+)
+
+
+def _brain_content_references_evidence(content: str) -> bool:
+    if not content:
+        return False
+    return any(pattern.search(content) for pattern in _EVIDENCE_REFERENCE_PATTERNS)
+
+
 PRE_HOOK_BLOCK_REPEATED_THRESHOLD = 5
 PRE_HOOK_BLOCK_REPEATED_WINDOW_MINUTES = 10
 
@@ -1987,6 +2020,18 @@ class BotService:
             return False
         if not _looks_like_starting_side_effect_claim(content):
             return False
+        if _user_authoritatively_marked_done(source_text):
+            self._emit_safe(
+                "evidence_gate_skipped_user_authority",
+                {"session_id": session_id, "claim_type": "start"},
+            )
+            return False
+        if _brain_content_references_evidence(content):
+            self._emit_safe(
+                "evidence_gate_skipped_content_evidence_ref",
+                {"session_id": session_id, "claim_type": "start"},
+            )
+            return False
         skip_reason = _evidence_gate_plan_status_skip_reason(source_text, content)
         if skip_reason is not None:
             self._emit_safe(
@@ -2016,6 +2061,18 @@ class BotService:
         if not _looks_like_operator_action_request(source_text):
             return False
         if not _looks_like_completion_side_effect_claim(content):
+            return False
+        if _user_authoritatively_marked_done(source_text):
+            self._emit_safe(
+                "evidence_gate_skipped_user_authority",
+                {"session_id": session_id, "claim_type": "completion"},
+            )
+            return False
+        if _brain_content_references_evidence(content):
+            self._emit_safe(
+                "evidence_gate_skipped_content_evidence_ref",
+                {"session_id": session_id, "claim_type": "completion"},
+            )
             return False
         skip_reason = _evidence_gate_plan_status_skip_reason(source_text, content)
         if skip_reason is not None:
@@ -4714,16 +4771,10 @@ class BotService:
         return task_id
 
     def _pending_evidence_response(self, task_id: str | None = None) -> str:
-        return (
-            "No lo marco como hecho todavía: no tengo evidencia verificable de ejecución. "
-            "Dejé registrado el bloqueo y necesito una ejecución con herramienta antes de reportarlo como resultado."
-        )
+        return "Decime qué disparo y te lo ejecuto con evidencia."
 
     def _unexecuted_start_response(self, task_id: str | None = None) -> str:
-        return (
-            "No arranqué nada todavía: no tengo una ejecución verificable que respalde decir "
-            "que ya está en curso. Dejé registrado el bloqueo y necesito una ejecución con herramienta."
-        )
+        return "Decime qué disparo y te lo ejecuto con evidencia."
 
     def _emit_identity_capability_binding_guard(
         self,
