@@ -791,6 +791,20 @@ def classify_orchestration_state(body_text: str) -> dict[str, object]:
         "blog post" in normalized
         or re.search(r"\binforme\b.+?\b(?:listo|ready)\b", normalized)
     )
+    video_ready = bool(
+        re.search(r"\b(?:resumen|overview).{0,40}\bvideo\b.+?\b(?:listo|ready)\b", normalized)
+        or re.search(r"\bvideo\b.{0,40}\b(?:listo|ready)\b", normalized)
+        or (
+            "play_arrow" in normalized
+            and (
+                "resumen en video" in normalized
+                or "resumen de video" in normalized
+                or "video overview" in normalized
+            )
+            and "hace " in normalized
+            and "generando" not in normalized
+        )
+    )
     return {
         "sources_count": sources_count,
         "research_running": any(
@@ -812,8 +826,17 @@ def classify_orchestration_state(body_text: str) -> dict[str, object]:
             "generando informe" in normalized
             or "iniciando la generación de informe" in normalized
         ),
+        "video_generating": (
+            "generando resumen de video" in normalized
+            or "generando video" in normalized
+            or "generating video" in normalized
+            or "video overview is being generated" in normalized
+            or "resumen en video está siendo creado" in normalized
+            or "resumen en video esta siendo creado" in normalized
+        ),
         "audio_ready": audio_ready,
         "blog_ready": blog_ready,
+        "video_ready": video_ready,
         "title": _extract_visible_title(body),
     }
 
@@ -921,7 +944,18 @@ def orchestrate_outputs_step(
                 "summary": state,
             }
 
-        if sources_count <= 0:
+        requested_state_names = []
+        if "podcast" in requested:
+            requested_state_names.append("audio")
+        if "blog" in requested:
+            requested_state_names.append("blog")
+        if "video" in requested:
+            requested_state_names.append("video")
+        observed_requested_output = any(
+            state.get(f"{name}_generating") or state.get(f"{name}_ready")
+            for name in requested_state_names
+        )
+        if sources_count <= 0 and not observed_requested_output:
             return {
                 "status": "pending",
                 "stage": "waiting_sources",
@@ -954,6 +988,41 @@ def orchestrate_outputs_step(
                 "stage": "podcast_triggered" if clicked else "podcast_click_failed",
                 "next_delay_seconds": 60,
                 "checkpoint": {"podcast_triggered": clicked},
+                "summary": classify_orchestration_state(_body_text(page)),
+            }
+
+        if "video" in requested and not (
+            checkpoint.get("video_triggered")
+            or state.get("video_generating")
+            or state.get("video_ready")
+        ):
+            clicked = _click_first_visible(
+                page,
+                (
+                    'button:has-text("Resumen en video")',
+                    'button:has-text("Resumen de video")',
+                    'button:has-text("Video overview")',
+                    'button[aria-label*="video" i]',
+                    '[role="button"]:has-text("Resumen en video")',
+                    '[role="button"]:has-text("Resumen de video")',
+                ),
+            )
+            if clicked:
+                time.sleep(1)
+                _click_first_visible(
+                    page,
+                    (
+                        'mat-dialog-container button:has-text("Generar")',
+                        'mat-dialog-container button:has-text("Generate")',
+                        'mat-dialog-container button[type="submit"]',
+                    ),
+                    timeout=4,
+                )
+            return {
+                "status": "pending",
+                "stage": "video_triggered" if clicked else "video_click_failed",
+                "next_delay_seconds": 60,
+                "checkpoint": {"video_triggered": clicked},
                 "summary": classify_orchestration_state(_body_text(page)),
             }
 
@@ -999,7 +1068,8 @@ def orchestrate_outputs_step(
         state = classify_orchestration_state(_body_text(page))
         audio_done = "podcast" not in requested or state.get("audio_ready")
         blog_done = "blog" not in requested or state.get("blog_ready")
-        if audio_done and blog_done:
+        video_done = "video" not in requested or state.get("video_ready")
+        if audio_done and blog_done and video_done:
             evidence_uri = _write_orchestration_evidence(notebook_id, state)
             return {
                 "status": "completed",

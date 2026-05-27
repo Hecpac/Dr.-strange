@@ -723,6 +723,33 @@ class NotebookLMOrchestrationTests(unittest.TestCase):
             self.assertEqual(job.payload["session_id"], "tg-test")
             self.assertEqual(job.payload["outputs"], ["podcast", "blog"])
 
+    def test_video_orchestration_registers_and_polls_as_video_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            job_service = JobService(Path(tmpdir) / "claw.db")
+            svc = NotebookLMService(job_service=job_service)
+            seen_outputs: list[tuple[str, ...]] = []
+
+            def fake_step(notebook_id: str, checkpoint: dict[str, object], outputs: tuple[str, ...]) -> dict[str, object]:
+                seen_outputs.append(outputs)
+                return {
+                    "status": "pending",
+                    "stage": "outputs_generating",
+                    "next_delay_seconds": 5,
+                    "summary": {"video_generating": True},
+                }
+
+            svc._cdp_orchestrate_step_fn = fake_step
+            svc.start_orchestration("nb-full-id", session_id="tg-test", outputs=("video",))
+
+            processed = svc.poll_orchestrations(limit=1)
+
+            self.assertEqual(processed, 1)
+            self.assertEqual(seen_outputs, [("video",)])
+            job = job_service.list()[0]
+            self.assertEqual(job.payload["outputs"], ["video"])
+            self.assertEqual(job.status, "retrying")
+            self.assertEqual(job.checkpoint["last_summary"]["video_generating"], True)
+
     def test_orchestration_pending_step_reschedules_without_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             job_service = JobService(Path(tmpdir) / "claw.db")
@@ -831,6 +858,18 @@ class NotebookLMOrchestrationStateTests(unittest.TestCase):
 
         self.assertTrue(state["audio_ready"])
         self.assertTrue(state["blog_ready"])
+
+    def test_video_generating_and_ready_are_detected(self) -> None:
+        generating = notebooklm_cdp.classify_orchestration_state(
+            "45 fuentes\nGenerando resumen de video\nRegresa en unos minutos"
+        )
+        ready = notebooklm_cdp.classify_orchestration_state(
+            "45 fuentes\nplay_arrow\nResumen en video\nHace 2 min"
+        )
+
+        self.assertTrue(generating["video_generating"])
+        self.assertFalse(generating["video_ready"])
+        self.assertTrue(ready["video_ready"])
 
 
 if __name__ == "__main__":

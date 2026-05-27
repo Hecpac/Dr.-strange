@@ -110,6 +110,10 @@ _BACKGROUND_MONITOR_PROMISE_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 _BACKGROUND_MONITOR_ACTIVE_JOB_STATUSES = ("queued", "running", "waiting_approval", "retrying")
 _BACKGROUND_MONITOR_ACTIVE_TASK_STATUSES = ("queued", "running")
+_NOTEBOOKLM_UUID_RE = re.compile(
+    r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+    re.IGNORECASE,
+)
 _CHATGPT_INTERACTIVE_TOKENS = (
     "pidele",
     "pidelo",
@@ -1713,7 +1717,15 @@ class BotService:
         """
         if not self._claims_background_monitor(content) and not self._claims_background_monitor(raw_content):
             return content
-        evidence = self._background_monitor_evidence(session_id, f"{content}\n{raw_content}")
+        response_text = f"{content}\n{raw_content}"
+        evidence = self._background_monitor_evidence(session_id, response_text)
+        if not evidence.get("durable"):
+            registered = self._maybe_register_notebooklm_background_monitor(
+                session_id=session_id,
+                response_text=response_text,
+            )
+            if registered:
+                evidence = self._background_monitor_evidence(session_id, response_text)
         if evidence.get("durable"):
             return content
         replacement = (
@@ -1731,6 +1743,101 @@ class BotService:
             },
         )
         return replacement
+
+    def _maybe_register_notebooklm_background_monitor(
+        self,
+        *,
+        session_id: str,
+        response_text: str,
+    ) -> bool:
+        notebook_id = self._extract_notebooklm_id(response_text)
+        outputs = self._notebooklm_monitor_outputs(response_text)
+        if not notebook_id or not outputs:
+            return False
+        nlm_handler = getattr(self, "_nlm_handler", None)
+        notebooklm = getattr(nlm_handler, "notebooklm", None)
+        starter = getattr(notebooklm, "start_orchestration", None)
+        if not callable(starter):
+            return False
+        try:
+            starter(notebook_id, session_id=session_id, outputs=outputs)
+        except Exception as exc:
+            self._emit_safe(
+                "background_monitor_auto_register_failed",
+                {
+                    "session_id": session_id,
+                    "notebook_id": notebook_id[:8],
+                    "outputs": list(outputs),
+                    "error": str(exc)[:300],
+                },
+            )
+            return False
+        self._emit_safe(
+            "background_monitor_auto_registered",
+            {
+                "session_id": session_id,
+                "notebook_id": notebook_id[:8],
+                "outputs": list(outputs),
+                "kind": "notebooklm.orchestrate",
+            },
+        )
+        return True
+
+    @staticmethod
+    def _extract_notebooklm_id(text: str) -> str | None:
+        match = _NOTEBOOKLM_UUID_RE.search(text or "")
+        return match.group(0) if match else None
+
+    @staticmethod
+    def _notebooklm_monitor_outputs(text: str) -> tuple[str, ...]:
+        normalized = str(text or "").lower()
+        if not any(
+            marker in normalized
+            for marker in (
+                "notebooklm",
+                "cuaderno",
+                "notebook",
+                "resumen de video",
+                "resumen en video",
+                "resumen de audio",
+                "resumen en audio",
+            )
+        ):
+            return ()
+        outputs: list[str] = []
+        if any(
+            marker in normalized
+            for marker in (
+                "video overview",
+                "resumen de video",
+                "resumen en video",
+                "generando video",
+                "generating video",
+            )
+        ):
+            outputs.append("video")
+        if any(
+            marker in normalized
+            for marker in (
+                "resumen de audio",
+                "resumen en audio",
+                "podcast",
+            )
+        ):
+            outputs.append("podcast")
+        if any(
+            marker in normalized
+            for marker in (
+                "generando informe",
+                "informe blog",
+                "blog post",
+                "entrada de blog",
+                "publicación de blog",
+                "publicacion de blog",
+            )
+        ):
+            outputs.append("blog")
+        return tuple(dict.fromkeys(outputs))
 
     @staticmethod
     def _claims_background_monitor(text: str) -> bool:

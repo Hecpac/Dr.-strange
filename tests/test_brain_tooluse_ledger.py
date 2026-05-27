@@ -28,10 +28,12 @@ import tempfile
 import unittest
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from claw_v2.bot import BotService
 from claw_v2.jobs import JobService
+from claw_v2.notebooklm import NotebookLMService
 from claw_v2.task_ledger import TaskLedger
 
 
@@ -552,6 +554,41 @@ class BrainToolUseLedgerEdgeCasesTests(unittest.TestCase):
 
         self.assertEqual(rendered, content)
         self.assertEqual(observe.events, [])
+
+    def test_notebooklm_video_monitor_claim_registers_durable_job(self) -> None:
+        observe = _RecordingObserve()
+        jobs = JobService(Path(self._tmp.name) / "claw.db")
+        notebooklm = NotebookLMService(job_service=jobs)
+        bot = _make_bot(observe, self.ledger, job_service=jobs)
+        bot._nlm_handler = SimpleNamespace(notebooklm=notebooklm)
+        content = (
+            "Video Overview disparado en NotebookLM. "
+            "Notebook ID: 04e763b8-2488-4462-8693-bac2ecce4918. "
+            "Generando resumen de video. Te aviso cuando termine."
+        )
+
+        rendered = bot._enforce_background_monitor_contract(
+            session_id="tg-test",
+            user_text="Opción A",
+            content=content,
+            raw_content=content,
+        )
+
+        self.assertEqual(rendered, content)
+        jobs_list = jobs.list()
+        self.assertEqual(len(jobs_list), 1)
+        job = jobs_list[0]
+        self.assertEqual(job.kind, "notebooklm.orchestrate")
+        self.assertEqual(job.status, "queued")
+        self.assertEqual(job.payload["session_id"], "tg-test")
+        self.assertEqual(job.payload["outputs"], ["video"])
+        self.assertEqual(
+            job.resume_key,
+            "notebooklm:orchestrate:04e763b8-2488-4462-8693-bac2ecce4918",
+        )
+        events = [name for name, _ in observe.events]
+        self.assertIn("background_monitor_auto_registered", events)
+        self.assertNotIn("background_monitor_claim_rejected", events)
 
 
 if __name__ == "__main__":

@@ -651,9 +651,11 @@ class NotebookLMService:
         if not full_id:
             raise ValueError("notebook_id is required")
         normalized_outputs = tuple(
-            output.strip().lower()
-            for output in outputs
-            if output and output.strip().lower() in {"podcast", "blog"}
+            dict.fromkeys(
+                output.strip().lower()
+                for output in outputs
+                if output and output.strip().lower() in {"podcast", "blog", "video"}
+            )
         ) or ("podcast", "blog")
         self._enforce_policy(
             "notebooklm.start_artifact",
@@ -730,7 +732,7 @@ class NotebookLMService:
             for item in payload.get("outputs", [])
             if str(item).strip()
         )
-        outputs = tuple(item for item in outputs if item in {"podcast", "blog"}) or ("podcast", "blog")
+        outputs = tuple(item for item in outputs if item in {"podcast", "blog", "video"}) or ("podcast", "blog")
         step_fn = self._cdp_orchestrate_step_fn
         if step_fn is None:
             def step_fn(
