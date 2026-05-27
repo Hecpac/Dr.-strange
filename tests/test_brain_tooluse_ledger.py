@@ -558,6 +558,145 @@ class BrainToolUseLedgerEdgeCasesTests(unittest.TestCase):
         self.assertIn("background_monitor_claim_rejected", events)
         self.assertNotIn("background_monitor_claim_stripped", events)
 
+    def test_durable_dispatch_claim_is_promoted_to_real_task(self) -> None:
+        # Causa 2: an unbacked durable-dispatch claim must be turned into a real
+        # coordinator task (so the work runs and evidence exists) instead of
+        # being replaced wholesale with the defensive template.
+        observe = _RecordingObserve()
+        bot = _make_bot(observe, self.ledger)
+
+        started_calls: list[tuple[str, str]] = []
+
+        def _fake_start(session_id: str, objective: str, *, source_text: str = "") -> str:
+            started_calls.append((session_id, objective))
+            self.ledger.create(
+                task_id=f"{session_id}:promoted",
+                session_id=session_id,
+                objective=objective,
+                runtime="coordinator",
+                mode="research",
+                status="running",
+                notify_policy="done_only",
+            )
+            return (
+                "Voy con eso. La dejo corriendo y te aviso cuando cierre.\n\n"
+                f"Tarea autónoma iniciada: `{session_id}:promoted`\nModo: research"
+            )
+
+        bot._task_handler = SimpleNamespace(
+            coordinator=object(), start_autonomous_task=_fake_start
+        )
+        # Objective resolution from session_state has its own tests; isolate the
+        # promotion wiring here.
+        bot._resolve_actionable_task_objective = (
+            lambda text, *, state: ("Haz el barrido de noticias", "pending_action")
+        )
+
+        content = (
+            "Va A+B encadenado.\n\n"
+            "**Disclosure operativo:** voy a hacer dispatch durable para que esto "
+            "sobreviva interrupciones. Cuando termine, te entrego el digest.\n\n"
+            "Disparo ahora."
+        )
+
+        rendered = bot._enforce_background_monitor_contract(
+            session_id="tg-test",
+            user_text="A+B",
+            content=content,
+            raw_content=content,
+        )
+
+        # The promise is preserved because a real running task now backs it.
+        self.assertEqual(rendered, content)
+        self.assertEqual(len(started_calls), 1)
+        events = [name for name, _ in observe.events]
+        self.assertIn("background_monitor_dispatch_promoted", events)
+        self.assertNotIn("background_monitor_claim_rejected", events)
+
+    def test_durable_dispatch_promotion_uses_reply_context_for_terse_pick(self) -> None:
+        # Causa 2 option 1: a terse pick like "A+B" that the real actionable
+        # resolver cannot pin down still promotes, using the reply_context plan
+        # the user was replying to as the objective. The real resolver runs here
+        # (not stubbed) so the fallback path is exercised end-to-end.
+        observe = _RecordingObserve()
+        reply_plan = (
+            "Va A+B encadenado: barrido X via Chrome CDP sobre x.com/home, "
+            "barrido web con WebSearch, y sintesis cruzada en un digest."
+        )
+        state = {
+            "active_object": {
+                "reply_context": {"text": reply_plan, "source": "telegram_reply"}
+            }
+        }
+        bot = _make_bot(observe, self.ledger, state=state)
+
+        started_objectives: list[str] = []
+
+        def _fake_start(session_id: str, objective: str, *, source_text: str = "") -> str:
+            started_objectives.append(objective)
+            self.ledger.create(
+                task_id=f"{session_id}:promoted",
+                session_id=session_id,
+                objective=objective,
+                runtime="coordinator",
+                mode="research",
+                status="running",
+                notify_policy="done_only",
+            )
+            return f"Tarea autónoma iniciada: `{session_id}:promoted`\nModo: research"
+
+        bot._task_handler = SimpleNamespace(
+            coordinator=object(), start_autonomous_task=_fake_start
+        )
+
+        content = (
+            "Va A+B encadenado.\n\n"
+            "voy a hacer dispatch durable para que esto sobreviva interrupciones. "
+            "Cuando termine te entrego el digest.\n\nDisparo ahora."
+        )
+
+        rendered = bot._enforce_background_monitor_contract(
+            session_id="tg-test",
+            user_text="A+B",
+            content=content,
+            raw_content=content,
+        )
+
+        self.assertEqual(rendered, content)
+        self.assertEqual(len(started_objectives), 1)
+        self.assertIn("barrido X", started_objectives[0])
+        events = [name for name, _ in observe.events]
+        self.assertIn("background_monitor_dispatch_promoted", events)
+        self.assertNotIn("background_monitor_claim_rejected", events)
+
+    def test_durable_dispatch_promotion_skipped_falls_back_to_template(self) -> None:
+        # When no actionable objective can be resolved, promotion is skipped and
+        # the existing block-with-template behavior is preserved.
+        observe = _RecordingObserve()
+        bot = _make_bot(observe, self.ledger)
+        bot._task_handler = SimpleNamespace(
+            coordinator=object(),
+            start_autonomous_task=lambda *a, **k: "should not be called",
+        )
+        bot._resolve_actionable_task_objective = lambda text, *, state: (None, "missing_context")
+
+        content = (
+            "Voy a hacer dispatch durable y cuando termine te entrego el digest.\n\n"
+            "Disparo ahora."
+        )
+
+        rendered = bot._enforce_background_monitor_contract(
+            session_id="tg-test",
+            user_text="A+B",
+            content=content,
+            raw_content=content,
+        )
+
+        self.assertIn("no quedó un monitor durable registrado", rendered)
+        events = [name for name, _ in observe.events]
+        self.assertIn("background_monitor_dispatch_promotion_skipped", events)
+        self.assertIn("background_monitor_claim_rejected", events)
+
     def test_background_monitor_claim_is_stripped_from_mixed_response(self) -> None:
         observe = _RecordingObserve()
         bot = _make_bot(observe, self.ledger)
@@ -601,6 +740,31 @@ class BrainToolUseLedgerEdgeCasesTests(unittest.TestCase):
 
         self.assertEqual(rendered, "Perfecto. Queda así.")
         self.assertEqual(observe.events, [])
+
+    def test_cross_line_only_monitor_claim_is_not_nuked_to_template(self) -> None:
+        # False-positive class Hector flagged: a useful conversational reply where
+        # the monitor pattern only matches across lines (DOTALL) and no single
+        # line is strippable. The reply must be preserved, not replaced wholesale.
+        observe = _RecordingObserve()
+        bot = _make_bot(observe, self.ledger)
+        content = (
+            "Listo, lo dejé anotado.\n\n"
+            "Cuando el proceso\n"
+            "termine te entrego el resultado."
+        )
+
+        rendered = bot._enforce_background_monitor_contract(
+            session_id="tg-test",
+            user_text="Listo ya quedo",
+            content=content,
+            raw_content=content,
+        )
+
+        self.assertEqual(rendered, content)
+        self.assertNotIn("no quedó un monitor durable registrado", rendered)
+        events = [name for name, _ in observe.events]
+        self.assertNotIn("background_monitor_claim_rejected", events)
+        self.assertIn("background_monitor_claim_kept_unisolated", events)
 
     def test_background_monitor_claim_allowed_with_related_active_job(self) -> None:
         observe = _RecordingObserve()

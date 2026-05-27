@@ -1733,6 +1733,20 @@ class BotService:
             )
             if registered:
                 evidence = self._background_monitor_evidence(session_id, response_text)
+        if not evidence.get("durable") and self._claims_durable_dispatch(content):
+            # Causa 2: the brain narrated a durable dispatch but never called a
+            # primitive that creates the job/task, so there is nothing for the
+            # evidence probe to find and the reply would be nuked while the work
+            # never runs. Make the promise true instead of only blocking it:
+            # start a real autonomous coordinator task for this turn, then
+            # re-check evidence so the narration is backed by running work.
+            promoted = self._maybe_promote_durable_dispatch_to_task(
+                session_id=session_id,
+                user_text=user_text,
+                response_text=response_text,
+            )
+            if promoted:
+                evidence = self._background_monitor_evidence(session_id, response_text)
         if evidence.get("durable"):
             return content
         durable_dispatch_claim = self._claims_durable_dispatch(content)
@@ -1753,6 +1767,22 @@ class BotService:
                 },
             )
             return stripped
+        if stripped == content and not durable_dispatch_claim:
+            # No single line carried the monitor claim: the only trigger was the
+            # cross-line DOTALL promise pattern matching over otherwise-unrelated
+            # lines. Replacing the whole reply with the defensive template here is
+            # the false-positive class Hector flagged ("Listo ya quedo" nuked a
+            # useful confirmation). When we cannot isolate the offending claim and
+            # there is no explicit durable-dispatch claim, keep the original reply.
+            self._emit_safe(
+                "background_monitor_claim_kept_unisolated",
+                {
+                    "session_id": session_id,
+                    "user_text_preview": user_text[:120],
+                    "reason": evidence.get("reason") or "no_durable_monitor",
+                },
+            )
+            return content
         return self._background_monitor_replacement(
             session_id=session_id,
             user_text=user_text,
@@ -1781,6 +1811,113 @@ class BotService:
             },
         )
         return replacement
+
+    def _maybe_promote_durable_dispatch_to_task(
+        self,
+        *,
+        session_id: str,
+        user_text: str,
+        response_text: str,
+    ) -> bool:
+        """Turn an unbacked durable-dispatch claim into a real coordinator task.
+
+        Causa 2 of the background-monitor bug: the brain narrates that it will
+        dispatch durable background work but never calls a primitive that
+        creates the job/task, so ``_background_monitor_evidence`` finds nothing
+        and the reply gets replaced with the defensive template while the work
+        never runs. Rather than only blocking, resolve the actionable objective
+        for this turn and start a real autonomous coordinator task so the
+        promise becomes true and the gate finds evidence on the re-check.
+
+        Returns True only when a coordinator task was actually started. The
+        coordinator still enforces its own per-tier approval gates, so this
+        cannot escalate privilege; it only makes a narrated promise durable.
+        """
+        handler = getattr(self, "_task_handler", None)
+        if handler is None or getattr(handler, "coordinator", None) is None:
+            return False
+        starter = getattr(handler, "start_autonomous_task", None)
+        if not callable(starter):
+            return False
+        try:
+            state = self.brain.memory.get_session_state(session_id)
+        except Exception:
+            state = {}
+        if not isinstance(state, dict):
+            state = {}
+        objective, source = self._resolve_actionable_task_objective(user_text, state=state)
+        if not objective:
+            # Causa 2 option 1: the standard resolver cannot pin an objective for
+            # terse option picks ("A+B", "Ambos"), which are exactly the replies
+            # that triggered the loop. Reuse the reply_context the user replied
+            # to — the concrete plan the brain just narrated — as the objective.
+            objective = self._durable_dispatch_fallback_objective(state)
+            source = "reply_context_fallback"
+        if not objective:
+            self._emit_safe(
+                "background_monitor_dispatch_promotion_skipped",
+                {
+                    "session_id": session_id,
+                    "user_text_preview": user_text[:120],
+                    "reason": "no_actionable_objective",
+                },
+            )
+            return False
+        try:
+            result = starter(session_id, objective, source_text=user_text or objective)
+        except Exception as exc:
+            self._emit_safe(
+                "background_monitor_dispatch_promotion_failed",
+                {
+                    "session_id": session_id,
+                    "user_text_preview": user_text[:120],
+                    "error": str(exc)[:300],
+                },
+            )
+            return False
+        started = isinstance(result, str) and "Tarea autónoma iniciada" in result
+        if not started:
+            self._emit_safe(
+                "background_monitor_dispatch_promotion_skipped",
+                {
+                    "session_id": session_id,
+                    "user_text_preview": user_text[:120],
+                    "reason": "coordinator_declined",
+                    "detail": (result or "")[:200] if isinstance(result, str) else "",
+                },
+            )
+            return False
+        self._emit_safe(
+            "background_monitor_dispatch_promoted",
+            {
+                "session_id": session_id,
+                "user_text_preview": user_text[:120],
+                "objective_source": source,
+            },
+        )
+        return True
+
+    @staticmethod
+    def _durable_dispatch_fallback_objective(state: dict[str, Any]) -> str:
+        """Best-effort objective for a durable-dispatch promise the actionable
+        resolver could not pin down.
+
+        Causa 2 option 1: terse picks like "A+B"/"Ambos" do not classify as a
+        direct task or a followup, so the standard resolver returns nothing.
+        Reuse the reply_context the user was replying to — that text is the
+        concrete plan the brain narrated this turn — so the promise can become a
+        real coordinator task instead of falling to the defensive template.
+        """
+        active_object = state.get("active_object") or {}
+        if not isinstance(active_object, dict):
+            return ""
+        reply_context = active_object.get("reply_context") or {}
+        if not isinstance(reply_context, dict):
+            return ""
+        text = str(reply_context.get("text") or "").strip()
+        if len(text) < 12:
+            return ""
+        return text[:500]
 
     def _strip_unsupported_background_monitor_claims(self, content: str) -> str:
         lines = str(content or "").splitlines()
