@@ -347,6 +347,57 @@ class BrainToolUseLedgerTests(unittest.TestCase):
         events = [name for name, _ in observe.events]
         self.assertIn("brain_tooluse_ledger_needs_verification", events)
 
+    def test_g3_external_action_without_verifier_blocks_instead_of_completed_unverified(self) -> None:
+        observe = _RecordingObserve()
+        observe.canned_trace_events = [
+            _tool_event("Write", tool_input={"file_path": "artifacts/instagram/_publish_reel.py"}),
+            _tool_event(
+                "Bash",
+                tool_input={"command": "python artifacts/instagram/_publish_reel.py"},
+            ),
+        ]
+        bot = _make_bot(observe, self.ledger)
+
+        bot._attach_brain_tool_use_ledger(
+            session_id="tg-test",
+            response=_StubResponse(artifacts={"trace_id": "trace-X"}),
+            source_text="Publicalo",
+            runtime_channel="telegram",
+        )
+
+        task = self.ledger.list(limit=10)[0]
+        self.assertEqual(task.status, "failed")
+        self.assertEqual(task.verification_status, "blocked")
+        self.assertIn("passed verification", task.error)
+        manifest = task.artifacts["evidence_manifest"]
+        self.assertEqual(manifest["verification_result"], "blocked")
+        self.assertIn("passed_verification_missing_for_action", manifest["blockers"])
+        events = [name for name, _ in observe.events]
+        self.assertIn("brain_tooluse_ledger_blocked_unverified_action", events)
+        self.assertNotIn("brain_tooluse_ledger_needs_verification", events)
+
+    def test_g4_external_status_check_without_verifier_blocks_even_with_read_tool(self) -> None:
+        observe = _RecordingObserve()
+        observe.canned_trace_events = [
+            _tool_event("Read", tool_input={"file_path": "artifacts/instagram/check_publish_profile.png"}),
+        ]
+        bot = _make_bot(observe, self.ledger)
+
+        bot._attach_brain_tool_use_ledger(
+            session_id="tg-test",
+            response=_StubResponse(artifacts={"trace_id": "trace-X"}),
+            source_text="Publicaste ?",
+            runtime_channel="telegram",
+        )
+
+        task = self.ledger.list(limit=10)[0]
+        self.assertEqual(task.status, "failed")
+        self.assertEqual(task.verification_status, "blocked")
+        self.assertEqual(
+            task.artifacts["evidence_manifest"]["blockers"],
+            ["passed_verification_missing_for_action"],
+        )
+
     # --- H. tier-3 / approval gate -> recorded as skipped --------------------
 
     def test_h_approval_blocked_tool_does_not_auto_succeed(self) -> None:

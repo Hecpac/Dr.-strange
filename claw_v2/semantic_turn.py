@@ -121,6 +121,17 @@ _NEW_TASK_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     )
 )
 
+_CONTEXTUAL_CONTINUATION_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(pattern)
+    for pattern in (
+        r"^(?:publicalo|publicala|publicalos|publicalas|publica\s+(?:esto|eso|lo|la))$",
+        r"^(?:lee|leer|read)\s+(?:los?\s+)?(?:docs?|documentos?)$",
+        r"^listo\s+(?:logueado|loggeado|logged\s+in)$",
+        r"^(?:arranca|arrancar|empieza|inicia)\s+con\s+(?:el\s+)?plan$",
+        r"^(?:ok|okay|dale|va|listo)\s+\d+$",
+    )
+)
+
 
 def classify_semantic_turn(text: str) -> SemanticTurn:
     stripped = (text or "").strip()
@@ -193,6 +204,7 @@ def classify_semantic_turn(text: str) -> SemanticTurn:
         explicit_continuation
         or (telegram_intent is not None and telegram_intent.intent == "task.continue_active_mission")
         or (owner_delegation is not None and owner_delegation.requires_resolution)
+        or _looks_like_contextual_continuation(normalized)
     ):
         return SemanticTurn(
             intent="continue_active_mission",
@@ -284,6 +296,13 @@ def _looks_like_option_combo(compact: str) -> bool:
             compact,
         )
     )
+
+
+def _looks_like_contextual_continuation(normalized: str) -> bool:
+    if not normalized:
+        return False
+    normalized = re.sub(r"\s+", " ", normalized).strip(" \t\n\r.,;:!?¿¡")
+    return any(pattern.search(normalized) for pattern in _CONTEXTUAL_CONTINUATION_PATTERNS)
 
 
 def _looks_like_question(original: str, normalized: str) -> bool:

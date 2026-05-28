@@ -115,6 +115,14 @@ _DURABLE_DISPATCH_CLAIM_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bsobreviv[ae]\s+(?:a\s+)?interrupciones?\b", re.IGNORECASE),
     re.compile(r"\bno\s+es\s+una\s+promesa\s+de\s+background\b", re.IGNORECASE),
 )
+_BRAIN_TOOLUSE_VERIFIED_ACTION_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\b(?:publica(?:lo|la|los|las)?|publicaste|publish|posted|postear?)\b", re.IGNORECASE),
+    re.compile(r"\bpudiste\b", re.IGNORECASE),
+    re.compile(r"\b(?:lee|leer|read)\s+(?:los?\s+)?(?:docs?|documentos?)\b", re.IGNORECASE),
+    re.compile(r"\babre\s+(?:instagram|x|twitter|linkedin|chrome)\b", re.IGNORECASE),
+    re.compile(r"\blisto\s+(?:logueado|loggeado|logged\s+in)\b", re.IGNORECASE),
+    re.compile(r"\b(?:arranca|arrancar|empieza|inicia)\s+con\s+(?:el\s+)?plan\b", re.IGNORECASE),
+)
 _BACKGROUND_MONITOR_ACTIVE_JOB_STATUSES = ("queued", "running", "waiting_approval", "retrying")
 _BACKGROUND_MONITOR_ACTIVE_TASK_STATUSES = ("queued", "running")
 _NOTEBOOKLM_UUID_RE = re.compile(
@@ -4779,6 +4787,7 @@ class BotService:
             "sensitive_redactions_applied": sensitive_redactions > 0,
             "verification_result": "unknown",
         }
+        requires_verified_completion = self._brain_tooluse_requires_verified_completion(source_summary)
         brain_artifacts = {
             "evidence_manifest": evidence_manifest,
             # Legacy top-level fields kept for backwards-compat with the
@@ -4836,6 +4845,31 @@ class BotService:
             logger.debug("brain_tooluse_ledger_started emit failed", exc_info=True)
         # Decide terminal status.
         if tool_failure_events:
+            if requires_verified_completion:
+                evidence_manifest["completed_at"] = time.time()
+                evidence_manifest["verification_result"] = "failed"
+                evidence_manifest["blockers"] = [first_error[:200] or "action tool execution failed"]
+                self.task_ledger.mark_terminal(
+                    task_id,
+                    status="failed",
+                    summary="brain action tool-use failed before passed verification",
+                    error=first_error[:300] or "action tool execution failed before passed verification",
+                    verification_status="failed",
+                    artifacts=brain_artifacts,
+                )
+                try:
+                    self.observe.emit(
+                        "brain_tooluse_ledger_failed",
+                        payload={
+                            "task_id": task_id,
+                            "error_count": len(tool_failure_events),
+                            "first_error_kind": first_error[:60],
+                            "action_requires_verification": True,
+                        },
+                    )
+                except Exception:
+                    logger.debug("brain_tooluse_ledger_failed emit failed", exc_info=True)
+                return
             useful_result = self._brain_response_has_useful_result(response)
             if useful_result:
                 evidence_manifest["completed_at"] = time.time()
@@ -4888,6 +4922,34 @@ class BotService:
         # Tools ran without failure, but no verifier has passed yet. Close the
         # row as completed_unverified so the stale-running watchdog does not
         # rewrite real user-visible work into a false lost failure.
+        if requires_verified_completion:
+            evidence_manifest["completed_at"] = time.time()
+            evidence_manifest["verification_result"] = "blocked"
+            evidence_manifest["blockers"] = ["passed_verification_missing_for_action"]
+            self.task_ledger.mark_terminal(
+                task_id,
+                status="failed",
+                summary="brain action tool-use blocked without passed verification",
+                error=(
+                    "Action-like brain tool-use cannot close without passed "
+                    "verification, a durable task/job, or a concrete blocker."
+                ),
+                verification_status="blocked",
+                artifacts=brain_artifacts,
+            )
+            try:
+                self.observe.emit(
+                    "brain_tooluse_ledger_blocked_unverified_action",
+                    payload={
+                        "task_id": task_id,
+                        "task_status": "failed",
+                        "verification_status": "blocked",
+                        "tools_count": len(tool_events),
+                    },
+                )
+            except Exception:
+                logger.debug("brain_tooluse_ledger_blocked_unverified_action emit failed", exc_info=True)
+            return
         evidence_manifest["completed_at"] = time.time()
         evidence_manifest["verification_result"] = "needs_verification"
         self.task_ledger.mark_terminal(
@@ -4938,6 +5000,22 @@ class BotService:
         if content.strip(" .,…!¡?¿-_") == "":
             return False
         return len(content) >= 20
+
+    @staticmethod
+    def _brain_tooluse_requires_verified_completion(source_text: str) -> bool:
+        """True for user turns that are asking the runtime to complete an
+        operational action, not just produce a conversational lookup.
+
+        These turns must not terminally close as ``completed_unverified``:
+        they need passed evidence, a durable task/job, or a concrete blocker.
+        """
+        normalized = _normalize_command_text(source_text or "")
+        if not normalized:
+            return False
+        return any(
+            pattern.search(normalized)
+            for pattern in _BRAIN_TOOLUSE_VERIFIED_ACTION_PATTERNS
+        )
 
     @staticmethod
     def _tool_payload(event: dict[str, Any]) -> dict[str, Any]:

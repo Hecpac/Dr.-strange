@@ -99,6 +99,18 @@ def test_semantic_classifier_recognizes_operational_tasks_and_option_picks() -> 
     assert spaced_combo_turn.intent == "continue_active_mission"
     assert spaced_combo_turn.explicit_continuation is True
 
+    contextual_action_samples = [
+        "Publicalo",
+        "Lee los docs",
+        "Listo loggeado",
+        "Arranca con el plan",
+        "Okay 1",
+    ]
+    for text in contextual_action_samples:
+        turn = classify_semantic_turn(text)
+        assert turn.intent == "continue_active_mission", text
+        assert turn.explicit_continuation is True
+
     stop_turn = classify_semantic_turn(
         "No continuemos porque ingles nativo es un problema si la entrevista es conversational"
     )
