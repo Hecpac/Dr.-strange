@@ -11,6 +11,7 @@ background thread by the caller.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import re
@@ -894,6 +895,173 @@ def _write_orchestration_evidence(notebook_id: str, summary: dict[str, object]) 
     }
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
     return str(path)
+
+
+# Studio overflow menu (verified live 2026-05-28 on the 2026 NotebookLM UI):
+# each generated output card exposes an overflow button aria-label="Más".
+# The audio/video cards' menu contains "Descargar" (save_alt); the report
+# card's menu only offers "Exportar a Documentos" (no local file download).
+_OVERFLOW_SELECTOR = 'button[aria-label="Más"]'
+_DOWNLOAD_ITEM_SELECTOR = '[role="menuitem"]:has-text("Descargar")'
+_DOWNLOADABLE_KINDS = {"audio", "video"}
+
+
+def download_ready_artifact(
+    notebook_id: str,
+    kind: str,
+    *,
+    dest_dir: Path | None = None,
+    cdp_url: str = DEFAULT_CDP_URL,
+) -> str | None:
+    """Best-effort download of a finished NotebookLM artifact via CDP.
+
+    Iterates the Studio overflow ("Más") menus, finds one offering "Descargar"
+    and captures the file via Playwright's download handler. Returns the saved
+    path, or None if no downloadable artifact is present. The report/blog card
+    is not file-downloadable (export-to-Docs only), so ``kind="blog"`` returns
+    None and the caller falls back to the text notify.
+
+    None is "deliver later / notify only", never a hard failure.
+    """
+    kind = kind.strip().lower()
+    if kind not in _DOWNLOADABLE_KINDS:
+        return None
+    target_dir = Path(dest_dir or _ORCHESTRATION_ARTIFACT_DIR)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    pw, browser = _connect(cdp_url)
+    try:
+        page = _focus_notebook(browser, notebook_id)
+        time.sleep(1.5)
+        overflow = page.locator(_OVERFLOW_SELECTOR)
+        try:
+            count = overflow.count()
+        except Exception:
+            count = 0
+        for idx in range(count):
+            try:
+                overflow.nth(idx).click(timeout=2_000)
+            except Exception:
+                continue
+            time.sleep(0.6)
+            download_item = page.locator(_DOWNLOAD_ITEM_SELECTOR)
+            try:
+                has_download = download_item.count() > 0
+            except Exception:
+                has_download = False
+            if not has_download:
+                with contextlib.suppress(Exception):
+                    page.keyboard.press("Escape")
+                time.sleep(0.3)
+                continue
+            try:
+                with page.expect_download(timeout=60_000) as dl_info:
+                    download_item.first.click(timeout=3_000)
+                download = dl_info.value
+                suggested = download.suggested_filename or f"{kind}_{int(time.time())}"
+                dest = target_dir / suggested
+                download.save_as(str(dest))
+                return str(dest)
+            except Exception as exc:  # pragma: no cover - live UI dependent
+                logger.warning("NotebookLM %s download failed: %s", kind, exc)
+                with contextlib.suppress(Exception):
+                    page.keyboard.press("Escape")
+                continue
+        return None
+    finally:
+        try:
+            browser.close()
+        except Exception:
+            pass
+        pw.stop()
+
+
+# Studio generated-output tiles carry an icon-name prefix in their innerText
+# (verified live 2026-05-28): reports = "auto_tab_group", audio =
+# "audio_magic_eraser", video = "subscriptions". The report is not
+# file-downloadable, so it is opened and scraped as structured blocks, then
+# delivered as HTML. A real Playwright click (not synthetic JS el.click()) is
+# required to open the report viewer; the prose lives in .artifact-content.
+_REPORT_TILE_ICON = "auto_tab_group"
+
+
+_REPORT_BLOCKS_JS = r"""
+() => {
+  const root = document.querySelector('.artifact-content');
+  if (!root) return null;
+  const items = [];
+  let buf = '';
+  const flush = () => { const t = buf.replace(/\s+/g,' ').trim(); buf=''; if (t) items.push({kind:'text', text:t}); };
+  const inline = new Set(['I','EM','B','STRONG','CODE','A','SPAN','SUP','SUB','MARK']);
+  function walk(node){
+    for (const ch of node.childNodes){
+      if (ch.nodeType===3){ buf += ch.textContent; }
+      else if (ch.nodeType===1){
+        const tag = ch.tagName;
+        if (tag==='TABLE'){
+          flush();
+          const rows=[];
+          for (const tr of ch.querySelectorAll('tr')){
+            const cells=[...tr.querySelectorAll('th,td')].map(c=>c.innerText.replace(/\s+/g,' ').trim());
+            if (cells.some(x=>x)) rows.push(cells);
+          }
+          if (rows.length) items.push({kind:'table', rows});
+        } else if (inline.has(tag)){ buf += ch.textContent; }
+        else { flush(); walk(ch); flush(); }
+      }
+    }
+  }
+  walk(root);
+  flush();
+  return items;
+}
+"""
+
+
+def extract_report_blocks(
+    notebook_id: str,
+    *,
+    cdp_url: str = DEFAULT_CDP_URL,
+) -> list[dict] | None:
+    """Open the report tile and return structured blocks (paragraphs + tables).
+
+    Each item is {"kind": "text", "text": str} or {"kind": "table", "rows":
+    [[cell, ...], ...]}. Block segmentation preserves paragraph breaks and the
+    comparison table that plain inner_text scraping flattens. None if no report
+    tile / empty body; caller falls back to the text notify.
+    """
+    pw, browser = _connect(cdp_url)
+    try:
+        page = _focus_notebook(browser, notebook_id)
+        time.sleep(1.5)
+        tile = page.locator(".artifact-item-button", has_text=_REPORT_TILE_ICON).first
+        try:
+            tile_present = tile.count() > 0
+        except Exception:
+            tile_present = False
+        if tile_present:
+            try:
+                tile.click(timeout=5_000)
+                time.sleep(3)
+            except Exception as exc:
+                logger.warning("NotebookLM report tile click failed: %s", exc)
+                return None
+        try:
+            items = page.evaluate(_REPORT_BLOCKS_JS)
+        except Exception as exc:
+            logger.warning("NotebookLM report blocks read failed: %s", exc)
+            return None
+        if not items or not isinstance(items, list):
+            return None
+        total = sum(len(str(it.get("text", ""))) for it in items if it.get("kind") == "text")
+        if total < 300:
+            return None
+        return items
+    finally:
+        try:
+            browser.close()
+        except Exception:
+            pass
+        pw.stop()
 
 
 def orchestrate_outputs_step(

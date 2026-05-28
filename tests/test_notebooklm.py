@@ -780,6 +780,8 @@ class NotebookLMOrchestrationTests(unittest.TestCase):
             notify = MagicMock()
             job_service = JobService(Path(tmpdir) / "claw.db")
             svc = NotebookLMService(notify=notify, job_service=job_service)
+            svc._cdp_download_fn = lambda nb, kind: None
+            svc._cdp_report_blocks_fn = lambda nb: None
 
             def fake_step(notebook_id: str, checkpoint: dict[str, object], outputs: tuple[str, ...]) -> dict[str, object]:
                 return {

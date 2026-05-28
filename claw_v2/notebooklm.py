@@ -122,6 +122,14 @@ class NotebookLMService:
         self._cdp_orchestrate_step_fn: (
             Callable[[str, dict[str, object], tuple[str, ...]], dict[str, object]] | None
         ) = None
+        # Hooks for delivering finished artifacts to the origin chat. Both are
+        # overridable in tests; production uses the CDP download + Telegram
+        # file sender. _cdp_download_fn(notebook_id, kind) -> path|None.
+        self._cdp_download_fn: Callable[[str, str], str | None] | None = None
+        # _cdp_report_blocks_fn(notebook_id) -> structured blocks|None (blog is
+        # not file-downloadable, so it is scraped and delivered as HTML).
+        self._cdp_report_blocks_fn: Callable[[str], list[dict] | None] | None = None
+        self._delivery: Any | None = None
         self._sdk_available = self._detect_sdk()
 
     @staticmethod
@@ -773,16 +781,26 @@ class NotebookLMService:
             "updated_at": time.time(),
         }
         if status == "completed":
+            session_id = payload.get("session_id")
+            delivered = self._deliver_outputs(
+                notebook_id, outputs, result, session_id=session_id
+            )
+            completion_result = {**dict(result), "deliveries": delivered}
             self._job_service.checkpoint(job.job_id, merged_checkpoint)
-            self._job_service.complete(job.job_id, result=dict(result))
+            self._job_service.complete(job.job_id, result=completion_result)
             self._emit(
                 "nlm_orchestration_completed",
                 notebook_id=notebook_id,
                 job_id=job.job_id,
                 evidence_uri=result.get("evidence_uri"),
+                deliveries=delivered,
             )
             evidence = str(result.get("evidence_uri") or "").strip()
             suffix = f"\nEvidence: {evidence}" if evidence else ""
+            sent = [d for d in delivered if d.get("ok")]
+            if sent:
+                kinds = ", ".join(sorted({str(d.get("kind")) for d in sent}))
+                suffix += f"\nEntregado al chat: {kinds}"
             self._notify(
                 "NotebookLM terminó la orquestación durable.\n"
                 f"Notebook: {notebook_id[:8]}\n"
@@ -820,6 +838,110 @@ class NotebookLMService:
             stage=merged_checkpoint.get("stage"),
             next_delay_seconds=delay,
         )
+
+    @staticmethod
+    def _chat_id_from_session(session_id: str | None) -> str | None:
+        if not session_id:
+            return None
+        text = str(session_id).strip()
+        if text.startswith("tg-"):
+            text = text[3:]
+        return text or None
+
+    def _get_delivery(self) -> Any:
+        if self._delivery is None:
+            from claw_v2.notebooklm_delivery import NotebookLMDeliveryService
+
+            self._delivery = NotebookLMDeliveryService()
+        return self._delivery
+
+    _OUTPUT_DELIVERY_MAP = {
+        "podcast": ("audio", "audio_ready", "Resumen en audio (NotebookLM)"),
+        "blog": ("blog", "blog_ready", "Informe (NotebookLM)"),
+        "video": ("video", "video_ready", "Resumen en video (NotebookLM)"),
+    }
+
+    def _obtain_report_path(self, notebook_id: str) -> str | None:
+        """Scrape the report blocks and persist them as a self-contained HTML file.
+
+        Reports are delivered as HTML (not markdown): HTML renders accents and
+        the comparison table correctly regardless of the viewer's encoding
+        guess, which the markdown text preview got wrong.
+        """
+        if self._cdp_report_blocks_fn is not None:
+            items = self._cdp_report_blocks_fn(notebook_id)
+        else:
+            from claw_v2 import notebooklm_cdp
+
+            items = notebooklm_cdp.extract_report_blocks(notebook_id)
+        if not items:
+            return None
+        from pathlib import Path as _Path
+
+        from claw_v2.notebooklm_delivery import render_report_html
+
+        meta = f"Informe NotebookLM · {time.strftime('%d %b %Y')}"
+        _title, doc = render_report_html(items, meta=meta)
+        safe_id = "".join(c for c in notebook_id if c.isalnum() or c in "-_")[:12] or "notebook"
+        out_dir = _Path("artifacts/notebooklm")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / f"informe_{safe_id}_{int(time.time())}.html"
+        path.write_text(doc, encoding="utf-8")
+        return str(path)
+
+    def _deliver_outputs(
+        self,
+        notebook_id: str,
+        outputs: tuple[str, ...],
+        result: dict[str, Any],
+        *,
+        session_id: str | None,
+    ) -> list[dict[str, Any]]:
+        """Download each ready artifact and push it to the origin chat.
+
+        Best-effort: any download/send failure is recorded and skipped so the
+        orchestration still completes and the text notify still fires.
+        """
+        summary = dict(result.get("summary") or {})
+        chat_id = self._chat_id_from_session(session_id)
+        download_fn = self._cdp_download_fn
+        deliveries: list[dict[str, Any]] = []
+        for kind in outputs:
+            mapped = self._OUTPUT_DELIVERY_MAP.get(kind)
+            if mapped is None:
+                continue
+            target, ready_flag, caption = mapped
+            if not summary.get(ready_flag):
+                continue
+            try:
+                if target == "blog":
+                    path = self._obtain_report_path(notebook_id)
+                elif download_fn is not None:
+                    path = download_fn(notebook_id, target)
+                else:
+                    from claw_v2 import notebooklm_cdp
+
+                    path = notebooklm_cdp.download_ready_artifact(notebook_id, target)
+            except Exception as exc:
+                logger.warning("NotebookLM %s fetch failed for %s: %s", target, notebook_id, exc)
+                deliveries.append({"kind": kind, "ok": False, "error": f"fetch:{exc}"[:200]})
+                continue
+            if not path:
+                deliveries.append({"kind": kind, "ok": False, "error": "no_artifact_path"})
+                continue
+            try:
+                from pathlib import Path as _Path
+
+                sent = self._get_delivery().send_to_telegram(
+                    _Path(path), chat_id=chat_id, caption=caption,
+                )
+                record = sent.to_dict()
+                record["kind"] = kind
+                deliveries.append(record)
+            except Exception as exc:
+                logger.warning("NotebookLM %s delivery failed for %s: %s", target, notebook_id, exc)
+                deliveries.append({"kind": kind, "ok": False, "error": f"send:{exc}"[:200]})
+        return deliveries
 
     def start_artifact(self, notebook_id: str, kind: str) -> str:
         normalized_kind = kind.strip().lower()
