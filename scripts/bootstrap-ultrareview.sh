@@ -9,11 +9,11 @@ cd "$repo_root"
 
 branch="$(git rev-parse --abbrev-ref HEAD)"
 
-echo "==> 1/5 Upgrading claude CLI to 2.1.120..."
+echo "==> 1/5 Upgrading claude CLI to 2.1.152..."
 if command -v npm >/dev/null 2>&1; then
-  npm install -g @anthropic-ai/claude-code@2.1.120
+  npm install -g @anthropic-ai/claude-code@2.1.152
 elif command -v pnpm >/dev/null 2>&1; then
-  pnpm add -g @anthropic-ai/claude-code@2.1.120
+  pnpm add -g @anthropic-ai/claude-code@2.1.152
 elif command -v brew >/dev/null 2>&1 && brew list claude-code >/dev/null 2>&1; then
   brew upgrade claude-code
 else
@@ -49,11 +49,11 @@ else
 - `scripts/install-hooks.sh` symlinks the hook into `.git/hooks/`.
 - `scripts/bootstrap-ultrareview.sh` one-shot installer (CLI upgrade + hook + PR + CI watch).
 
-Requires `claude` CLI 2.1.120+.
+Requires `claude` CLI 2.1.152+.
 
 ## Test plan
 
-- [ ] `./scripts/bootstrap-ultrareview.sh` produces `.git/hooks/pre-push` symlink and `claude --version` >= 2.1.120.
+- [ ] `./scripts/bootstrap-ultrareview.sh` produces `.git/hooks/pre-push` symlink and `claude --version` >= 2.1.152.
 - [ ] Clean push: hook reports "ultrareview passed".
 - [ ] Dirty push: hook blocks with non-zero exit and `/tmp/claw-ultrareview.json`.
 - [ ] `CLAW_SKIP_ULTRAREVIEW=1 git push` bypasses.
