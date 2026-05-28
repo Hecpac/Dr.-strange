@@ -150,7 +150,7 @@ def _looks_like_supported_image(raw: bytes, suffix: str) -> bool:
 #       sub-tools of any tier; without tier-introspection of the skill body the
 #       conservative default is to treat every skill run as approval-gated.
 #   Tier 2: Write, Edit, Bash, WikiLint, SkillGenerate, AnalyzeImage
-#   Tier 3: WikiDelete, A2ASend, HeyGenVideo, HeyGenDeliver, GPTImage, SkillExecute
+#   Tier 3: WikiDelete, A2ASend, HeyGenVideo, HeyGenDeliver, InstagramPublish, GPTImage, SkillExecute
 TIER_READ_ONLY = 1
 TIER_LOCAL_MUTATION = 2
 TIER_REQUIRES_APPROVAL = 3
@@ -209,6 +209,7 @@ DEFAULT_TOOL_AGENT_CLASSES: dict[str, tuple[AgentClass, ...]] = {
     "A2ASend": ("operator", "deployer"),
     "HeyGenVideo": ("operator", "deployer"),
     "HeyGenDeliver": ("operator", "deployer"),
+    "InstagramPublish": ("operator", "deployer"),
     "SocialCaptionScaffold": ("researcher", "operator", "deployer"),
     "SocialReplyScaffold": ("researcher", "operator", "deployer"),
     "SocialCompetitorResearch": ("researcher", "operator", "deployer"),
@@ -1395,6 +1396,47 @@ class ToolRegistry:
                     "chat_id": {"type": "string"},
                     "slug": {"type": "string"},
                 },
+            },
+        ))
+
+        def instagram_publish(args: dict) -> dict:
+            from claw_v2.instagram_publish import InstagramPublishService
+
+            video_path = (args.get("video_path") or "").strip()
+            caption = args.get("caption") or ""
+            if not video_path:
+                raise ValueError("video_path is required")
+            svc = InstagramPublishService()
+            result = svc.publish_reel(
+                video_path=video_path,
+                caption=caption,
+                expected_account=args.get("account"),
+            )
+            return result.to_dict()
+
+        registry.register(ToolDefinition(
+            name="InstagramPublish",
+            description=(
+                "Publish a local video as an Instagram Reel via the logged-in "
+                "CDP Chrome session: create flow, upload, caption, share, then "
+                "verify via Instagram's share-confirmation modal. "
+                "Args: video_path (str, required), caption (str, optional), "
+                "account (str, optional - expected handle, guards against "
+                "posting from the wrong account). Tier 3: external publication."
+            ),
+            allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["InstagramPublish"],
+            handler=instagram_publish, mutates_state=True, requires_network=True,
+            tier=TIER_REQUIRES_APPROVAL,
+            success_condition=EXTERNAL_TOOL_SUCCESS_CONDITIONS["InstagramPublish"],
+            preflight=EXTERNAL_TOOL_PREFLIGHTS["InstagramPublish"],
+            parameter_schema={
+                "type": "object",
+                "properties": {
+                    "video_path": {"type": "string"},
+                    "caption": {"type": "string"},
+                    "account": {"type": "string"},
+                },
+                "required": ["video_path"],
             },
         ))
 

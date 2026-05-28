@@ -149,6 +149,26 @@ EXTERNAL_TOOL_SUCCESS_CONDITIONS: dict[str, SuccessCondition] = {
         ),
     ),
 
+    # 7. InstagramPublish — publish a local video as a Reel via CDP Chrome.
+    #    Verified by Instagram's own share-confirmation modal (verified=True).
+    #    No external_check: there is no clean HTTP endpoint; the in-flow modal
+    #    is the authoritative signal and is reflected in the handler result.
+    "InstagramPublish": SuccessCondition(
+        must_contain_keys=("account", "shared", "verified"),
+        must_be_nonempty_str=("account",),
+        must_equal={"shared": True, "verified": True},
+        forbidden_reasons=(
+            "not_logged_in",
+            "wrong_account",
+            "video_not_found",
+            "file_upload_failed",
+            "caption_box_not_found",
+            "share_button_not_found",
+            "share_not_confirmed",
+            "cdp_unavailable",
+        ),
+    ),
+
     # 6. WikiDelete — cascade-delete a wiki entry. Irreversible.
     #    The contract requires `approval_artifact` to be a non-empty string;
     #    the upstream approval gate is responsible for setting it.
@@ -202,6 +222,11 @@ EXTERNAL_TOOL_PREFLIGHTS: dict[str, PreflightSpec] = {
         target="approval_artifact_present",
         must_match={"approval_artifact_present": True},
         fail_message="WikiDelete requires an explicit approval_artifact.",
+    ),
+    "InstagramPublish": PreflightSpec(
+        probe_kind="account_exists",
+        target="instagram_session",
+        fail_message="Instagram session not logged in on the CDP Chrome profile.",
     ),
 }
 

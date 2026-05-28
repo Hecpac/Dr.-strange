@@ -68,3 +68,7 @@ sgc-video/
 
 # Firecrawl scrape cache
 .firecrawl/
+
+# Exploration artifacts & generated reports (throwaway; productive code lives in claw_v2/)
+artifacts/
+reports/
