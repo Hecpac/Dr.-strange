@@ -121,6 +121,28 @@ invariants:
          Keeping the helper a pure formatter prevents that whole class
          of bug; the placement rule ensures the brain-path migration
          (P1-6 funnel) never breaks `evidence_gate_meta_skip_sync_path`.
+
+  extract_verification_status_tolerant:
+    rule: `_extract_verification_status` maps explicit verifier verdicts with
+          markdown, prose, or separator noise to passed/failed/pending while
+          preserving the exact legacy `Verification Status: passed` format.
+    enforced_by:
+      - tests/test_brain_tooluse_verify.py
+    why: Coordinator checkpoints and session-state updates both depend on this
+         parser. A verifier that says `**Verification Status:** passed.` should
+         not downgrade a real pass to unknown because of formatting.
+
+  verify_brain_tooluse_standalone:
+    rule: `verify_brain_tooluse` verifies a brain tool-use turn by dispatching
+          exactly one lane=`verifier` worker via `_dispatch_parallel`, carrying
+          files_written, commands_run, and assistant claim evidence. It must not
+          run coordinator research/synthesis phases and must default to pending
+          when no explicit verdict is parsed or dispatch fails.
+    enforced_by:
+      - tests/test_brain_tooluse_verify.py
+    why: Brain fallback tool-use already has concrete artifact evidence. The
+         verifier primitive must score those artifacts directly; reusing the
+         full coordinator cycle would verify an intermediate synthesis instead.
 ```
 
 ---

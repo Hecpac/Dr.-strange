@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 from dataclasses import dataclass
 
 from claw_v2.coordinator import CoordinatorResult, WorkerTask
+from claw_v2.tracing import new_trace_context
 from claw_v2.turn_context import (  # P0-B: re-export the turn_id helpers from bot_helpers for callers that already pull from this module.
     current_turn_id,
     new_turn_id,
@@ -145,12 +146,19 @@ __all__ = [
     "_task_queue_item_ready",
     "_tweet_fxtwitter_read",
     "_tweet_oembed_fallback",
+    "verify_brain_tooluse",
     "_help_response",
 ]
 
 
 _META_INTROSPECTION_CONTEXT: ContextVar[str | None] = ContextVar(
     "claw_meta_introspection_context", default=None
+)
+
+_VERIFICATION_STATUS_RE = re.compile(
+    r"(?:verificado|verified|verification\s+status)[\s:*\-–—]*"
+    r"(ok|passed|pending|failed|none|unknown)\b",
+    re.IGNORECASE,
 )
 
 
@@ -1566,11 +1574,7 @@ def _task_queue_item_ready(task_queue: list[dict[str, Any]], item: dict[str, Any
 
 def _extract_verification_status(text: str) -> str | None:
     for line in text.splitlines():
-        match = re.match(
-            r"^\s*(?:verificado|verified|verification status)\s*:\s*(ok|passed|pending|failed|none|unknown)\s*$",
-            line,
-            re.IGNORECASE,
-        )
+        match = _VERIFICATION_STATUS_RE.search(line)
         if match:
             normalized = match.group(1).strip().lower()
             if normalized in {"ok", "passed"}:
@@ -1581,6 +1585,57 @@ def _extract_verification_status(text: str) -> str | None:
                 return "pending"
             return "unknown"
     return None
+
+
+def verify_brain_tooluse(
+    coordinator: Any,
+    *,
+    task_id: str,
+    objective: str,
+    files_written: list[str],
+    commands_run: list[str],
+    response_excerpt: str = "",
+    lane_overrides: dict[str, dict[str, Any]] | None = None,
+) -> str:
+    """Verify a substantive brain-tool-use turn from its real artifacts.
+
+    Dispatches one verifier-lane task directly, without research/synthesis
+    phases. The close path does not call this helper until the B1 wiring lands.
+    """
+    evidence_lines: list[str] = []
+    if files_written:
+        evidence_lines.append("Files written: " + ", ".join(files_written[:50]))
+    if commands_run:
+        evidence_lines.append("Commands run: " + " | ".join(commands_run[:20]))
+    if response_excerpt:
+        evidence_lines.append("Assistant claim: " + response_excerpt[:1000])
+    evidence = "\n".join(evidence_lines) or "No artifacts captured."
+
+    instruction = (
+        "Verify whether this brain tool-use turn actually accomplished its "
+        f"objective from the evidence below. Objective: {objective}\n\n"
+        f"{evidence}\n\n"
+        "Inspect the written files / commands as needed. Return a concise "
+        "operational review and include a line "
+        "`Verification Status: passed|pending|failed`. "
+        "If more work is needed, include `Siguiente paso: ...`."
+    )
+    task = WorkerTask(
+        name="verify_brain_action",
+        instruction=instruction,
+        lane="verifier",
+    )
+    try:
+        trace = new_trace_context(job_id=task_id, artifact_id=task_id)
+        results = coordinator._dispatch_parallel(
+            [task],
+            trace,
+            lane_overrides=lane_overrides,
+        )
+    except Exception:
+        return "pending"
+    text = "\n".join(str(getattr(result, "content", "") or "") for result in results)
+    return _extract_verification_status(text) or "pending"
 
 
 def _build_checkpoint(text: str, *, pending_action: str | None, verification_status: str) -> dict[str, str]:
