@@ -350,6 +350,7 @@ class AppConfig:
     self_improve_test_timeout_seconds: int
     autonomous_maintenance_enabled: bool
     use_compaction: bool
+    brain_tooluse_verify: bool
     cache_prefix_ttl: int
     allowed_paths: list[Path]
     approvals_root: Path
@@ -482,6 +483,7 @@ class AppConfig:
             self_improve_test_timeout_seconds=_env_int("SELF_IMPROVE_TEST_TIMEOUT_SECONDS", 600),
             autonomous_maintenance_enabled=_autonomous_maintenance_from_env(),
             use_compaction=_env_bool("USE_COMPACTION", True),
+            brain_tooluse_verify=_env_bool("BRAIN_TOOLUSE_VERIFY", False),
             cache_prefix_ttl=_env_int("CACHE_PREFIX_TTL", 3600),
             allowed_paths=[Path(p) for p in os.getenv("ALLOWED_PATHS", "").split(":") if p],
             approvals_root=Path(os.getenv("APPROVALS_ROOT", str(home / ".claw" / "pending_approvals"))),

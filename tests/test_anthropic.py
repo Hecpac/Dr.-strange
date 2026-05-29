@@ -13,6 +13,7 @@ from claw_v2.adapters.anthropic import (
     SILENCE_DIRECTIVE,
     create_claude_sdk_executor,
     _safe_runtime_policy_reason,
+    _tool_input_evidence,
 )
 from claw_v2.adapters.base import AdapterError, AdapterUnavailableError, LLMRequest
 from claw_v2.llm import LLMRouter
@@ -22,6 +23,25 @@ from tests.helpers import make_config
 
 
 class AnthropicIntegrationTests(unittest.TestCase):
+    def test_tool_input_evidence_keeps_paths_and_commands_only(self) -> None:
+        self.assertEqual(
+            _tool_input_evidence(
+                "Write",
+                {"file_path": "notes/a.txt", "content": "secret body"},
+            ),
+            {"file_path": "notes/a.txt"},
+        )
+        self.assertEqual(
+            _tool_input_evidence("Bash", {"command": "pytest -q"}),
+            {"command": "pytest -q"},
+        )
+
+    def test_tool_input_evidence_omits_unknown_tool_inputs(self) -> None:
+        self.assertEqual(
+            _tool_input_evidence("UnknownTool", {"token": "abc", "file_path": "x"}),
+            {},
+        )
+
     def test_runtime_policy_reason_hides_raw_whitelist_error(self) -> None:
         reason = _safe_runtime_policy_reason(
             "binary 'brew' requires higher privilege level (not in the allowed whitelist)"

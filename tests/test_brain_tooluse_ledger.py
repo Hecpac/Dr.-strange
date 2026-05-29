@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 from claw_v2.bot import BotService
 from claw_v2.jobs import JobService
@@ -64,6 +65,14 @@ class _StubBrain:
         self.memory = _StubBrainMemory(state)
 
 
+class _StubTaskHandler:
+    def __init__(self, coordinator: object | None = None) -> None:
+        self.coordinator = coordinator
+
+    def _lane_model_overrides(self, session_id: str) -> dict[str, dict[str, Any]]:
+        return {}
+
+
 @dataclass
 class _StubResponse:
     content: str = ""
@@ -75,6 +84,8 @@ def _make_bot(
     task_ledger: TaskLedger,
     state: dict | None = None,
     job_service: JobService | None = None,
+    brain_tooluse_verify: bool = False,
+    coordinator: object | None = None,
 ) -> BotService:
     """Construct just enough BotService surface for the ledger to run.
 
@@ -87,6 +98,8 @@ def _make_bot(
     bot.task_ledger = task_ledger
     bot.job_service = job_service
     bot.brain = _StubBrain(state)
+    bot.config = SimpleNamespace(brain_tooluse_verify=brain_tooluse_verify)
+    bot._task_handler = _StubTaskHandler(coordinator)
     return bot
 
 
@@ -397,6 +410,167 @@ class BrainToolUseLedgerTests(unittest.TestCase):
             task.artifacts["evidence_manifest"]["blockers"],
             ["passed_verification_missing_for_action"],
         )
+
+    def test_b1_off_is_unchanged_for_mutation(self) -> None:
+        observe = _RecordingObserve()
+        observe.canned_trace_events = [
+            _tool_event("Write", tool_input={"file_path": "notes/b1.txt"}),
+        ]
+        bot = _make_bot(
+            observe,
+            self.ledger,
+            brain_tooluse_verify=False,
+            coordinator=object(),
+        )
+
+        with patch("claw_v2.bot.verify_brain_tooluse") as verifier:
+            bot._attach_brain_tool_use_ledger(
+                session_id="tg-test",
+                response=_StubResponse(artifacts={"trace_id": "trace-X"}),
+                source_text="actualiza la nota",
+                runtime_channel="telegram",
+            )
+
+        verifier.assert_not_called()
+        task = self.ledger.list(limit=10)[0]
+        self.assertEqual(task.status, "completed_unverified")
+        self.assertEqual(task.verification_status, "needs_verification")
+
+    def test_b1_on_passed_closes_succeeded_for_mutation(self) -> None:
+        observe = _RecordingObserve()
+        observe.canned_trace_events = [
+            _tool_event("Write", tool_input={"file_path": "notes/b1.txt"}),
+            _tool_event("Bash", tool_input={"command": "pytest -q"}),
+        ]
+        bot = _make_bot(
+            observe,
+            self.ledger,
+            brain_tooluse_verify=True,
+            coordinator=object(),
+        )
+
+        with patch("claw_v2.bot.verify_brain_tooluse", return_value="passed") as verifier:
+            bot._attach_brain_tool_use_ledger(
+                session_id="tg-test",
+                response=_StubResponse(
+                    content="Actualicé la nota y corrí pytest.",
+                    artifacts={"trace_id": "trace-X"},
+                ),
+                source_text="actualiza la nota",
+                runtime_channel="telegram",
+            )
+
+        verifier.assert_called_once()
+        task = self.ledger.list(limit=10)[0]
+        self.assertEqual(task.status, "succeeded")
+        self.assertEqual(task.verification_status, "passed")
+        self.assertEqual(task.artifacts["evidence_manifest"]["verification_result"], "passed")
+        events = [name for name, _ in observe.events]
+        self.assertIn("brain_tooluse_ledger_verified", events)
+
+    def test_b1_on_passed_closes_succeeded_for_keyword_required_read(self) -> None:
+        observe = _RecordingObserve()
+        observe.canned_trace_events = [
+            _tool_event("Read", tool_input={"file_path": "artifacts/instagram/check_publish_profile.png"}),
+        ]
+        bot = _make_bot(
+            observe,
+            self.ledger,
+            brain_tooluse_verify=True,
+            coordinator=object(),
+        )
+
+        with patch("claw_v2.bot.verify_brain_tooluse", return_value="passed"):
+            bot._attach_brain_tool_use_ledger(
+                session_id="tg-test",
+                response=_StubResponse(
+                    content="Sí, quedó publicado.",
+                    artifacts={"trace_id": "trace-X"},
+                ),
+                source_text="Publicaste ?",
+                runtime_channel="telegram",
+            )
+
+        task = self.ledger.list(limit=10)[0]
+        self.assertEqual(task.status, "succeeded")
+        self.assertEqual(task.verification_status, "passed")
+
+    def test_b1_on_failed_closes_failed(self) -> None:
+        observe = _RecordingObserve()
+        observe.canned_trace_events = [
+            _tool_event("Write", tool_input={"file_path": "notes/b1.txt"}),
+        ]
+        bot = _make_bot(
+            observe,
+            self.ledger,
+            brain_tooluse_verify=True,
+            coordinator=object(),
+        )
+
+        with patch("claw_v2.bot.verify_brain_tooluse", return_value="failed") as verifier:
+            bot._attach_brain_tool_use_ledger(
+                session_id="tg-test",
+                response=_StubResponse(artifacts={"trace_id": "trace-X"}),
+                source_text="actualiza la nota",
+                runtime_channel="telegram",
+            )
+
+        verifier.assert_called_once()
+        task = self.ledger.list(limit=10)[0]
+        self.assertEqual(task.status, "failed")
+        self.assertEqual(task.verification_status, "failed")
+        self.assertEqual(task.artifacts["evidence_manifest"]["verification_result"], "failed")
+
+    def test_b1_on_pending_falls_through_to_conservative_close(self) -> None:
+        observe = _RecordingObserve()
+        observe.canned_trace_events = [
+            _tool_event("Write", tool_input={"file_path": "notes/b1.txt"}),
+        ]
+        bot = _make_bot(
+            observe,
+            self.ledger,
+            brain_tooluse_verify=True,
+            coordinator=object(),
+        )
+
+        with patch("claw_v2.bot.verify_brain_tooluse", return_value="pending") as verifier:
+            bot._attach_brain_tool_use_ledger(
+                session_id="tg-test",
+                response=_StubResponse(artifacts={"trace_id": "trace-X"}),
+                source_text="actualiza la nota",
+                runtime_channel="telegram",
+            )
+
+        verifier.assert_called_once()
+        task = self.ledger.list(limit=10)[0]
+        self.assertEqual(task.status, "completed_unverified")
+        self.assertEqual(task.verification_status, "needs_verification")
+        self.assertEqual(task.artifacts["evidence_manifest"]["verification_result"], "needs_verification")
+
+    def test_b1_no_coordinator_skips_verifier(self) -> None:
+        observe = _RecordingObserve()
+        observe.canned_trace_events = [
+            _tool_event("Write", tool_input={"file_path": "notes/b1.txt"}),
+        ]
+        bot = _make_bot(
+            observe,
+            self.ledger,
+            brain_tooluse_verify=True,
+            coordinator=None,
+        )
+
+        with patch("claw_v2.bot.verify_brain_tooluse") as verifier:
+            bot._attach_brain_tool_use_ledger(
+                session_id="tg-test",
+                response=_StubResponse(artifacts={"trace_id": "trace-X"}),
+                source_text="actualiza la nota",
+                runtime_channel="telegram",
+            )
+
+        verifier.assert_not_called()
+        task = self.ledger.list(limit=10)[0]
+        self.assertEqual(task.status, "completed_unverified")
+        self.assertEqual(task.verification_status, "needs_verification")
 
     # --- H. tier-3 / approval gate -> recorded as skipped --------------------
 

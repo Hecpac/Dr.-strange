@@ -49,6 +49,7 @@ def make_config(root: Path) -> AppConfig:
         self_improve_test_timeout_seconds=600,
         autonomous_maintenance_enabled=True,
         use_compaction=False,
+        brain_tooluse_verify=False,
         cache_prefix_ttl=3600,
         allowed_paths=[],
         approvals_root=root / "approvals",

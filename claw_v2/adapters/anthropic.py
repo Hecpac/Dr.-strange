@@ -382,6 +382,7 @@ class ClaudeSDKExecutor:
 
         async def post_tool_use(input_data: dict[str, Any], tool_use_id: str | None, context: Any) -> dict[str, Any]:
             if self.observe is not None:
+                tool_name = str(input_data.get("tool_name") or "")
                 self.observe.emit(
                     "sdk_post_tool_use",
                     lane=request.lane,
@@ -389,9 +390,13 @@ class ClaudeSDKExecutor:
                     model=request.model,
                     **trace_metadata(request.evidence_pack),
                     payload={
-                        "tool_name": input_data.get("tool_name"),
+                        "tool_name": tool_name,
                         "tool_use_id": tool_use_id,
                         "session_id": input_data.get("session_id"),
+                        "tool_input": _tool_input_evidence(
+                            tool_name,
+                            input_data.get("tool_input"),
+                        ),
                     },
                 )
             return {}
@@ -400,6 +405,7 @@ class ClaudeSDKExecutor:
             input_data: dict[str, Any], tool_use_id: str | None, context: Any
         ) -> dict[str, Any]:
             if self.observe is not None:
+                tool_name = str(input_data.get("tool_name") or "")
                 tool_response = input_data.get("tool_response") or {}
                 error_message = (
                     input_data.get("error")
@@ -417,9 +423,13 @@ class ClaudeSDKExecutor:
                     model=request.model,
                     **trace_metadata(request.evidence_pack),
                     payload={
-                        "tool_name": input_data.get("tool_name"),
+                        "tool_name": tool_name,
                         "tool_use_id": tool_use_id,
                         "session_id": input_data.get("session_id"),
+                        "tool_input": _tool_input_evidence(
+                            tool_name,
+                            input_data.get("tool_input"),
+                        ),
                         "error": str(error_message)[:1000],
                         "is_error": bool(tool_response.get("is_error")) if isinstance(tool_response, dict) else False,
                     },
@@ -531,6 +541,27 @@ def create_claude_sdk_executor(
 ) -> Callable[[LLMRequest], LLMResponse]:
     executor = ClaudeSDKExecutor(config, observe=observe, approvals=approvals)
     return executor
+
+
+def _tool_input_evidence(tool_name: str, tool_input: Any) -> dict[str, str]:
+    if not isinstance(tool_input, dict):
+        return {}
+    allowed_by_tool = {
+        "Bash": ("command", "cmd"),
+        "Edit": ("file_path",),
+        "Write": ("file_path",),
+        "Read": ("file_path",),
+        "NotebookEdit": ("notebook_path", "file_path"),
+        "Grep": ("pattern", "path"),
+        "Glob": ("pattern",),
+    }
+    allowed = allowed_by_tool.get(tool_name, ())
+    evidence: dict[str, str] = {}
+    for key in allowed:
+        value = tool_input.get(key)
+        if value:
+            evidence[key] = str(value)[:1000]
+    return evidence
 
 
 def _load_sdk() -> Any:

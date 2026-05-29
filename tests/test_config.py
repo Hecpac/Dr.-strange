@@ -92,6 +92,21 @@ class AppConfigDefaultsTests(unittest.TestCase):
             finally:
                 os.chdir(previous_cwd)
 
+    def test_brain_tooluse_verify_defaults_off_and_accepts_override(self) -> None:
+        previous_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.chdir(tmpdir)
+            try:
+                with patch.dict(os.environ, {}, clear=True):
+                    config = AppConfig.from_env()
+                self.assertFalse(config.brain_tooluse_verify)
+
+                with patch.dict(os.environ, {"BRAIN_TOOLUSE_VERIFY": "true"}, clear=True):
+                    configured = AppConfig.from_env()
+                self.assertTrue(configured.brain_tooluse_verify)
+            finally:
+                os.chdir(previous_cwd)
+
     def test_morning_brief_configuration_loads_from_env(self) -> None:
         previous_cwd = Path.cwd()
         with tempfile.TemporaryDirectory() as tmpdir:

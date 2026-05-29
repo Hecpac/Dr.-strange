@@ -65,7 +65,7 @@ from claw_v2.model_registry import (
 from claw_v2.pipeline import PipelineService
 from claw_v2.social import SocialPublisher
 from claw_v2.bot_helpers import *  # noqa: F403
-from claw_v2.bot_helpers import _is_secret_shaped_token  # explicit: private helper
+from claw_v2.bot_helpers import _is_secret_shaped_token, verify_brain_tooluse  # explicit: private helper + B1 verifier seam
 from claw_v2.turn_receipt import emit_turn_receipt
 
 if TYPE_CHECKING:
@@ -4919,6 +4919,79 @@ class BotService:
             except Exception:
                 logger.debug("brain_tooluse_ledger_failed emit failed", exc_info=True)
             return
+        # B1: when explicitly enabled, verify substantive brain tool-use turns
+        # against the artifacts that actually ran instead of the request text.
+        performed_mutation = bool(files_written) or bool(commands_run)
+        coordinator = getattr(getattr(self, "_task_handler", None), "coordinator", None)
+        verify_enabled = bool(
+            getattr(getattr(self, "config", None), "brain_tooluse_verify", False)
+        )
+        should_verify = (
+            verify_enabled
+            and coordinator is not None
+            and (requires_verified_completion or performed_mutation)
+        )
+        if should_verify:
+            lane_overrides: dict[str, dict[str, Any]] | None = None
+            try:
+                lane_overrides = self._task_handler._lane_model_overrides(session_id)
+            except Exception:
+                logger.debug("brain_tooluse verifier lane override lookup failed", exc_info=True)
+            verdict = verify_brain_tooluse(
+                coordinator,
+                task_id=task_id,
+                objective=source_text,
+                files_written=sorted(files_written)[:50],
+                commands_run=commands_run[:20],
+                response_excerpt=str(getattr(response, "content", "") or ""),
+                lane_overrides=lane_overrides,
+            )
+            if verdict == "passed":
+                evidence_manifest["completed_at"] = time.time()
+                evidence_manifest["verification_result"] = "passed"
+                self.task_ledger.mark_terminal(
+                    task_id,
+                    status="succeeded",
+                    summary=f"brain tool-use verified: {len(tool_events)} tool calls",
+                    verification_status="passed",
+                    artifacts=brain_artifacts,
+                )
+                try:
+                    self.observe.emit(
+                        "brain_tooluse_ledger_verified",
+                        payload={
+                            "task_id": task_id,
+                            "task_status": "succeeded",
+                            "verification_status": "passed",
+                            "tools_count": len(tool_events),
+                        },
+                    )
+                except Exception:
+                    logger.debug("brain_tooluse_ledger_verified emit failed", exc_info=True)
+                return
+            if verdict == "failed":
+                evidence_manifest["completed_at"] = time.time()
+                evidence_manifest["verification_result"] = "failed"
+                self.task_ledger.mark_terminal(
+                    task_id,
+                    status="failed",
+                    summary="brain tool-use failed verification",
+                    verification_status="failed",
+                    artifacts=brain_artifacts,
+                )
+                try:
+                    self.observe.emit(
+                        "brain_tooluse_ledger_verification_failed",
+                        payload={
+                            "task_id": task_id,
+                            "task_status": "failed",
+                            "verification_status": "failed",
+                            "tools_count": len(tool_events),
+                        },
+                    )
+                except Exception:
+                    logger.debug("brain_tooluse_ledger_verification_failed emit failed", exc_info=True)
+                return
         # Tools ran without failure, but no verifier has passed yet. Close the
         # row as completed_unverified so the stale-running watchdog does not
         # rewrite real user-visible work into a false lost failure.

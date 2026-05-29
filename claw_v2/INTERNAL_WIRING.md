@@ -143,6 +143,26 @@ invariants:
     why: Brain fallback tool-use already has concrete artifact evidence. The
          verifier primitive must score those artifacts directly; reusing the
          full coordinator cycle would verify an intermediate synthesis instead.
+
+  brain_tooluse_verify_flag_gated:
+    rule: With `BRAIN_TOOLUSE_VERIFY` off, the brain tool-use close path remains
+          conservative: substantive turns still close as completed_unverified or
+          blocked according to the pre-B1 branches. With the flag on, a turn
+          that either requires verified completion or performed mutation
+          (files_written or commands_run) calls `verify_brain_tooluse`; passed
+          closes succeeded/passed, failed closes failed/failed, and pending falls
+          through to the existing conservative branches. If the coordinator is
+          unavailable, verifier dispatch is skipped. Anthropic SDK tool hooks
+          must persist minimal tool_input evidence (paths, commands, patterns)
+          so the close path can derive files_written and commands_run from real
+          tool effects without storing file contents.
+    enforced_by:
+      - tests/test_brain_tooluse_ledger.py
+      - tests/test_anthropic.py
+    why: The signal that a turn needs verification must come from actual tool
+         effects, not only a small allowlist of request text. The flag preserves
+         rollout control because each verified turn spends an additional
+         verifier-lane call.
 ```
 
 ---
