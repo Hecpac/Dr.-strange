@@ -23,6 +23,7 @@ from claw_v2.config import AppConfig
 from claw_v2.network_proxy import DomainAllowlistEnforcer
 from claw_v2.observe import ObserveStream
 from claw_v2.approval_gate import ApprovalPending, build_telegram_approval_gate
+from claw_v2.redaction import redact_text
 from claw_v2.runtime_policy import RuntimePolicyEngine
 from claw_v2.sandbox import SandboxPolicy
 from claw_v2.tracing import trace_metadata
@@ -560,7 +561,7 @@ def _tool_input_evidence(tool_name: str, tool_input: Any) -> dict[str, str]:
     for key in allowed:
         value = tool_input.get(key)
         if value:
-            evidence[key] = str(value)[:1000]
+            evidence[key] = redact_text(str(value)[:1000], limit=0)
     return evidence
 
 

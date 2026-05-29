@@ -42,6 +42,15 @@ class AnthropicIntegrationTests(unittest.TestCase):
             {},
         )
 
+    def test_tool_input_evidence_redacts_secret_shaped_commands(self) -> None:
+        evidence = _tool_input_evidence(
+            "Bash",
+            {"command": "curl -H 'Authorization: Bearer abcdefghijklmnopqrstuvwxyz123456' https://example.test"},
+        )
+
+        self.assertNotIn("abcdefghijklmnopqrstuvwxyz123456", evidence["command"])
+        self.assertIn("[REDACTED]", evidence["command"])
+
     def test_runtime_policy_reason_hides_raw_whitelist_error(self) -> None:
         reason = _safe_runtime_policy_reason(
             "binary 'brew' requires higher privilege level (not in the allowed whitelist)"
