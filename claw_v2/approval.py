@@ -155,6 +155,10 @@ class ApprovalManager:
             raw = self._read_locked_fd(fd)
             payload = json.loads(raw.decode("utf-8"))
             modifier(payload)  # type: ignore[operator]
+            # ``_result`` is a return side-channel, not record state — strip it
+            # before persisting so a resolved record is content-immutable on
+            # replay (and re-attach it for the caller).
+            result = payload.pop("_result", False)
             new_data = json.dumps(payload, indent=2).encode("utf-8")
             os.lseek(fd, 0, os.SEEK_SET)
             os.ftruncate(fd, 0)
@@ -162,6 +166,7 @@ class ApprovalManager:
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
+        payload["_result"] = result
         return payload
 
     def status(self, approval_id: str) -> str:

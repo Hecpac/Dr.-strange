@@ -103,6 +103,30 @@ class ApprovalManagerTests(unittest.TestCase):
             self.assertFalse(m.approve(p.approval_id, p.token))
             self.assertEqual(m.status(p.approval_id), "expired")
 
+    def test_approve_does_not_persist_result_side_channel(self) -> None:
+        # The _result return side-channel must never be written to the record.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            m = ApprovalManager(Path(tmpdir), "secret")
+            p = m.create("deploy", "x")
+            m.approve(p.approval_id, p.token)
+            raw = json.loads(m._path_for(p.approval_id).read_text(encoding="utf-8"))
+            self.assertNotIn("_result", raw)
+            self.assertEqual(raw["status"], "approved")
+
+    def test_resolved_record_is_content_immutable_on_replay(self) -> None:
+        # A resolved record's persisted bytes must not change on replay /
+        # wrong-token-after-approval.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            m = ApprovalManager(Path(tmpdir), "secret")
+            p = m.create("social_publish:acme", "post")
+            m.approve(p.approval_id, p.token)
+            path = m._path_for(p.approval_id)
+            before = path.read_text(encoding="utf-8")
+            m.approve(p.approval_id, p.token)        # replay valid token
+            m.approve(p.approval_id, "wrong-token")  # wrong token after approval
+            after = path.read_text(encoding="utf-8")
+            self.assertEqual(before, after)
+
     def test_approved_tool_invocation_allows_one_matching_tool_call(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = ApprovalManager(Path(tmpdir), "secret")
