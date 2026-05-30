@@ -106,6 +106,11 @@ class RuntimePolicyEngineTests(unittest.TestCase):
         self.assertIn("~/.netrc", found)
         nested = [v for _, v in _iter_path_values({"path": ["/etc/passwd", "~/.npmrc"]})]
         self.assertIn("/etc/passwd", nested)
+        # PR1 follow-up: non-scalars nested under a path key must not bypass extraction.
+        nested_dict = [v for _, v in _iter_path_values({"path": [{"path": "/etc/passwd"}]})]
+        self.assertIn("/etc/passwd", nested_dict)
+        nested_list = [v for _, v in _iter_path_values({"path": [["/etc/passwd"]]})]
+        self.assertIn("/etc/passwd", nested_list)
 
 
 if __name__ == "__main__":

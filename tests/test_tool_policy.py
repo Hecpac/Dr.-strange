@@ -125,6 +125,14 @@ class SecretPathTests(unittest.TestCase):
             "/Users/x/.ssh/id_ed25519",
             "/Users/x/.ssh/id_ecdsa",
             "cookies.json",
+            # PR1 follow-up: relative forms must match without a leading directory.
+            ".docker/config.json",
+            "gh/hosts.yml",
+            ".aws/config",
+            ".kube/config",
+            ".config/gcloud/access_tokens.json",
+            ".ssh/config",
+            ".ssh/id_ed25519",
         ):
             with self.subTest(path=path):
                 self.assertTrue(path_is_secret(path), msg=path)

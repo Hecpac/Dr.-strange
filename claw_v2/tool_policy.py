@@ -56,10 +56,15 @@ SECRET_PATH_PATTERNS: tuple[str, ...] = (
     "*cookies*",
     "*.keychain",
     "*.keychain-db",
+    ".docker/*",
     "*/.docker/*",
+    "gh/hosts.yml",
     "*/gh/hosts.yml",
-    "*/.aws/config",  # .aws/credentials already covered by *credential*
+    ".aws/config",  # .aws/credentials already covered by *credential*
+    "*/.aws/config",
+    ".kube/config",
     "*/.kube/config",
+    ".config/gcloud/*",
     "*/.config/gcloud/*",
     "*_history",  # .zsh_history / .bash_history / .python_history (narrower than *history to avoid doc false positives)
     "*.kdbx",
@@ -67,6 +72,7 @@ SECRET_PATH_PATTERNS: tuple[str, ...] = (
     "id_ed25519*",
     "id_ecdsa*",
     "id_dsa*",
+    ".ssh/*",
     "*/.ssh/*",
 )
 

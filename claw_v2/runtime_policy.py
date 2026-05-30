@@ -296,14 +296,12 @@ def _iter_path_values(value: Any, *, key: str = "") -> list[tuple[str, str]]:
         values: list[tuple[str, str]] = []
         for child_key, child_value in value.items():
             normalized = str(child_key).lower()
-            if normalized in _PATH_KEYS:
-                if isinstance(child_value, (str, Path)):
-                    values.append((normalized, str(child_value)))
-                elif isinstance(child_value, list):
-                    values.extend(
-                        (normalized, str(item)) for item in child_value if isinstance(item, (str, Path))
-                    )
+            if normalized in _PATH_KEYS and isinstance(child_value, (str, Path)):
+                values.append((normalized, str(child_value)))
                 continue
+            # Recurse into anything else (dict/list, including non-scalars nested
+            # under a path key) so a path arg buried in a container cannot bypass
+            # the secret/boundary check.
             values.extend(_iter_path_values(child_value, key=normalized))
         return values
     if isinstance(value, list):
