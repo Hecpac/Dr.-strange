@@ -16,6 +16,10 @@ from claw_v2.tracing import new_trace_context
 logger = logging.getLogger(__name__)
 
 
+def _env_flag(name: str) -> bool:
+    return os.getenv(name, "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass(slots=True)
 class TickResult:
     executed_jobs: list[str]
@@ -34,6 +38,9 @@ class ClawDaemon:
         stale_task_seconds: float = 6 * 60 * 60,
         task_reconciliation_interval: float = 5 * 60,
         pending_verification_interval: float = 15 * 60,
+        pending_verification_drain_apply: bool | None = None,
+        pending_verification_drain_max_apply: int = 10,
+        pending_verification_drain_max_scan: int = 500,
     ) -> None:
         self.scheduler = scheduler
         self.heartbeat = heartbeat
@@ -45,6 +52,15 @@ class ClawDaemon:
         self._last_task_reconciliation_at = 0.0
         self.pending_verification_interval = pending_verification_interval
         self._last_pending_verification_at = 0.0
+        # Checkpoint D: live drain of the read-only backlog. Default OFF — the
+        # env flag (or an explicit arg) must opt in before any row transitions.
+        if pending_verification_drain_apply is None:
+            pending_verification_drain_apply = _env_flag(
+                "CLAW_PENDING_VERIFICATION_DRAIN_APPLY"
+            )
+        self.pending_verification_drain_apply = bool(pending_verification_drain_apply)
+        self.pending_verification_drain_max_apply = pending_verification_drain_max_apply
+        self.pending_verification_drain_max_scan = pending_verification_drain_max_scan
 
     def tick(self, *, now: float | None = None) -> TickResult:
         trace = new_trace_context(artifact_id="daemon_tick")
@@ -146,6 +162,18 @@ class ClawDaemon:
             logger.exception("pending verification reconciliation failed")
             return None
         self._last_pending_verification_at = current
+        # Checkpoint D: gated live drain of the safe read-only subset. OFF by
+        # default; contained like the report above so a drain failure never
+        # stops the scheduler / stale / orphan reconciliation in this tick.
+        if self.pending_verification_drain_apply:
+            try:
+                self.task_ledger.drain_reconcilable_unverified(
+                    apply=True,
+                    max_scan=self.pending_verification_drain_max_scan,
+                    max_apply=self.pending_verification_drain_max_apply,
+                )
+            except Exception:
+                logger.exception("pending verification drain failed")
         return int(report.get("unverified_count", 0))
 
     async def run_loop(self, shutdown: asyncio.Event, interval: float = 60.0) -> None:

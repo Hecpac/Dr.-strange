@@ -8,8 +8,8 @@
 ## meta
 
 ```yaml
-describes_commit: 448ef39+pr2-checkpoint-c2
-doc_version: 1.8
+describes_commit: 448ef39+pr2-checkpoint-d
+doc_version: 1.9
 last_verified: 2026-05-30
 verification_method: manual + grep cross-check
 anchor_strategy: symbol_only  # path:symbol, no line numbers
@@ -182,10 +182,19 @@ invariants:
           classify and apply is left for the human/verifier lane
           (`skipped_classification_changed`), distinct from a status/pending/
           overdue drift (`skipped_state_changed`). The batch rolls back on any
-          mid-loop failure.
+          mid-loop failure. D (2026-05-30): the daemon tick
+          (`_reconcile_pending_verification`) calls the drain with `apply=True`
+          ONLY when `CLAW_PENDING_VERIFICATION_DRAIN_APPLY` (default OFF) is set,
+          bounded by the drain's `max_scan` (daemon arg
+          `pending_verification_drain_max_scan`, default 500; oldest-first,
+          `limit+1` proves `scan_capped`) and `max_apply` (daemon arg
+          `pending_verification_drain_max_apply`, default 10). The drain call is
+          contained in its own try/except so a failure never stops the
+          scheduler / stale / orphan reconciliation (like the A1 report guard).
     enforced_by:
       - tests/test_brain_tooluse_ledger.py
       - tests/test_completed_unverified_reconciliation.py
+      - tests/test_daemon.py
       - tests/test_anthropic.py
     why: The signal that a turn needs verification must come from actual tool
          effects, not only a small allowlist of request text. The flag preserves

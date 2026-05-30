@@ -214,32 +214,17 @@ class DrainReconcilableUnverifiedTests(unittest.TestCase):
         return record.verification_status if record else None
 
     @staticmethod
-    def _stale_report(task_id):
-        # A reconciliation report that (stale-ly) classifies task_id as an
-        # eligible read-only auto-close, regardless of the row's real state.
-        return {
-            "generated_at": "2026-05-30T00:00:00+00:00",
-            "deadline_seconds": 86400,
-            "unverified_count": 1,
-            "overdue_count": 1,
-            "by_recommended_action": {"auto_close_as_unverified_lookup": 1},
-            "cases": [
-                {
-                    "task_id": task_id,
-                    "channel": "telegram",
-                    "external_session_id": "s",
-                    "session_id": "tg-1",
-                    "tools": ["Read"],
-                    "verification_status": "needs_verification",
-                    "summary": "",
-                    "error": "",
-                    "completed_at_epoch": 0.0,
-                    "deadline_at_epoch": 0.0,
-                    "deadline_at": "1970-01-01T00:00:00+00:00",
-                    "recommended_action": "auto_close_as_unverified_lookup",
-                }
-            ],
-        }
+    def _fake_scan_record(task_id, tools, *, error="", age_seconds=48 * 3600):
+        # A record the scan (stale-ly) yields as a read-only candidate,
+        # regardless of the row's real state — used to drive TOCTOU re-checks.
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            task_id=task_id,
+            artifacts={"evidence_manifest": {"tools_run": list(tools)}},
+            error=error,
+            completed_at=time.time() - age_seconds,
+        )
 
     def test_dry_run_lists_eligible_without_mutation(self) -> None:
         self._seed_unverified("ro-overdue", ["Read", "Grep"])
@@ -369,13 +354,14 @@ class DrainReconcilableUnverifiedTests(unittest.TestCase):
         self.assertEqual(self.ledger.get("ro-passed").status, "completed_unverified")
 
     def test_classification_revalidated_under_lock_fail_closed(self) -> None:
-        # Row is ACTUALLY mutating (Bash/Write) + overdue + pending, but a stale
-        # classify reports it as an eligible read-only auto-close. The lock-held
+        # Row is ACTUALLY mutating (Bash/Write) + overdue + pending, but the scan
+        # (stale-ly) yields it as a read-only candidate. The lock-held
         # re-classification on fresh data must FAIL CLOSED and not drain it.
         self._seed_unverified("toctou", ["Bash", "Write"])
-        with mock.patch(
-            "claw_v2.reconciliation.build_reconciliation_report",
-            return_value=self._stale_report("toctou"),
+        with mock.patch.object(
+            self.ledger,
+            "_scan_drainable_candidates",
+            return_value=([self._fake_scan_record("toctou", ["Read"])], False),
         ):
             result = self.ledger.drain_reconcilable_unverified(apply=True)
         self.assertEqual(result["drained_count"], 0)
@@ -385,18 +371,61 @@ class DrainReconcilableUnverifiedTests(unittest.TestCase):
         self.assertEqual(self._payloads("pending_verification_readonly_auto_closed"), [])
 
     def test_state_revalidated_under_lock_skips_drifted_row(self) -> None:
-        # Row drifted to a non-pending verification_status after a stale classify;
+        # Row drifted to a non-pending verification_status after a stale scan;
         # the status-pair guard skips it as state-changed (not classification).
         self._seed_unverified("drift", ["Read", "Grep"], verification_status="passed")
-        with mock.patch(
-            "claw_v2.reconciliation.build_reconciliation_report",
-            return_value=self._stale_report("drift"),
+        with mock.patch.object(
+            self.ledger,
+            "_scan_drainable_candidates",
+            return_value=([self._fake_scan_record("drift", ["Read"])], False),
         ):
             result = self.ledger.drain_reconcilable_unverified(apply=True)
         self.assertEqual(result["drained_count"], 0)
         self.assertEqual(result["skipped_state_changed"], 1)
         self.assertEqual(result["skipped_classification_changed"], 0)
         self.assertEqual(self.ledger.get("drift").status, "completed_unverified")
+
+    def test_max_apply_caps_closures_per_call(self) -> None:
+        # D guardrail: never drain the whole backlog in one call.
+        for i in range(4):
+            self._seed_unverified(f"ro{i}", ["Read", "Grep"])
+        result = self.ledger.drain_reconcilable_unverified(apply=True, max_apply=2)
+        self.assertEqual(result["eligible_count"], 4)
+        self.assertEqual(result["drained_count"], 2)
+        self.assertEqual(result["skipped_over_max_apply"], 2)
+        cancelled = sum(
+            1 for i in range(4) if self.ledger.get(f"ro{i}").status == "cancelled"
+        )
+        self.assertEqual(cancelled, 2)
+
+    def test_eligible_behind_scan_cap_reachable_with_larger_scan(self) -> None:
+        # Older mutating rows must not hide a (newer, still-overdue) read-only row
+        # forever: a small scan misses it; a larger scan reaches it.
+        self._seed_unverified("m1", ["Bash"], overdue=False)
+        self._backdate("m1", 100 * 3600)
+        self._seed_unverified("m2", ["Write"], overdue=False)
+        self._backdate("m2", 99 * 3600)
+        self._seed_unverified("ro", ["Read", "Grep"], overdue=False)
+        self._backdate("ro", 50 * 3600)  # >24h overdue, but newest of the three
+        small = self.ledger.drain_reconcilable_unverified(apply=True, max_scan=2)
+        self.assertEqual(small["drained_count"], 0)
+        self.assertTrue(small["scan_capped"])
+        self.assertEqual(self.ledger.get("ro").status, "completed_unverified")
+        big = self.ledger.drain_reconcilable_unverified(apply=True, max_scan=10)
+        self.assertFalse(big["scan_capped"])
+        self.assertEqual(big["drained_count"], 1)
+        self.assertEqual(self.ledger.get("ro").status, "cancelled")
+
+    def test_scan_capped_is_exact_via_limit_plus_one(self) -> None:
+        # Exactly max_scan rows must NOT report capped (limit+1 proof); one more does.
+        self._seed_unverified("a", ["Bash"])
+        self._seed_unverified("b", ["Bash"])
+        at_cap = self.ledger.drain_reconcilable_unverified(apply=False, max_scan=2)
+        self.assertFalse(at_cap["scan_capped"])
+        self.assertEqual(at_cap["scanned"], 2)
+        over_cap = self.ledger.drain_reconcilable_unverified(apply=False, max_scan=1)
+        self.assertTrue(over_cap["scan_capped"])
+        self.assertEqual(over_cap["scanned"], 1)
 
     def test_apply_rolls_back_batch_on_midbatch_failure(self) -> None:
         # A failure after the 1st row's UPDATE (json.dumps is called once per row
