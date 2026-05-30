@@ -16,6 +16,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from claw_v2.reconciliation import (
     DEFAULT_RECONCILIATION_DEADLINE_SECONDS,
@@ -212,6 +213,34 @@ class DrainReconcilableUnverifiedTests(unittest.TestCase):
         record = self.ledger.get(task_id)
         return record.verification_status if record else None
 
+    @staticmethod
+    def _stale_report(task_id):
+        # A reconciliation report that (stale-ly) classifies task_id as an
+        # eligible read-only auto-close, regardless of the row's real state.
+        return {
+            "generated_at": "2026-05-30T00:00:00+00:00",
+            "deadline_seconds": 86400,
+            "unverified_count": 1,
+            "overdue_count": 1,
+            "by_recommended_action": {"auto_close_as_unverified_lookup": 1},
+            "cases": [
+                {
+                    "task_id": task_id,
+                    "channel": "telegram",
+                    "external_session_id": "s",
+                    "session_id": "tg-1",
+                    "tools": ["Read"],
+                    "verification_status": "needs_verification",
+                    "summary": "",
+                    "error": "",
+                    "completed_at_epoch": 0.0,
+                    "deadline_at_epoch": 0.0,
+                    "deadline_at": "1970-01-01T00:00:00+00:00",
+                    "recommended_action": "auto_close_as_unverified_lookup",
+                }
+            ],
+        }
+
     def test_dry_run_lists_eligible_without_mutation(self) -> None:
         self._seed_unverified("ro-overdue", ["Read", "Grep"])
         self._seed_unverified("mut-overdue", ["Bash", "Write"])
@@ -320,6 +349,7 @@ class DrainReconcilableUnverifiedTests(unittest.TestCase):
         self.assertEqual(s["limit"], 100)
         self.assertFalse(s["scan_capped"])
         self.assertEqual(s["skipped_state_changed"], 0)
+        self.assertEqual(s["skipped_classification_changed"], 0)
 
     def test_needs_verify_alias_is_eligible_and_drained(self) -> None:
         # task_completion treats 'needs_verify' as a pending alias; classify and
@@ -337,6 +367,60 @@ class DrainReconcilableUnverifiedTests(unittest.TestCase):
         self.assertEqual(result["eligible_count"], 0)
         self.assertEqual(result["drained_count"], 0)
         self.assertEqual(self.ledger.get("ro-passed").status, "completed_unverified")
+
+    def test_classification_revalidated_under_lock_fail_closed(self) -> None:
+        # Row is ACTUALLY mutating (Bash/Write) + overdue + pending, but a stale
+        # classify reports it as an eligible read-only auto-close. The lock-held
+        # re-classification on fresh data must FAIL CLOSED and not drain it.
+        self._seed_unverified("toctou", ["Bash", "Write"])
+        with mock.patch(
+            "claw_v2.reconciliation.build_reconciliation_report",
+            return_value=self._stale_report("toctou"),
+        ):
+            result = self.ledger.drain_reconcilable_unverified(apply=True)
+        self.assertEqual(result["drained_count"], 0)
+        self.assertEqual(result["skipped_classification_changed"], 1)
+        self.assertEqual(result["skipped_state_changed"], 0)
+        self.assertEqual(self.ledger.get("toctou").status, "completed_unverified")
+        self.assertEqual(self._payloads("pending_verification_readonly_auto_closed"), [])
+
+    def test_state_revalidated_under_lock_skips_drifted_row(self) -> None:
+        # Row drifted to a non-pending verification_status after a stale classify;
+        # the status-pair guard skips it as state-changed (not classification).
+        self._seed_unverified("drift", ["Read", "Grep"], verification_status="passed")
+        with mock.patch(
+            "claw_v2.reconciliation.build_reconciliation_report",
+            return_value=self._stale_report("drift"),
+        ):
+            result = self.ledger.drain_reconcilable_unverified(apply=True)
+        self.assertEqual(result["drained_count"], 0)
+        self.assertEqual(result["skipped_state_changed"], 1)
+        self.assertEqual(result["skipped_classification_changed"], 0)
+        self.assertEqual(self.ledger.get("drift").status, "completed_unverified")
+
+    def test_apply_rolls_back_batch_on_midbatch_failure(self) -> None:
+        # A failure after the 1st row's UPDATE (json.dumps is called once per row
+        # to build the UPDATE param, only in the apply loop) must roll the whole
+        # batch back and propagate — no partial drain.
+        import json as _json
+
+        self._seed_unverified("r1", ["Read", "Grep"])
+        self._seed_unverified("r2", ["Read", "Glob"])
+        real_dumps = _json.dumps
+        state = {"n": 0}
+
+        def flaky_dumps(*args, **kwargs):
+            state["n"] += 1
+            if state["n"] == 2:
+                raise RuntimeError("boom mid-batch")
+            return real_dumps(*args, **kwargs)
+
+        with mock.patch("claw_v2.task_ledger.json.dumps", side_effect=flaky_dumps):
+            with self.assertRaises(RuntimeError):
+                self.ledger.drain_reconcilable_unverified(apply=True)
+        # Both rows were rolled back — neither drained, no per-row events.
+        self.assertEqual(self.ledger.get("r1").status, "completed_unverified")
+        self.assertEqual(self.ledger.get("r2").status, "completed_unverified")
 
     def test_second_apply_is_noop(self) -> None:
         self._seed_unverified("ro-overdue", ["Read", "Grep"])

@@ -8,8 +8,8 @@
 ## meta
 
 ```yaml
-describes_commit: 448ef39+pr2-checkpoint-c
-doc_version: 1.7
+describes_commit: 448ef39+pr2-checkpoint-c2
+doc_version: 1.8
 last_verified: 2026-05-30
 verification_method: manual + grep cross-check
 anchor_strategy: symbol_only  # path:symbol, no line numbers
@@ -175,7 +175,14 @@ invariants:
           Checkpoint D. The drain summary telemetry exposes
           `scanned`/`scan_capped`/`limit` (the 100-row per-call scan cap,
           `RECONCILIATION_SCAN_LIMIT`); D must page or lift it so older
-          read-only rows are not hidden behind the first page.
+          read-only rows are not hidden behind the first page. C2: the apply
+          path re-reads each row under the lock and re-runs the FULL read-only
+          / no-error classification on fresh data before transitioning
+          (fail-closed) — a row that gained a mutating tool or error between
+          classify and apply is left for the human/verifier lane
+          (`skipped_classification_changed`), distinct from a status/pending/
+          overdue drift (`skipped_state_changed`). The batch rolls back on any
+          mid-loop failure.
     enforced_by:
       - tests/test_brain_tooluse_ledger.py
       - tests/test_completed_unverified_reconciliation.py

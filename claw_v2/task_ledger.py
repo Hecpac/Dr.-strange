@@ -473,7 +473,9 @@ class TaskLedger:
             AUTO_CLOSED_UNVERIFIED_LOOKUP,
             DEFAULT_RECONCILIATION_DEADLINE_SECONDS,
             RECONCILIATION_SCAN_LIMIT,
+            _tools_from_record,
             build_reconciliation_report,
+            recommend_reconciliation_action,
         )
 
         if deadline_seconds is None:
@@ -512,70 +514,89 @@ class TaskLedger:
         )
         drained: list[str] = []
         closed_events: list[dict[str, Any]] = []
+        skipped_state_changed = 0
+        skipped_classification_changed = 0
         if apply and eligible_ids:
-            # The guard re-validates the FULL eligibility (status pair, still
-            # pending, still overdue) under the lock, so a row re-stamped between
-            # classify and apply is left alone.
             pending = tuple(sorted(NEEDS_VERIFICATION_STATUSES))
             pending_placeholders = ", ".join("?" for _ in pending)
             overdue_before = now - float(deadline_seconds)
             # One short transaction: all eligible rows transition under a single
-            # lock + commit (atomic batch; no UPDATE ... LIMIT).
+            # lock + commit (atomic batch; no UPDATE ... LIMIT). A failure
+            # mid-batch rolls the whole transaction back (fail-closed).
             with self._lock:
-                for task_id in eligible_ids:
-                    row = self._conn.execute(
-                        "SELECT completed_at, metadata_json, verification_status "
-                        "FROM agent_tasks WHERE task_id = ? "
-                        "AND status = 'completed_unverified' "
-                        f"AND verification_status IN ({pending_placeholders}) "
-                        "AND completed_at < ?",
-                        (task_id, *pending, overdue_before),
-                    ).fetchone()
-                    if row is None:
-                        # Changed since the classify read — skip (idempotent).
-                        continue
-                    previous_verification = str(row["verification_status"])
-                    metadata = _loads_json(row["metadata_json"])
-                    metadata.update(
-                        {
-                            "reconciled_drained": True,
-                            "drained_from_status": "completed_unverified",
-                            "drained_from_verification_status": previous_verification,
-                            "drained_reason": "read-only unverified lookup past reconciliation deadline",
-                            "drained_at": now,
-                        }
-                    )
-                    # Reuse the existing terminal 'cancelled' status (no schema
-                    # migration); completed_at is preserved. Matches the prod
-                    # convention for drained read-only lookups.
-                    self._conn.execute(
-                        "UPDATE agent_tasks SET status = 'cancelled', "
-                        "verification_status = ?, metadata_json = ?, updated_at = ? "
-                        "WHERE task_id = ?",
-                        (
-                            AUTO_CLOSED_UNVERIFIED_LOOKUP,
-                            json.dumps(metadata, sort_keys=True),
-                            now,
-                            task_id,
-                        ),
-                    )
-                    drained.append(task_id)
-                    closed_events.append(
-                        {
-                            "task_id": task_id,
-                            "previous_status": "completed_unverified",
-                            "previous_verification_status": previous_verification,
-                            "new_status": "cancelled",
-                            "new_verification_status": AUTO_CLOSED_UNVERIFIED_LOOKUP,
-                            "age_seconds": int(now - float(row["completed_at"] or now)),
-                            "recommended_action": "auto_close_as_unverified_lookup",
-                            "reason": "auto-closed unverified read-only lookup past deadline (not user-cancelled)",
-                            "apply": True,
-                            "dry_run": False,
-                        }
-                    )
-                if drained:
-                    self._conn.commit()
+                try:
+                    for task_id in eligible_ids:
+                        row = self._conn.execute(
+                            "SELECT * FROM agent_tasks WHERE task_id = ? "
+                            "AND status = 'completed_unverified' "
+                            f"AND verification_status IN ({pending_placeholders}) "
+                            "AND completed_at < ?",
+                            (task_id, *pending, overdue_before),
+                        ).fetchone()
+                        if row is None:
+                            # status / pending / overdue changed since classify.
+                            skipped_state_changed += 1
+                            continue
+                        record = self._row_to_record(row)
+                        # Re-run the FULL classification on fresh row data under
+                        # the lock: if it is no longer a read-only / no-error
+                        # auto-close (e.g. a tool or error landed after classify),
+                        # leave it for the human/verifier lane (fail-closed).
+                        if (
+                            recommend_reconciliation_action(
+                                tools=_tools_from_record(record),
+                                error=str(record.error or ""),
+                            )
+                            != "auto_close_as_unverified_lookup"
+                        ):
+                            skipped_classification_changed += 1
+                            continue
+                        previous_verification = record.verification_status
+                        metadata = dict(record.metadata or {})
+                        metadata.update(
+                            {
+                                "reconciled_drained": True,
+                                "drained_from_status": "completed_unverified",
+                                "drained_from_verification_status": previous_verification,
+                                "drained_reason": "read-only unverified lookup past reconciliation deadline",
+                                "drained_at": now,
+                            }
+                        )
+                        # Reuse the existing terminal 'cancelled' status (no schema
+                        # migration); completed_at is preserved. Matches the prod
+                        # convention for drained read-only lookups.
+                        self._conn.execute(
+                            "UPDATE agent_tasks SET status = 'cancelled', "
+                            "verification_status = ?, metadata_json = ?, updated_at = ? "
+                            "WHERE task_id = ?",
+                            (
+                                AUTO_CLOSED_UNVERIFIED_LOOKUP,
+                                json.dumps(metadata, sort_keys=True),
+                                now,
+                                task_id,
+                            ),
+                        )
+                        drained.append(task_id)
+                        closed_events.append(
+                            {
+                                "task_id": task_id,
+                                "previous_status": "completed_unverified",
+                                "previous_verification_status": previous_verification,
+                                "new_status": "cancelled",
+                                "new_verification_status": AUTO_CLOSED_UNVERIFIED_LOOKUP,
+                                "age_seconds": int(now - float(record.completed_at or now)),
+                                "recommended_action": "auto_close_as_unverified_lookup",
+                                "reason": "auto-closed unverified read-only lookup past deadline (not user-cancelled)",
+                                "apply": True,
+                                "dry_run": False,
+                            }
+                        )
+                    if drained:
+                        self._conn.commit()
+                except Exception:
+                    # Discard any partial UPDATEs so the batch is all-or-nothing.
+                    self._conn.rollback()
+                    raise
             # Emit one event per drained row AFTER releasing the lock (no
             # observe I/O while holding it). Only actual closes emit here, so a
             # second run (eligible=0) re-emits no per-row events.
@@ -585,9 +606,9 @@ class TaskLedger:
         # runs — so the reconciliation lane always has a durable trace.
         scanned = len(cases)
         scan_capped = scanned >= RECONCILIATION_SCAN_LIMIT
-        # Eligible rows the lock-held guard found already changed (TOCTOU). Only
-        # meaningful under apply; a dry run attempts nothing, so it is 0.
-        skipped_state_changed = (len(eligible_ids) - len(drained)) if apply else 0
+        # skipped_state_changed: status/pending/overdue drifted between classify
+        # and the lock-held re-read. skipped_classification_changed: still in the
+        # backlog but no longer read-only/no-error on fresh re-classification.
         self._emit(
             "pending_verification_readonly_drain_summary",
             {
@@ -598,6 +619,7 @@ class TaskLedger:
                 "skipped_not_overdue": skipped_not_overdue,
                 "skipped_needs_evidence_review": skipped_needs_evidence_review,
                 "skipped_state_changed": skipped_state_changed,
+                "skipped_classification_changed": skipped_classification_changed,
                 "scanned": scanned,
                 "scan_capped": scan_capped,
                 "limit": RECONCILIATION_SCAN_LIMIT,
@@ -618,6 +640,7 @@ class TaskLedger:
             "skipped_not_overdue": skipped_not_overdue,
             "skipped_needs_evidence_review": skipped_needs_evidence_review,
             "skipped_state_changed": skipped_state_changed,
+            "skipped_classification_changed": skipped_classification_changed,
             "scanned": scanned,
             "scan_capped": scan_capped,
         }
