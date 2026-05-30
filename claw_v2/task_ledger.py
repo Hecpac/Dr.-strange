@@ -443,6 +443,104 @@ class TaskLedger:
             self._emit("task_false_success_reconciled", {"count": changed, "tasks": reconciled})
         return changed
 
+    def drain_reconcilable_unverified(
+        self,
+        *,
+        deadline_seconds: float | None = None,
+        apply: bool = False,
+    ) -> dict[str, Any]:
+        """PR2 Checkpoint C: gated drain of the SAFE subset of the
+        ``completed_unverified`` backlog.
+
+        Only rows classified ``auto_close_as_unverified_lookup`` by
+        ``recommend_reconciliation_action`` (read-only tools, no error) that
+        are past the reconciliation deadline are eligible. Eligible rows
+        transition to the existing terminal ``status='cancelled'`` with
+        ``verification_status='auto_closed_unverified_lookup'`` (reuse-states;
+        no schema migration; respects ``brain_tooluse_verify_flag_gated``), so
+        they leave the active reconciliation queue. Mutating/error rows are
+        never touched here — they remain for the human/verifier lane.
+
+        Off by default: ``apply=False`` returns the eligible candidates
+        without writing (the explicit gate). No daemon caller wires this
+        yet — that is Checkpoint D.
+        """
+        from claw_v2.reconciliation import (
+            AUTO_CLOSED_UNVERIFIED_LOOKUP,
+            DEFAULT_RECONCILIATION_DEADLINE_SECONDS,
+            build_reconciliation_report,
+        )
+
+        if deadline_seconds is None:
+            deadline_seconds = DEFAULT_RECONCILIATION_DEADLINE_SECONDS
+        # Classify outside the lock: build_reconciliation_report calls
+        # self.list (which takes self._lock, a non-reentrant Lock).
+        report = build_reconciliation_report(self, deadline_seconds=deadline_seconds)
+        now = time.time()
+        eligible_ids = [
+            str(case["task_id"])
+            for case in report["cases"]
+            if case["recommended_action"] == "auto_close_as_unverified_lookup"
+            and case["deadline_at_epoch"] < now
+        ]
+        drained: list[str] = []
+        if apply and eligible_ids:
+            with self._lock:
+                for task_id in eligible_ids:
+                    row = self._conn.execute(
+                        "SELECT metadata_json, verification_status FROM agent_tasks "
+                        "WHERE task_id = ? AND status = 'completed_unverified' "
+                        "AND verification_status = 'needs_verification'",
+                        (task_id,),
+                    ).fetchone()
+                    if row is None:
+                        # Changed since the classify read — skip (idempotent).
+                        continue
+                    metadata = _loads_json(row["metadata_json"])
+                    metadata.update(
+                        {
+                            "reconciled_drained": True,
+                            "drained_from_status": "completed_unverified",
+                            "drained_from_verification_status": str(row["verification_status"]),
+                            "drained_reason": "read-only unverified lookup past reconciliation deadline",
+                            "drained_at": now,
+                        }
+                    )
+                    # Reuse the existing terminal 'cancelled' status (no schema
+                    # migration); completed_at is preserved. Matches the prod
+                    # convention for drained read-only lookups.
+                    self._conn.execute(
+                        "UPDATE agent_tasks SET status = 'cancelled', "
+                        "verification_status = ?, metadata_json = ?, updated_at = ? "
+                        "WHERE task_id = ?",
+                        (
+                            AUTO_CLOSED_UNVERIFIED_LOOKUP,
+                            json.dumps(metadata, sort_keys=True),
+                            now,
+                            task_id,
+                        ),
+                    )
+                    drained.append(task_id)
+                if drained:
+                    self._conn.commit()
+            if drained:
+                self._emit(
+                    "task_ledger_reconciled_drained",
+                    {
+                        "count": len(drained),
+                        "task_ids": drained,
+                        "deadline_seconds": float(deadline_seconds),
+                    },
+                )
+        return {
+            "apply": apply,
+            "deadline_seconds": float(deadline_seconds),
+            "eligible_task_ids": eligible_ids,
+            "eligible_count": len(eligible_ids),
+            "drained_task_ids": drained,
+            "drained_count": len(drained),
+        }
+
     def get(self, task_id: str) -> TaskRecord | None:
         with self._lock:
             row = self._conn.execute("SELECT * FROM agent_tasks WHERE task_id = ?", (task_id,)).fetchone()

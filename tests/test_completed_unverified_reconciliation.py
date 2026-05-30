@@ -157,5 +157,117 @@ class CompletedUnverifiedReconciliationTests(unittest.TestCase):
             self.assertEqual(len(data["cases"]), 2)
 
 
+class DrainReconcilableUnverifiedTests(unittest.TestCase):
+    """PR2 Checkpoint C: gated drain of the SAFE subset (read-only, no-error,
+    overdue) of the completed_unverified backlog.
+
+    Eligible rows transition to the existing terminal ``status='cancelled'``
+    with ``verification_status='auto_closed_unverified_lookup'`` (reuse-states;
+    respects ``brain_tooluse_verify_flag_gated``). Mutating/error/not-yet-overdue
+    rows are never touched. Off by default (``apply=False`` is a dry run) and
+    not wired into the daemon at this checkpoint.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.observe = _RecordingObserve()
+        self.ledger = TaskLedger(Path(self._tmp.name) / "claw.db", observe=self.observe)
+
+    def _seed_unverified(self, task_id, tools, *, error="", overdue=True) -> None:
+        manifest = {"evidence_manifest": {"tools_run": list(tools)}}
+        self.ledger.create(
+            task_id=task_id,
+            session_id="tg-1",
+            objective="x",
+            runtime="telegram",
+            mode="brain_fallback",
+            status="running",
+            route={"channel": "telegram", "external_session_id": "tg-1"},
+            artifacts=manifest,
+        )
+        self.ledger.mark_terminal(
+            task_id,
+            status="completed_unverified",
+            summary="brain tool-use turn (unverified)",
+            error=error,
+            verification_status="needs_verification",
+            artifacts=manifest,
+        )
+        if overdue:
+            self._backdate(task_id, 48 * 3600)
+
+    def _backdate(self, task_id, seconds_ago) -> None:
+        old = time.time() - seconds_ago
+        with self.ledger._lock:
+            self.ledger._conn.execute(
+                "UPDATE agent_tasks SET completed_at = ?, updated_at = ? WHERE task_id = ?",
+                (old, old, task_id),
+            )
+            self.ledger._conn.commit()
+
+    def _verification_status(self, task_id):
+        record = self.ledger.get(task_id)
+        return record.verification_status if record else None
+
+    def test_dry_run_lists_eligible_without_mutation(self) -> None:
+        self._seed_unverified("ro-overdue", ["Read", "Grep"])
+        self._seed_unverified("mut-overdue", ["Bash", "Write"])
+        result = self.ledger.drain_reconcilable_unverified(apply=False)
+        self.assertEqual(result["apply"], False)
+        self.assertEqual(result["eligible_task_ids"], ["ro-overdue"])
+        self.assertEqual(result["drained_count"], 0)
+        # Dry run mutates nothing and emits no drain event.
+        self.assertEqual(self._verification_status("ro-overdue"), "needs_verification")
+        self.assertEqual(self._verification_status("mut-overdue"), "needs_verification")
+        self.assertNotIn(
+            "task_ledger_reconciled_drained", [e[0] for e in self.observe.events]
+        )
+
+    def test_apply_drains_only_readonly_overdue_no_error(self) -> None:
+        self._seed_unverified("ro-overdue", ["Read", "Grep"])
+        self._seed_unverified("mut-overdue", ["Bash", "Write"])
+        self._seed_unverified("ro-err-overdue", ["Read"], error="boom")
+        self._seed_unverified("ro-fresh", ["Read", "Glob"], overdue=False)
+        result = self.ledger.drain_reconcilable_unverified(apply=True)
+        self.assertEqual(result["drained_task_ids"], ["ro-overdue"])
+        self.assertEqual(result["drained_count"], 1)
+        # Drained row: cancelled + auto_closed_unverified_lookup (prod convention),
+        # provenance stamped. completed_at preserved (terminal already).
+        self.assertEqual(self.ledger.get("ro-overdue").status, "cancelled")
+        self.assertEqual(
+            self._verification_status("ro-overdue"), "auto_closed_unverified_lookup"
+        )
+        self.assertTrue(self.ledger.get("ro-overdue").metadata.get("reconciled_drained"))
+        # Mutating / error / not-yet-overdue rows are left untouched.
+        self.assertEqual(self._verification_status("mut-overdue"), "needs_verification")
+        self.assertEqual(self._verification_status("ro-err-overdue"), "needs_verification")
+        self.assertEqual(self._verification_status("ro-fresh"), "needs_verification")
+
+    def test_drained_row_leaves_active_reconciliation_report(self) -> None:
+        self._seed_unverified("ro-overdue", ["Read", "Grep"])
+        self.ledger.drain_reconcilable_unverified(apply=True)
+        report = build_reconciliation_report(self.ledger)
+        ids = {case["task_id"] for case in report["cases"]}
+        self.assertNotIn("ro-overdue", ids)
+        self.assertEqual(report["unverified_count"], 0)
+
+    def test_apply_emits_drained_event(self) -> None:
+        self._seed_unverified("ro-overdue", ["Read", "Grep"])
+        self.ledger.drain_reconcilable_unverified(apply=True)
+        drained_events = [
+            p for et, p in self.observe.events if et == "task_ledger_reconciled_drained"
+        ]
+        self.assertEqual(len(drained_events), 1)
+        self.assertEqual(drained_events[0]["payload"]["count"], 1)
+
+    def test_second_apply_is_noop(self) -> None:
+        self._seed_unverified("ro-overdue", ["Read", "Grep"])
+        self.ledger.drain_reconcilable_unverified(apply=True)
+        result2 = self.ledger.drain_reconcilable_unverified(apply=True)
+        self.assertEqual(result2["drained_count"], 0)
+        self.assertEqual(result2["eligible_task_ids"], [])
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

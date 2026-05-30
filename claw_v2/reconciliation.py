@@ -27,6 +27,13 @@ logger = logging.getLogger(__name__)
 DEFAULT_RECONCILIATION_DEADLINE_SECONDS = 24 * 60 * 60  # 24 hours
 """How long after ``mark_terminal`` we expect a verifier-or-human signal."""
 
+AUTO_CLOSED_UNVERIFIED_LOOKUP = "auto_closed_unverified_lookup"
+"""Terminal ``verification_status`` stamped on read-only, no-error rows drained
+past the reconciliation deadline (PR2 Checkpoint C). The row transitions to the
+existing terminal ``status='cancelled'`` (reuse-states; no schema migration),
+matching the established prod convention, so it leaves the active queue (which
+lists only ``completed_unverified`` rows)."""
+
 _MUTATING_TOOLS = frozenset(
     {
         "Bash",

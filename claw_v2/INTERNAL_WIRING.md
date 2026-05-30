@@ -8,8 +8,8 @@
 ## meta
 
 ```yaml
-describes_commit: 448ef39+pr2-checkpoint-b
-doc_version: 1.6
+describes_commit: 448ef39+pr2-checkpoint-c
+doc_version: 1.7
 last_verified: 2026-05-30
 verification_method: manual + grep cross-check
 anchor_strategy: symbol_only  # path:symbol, no line numbers
@@ -161,9 +161,21 @@ invariants:
           skipped. Anthropic SDK tool hooks must persist minimal tool_input
           evidence (paths, commands, patterns) so the close path can derive
           files_written and commands_run from real tool effects without storing
-          file contents.
+          file contents. PR2-C (2026-05-30): the post-hoc reconciliation drain
+          is the only path that resolves a `completed_unverified` row without a
+          verifier pass, and only for the safe subset — read-only
+          (`auto_close_as_unverified_lookup`), no error, past the 24h deadline.
+          It transitions those rows to the existing terminal `status='cancelled'`
+          with `verification_status='auto_closed_unverified_lookup'` (reuses an
+          existing state — no schema migration, no new benign-success status;
+          matches the established prod convention), so a substantive/mutating
+          turn still never auto-closes as verified. The drain is OFF by default
+          (`TaskLedger.drain_reconcilable_unverified(apply=False)`) with no
+          daemon caller at this checkpoint; wiring the live transition is
+          Checkpoint D.
     enforced_by:
       - tests/test_brain_tooluse_ledger.py
+      - tests/test_completed_unverified_reconciliation.py
       - tests/test_anthropic.py
     why: The signal that a turn needs verification must come from actual tool
          effects, not only a small allowlist of request text. The flag preserves
