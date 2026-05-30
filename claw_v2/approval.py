@@ -83,6 +83,14 @@ class ApprovalManager:
 
     def approve(self, approval_id: str, token: str) -> bool:
         def _do_approve(payload: dict) -> None:
+            # MED-2: single-use. Only a still-pending approval can be resolved
+            # here; once approved/rejected/expired/archived the record is
+            # immutable, so a replayed token cannot re-authorize the action
+            # (no double-publish) and a wrong token cannot flip a resolved
+            # record's status.
+            if payload.get("status") != "pending":
+                payload["_result"] = False
+                return
             created = payload.get("created_at", 0)
             if time.time() - created > APPROVAL_TTL_SECONDS:
                 payload["status"] = "expired"
@@ -147,6 +155,10 @@ class ApprovalManager:
             raw = self._read_locked_fd(fd)
             payload = json.loads(raw.decode("utf-8"))
             modifier(payload)  # type: ignore[operator]
+            # ``_result`` is a return side-channel, not record state — strip it
+            # before persisting so a resolved record is content-immutable on
+            # replay (and re-attach it for the caller).
+            result = payload.pop("_result", False)
             new_data = json.dumps(payload, indent=2).encode("utf-8")
             os.lseek(fd, 0, os.SEEK_SET)
             os.ftruncate(fd, 0)
@@ -154,6 +166,7 @@ class ApprovalManager:
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
+        payload["_result"] = result
         return payload
 
     def status(self, approval_id: str) -> str:

@@ -249,6 +249,48 @@ class BotTests(unittest.TestCase):
                 self.assertEqual(publisher_mock.publish.call_count, 1)
                 self.assertIn("post_id", second)
 
+    def test_social_approve_replay_does_not_double_publish(self) -> None:
+        # MED-2: a leaked /social_approve line replayed within the TTL must not
+        # re-trigger a live publish (single-use approval token).
+        from unittest.mock import MagicMock
+        from claw_v2.content import PostDraft
+        from claw_v2.social import PublishResult
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                draft = PostDraft(account="acme", platform="x", text="hello", hashtags=["#ai"])
+                runtime.bot.content_engine = MagicMock()
+                runtime.bot.content_engine.generate_batch.return_value = [draft]
+                publisher_mock = MagicMock()
+                publisher_mock.publish.return_value = PublishResult(
+                    platform="x", account="acme", post_id="42",
+                    url="https://x.com/acme/42", published_at="2026-04-26",
+                )
+                runtime.bot.social_publisher = publisher_mock
+
+                payload = json.loads(
+                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/social_publish acme")
+                )
+                approval_id = payload["approval_id"]
+                token = payload["approval_token"]
+                approve_cmd = f"/social_approve {approval_id} {token}"
+                runtime.bot.handle_text(user_id="123", session_id="s1", text=approve_cmd)
+                self.assertEqual(publisher_mock.publish.call_count, 1)
+
+                # Replay the identical approval line — must NOT publish again.
+                runtime.bot.handle_text(user_id="123", session_id="s1", text=approve_cmd)
+                self.assertEqual(publisher_mock.publish.call_count, 1)
+
     def test_stream_interrupted_marks_running_checkpoint_with_partial(self) -> None:
         from unittest.mock import MagicMock
         from claw_v2.adapters.base import StreamInterruptedError
