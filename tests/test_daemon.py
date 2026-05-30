@@ -30,6 +30,175 @@ class DaemonTickTests(unittest.TestCase):
         daemon = ClawDaemon(scheduler=scheduler, heartbeat=heartbeat, observe=observe)
         return daemon, heartbeat, observe
 
+    def test_tick_emits_pending_verification_reconciliation_dry_run(self) -> None:
+        # P1 Checkpoint A: the daemon must CALL the (already dry-run) reconciler
+        # so pending_verification_reconciliation telemetry is emitted. Before
+        # wiring there was no caller -> 0 events in production. Dry-run: the
+        # ledger is only read (.list), never transitioned.
+        from types import SimpleNamespace
+
+        scheduler = CronScheduler()
+        heartbeat = MagicMock()
+        heartbeat.collect.return_value = HeartbeatSnapshot(
+            timestamp="2026-01-01T00:00:00",
+            pending_approvals=0,
+            pending_approval_ids=[],
+            agents={},
+            lane_metrics={},
+        )
+        observe = MagicMock()
+        ledger = MagicMock()
+        ledger.mark_stale_running_lost.return_value = 0
+        ledger.list.return_value = [
+            SimpleNamespace(
+                task_id="t1", channel="telegram", external_session_id="s",
+                session_id="tg-1", verification_status="needs_verification",
+                summary="ran cat", error="", completed_at=0.0,
+                artifacts={"evidence_manifest": {"tools_run": ["Read"]}},
+            ),
+            SimpleNamespace(
+                task_id="t2", channel="telegram", external_session_id="s",
+                session_id="tg-1", verification_status="needs_verification",
+                summary="wrote file", error="", completed_at=0.0,
+                artifacts={"evidence_manifest": {"tools_run": ["Write"]}},
+            ),
+        ]
+        daemon = ClawDaemon(scheduler=scheduler, heartbeat=heartbeat, observe=observe, task_ledger=ledger)
+
+        daemon.tick(now=1_000_000)
+
+        emitted = [call.args[0] for call in observe.emit.call_args_list]
+        self.assertIn("pending_verification_reconciliation", emitted)
+        # RECONCILIATION_SCAN_LIMIT — the honest per-call cap (list clamps to 100).
+        ledger.list.assert_any_call(statuses=("completed_unverified",), limit=100)
+        # Dry-run guarantee: Checkpoint A must not transition any row.
+        ledger.mark_terminal.assert_not_called()
+
+    def _make_daemon_with_ledger(self, ledger: MagicMock, **kwargs) -> tuple[ClawDaemon, MagicMock]:
+        scheduler = kwargs.pop("scheduler", CronScheduler())
+        heartbeat = MagicMock()
+        heartbeat.collect.return_value = HeartbeatSnapshot(
+            timestamp="2026-01-01T00:00:00",
+            pending_approvals=0,
+            pending_approval_ids=[],
+            agents={},
+            lane_metrics={},
+        )
+        observe = MagicMock()
+        daemon = ClawDaemon(
+            scheduler=scheduler, heartbeat=heartbeat, observe=observe, task_ledger=ledger, **kwargs
+        )
+        return daemon, observe
+
+    def test_pending_verification_skip_within_interval_omits_field(self) -> None:
+        # A1: a skipped reconciler run (interval not elapsed) must NOT report
+        # pending_verification_unverified=0 as if it were a real backlog count.
+        from types import SimpleNamespace
+
+        ledger = MagicMock()
+        ledger.mark_stale_running_lost.return_value = 0
+        ledger.list.return_value = [
+            SimpleNamespace(
+                task_id="t1", channel="telegram", external_session_id="s",
+                session_id="tg-1", verification_status="needs_verification",
+                summary="x", error="", completed_at=0.0,
+                artifacts={"evidence_manifest": {"tools_run": ["Read"]}},
+            ),
+        ]
+        daemon, observe = self._make_daemon_with_ledger(ledger, pending_verification_interval=900)
+        daemon.tick(now=1_000_000)   # reconciler runs
+        daemon.tick(now=1_000_030)   # within interval -> skipped
+
+        recon = [c for c in observe.emit.call_args_list if c.args[0] == "pending_verification_reconciliation"]
+        self.assertEqual(len(recon), 1)  # only the first tick emitted it
+        tick_payloads = [c.kwargs["payload"] for c in observe.emit.call_args_list if c.args[0] == "daemon_tick"]
+        self.assertEqual(len(tick_payloads), 2)
+        self.assertIn("pending_verification_unverified", tick_payloads[0])      # ran
+        self.assertNotIn("pending_verification_unverified", tick_payloads[1])   # skipped -> omitted
+
+    def test_reconciler_failure_does_not_crash_tick(self) -> None:
+        # A1: a reconciler exception must be contained — scheduler and the rest of
+        # the tick still run, and no ledger transition occurs.
+        ledger = MagicMock()
+        ledger.mark_stale_running_lost.return_value = 0
+        ledger.list.side_effect = RuntimeError("boom")  # build_reconciliation_report raises
+        daemon, observe = self._make_daemon_with_ledger(ledger)
+        probe = MagicMock()
+        daemon.scheduler.register(ScheduledJob(name="probe", interval_seconds=60, handler=probe))
+
+        result = daemon.tick(now=1_000_000)  # must not raise
+
+        self.assertIn("probe", result.executed_jobs)
+        probe.assert_called_once()
+        ledger.mark_terminal.assert_not_called()
+        recon = [c for c in observe.emit.call_args_list if c.args[0] == "pending_verification_reconciliation"]
+        self.assertEqual(recon, [])  # raised before the emit
+
+    def test_drain_disabled_does_not_apply(self) -> None:
+        # D: flag OFF — the tick may emit telemetry but must NOT call the drain.
+        ledger = MagicMock()
+        ledger.mark_stale_running_lost.return_value = 0
+        ledger.list.return_value = []
+        daemon, _ = self._make_daemon_with_ledger(
+            ledger, pending_verification_drain_apply=False
+        )
+        daemon.tick(now=1_000_000)
+        ledger.drain_reconcilable_unverified.assert_not_called()
+
+    def test_drain_enabled_applies_with_caps(self) -> None:
+        # D: flag ON — the tick calls the drain with apply=True and the per-tick caps.
+        ledger = MagicMock()
+        ledger.mark_stale_running_lost.return_value = 0
+        ledger.list.return_value = []
+        daemon, _ = self._make_daemon_with_ledger(
+            ledger, pending_verification_drain_apply=True
+        )
+        daemon.tick(now=1_000_000)
+        ledger.drain_reconcilable_unverified.assert_called_once()
+        _, kwargs = ledger.drain_reconcilable_unverified.call_args
+        self.assertTrue(kwargs["apply"])
+        self.assertEqual(kwargs["max_apply"], 10)
+        self.assertEqual(kwargs["max_scan"], 500)
+
+    def test_drain_failure_does_not_crash_tick(self) -> None:
+        # D: a drain exception must be contained — scheduler still runs.
+        ledger = MagicMock()
+        ledger.mark_stale_running_lost.return_value = 0
+        ledger.list.return_value = []
+        ledger.drain_reconcilable_unverified.side_effect = RuntimeError("boom")
+        daemon, _ = self._make_daemon_with_ledger(
+            ledger, pending_verification_drain_apply=True
+        )
+        probe = MagicMock()
+        daemon.scheduler.register(ScheduledJob(name="probe", interval_seconds=60, handler=probe))
+        result = daemon.tick(now=1_000_000)  # must not raise
+        self.assertIn("probe", result.executed_jobs)
+        probe.assert_called_once()
+
+    def test_drain_is_interval_gated_with_the_report(self) -> None:
+        # The live drain shares the pending-verification interval gate: a second
+        # tick within the interval must NOT drain again.
+        ledger = MagicMock()
+        ledger.mark_stale_running_lost.return_value = 0
+        ledger.list.return_value = []
+        daemon, _ = self._make_daemon_with_ledger(
+            ledger, pending_verification_drain_apply=True
+        )
+        daemon.tick(now=1_000_000)  # interval elapsed from 0 -> runs
+        daemon.tick(now=1_000_010)  # within the 15-min interval -> skipped
+        self.assertEqual(ledger.drain_reconcilable_unverified.call_count, 1)
+
+    def test_drain_flag_defaults_off_and_reads_env(self) -> None:
+        # Default OFF; env opt-in flips it on.
+        import os
+        from unittest import mock as _mock
+
+        off, _ = self._make_daemon_with_ledger(MagicMock())
+        self.assertFalse(off.pending_verification_drain_apply)
+        with _mock.patch.dict(os.environ, {"CLAW_PENDING_VERIFICATION_DRAIN_APPLY": "1"}):
+            on, _ = self._make_daemon_with_ledger(MagicMock())
+        self.assertTrue(on.pending_verification_drain_apply)
+
     def test_tick_does_not_call_heartbeat_emit(self) -> None:
         daemon, heartbeat, _ = self._make_daemon()
         daemon.tick(now=1000)

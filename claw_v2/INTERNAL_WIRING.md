@@ -8,9 +8,9 @@
 ## meta
 
 ```yaml
-describes_commit: 6d43148+final-render-funnel
-doc_version: 1.5
-last_verified: 2026-05-17
+describes_commit: 448ef39+pr2-checkpoint-d
+doc_version: 1.9
+last_verified: 2026-05-30
 verification_method: manual + grep cross-check
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
@@ -145,19 +145,56 @@ invariants:
          full coordinator cycle would verify an intermediate synthesis instead.
 
   brain_tooluse_verify_flag_gated:
-    rule: With `BRAIN_TOOLUSE_VERIFY` off, the brain tool-use close path remains
-          conservative: substantive turns still close as completed_unverified or
-          blocked according to the pre-B1 branches. With the flag on, a turn
-          that either requires verified completion or performed mutation
-          (files_written or commands_run) calls `verify_brain_tooluse`; passed
-          closes succeeded/passed, failed closes failed/failed, and pending falls
-          through to the existing conservative branches. If the coordinator is
-          unavailable, verifier dispatch is skipped. Anthropic SDK tool hooks
-          must persist minimal tool_input evidence (paths, commands, patterns)
-          so the close path can derive files_written and commands_run from real
-          tool effects without storing file contents.
+    rule: The close path blocks substantive turns that ran without a passed
+          verifier. PR2-B (2026-05-30): the blocker fires on
+          `requires_verified_completion OR performed_mutation` (files_written /
+          commands_run) REGARDLESS of the `BRAIN_TOOLUSE_VERIFY` flag — a
+          Write/Edit/Bash turn closes failed/blocked, not completed_unverified,
+          even with the flag off. Only read-only turns with no action-text and no
+          error fall through to the conservative completed_unverified close.
+          (This supersedes the prior flag-off-conservative behavior; the audit
+          found 96% of the backlog had mutating tools while the text-only blocker
+          almost never fired.) With the flag on, such a turn first calls
+          `verify_brain_tooluse`; passed closes succeeded/passed, failed closes
+          failed/failed, and pending falls through to the now mutation-aware
+          blocker. If the coordinator is unavailable, verifier dispatch is
+          skipped. Anthropic SDK tool hooks must persist minimal tool_input
+          evidence (paths, commands, patterns) so the close path can derive
+          files_written and commands_run from real tool effects without storing
+          file contents. PR2-C (2026-05-30): the post-hoc reconciliation drain
+          is the only path that resolves a `completed_unverified` row without a
+          verifier pass, and only for the safe subset — read-only
+          (`auto_close_as_unverified_lookup`), no error, past the 24h deadline.
+          It transitions those rows to the existing terminal `status='cancelled'`
+          with `verification_status='auto_closed_unverified_lookup'` (reuses an
+          existing state — no schema migration, no new benign-success status;
+          matches the established prod convention), so a substantive/mutating
+          turn still never auto-closes as verified. The drain is OFF by default
+          (`TaskLedger.drain_reconcilable_unverified(apply=False)`) with no
+          daemon caller at this checkpoint; wiring the live transition is
+          Checkpoint D. The drain summary telemetry exposes
+          `scanned`/`scan_capped`/`limit` (the 100-row per-call scan cap,
+          `RECONCILIATION_SCAN_LIMIT`); D must page or lift it so older
+          read-only rows are not hidden behind the first page. C2: the apply
+          path re-reads each row under the lock and re-runs the FULL read-only
+          / no-error classification on fresh data before transitioning
+          (fail-closed) — a row that gained a mutating tool or error between
+          classify and apply is left for the human/verifier lane
+          (`skipped_classification_changed`), distinct from a status/pending/
+          overdue drift (`skipped_state_changed`). The batch rolls back on any
+          mid-loop failure. D (2026-05-30): the daemon tick
+          (`_reconcile_pending_verification`) calls the drain with `apply=True`
+          ONLY when `CLAW_PENDING_VERIFICATION_DRAIN_APPLY` (default OFF) is set,
+          bounded by the drain's `max_scan` (daemon arg
+          `pending_verification_drain_max_scan`, default 500; oldest-first,
+          `limit+1` proves `scan_capped`) and `max_apply` (daemon arg
+          `pending_verification_drain_max_apply`, default 10). The drain call is
+          contained in its own try/except so a failure never stops the
+          scheduler / stale / orphan reconciliation (like the A1 report guard).
     enforced_by:
       - tests/test_brain_tooluse_ledger.py
+      - tests/test_completed_unverified_reconciliation.py
+      - tests/test_daemon.py
       - tests/test_anthropic.py
     why: The signal that a turn needs verification must come from actual tool
          effects, not only a small allowlist of request text. The flag preserves

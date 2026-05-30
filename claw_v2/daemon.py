@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import time
 from dataclasses import asdict, dataclass
@@ -11,6 +12,12 @@ from claw_v2.heartbeat import HeartbeatService, HeartbeatSnapshot
 from claw_v2.observe import ObserveStream
 from claw_v2.task_ledger import TaskLedger
 from claw_v2.tracing import new_trace_context
+
+logger = logging.getLogger(__name__)
+
+
+def _env_flag(name: str) -> bool:
+    return os.getenv(name, "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
 @dataclass(slots=True)
@@ -30,6 +37,10 @@ class ClawDaemon:
         job_service: Any | None = None,
         stale_task_seconds: float = 6 * 60 * 60,
         task_reconciliation_interval: float = 5 * 60,
+        pending_verification_interval: float = 15 * 60,
+        pending_verification_drain_apply: bool | None = None,
+        pending_verification_drain_max_apply: int = 10,
+        pending_verification_drain_max_scan: int = 500,
     ) -> None:
         self.scheduler = scheduler
         self.heartbeat = heartbeat
@@ -39,14 +50,37 @@ class ClawDaemon:
         self.stale_task_seconds = stale_task_seconds
         self.task_reconciliation_interval = task_reconciliation_interval
         self._last_task_reconciliation_at = 0.0
+        self.pending_verification_interval = pending_verification_interval
+        self._last_pending_verification_at = 0.0
+        # Checkpoint D: live drain of the read-only backlog. Default OFF — the
+        # env flag (or an explicit arg) must opt in before any row transitions.
+        if pending_verification_drain_apply is None:
+            pending_verification_drain_apply = _env_flag(
+                "CLAW_PENDING_VERIFICATION_DRAIN_APPLY"
+            )
+        self.pending_verification_drain_apply = bool(pending_verification_drain_apply)
+        self.pending_verification_drain_max_apply = pending_verification_drain_max_apply
+        self.pending_verification_drain_max_scan = pending_verification_drain_max_scan
 
     def tick(self, *, now: float | None = None) -> TickResult:
         trace = new_trace_context(artifact_id="daemon_tick")
         reconciled_lost = self._reconcile_stale_tasks(now=now)
         reconciled_orphan_jobs = self._reconcile_orphaned_jobs()
+        reconciled_pending = self._reconcile_pending_verification(now=now)
         executed_jobs = self.scheduler.run_due(now=now)
         snapshot = self.heartbeat.collect()
         if self.observe is not None:
+            payload = {
+                "executed_jobs": executed_jobs,
+                "heartbeat": asdict(snapshot),
+                "reconciled_lost_tasks": reconciled_lost,
+                "reconciled_orphan_jobs": reconciled_orphan_jobs,
+            }
+            # Omit the field when the reconciler did not run this tick, so a skip
+            # is not logged as a real backlog of 0 (the authoritative count lives
+            # in the pending_verification_reconciliation event).
+            if reconciled_pending is not None:
+                payload["pending_verification_unverified"] = reconciled_pending
             self.observe.emit(
                 "daemon_tick",
                 trace_id=trace["trace_id"],
@@ -54,12 +88,7 @@ class ClawDaemon:
                 span_id=trace["span_id"],
                 parent_span_id=trace["parent_span_id"],
                 artifact_id=trace["artifact_id"],
-                payload={
-                    "executed_jobs": executed_jobs,
-                    "heartbeat": asdict(snapshot),
-                    "reconciled_lost_tasks": reconciled_lost,
-                    "reconciled_orphan_jobs": reconciled_orphan_jobs,
-                },
+                payload=payload,
             )
         return TickResult(executed_jobs=executed_jobs, heartbeat=snapshot)
 
@@ -108,6 +137,44 @@ class ClawDaemon:
                 payload={"cancelled_orphan_jobs": changed},
             )
         return changed
+
+    def _reconcile_pending_verification(self, *, now: float | None = None) -> int | None:
+        """Dry-run telemetry for the completed_unverified backlog (P1 Checkpoint A).
+
+        Returns the unverified count when the reconciler ran, or ``None`` when it
+        was skipped (no ledger / interval not elapsed) or failed — so
+        ``daemon_tick`` can distinguish "did not run" from "ran, backlog == 0".
+        Calls the reconciler so ``pending_verification_reconciliation`` is emitted
+        (it had no caller before); NEVER mutates ``agent_tasks``. A reconciler
+        failure is contained here so the rest of the tick (scheduler, stale/orphan
+        reconciliation) still runs. Interval-gated like ``_reconcile_stale_tasks``.
+        """
+        if self.task_ledger is None:
+            return None
+        current = time.time() if now is None else now
+        if current - self._last_pending_verification_at < self.pending_verification_interval:
+            return None
+        from claw_v2.reconciliation import build_reconciliation_report
+
+        try:
+            report = build_reconciliation_report(self.task_ledger, observe=self.observe)
+        except Exception:
+            logger.exception("pending verification reconciliation failed")
+            return None
+        self._last_pending_verification_at = current
+        # Checkpoint D: gated live drain of the safe read-only subset. OFF by
+        # default; contained like the report above so a drain failure never
+        # stops the scheduler / stale / orphan reconciliation in this tick.
+        if self.pending_verification_drain_apply:
+            try:
+                self.task_ledger.drain_reconcilable_unverified(
+                    apply=True,
+                    max_scan=self.pending_verification_drain_max_scan,
+                    max_apply=self.pending_verification_drain_max_apply,
+                )
+            except Exception:
+                logger.exception("pending verification drain failed")
+        return int(report.get("unverified_count", 0))
 
     async def run_loop(self, shutdown: asyncio.Event, interval: float = 60.0) -> None:
         liveness_task = None

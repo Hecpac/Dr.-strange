@@ -10,7 +10,11 @@ from typing import Any, Iterable
 
 from claw_v2.redaction import redact_sensitive
 from claw_v2.sqlite_runtime import connect_runtime_sqlite
-from claw_v2.task_completion import COMPLETION_CANDIDATES, validate_completion
+from claw_v2.task_completion import (
+    COMPLETION_CANDIDATES,
+    NEEDS_VERIFICATION_STATUSES,
+    validate_completion,
+)
 from claw_v2.turn_context import current_turn_id
 
 
@@ -442,6 +446,239 @@ class TaskLedger:
         if changed:
             self._emit("task_false_success_reconciled", {"count": changed, "tasks": reconciled})
         return changed
+
+    def _scan_drainable_candidates(
+        self, *, max_scan: int
+    ) -> tuple[list[TaskRecord], bool]:
+        """Scan the oldest pending ``completed_unverified`` rows for the drain.
+
+        Returns ``(records, scan_capped)``. Reads ``max_scan + 1`` rows so the
+        cap is *provable*: ``scan_capped`` is True only when MORE than
+        ``max_scan`` pending rows exist, never merely because exactly
+        ``max_scan`` were returned. Oldest-first (``updated_at ASC``) so overdue
+        rows — which are old — surface even when newer rows dominate. Bypasses
+        ``list``'s 100-row clamp on purpose; the drain bounds the real work via
+        ``max_apply``.
+        """
+        pending = tuple(sorted(NEEDS_VERIFICATION_STATUSES))
+        placeholders = ", ".join("?" for _ in pending)
+        cap = max(1, int(max_scan))
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM agent_tasks "
+                "WHERE status = 'completed_unverified' "
+                f"AND verification_status IN ({placeholders}) "
+                "ORDER BY updated_at ASC LIMIT ?",
+                (*pending, cap + 1),
+            ).fetchall()
+        scan_capped = len(rows) > cap
+        records = [self._row_to_record(row) for row in rows[:cap]]
+        return records, scan_capped
+
+    def drain_reconcilable_unverified(
+        self,
+        *,
+        deadline_seconds: float | None = None,
+        apply: bool = False,
+        max_scan: int | None = None,
+        max_apply: int | None = None,
+    ) -> dict[str, Any]:
+        """PR2 Checkpoint C/D: gated drain of the SAFE subset of the
+        ``completed_unverified`` backlog.
+
+        Only rows classified ``auto_close_as_unverified_lookup`` by
+        ``recommend_reconciliation_action`` (read-only tools, no error) that are
+        past the reconciliation deadline are eligible. Eligible rows transition
+        to the existing terminal ``status='cancelled'`` with
+        ``verification_status='auto_closed_unverified_lookup'`` (reuse-states; no
+        schema migration; respects ``brain_tooluse_verify_flag_gated``). Mutating
+        / error rows are never touched here.
+
+        Scope guards: ``max_scan`` bounds the per-call scan (``scan_capped`` is
+        proven via ``limit + 1``); ``max_apply`` bounds how many rows are drained
+        per call. ``apply=False`` is a pure dry-run (the explicit gate); the
+        daemon (Checkpoint D) calls it with ``apply=True`` behind a default-OFF
+        flag. The apply batch re-reads and re-classifies each row under the lock
+        (fail-closed) and rolls back on any mid-batch failure.
+        """
+        from claw_v2.reconciliation import (
+            AUTO_CLOSED_UNVERIFIED_LOOKUP,
+            DEFAULT_RECONCILIATION_DEADLINE_SECONDS,
+            RECONCILIATION_SCAN_LIMIT,
+            _tools_from_record,
+            recommend_reconciliation_action,
+        )
+
+        if deadline_seconds is None:
+            deadline_seconds = DEFAULT_RECONCILIATION_DEADLINE_SECONDS
+        if max_scan is None:
+            max_scan = RECONCILIATION_SCAN_LIMIT
+        now = time.time()
+        overdue_before = now - float(deadline_seconds)
+        # Bounded, oldest-first scan (reads limit + 1 so scan_capped is provable).
+        records, scan_capped = self._scan_drainable_candidates(max_scan=max_scan)
+        scanned = len(records)
+        # Classify each scanned row; build the skip breakdown + eligible set.
+        skipped_mutating = 0
+        skipped_error = 0
+        skipped_not_overdue = 0
+        skipped_needs_evidence_review = 0
+        eligible_ids: list[str] = []
+        for record in records:
+            action = recommend_reconciliation_action(
+                tools=_tools_from_record(record), error=str(record.error or "")
+            )
+            if action == "require_human_verification":
+                skipped_mutating += 1
+            elif action == "investigate_failure":
+                skipped_error += 1
+            elif action == "needs_evidence_review":
+                skipped_needs_evidence_review += 1
+            elif action == "auto_close_as_unverified_lookup":
+                if (
+                    record.completed_at is not None
+                    and float(record.completed_at) < overdue_before
+                ):
+                    eligible_ids.append(record.task_id)
+                else:
+                    skipped_not_overdue += 1
+        # Bound the actual work per call (Checkpoint D operational guardrail).
+        if max_apply is not None:
+            to_apply = eligible_ids[: max(0, int(max_apply))]
+        else:
+            to_apply = list(eligible_ids)
+        skipped_over_max_apply = len(eligible_ids) - len(to_apply)
+
+        drained: list[str] = []
+        closed_events: list[dict[str, Any]] = []
+        skipped_state_changed = 0
+        skipped_classification_changed = 0
+        if apply and to_apply:
+            pending = tuple(sorted(NEEDS_VERIFICATION_STATUSES))
+            pending_placeholders = ", ".join("?" for _ in pending)
+            # One short transaction: all rows transition under a single lock +
+            # commit (atomic batch; no UPDATE ... LIMIT). A failure mid-batch
+            # rolls the whole transaction back (fail-closed).
+            with self._lock:
+                try:
+                    for task_id in to_apply:
+                        row = self._conn.execute(
+                            "SELECT * FROM agent_tasks WHERE task_id = ? "
+                            "AND status = 'completed_unverified' "
+                            f"AND verification_status IN ({pending_placeholders}) "
+                            "AND completed_at < ?",
+                            (task_id, *pending, overdue_before),
+                        ).fetchone()
+                        if row is None:
+                            # status / pending / overdue changed since classify.
+                            skipped_state_changed += 1
+                            continue
+                        record = self._row_to_record(row)
+                        # Re-run the FULL classification on fresh row data under
+                        # the lock: if it is no longer a read-only / no-error
+                        # auto-close (e.g. a tool or error landed after classify),
+                        # leave it for the human/verifier lane (fail-closed).
+                        if (
+                            recommend_reconciliation_action(
+                                tools=_tools_from_record(record),
+                                error=str(record.error or ""),
+                            )
+                            != "auto_close_as_unverified_lookup"
+                        ):
+                            skipped_classification_changed += 1
+                            continue
+                        previous_verification = record.verification_status
+                        metadata = dict(record.metadata or {})
+                        metadata.update(
+                            {
+                                "reconciled_drained": True,
+                                "drained_from_status": "completed_unverified",
+                                "drained_from_verification_status": previous_verification,
+                                "drained_reason": "read-only unverified lookup past reconciliation deadline",
+                                "drained_at": now,
+                            }
+                        )
+                        # Reuse the existing terminal 'cancelled' status (no schema
+                        # migration); completed_at is preserved. Matches the prod
+                        # convention for drained read-only lookups.
+                        self._conn.execute(
+                            "UPDATE agent_tasks SET status = 'cancelled', "
+                            "verification_status = ?, metadata_json = ?, updated_at = ? "
+                            "WHERE task_id = ?",
+                            (
+                                AUTO_CLOSED_UNVERIFIED_LOOKUP,
+                                json.dumps(metadata, sort_keys=True),
+                                now,
+                                task_id,
+                            ),
+                        )
+                        drained.append(task_id)
+                        closed_events.append(
+                            {
+                                "task_id": task_id,
+                                "previous_status": "completed_unverified",
+                                "previous_verification_status": previous_verification,
+                                "new_status": "cancelled",
+                                "new_verification_status": AUTO_CLOSED_UNVERIFIED_LOOKUP,
+                                "age_seconds": int(now - float(record.completed_at or now)),
+                                "recommended_action": "auto_close_as_unverified_lookup",
+                                "reason": "auto-closed unverified read-only lookup past deadline (not user-cancelled)",
+                                "apply": True,
+                                "dry_run": False,
+                            }
+                        )
+                    if drained:
+                        self._conn.commit()
+                except Exception:
+                    # Discard any partial UPDATEs so the batch is all-or-nothing.
+                    self._conn.rollback()
+                    raise
+            # Emit one event per drained row AFTER releasing the lock (no
+            # observe I/O while holding it). Only actual closes emit here, so a
+            # second run (eligible=0) re-emits no per-row events.
+            for event in closed_events:
+                self._emit("pending_verification_readonly_auto_closed", event)
+        # Summary on EVERY call (incl. apply=False / no-op) so the lane always
+        # has a durable trace. scanned/scan_capped/limit expose the scan window;
+        # the skipped_* fields fully account for eligible - closed.
+        summary = {
+            "eligible": len(eligible_ids),
+            "closed": len(drained),
+            "skipped_mutating": skipped_mutating,
+            "skipped_error": skipped_error,
+            "skipped_not_overdue": skipped_not_overdue,
+            "skipped_needs_evidence_review": skipped_needs_evidence_review,
+            "skipped_state_changed": skipped_state_changed,
+            "skipped_classification_changed": skipped_classification_changed,
+            "skipped_over_max_apply": skipped_over_max_apply,
+            "scanned": scanned,
+            "scan_capped": scan_capped,
+            "limit": int(max_scan),
+            "max_apply": max_apply,
+            "deadline_seconds": float(deadline_seconds),
+            "apply": apply,
+            "dry_run": not apply,
+        }
+        self._emit("pending_verification_readonly_drain_summary", summary)
+        return {
+            "apply": apply,
+            "deadline_seconds": float(deadline_seconds),
+            "eligible_task_ids": eligible_ids,
+            "eligible_count": len(eligible_ids),
+            "drained_task_ids": drained,
+            "drained_count": len(drained),
+            "skipped_mutating": skipped_mutating,
+            "skipped_error": skipped_error,
+            "skipped_not_overdue": skipped_not_overdue,
+            "skipped_needs_evidence_review": skipped_needs_evidence_review,
+            "skipped_state_changed": skipped_state_changed,
+            "skipped_classification_changed": skipped_classification_changed,
+            "skipped_over_max_apply": skipped_over_max_apply,
+            "scanned": scanned,
+            "scan_capped": scan_capped,
+            "limit": int(max_scan),
+            "max_apply": max_apply,
+        }
 
     def get(self, task_id: str) -> TaskRecord | None:
         with self._lock:
