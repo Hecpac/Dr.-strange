@@ -83,6 +83,14 @@ class ApprovalManager:
 
     def approve(self, approval_id: str, token: str) -> bool:
         def _do_approve(payload: dict) -> None:
+            # MED-2: single-use. Only a still-pending approval can be resolved
+            # here; once approved/rejected/expired/archived the record is
+            # immutable, so a replayed token cannot re-authorize the action
+            # (no double-publish) and a wrong token cannot flip a resolved
+            # record's status.
+            if payload.get("status") != "pending":
+                payload["_result"] = False
+                return
             created = payload.get("created_at", 0)
             if time.time() - created > APPROVAL_TTL_SECONDS:
                 payload["status"] = "expired"
