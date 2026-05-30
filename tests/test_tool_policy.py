@@ -97,9 +97,37 @@ class SecretPathTests(unittest.TestCase):
                 self.assertTrue(path_is_secret(path), msg=path)
 
     def test_normal_paths_not_secret(self) -> None:
-        for path in ("README.md", "src/main.py", "docs/intro.md"):
+        for path in (
+            "README.md",
+            "src/main.py",
+            "docs/intro.md",
+            "config/app.yaml",          # guard: hardened patterns must not block generic config
+            "docs/release-history.md",  # guard: *_history must not match doc files
+        ):
             with self.subTest(path=path):
                 self.assertFalse(path_is_secret(path))
+
+    def test_credential_files_detected_post_audit(self) -> None:
+        # Gaps surfaced by the 2026-05-29 audit (PR 1): credential/secret files
+        # under HOME that the read-root exposes and SECRET_PATH_PATTERNS missed.
+        for path in (
+            "/Users/x/.netrc",
+            "/Users/x/.npmrc",
+            "/Users/x/.config/gh/hosts.yml",
+            "/Users/x/.docker/config.json",
+            "/Users/x/.aws/config",
+            "/Users/x/.kube/config",
+            "/Users/x/.config/gcloud/credentials.db",
+            "/Users/x/Library/Keychains/login.keychain-db",
+            "/Users/x/.zsh_history",
+            "/Users/x/.bash_history",
+            "/Users/x/passwords.kdbx",
+            "/Users/x/.ssh/id_ed25519",
+            "/Users/x/.ssh/id_ecdsa",
+            "cookies.json",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(path_is_secret(path), msg=path)
 
 
 class WorkspacePathValidationTests(unittest.TestCase):

@@ -48,6 +48,26 @@ SECRET_PATH_PATTERNS: tuple[str, ...] = (
     "*/approvals/*",
     "id_rsa*",
     "*.token",
+    # --- 2026-05-29 audit (PR 1): credential files exposed by the HOME read-root ---
+    ".netrc",
+    "*/.netrc",
+    ".npmrc",
+    "*/.npmrc",
+    "*cookies*",
+    "*.keychain",
+    "*.keychain-db",
+    "*/.docker/*",
+    "*/gh/hosts.yml",
+    "*/.aws/config",  # .aws/credentials already covered by *credential*
+    "*/.kube/config",
+    "*/.config/gcloud/*",
+    "*_history",  # .zsh_history / .bash_history / .python_history (narrower than *history to avoid doc false positives)
+    "*.kdbx",
+    # SSH private keys: id_rsa* already present; cover the rest + the whole dir
+    "id_ed25519*",
+    "id_ecdsa*",
+    "id_dsa*",
+    "*/.ssh/*",
 )
 
 

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, Callable
 from urllib.parse import urlparse
 
 from claw_v2.network_proxy import DomainAllowlistEnforcer, NetworkPolicy
-from claw_v2.sandbox import SandboxPolicy, check_command
+from claw_v2.sandbox import SandboxPolicy, check_command, _unwrap_command_tokens
 from claw_v2.tool_policy import TOOL_POLICIES, ToolPolicy, _decode_path_text, path_is_secret
 
 if TYPE_CHECKING:
@@ -189,7 +189,11 @@ class RuntimePolicyEngine:
         if violation:
             raise RuntimePolicyViolation(violation)
         try:
-            tokens = shlex.split(command) if command else []
+            # Inspect the REAL argv (unwrapped from bash -c / sh -c / env / sudo),
+            # not the outer shlex tokens. Otherwise the -c payload stays a single
+            # opaque token that resolves inside the workspace and slips past the
+            # boundary check (2026-05-29 audit CRITICAL).
+            tokens = _unwrap_command_tokens(shlex.split(command)) if command else []
         except ValueError as exc:
             raise RuntimePolicyViolation("unparseable command") from exc
         for token in tokens:
@@ -295,9 +299,17 @@ def _iter_path_values(value: Any, *, key: str = "") -> list[tuple[str, str]]:
             if normalized in _PATH_KEYS:
                 if isinstance(child_value, (str, Path)):
                     values.append((normalized, str(child_value)))
+                elif isinstance(child_value, list):
+                    values.extend(
+                        (normalized, str(item)) for item in child_value if isinstance(item, (str, Path))
+                    )
                 continue
-            if isinstance(child_value, dict):
-                values.extend(_iter_path_values(child_value, key=normalized))
+            values.extend(_iter_path_values(child_value, key=normalized))
+        return values
+    if isinstance(value, list):
+        values = []
+        for item in value:
+            values.extend(_iter_path_values(item, key=key))
         return values
     return [(key, str(value))] if key in _PATH_KEYS and isinstance(value, (str, Path)) else []
 

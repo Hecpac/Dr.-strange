@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from claw_v2.runtime_policy import RuntimePolicyEngine
+from claw_v2.runtime_policy import RuntimePolicyEngine, _iter_path_values
 from claw_v2.sandbox import SandboxPolicy
 from claw_v2.tools import ToolDefinition, ToolRegistry
 
@@ -63,6 +63,49 @@ class RuntimePolicyEngineTests(unittest.TestCase):
                 )
 
             self.assertIn("not declared", str(ctx.exception))
+
+    def test_bash_dash_c_payload_cannot_escape_path_boundary(self) -> None:
+        # 2026-05-29 audit CRITICAL: bash -c '<cmd>' left the -c payload as one
+        # opaque shlex token that resolved inside the workspace, so absolute
+        # host paths slipped past the boundary check.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            engine = RuntimePolicyEngine(workspace_root=workspace, sandbox_policy=SandboxPolicy(workspace_root=workspace))
+            for command in (
+                "bash -c 'cat /etc/passwd'",
+                "bash -c 'cp /etc/passwd /tmp/x'",
+                "bash -c 'grep -r AKIA /var/log'",
+                "sh -c 'cat /etc/hosts'",
+            ):
+                with self.subTest(command=command):
+                    with self.assertRaises(PermissionError):
+                        engine.enforce("Bash", {"command": command}, context="operator")
+
+    def test_bash_dash_c_workspace_path_still_allowed(self) -> None:
+        # Regression guard: the unwrap fix must not over-block legitimate
+        # workspace-relative reads inside bash -c.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            (workspace / "README.md").write_text("ok", encoding="utf-8")
+            engine = RuntimePolicyEngine(workspace_root=workspace, sandbox_policy=SandboxPolicy(workspace_root=workspace))
+            engine.enforce("Bash", {"command": "bash -c 'cat README.md'"}, context="operator")
+
+    def test_direct_secret_command_path_blocked(self) -> None:
+        # Regression guard: direct (non-wrapped) host path stays blocked.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            engine = RuntimePolicyEngine(workspace_root=workspace, sandbox_policy=SandboxPolicy(workspace_root=workspace))
+            with self.assertRaises(PermissionError):
+                engine.enforce("Bash", {"command": "cat /etc/passwd"}, context="operator")
+
+    def test_iter_path_values_recurses_into_lists(self) -> None:
+        # 2026-05-29 audit: _iter_path_values skipped lists (asymmetric with
+        # _iter_urls), so path args inside lists escaped the secret/boundary check.
+        found = [v for _, v in _iter_path_values({"files": [{"path": "/etc/passwd"}, {"path": "~/.netrc"}]})]
+        self.assertIn("/etc/passwd", found)
+        self.assertIn("~/.netrc", found)
+        nested = [v for _, v in _iter_path_values({"path": ["/etc/passwd", "~/.npmrc"]})]
+        self.assertIn("/etc/passwd", nested)
 
 
 if __name__ == "__main__":
