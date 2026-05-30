@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import time
 from dataclasses import asdict, dataclass
@@ -11,6 +12,8 @@ from claw_v2.heartbeat import HeartbeatService, HeartbeatSnapshot
 from claw_v2.observe import ObserveStream
 from claw_v2.task_ledger import TaskLedger
 from claw_v2.tracing import new_trace_context
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -51,6 +54,17 @@ class ClawDaemon:
         executed_jobs = self.scheduler.run_due(now=now)
         snapshot = self.heartbeat.collect()
         if self.observe is not None:
+            payload = {
+                "executed_jobs": executed_jobs,
+                "heartbeat": asdict(snapshot),
+                "reconciled_lost_tasks": reconciled_lost,
+                "reconciled_orphan_jobs": reconciled_orphan_jobs,
+            }
+            # Omit the field when the reconciler did not run this tick, so a skip
+            # is not logged as a real backlog of 0 (the authoritative count lives
+            # in the pending_verification_reconciliation event).
+            if reconciled_pending is not None:
+                payload["pending_verification_unverified"] = reconciled_pending
             self.observe.emit(
                 "daemon_tick",
                 trace_id=trace["trace_id"],
@@ -58,13 +72,7 @@ class ClawDaemon:
                 span_id=trace["span_id"],
                 parent_span_id=trace["parent_span_id"],
                 artifact_id=trace["artifact_id"],
-                payload={
-                    "executed_jobs": executed_jobs,
-                    "heartbeat": asdict(snapshot),
-                    "reconciled_lost_tasks": reconciled_lost,
-                    "reconciled_orphan_jobs": reconciled_orphan_jobs,
-                    "pending_verification_unverified": reconciled_pending,
-                },
+                payload=payload,
             )
         return TickResult(executed_jobs=executed_jobs, heartbeat=snapshot)
 
@@ -114,22 +122,29 @@ class ClawDaemon:
             )
         return changed
 
-    def _reconcile_pending_verification(self, *, now: float | None = None) -> int:
+    def _reconcile_pending_verification(self, *, now: float | None = None) -> int | None:
         """Dry-run telemetry for the completed_unverified backlog (P1 Checkpoint A).
 
-        Calls the reconciler so ``pending_verification_reconciliation`` is
-        actually emitted — it had no caller before, so the backlog was invisible.
-        NEVER mutates ``agent_tasks``; applying transitions is a later, gated
-        step. Interval-gated like ``_reconcile_stale_tasks``.
+        Returns the unverified count when the reconciler ran, or ``None`` when it
+        was skipped (no ledger / interval not elapsed) or failed — so
+        ``daemon_tick`` can distinguish "did not run" from "ran, backlog == 0".
+        Calls the reconciler so ``pending_verification_reconciliation`` is emitted
+        (it had no caller before); NEVER mutates ``agent_tasks``. A reconciler
+        failure is contained here so the rest of the tick (scheduler, stale/orphan
+        reconciliation) still runs. Interval-gated like ``_reconcile_stale_tasks``.
         """
         if self.task_ledger is None:
-            return 0
+            return None
         current = time.time() if now is None else now
         if current - self._last_pending_verification_at < self.pending_verification_interval:
-            return 0
+            return None
         from claw_v2.reconciliation import build_reconciliation_report
 
-        report = build_reconciliation_report(self.task_ledger, observe=self.observe)
+        try:
+            report = build_reconciliation_report(self.task_ledger, observe=self.observe)
+        except Exception:
+            logger.exception("pending verification reconciliation failed")
+            return None
         self._last_pending_verification_at = current
         return int(report.get("unverified_count", 0))
 
