@@ -8,9 +8,9 @@
 ## meta
 
 ```yaml
-describes_commit: 6d43148+final-render-funnel
-doc_version: 1.5
-last_verified: 2026-05-17
+describes_commit: 448ef39+pr2-checkpoint-b
+doc_version: 1.6
+last_verified: 2026-05-30
 verification_method: manual + grep cross-check
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
@@ -145,17 +145,23 @@ invariants:
          full coordinator cycle would verify an intermediate synthesis instead.
 
   brain_tooluse_verify_flag_gated:
-    rule: With `BRAIN_TOOLUSE_VERIFY` off, the brain tool-use close path remains
-          conservative: substantive turns still close as completed_unverified or
-          blocked according to the pre-B1 branches. With the flag on, a turn
-          that either requires verified completion or performed mutation
-          (files_written or commands_run) calls `verify_brain_tooluse`; passed
-          closes succeeded/passed, failed closes failed/failed, and pending falls
-          through to the existing conservative branches. If the coordinator is
-          unavailable, verifier dispatch is skipped. Anthropic SDK tool hooks
-          must persist minimal tool_input evidence (paths, commands, patterns)
-          so the close path can derive files_written and commands_run from real
-          tool effects without storing file contents.
+    rule: The close path blocks substantive turns that ran without a passed
+          verifier. PR2-B (2026-05-30): the blocker fires on
+          `requires_verified_completion OR performed_mutation` (files_written /
+          commands_run) REGARDLESS of the `BRAIN_TOOLUSE_VERIFY` flag — a
+          Write/Edit/Bash turn closes failed/blocked, not completed_unverified,
+          even with the flag off. Only read-only turns with no action-text and no
+          error fall through to the conservative completed_unverified close.
+          (This supersedes the prior flag-off-conservative behavior; the audit
+          found 96% of the backlog had mutating tools while the text-only blocker
+          almost never fired.) With the flag on, such a turn first calls
+          `verify_brain_tooluse`; passed closes succeeded/passed, failed closes
+          failed/failed, and pending falls through to the now mutation-aware
+          blocker. If the coordinator is unavailable, verifier dispatch is
+          skipped. Anthropic SDK tool hooks must persist minimal tool_input
+          evidence (paths, commands, patterns) so the close path can derive
+          files_written and commands_run from real tool effects without storing
+          file contents.
     enforced_by:
       - tests/test_brain_tooluse_ledger.py
       - tests/test_anthropic.py

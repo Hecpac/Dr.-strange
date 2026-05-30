@@ -4992,10 +4992,16 @@ class BotService:
                 except Exception:
                     logger.debug("brain_tooluse_ledger_verification_failed emit failed", exc_info=True)
                 return
-        # Tools ran without failure, but no verifier has passed yet. Close the
-        # row as completed_unverified so the stale-running watchdog does not
-        # rewrite real user-visible work into a false lost failure.
-        if requires_verified_completion:
+        # Tools ran without failure, but no verifier has passed yet.
+        # PR2 Checkpoint B: block on executed mutation (files_written /
+        # commands_run), not only on the 6 request-text regex. A Write/Edit/Bash
+        # turn that ran without a passed verifier must not benign-close as
+        # completed_unverified — it closes blocked regardless of the verify flag
+        # (the audit found 96% of the backlog had mutating tools while the
+        # text-only blocker almost never fired). Read-only turns (no mutation, no
+        # action text) still fall through to the conservative completed_unverified
+        # close below. See INTERNAL_WIRING brain_tooluse_verify_flag_gated.
+        if requires_verified_completion or performed_mutation:
             evidence_manifest["completed_at"] = time.time()
             evidence_manifest["verification_result"] = "blocked"
             evidence_manifest["blockers"] = ["passed_verification_missing_for_action"]

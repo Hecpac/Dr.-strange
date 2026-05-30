@@ -411,17 +411,19 @@ class BrainToolUseLedgerTests(unittest.TestCase):
             ["passed_verification_missing_for_action"],
         )
 
-    def test_b1_off_is_unchanged_for_mutation(self) -> None:
+    def test_b_mutation_without_action_text_blocks_even_with_verifier_off(self) -> None:
+        # PR2 Checkpoint B: the blocker now fires on executed mutation
+        # (files_written / commands_run), not only on the 6 request-text regex.
+        # With the verifier flag OFF, a Write/Edit/Bash turn whose text does NOT
+        # match still closes blocked, not benign completed_unverified.
+        # Supersedes the prior flag-off-conservative behavior (the former
+        # test_b1_off_is_unchanged_for_mutation); INTERNAL_WIRING
+        # brain_tooluse_verify_flag_gated is updated in the same commit.
         observe = _RecordingObserve()
         observe.canned_trace_events = [
             _tool_event("Write", tool_input={"file_path": "notes/b1.txt"}),
         ]
-        bot = _make_bot(
-            observe,
-            self.ledger,
-            brain_tooluse_verify=False,
-            coordinator=object(),
-        )
+        bot = _make_bot(observe, self.ledger, brain_tooluse_verify=False, coordinator=object())
 
         with patch("claw_v2.bot.verify_brain_tooluse") as verifier:
             bot._attach_brain_tool_use_ledger(
@@ -431,7 +433,60 @@ class BrainToolUseLedgerTests(unittest.TestCase):
                 runtime_channel="telegram",
             )
 
-        verifier.assert_not_called()
+        verifier.assert_not_called()  # flag off -> no verifier call
+        task = self.ledger.list(limit=10)[0]
+        self.assertEqual(task.status, "failed")
+        self.assertEqual(task.verification_status, "blocked")
+        events = [name for name, _ in observe.events]
+        self.assertIn("brain_tooluse_ledger_blocked_unverified_action", events)
+        self.assertNotIn("brain_tooluse_ledger_needs_verification", events)
+
+    def test_b_edit_mutation_without_action_text_blocks(self) -> None:
+        observe = _RecordingObserve()
+        observe.canned_trace_events = [
+            _tool_event("Edit", tool_input={"file_path": "notes/b1.txt"}),
+        ]
+        bot = _make_bot(observe, self.ledger)
+        bot._attach_brain_tool_use_ledger(
+            session_id="tg-test",
+            response=_StubResponse(artifacts={"trace_id": "trace-X"}),
+            source_text="ajusta el texto",
+            runtime_channel="telegram",
+        )
+        task = self.ledger.list(limit=10)[0]
+        self.assertEqual(task.status, "failed")
+        self.assertEqual(task.verification_status, "blocked")
+
+    def test_b_bash_mutation_without_action_text_blocks(self) -> None:
+        observe = _RecordingObserve()
+        observe.canned_trace_events = [
+            _tool_event("Bash", tool_input={"command": "mkdir -p build && touch build/x"}),
+        ]
+        bot = _make_bot(observe, self.ledger)
+        bot._attach_brain_tool_use_ledger(
+            session_id="tg-test",
+            response=_StubResponse(artifacts={"trace_id": "trace-X"}),
+            source_text="prepara el build",
+            runtime_channel="telegram",
+        )
+        task = self.ledger.list(limit=10)[0]
+        self.assertEqual(task.status, "failed")
+        self.assertEqual(task.verification_status, "blocked")
+
+    def test_b_readonly_without_error_is_not_blocked_by_mutation(self) -> None:
+        # His #4: read-only tools (no mutation, no action text) still close benign.
+        observe = _RecordingObserve()
+        observe.canned_trace_events = [
+            _tool_event("Grep", tool_input={"pattern": "TODO"}),
+            _tool_event("Glob", tool_input={"pattern": "**/*.py"}),
+        ]
+        bot = _make_bot(observe, self.ledger)
+        bot._attach_brain_tool_use_ledger(
+            session_id="tg-test",
+            response=_StubResponse(artifacts={"trace_id": "trace-X"}),
+            source_text="busca los TODO",
+            runtime_channel="telegram",
+        )
         task = self.ledger.list(limit=10)[0]
         self.assertEqual(task.status, "completed_unverified")
         self.assertEqual(task.verification_status, "needs_verification")
@@ -521,7 +576,9 @@ class BrainToolUseLedgerTests(unittest.TestCase):
         self.assertEqual(task.verification_status, "failed")
         self.assertEqual(task.artifacts["evidence_manifest"]["verification_result"], "failed")
 
-    def test_b1_on_pending_falls_through_to_conservative_close(self) -> None:
+    def test_b1_on_pending_mutation_blocks(self) -> None:
+        # PR2-B: a pending verdict is not a pass; a mutation that did not earn a
+        # passed verifier falls through to the now mutation-aware blocker.
         observe = _RecordingObserve()
         observe.canned_trace_events = [
             _tool_event("Write", tool_input={"file_path": "notes/b1.txt"}),
@@ -543,11 +600,13 @@ class BrainToolUseLedgerTests(unittest.TestCase):
 
         verifier.assert_called_once()
         task = self.ledger.list(limit=10)[0]
-        self.assertEqual(task.status, "completed_unverified")
-        self.assertEqual(task.verification_status, "needs_verification")
-        self.assertEqual(task.artifacts["evidence_manifest"]["verification_result"], "needs_verification")
+        self.assertEqual(task.status, "failed")
+        self.assertEqual(task.verification_status, "blocked")
+        self.assertEqual(task.artifacts["evidence_manifest"]["verification_result"], "blocked")
 
-    def test_b1_no_coordinator_skips_verifier(self) -> None:
+    def test_b1_no_coordinator_skips_verifier_blocks_mutation(self) -> None:
+        # PR2-B: with no coordinator the verifier cannot run; a mutation still must
+        # not benign-close, so the blocker fires instead of completed_unverified.
         observe = _RecordingObserve()
         observe.canned_trace_events = [
             _tool_event("Write", tool_input={"file_path": "notes/b1.txt"}),
@@ -569,8 +628,8 @@ class BrainToolUseLedgerTests(unittest.TestCase):
 
         verifier.assert_not_called()
         task = self.ledger.list(limit=10)[0]
-        self.assertEqual(task.status, "completed_unverified")
-        self.assertEqual(task.verification_status, "needs_verification")
+        self.assertEqual(task.status, "failed")
+        self.assertEqual(task.verification_status, "blocked")
 
     # --- H. tier-3 / approval gate -> recorded as skipped --------------------
 
