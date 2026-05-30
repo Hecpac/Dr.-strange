@@ -153,7 +153,9 @@ class WikiService:
         self.raw_dir.mkdir(parents=True, exist_ok=True)
         self.wiki_dir.mkdir(parents=True, exist_ok=True)
         # In-memory indices
-        self._lock = threading.Lock()
+        # RLock (not Lock): embedding mutations and snapshot reads may nest
+        # (e.g. delete -> _save_embeddings), and reentrancy avoids deadlock.
+        self._lock = threading.RLock()
         self._embeddings: dict[str, list[float]] = self._load_embeddings()
         self._graph: dict[str, list[dict]] = self._load_graph()
         self._firecrawl_paused_until, self._firecrawl_pause_reason = self._load_firecrawl_state()
@@ -990,12 +992,14 @@ class WikiService:
         pages = self._list_wiki_pages()
         total_pages = len(pages)
         active_slugs = {page.stem for page in pages}
+        with self._lock:
+            embedding_items = list(self._embeddings.items())
         indexed_slugs = {
-            slug for slug, vector in self._embeddings.items()
+            slug for slug, vector in embedding_items
             if slug in active_slugs and isinstance(vector, list) and bool(vector)
         }
         stale_embeddings = {
-            slug for slug, vector in self._embeddings.items()
+            slug for slug, vector in embedding_items
             if slug not in active_slugs and isinstance(vector, list) and bool(vector)
         }
 
@@ -1086,8 +1090,9 @@ class WikiService:
             removed.append(f"wiki/{slug}.md")
 
         # 3. Embeddings
-        if slug in self._embeddings:
-            del self._embeddings[slug]
+        with self._lock:
+            existed = self._embeddings.pop(slug, None) is not None
+        if existed:
             self._save_embeddings()
             removed.append("embedding")
 
@@ -1314,11 +1319,13 @@ class WikiService:
                 text = ""
             title = self._extract_title(page)
             search_text = f"{title} {slug.replace('-', ' ')} {text[:20000]}"
-            page_vec = self._embeddings.get(slug)
+            with self._lock:
+                page_vec = self._embeddings.get(slug)
             if page_vec is None:
                 page_vec = _embed(search_text[:1500])
                 if persist_missing_embeddings:
-                    self._embeddings[slug] = page_vec
+                    with self._lock:
+                        self._embeddings[slug] = page_vec
                     embeddings_dirty = True
             similarity = max(0.0, _cosine(query_vec, page_vec)) * self._time_decay(page)
             tokens = _tokenize(search_text)
@@ -1659,7 +1666,9 @@ class WikiService:
     def _index_page_embedding(self, slug: str, content: str) -> None:
         """Create/update the embedding for a wiki page."""
         text = f"{slug.replace('-', ' ')} {content[:500]}"
-        self._embeddings[slug] = _embed(text)
+        vector = _embed(text)
+        with self._lock:
+            self._embeddings[slug] = vector
 
     def _update_index(self, category: str, entry: str) -> None:
         if not entry.strip():
@@ -1684,7 +1693,9 @@ class WikiService:
     def _find_duplicate(self, content: str, threshold: float = 0.85) -> str | None:
         """Check if content is too similar to an existing wiki page."""
         incoming_vec = _embed(content[:500])
-        for slug, page_vec in self._embeddings.items():
+        with self._lock:
+            items = list(self._embeddings.items())
+        for slug, page_vec in items:
             if _cosine(incoming_vec, page_vec) > threshold:
                 return slug
         return None

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 from html import escape
 import json
 import logging
@@ -366,6 +367,24 @@ CREATE TABLE IF NOT EXISTS calibration_stats (
 _GRAPH_NEIGHBOR_DISCOUNT = 0.6
 
 
+def _synchronized(method):
+    """Run an instance method while holding self._lock (a reentrant RLock).
+
+    Read methods on MemoryStore share one sqlite3 connection
+    (check_same_thread=False) with the locked write methods; without this guard a
+    read interleaved with a write raised sqlite3 errors (2026-05-29 audit HIGH).
+    The lock is an RLock so a synchronized read that calls another synchronized
+    read (or an already-locked write helper) does not deadlock.
+    """
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 class MemoryStore:
     def __init__(self, db_path: Path | str) -> None:
         self.db_path = Path(db_path)
@@ -378,7 +397,9 @@ class MemoryStore:
             logger.debug("Pending restore check failed", exc_info=True)
         self._conn = connect_runtime_sqlite(self.db_path)
         self._conn.executescript(SCHEMA)
-        self._lock = threading.Lock()
+        # RLock (not Lock): read methods are @_synchronized and may be called
+        # from within already-locked write paths; reentrancy avoids deadlock.
+        self._lock = threading.RLock()
         self._migrate()
 
     def _ensure_task_outcome_usable_reply_unverified_locked(self) -> None:
@@ -740,6 +761,7 @@ class MemoryStore:
             self._conn.commit()
             return len(ids)
 
+    @_synchronized
     def get_recent_messages(self, session_id: str, limit: int = 20) -> list[dict]:
         rows = self._conn.execute(
             """
@@ -778,6 +800,7 @@ class MemoryStore:
             self._conn.commit()
             return int(cursor.rowcount or 0)
 
+    @_synchronized
     def get_messages_since(self, session_id: str, after_id: int, limit: int | None = None) -> list[dict]:
         sql = [
             """
@@ -794,6 +817,7 @@ class MemoryStore:
         rows = self._conn.execute("\n".join(sql), params).fetchall()
         return [dict(row) for row in rows]
 
+    @_synchronized
     def count_messages(self, session_id: str) -> int:
         row = self._conn.execute(
             """
@@ -805,6 +829,7 @@ class MemoryStore:
         ).fetchone()
         return row["count"] if row else 0
 
+    @_synchronized
     def last_message_id(self, session_id: str) -> int:
         row = self._conn.execute(
             """
@@ -837,6 +862,7 @@ class MemoryStore:
             self._conn.commit()
             return True
 
+    @_synchronized
     def get_session_state(self, session_id: str) -> dict:
         row = self._conn.execute(
             """
@@ -882,6 +908,7 @@ class MemoryStore:
             "last_turn_summary": row["last_turn_summary"],
         }
 
+    @_synchronized
     def list_session_states(self, *, limit: int = 5) -> list[dict]:
         rows = self._conn.execute(
             """
@@ -1069,6 +1096,7 @@ class MemoryStore:
             self._conn.commit()
             return cursor.rowcount > 0
 
+    @_synchronized
     def get_fact(self, key: str) -> dict | None:
         row = self._conn.execute(
             """
@@ -1102,6 +1130,7 @@ class MemoryStore:
             self._conn.commit()
             return new_value
 
+    @_synchronized
     def search_facts(self, query: str, limit: int = 10, agent_name: str | None = None) -> list[dict]:
         if agent_name:
             rows = self._conn.execute(
@@ -1127,6 +1156,7 @@ class MemoryStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    @_synchronized
     def get_profile_facts(self) -> list[dict]:
         rows = self._conn.execute(
             """
@@ -1138,6 +1168,7 @@ class MemoryStore:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    @_synchronized
     def get_learning_facts(self, limit: int = 3) -> list[dict]:
         rows = self._conn.execute(
             """
@@ -1151,6 +1182,7 @@ class MemoryStore:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    @_synchronized
     def build_context(
         self,
         session_id: str,
@@ -1373,6 +1405,7 @@ class MemoryStore:
             self._conn.commit()
             return int(cursor.lastrowid or 0)
 
+    @_synchronized
     def list_pending_recovery_jobs(
         self, session_id: str | None = None
     ) -> list[dict[str, Any]]:
@@ -1460,6 +1493,7 @@ class MemoryStore:
             )
             self._conn.commit()
 
+    @_synchronized
     def get_provider_session_reset(self, app_session_id: str) -> dict[str, Any] | None:
         row = self._conn.execute(
             """
@@ -1488,6 +1522,7 @@ class MemoryStore:
 
     # --- Cron state ---
 
+    @_synchronized
     def load_cron_state(self) -> dict[str, tuple[float, int]]:
         rows = self._conn.execute("SELECT job_name, last_run_at, runs FROM cron_state").fetchall()
         return {row["job_name"]: (row["last_run_at"], row["runs"]) for row in rows}
@@ -1836,6 +1871,7 @@ class MemoryStore:
             "sample_count": row[4],
         }
 
+    @_synchronized
     def search_past_outcomes(
         self, query: str, *, task_type: str | None = None, limit: int = 5,
     ) -> list[dict]:
@@ -1861,6 +1897,7 @@ class MemoryStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    @_synchronized
     def iter_recent_outcomes(self, *, limit: int = 200) -> list[dict]:
         """Wave 3.4: outcome rows including parsed tags. Used by
         LearningLoop.detect_failure_clusters to group failures by tag and
@@ -1884,6 +1921,7 @@ class MemoryStore:
             out.append(record)
         return out
 
+    @_synchronized
     def recent_failures(self, *, task_type: str | None = None, limit: int = 5) -> list[dict]:
         if task_type:
             rows = self._conn.execute(
@@ -1905,6 +1943,7 @@ class MemoryStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    @_synchronized
     def recent_outcomes_within(
         self,
         *,
@@ -2019,6 +2058,7 @@ class MemoryStore:
 
         return scored[:limit]
 
+    @_synchronized
     def search_outcomes_with_graph(
         self,
         query: str,
@@ -2088,6 +2128,7 @@ class MemoryStore:
 
     # --- Learning loop: feedback & retrieval helpers ---
 
+    @_synchronized
     def get_outcome(self, outcome_id: int) -> dict | None:
         row = self._conn.execute(
             "SELECT * FROM task_outcomes WHERE id = ?", (outcome_id,),
@@ -2102,6 +2143,7 @@ class MemoryStore:
             )
             self._conn.commit()
 
+    @_synchronized
     def last_outcome_id(self) -> int | None:
         row = self._conn.execute(
             "SELECT id FROM task_outcomes ORDER BY id DESC LIMIT 1",
