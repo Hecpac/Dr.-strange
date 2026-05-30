@@ -30,6 +30,7 @@ class ClawDaemon:
         job_service: Any | None = None,
         stale_task_seconds: float = 6 * 60 * 60,
         task_reconciliation_interval: float = 5 * 60,
+        pending_verification_interval: float = 15 * 60,
     ) -> None:
         self.scheduler = scheduler
         self.heartbeat = heartbeat
@@ -39,11 +40,14 @@ class ClawDaemon:
         self.stale_task_seconds = stale_task_seconds
         self.task_reconciliation_interval = task_reconciliation_interval
         self._last_task_reconciliation_at = 0.0
+        self.pending_verification_interval = pending_verification_interval
+        self._last_pending_verification_at = 0.0
 
     def tick(self, *, now: float | None = None) -> TickResult:
         trace = new_trace_context(artifact_id="daemon_tick")
         reconciled_lost = self._reconcile_stale_tasks(now=now)
         reconciled_orphan_jobs = self._reconcile_orphaned_jobs()
+        reconciled_pending = self._reconcile_pending_verification(now=now)
         executed_jobs = self.scheduler.run_due(now=now)
         snapshot = self.heartbeat.collect()
         if self.observe is not None:
@@ -59,6 +63,7 @@ class ClawDaemon:
                     "heartbeat": asdict(snapshot),
                     "reconciled_lost_tasks": reconciled_lost,
                     "reconciled_orphan_jobs": reconciled_orphan_jobs,
+                    "pending_verification_unverified": reconciled_pending,
                 },
             )
         return TickResult(executed_jobs=executed_jobs, heartbeat=snapshot)
@@ -108,6 +113,25 @@ class ClawDaemon:
                 payload={"cancelled_orphan_jobs": changed},
             )
         return changed
+
+    def _reconcile_pending_verification(self, *, now: float | None = None) -> int:
+        """Dry-run telemetry for the completed_unverified backlog (P1 Checkpoint A).
+
+        Calls the reconciler so ``pending_verification_reconciliation`` is
+        actually emitted — it had no caller before, so the backlog was invisible.
+        NEVER mutates ``agent_tasks``; applying transitions is a later, gated
+        step. Interval-gated like ``_reconcile_stale_tasks``.
+        """
+        if self.task_ledger is None:
+            return 0
+        current = time.time() if now is None else now
+        if current - self._last_pending_verification_at < self.pending_verification_interval:
+            return 0
+        from claw_v2.reconciliation import build_reconciliation_report
+
+        report = build_reconciliation_report(self.task_ledger, observe=self.observe)
+        self._last_pending_verification_at = current
+        return int(report.get("unverified_count", 0))
 
     async def run_loop(self, shutdown: asyncio.Event, interval: float = 60.0) -> None:
         liveness_task = None
