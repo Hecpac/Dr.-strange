@@ -10,7 +10,11 @@ from typing import Any, Iterable
 
 from claw_v2.redaction import redact_sensitive
 from claw_v2.sqlite_runtime import connect_runtime_sqlite
-from claw_v2.task_completion import COMPLETION_CANDIDATES, validate_completion
+from claw_v2.task_completion import (
+    COMPLETION_CANDIDATES,
+    NEEDS_VERIFICATION_STATUSES,
+    validate_completion,
+)
 from claw_v2.turn_context import current_turn_id
 
 
@@ -468,6 +472,7 @@ class TaskLedger:
         from claw_v2.reconciliation import (
             AUTO_CLOSED_UNVERIFIED_LOOKUP,
             DEFAULT_RECONCILIATION_DEADLINE_SECONDS,
+            RECONCILIATION_SCAN_LIMIT,
             build_reconciliation_report,
         )
 
@@ -476,32 +481,66 @@ class TaskLedger:
         # Classify outside the lock: build_reconciliation_report calls
         # self.list (which takes self._lock, a non-reentrant Lock).
         report = build_reconciliation_report(self, deadline_seconds=deadline_seconds)
+        cases = report["cases"]
         now = time.time()
+        # Classify and apply must agree on what "pending" means: only rows still
+        # awaiting verification (needs_verification / needs_verify) are eligible,
+        # so eligible_count never counts a row the apply guard would skip.
         eligible_ids = [
             str(case["task_id"])
-            for case in report["cases"]
+            for case in cases
             if case["recommended_action"] == "auto_close_as_unverified_lookup"
             and case["deadline_at_epoch"] < now
+            and case["verification_status"] in NEEDS_VERIFICATION_STATUSES
         ]
+        # Skip breakdown so the summary telemetry says WHY each non-eligible
+        # case stayed in the backlog (mutating / error / not-yet-overdue).
+        skipped_mutating = sum(
+            1 for c in cases if c["recommended_action"] == "require_human_verification"
+        )
+        skipped_error = sum(
+            1 for c in cases if c["recommended_action"] == "investigate_failure"
+        )
+        skipped_not_overdue = sum(
+            1
+            for c in cases
+            if c["recommended_action"] == "auto_close_as_unverified_lookup"
+            and c["deadline_at_epoch"] >= now
+        )
+        skipped_needs_evidence_review = sum(
+            1 for c in cases if c["recommended_action"] == "needs_evidence_review"
+        )
         drained: list[str] = []
+        closed_events: list[dict[str, Any]] = []
         if apply and eligible_ids:
+            # The guard re-validates the FULL eligibility (status pair, still
+            # pending, still overdue) under the lock, so a row re-stamped between
+            # classify and apply is left alone.
+            pending = tuple(sorted(NEEDS_VERIFICATION_STATUSES))
+            pending_placeholders = ", ".join("?" for _ in pending)
+            overdue_before = now - float(deadline_seconds)
+            # One short transaction: all eligible rows transition under a single
+            # lock + commit (atomic batch; no UPDATE ... LIMIT).
             with self._lock:
                 for task_id in eligible_ids:
                     row = self._conn.execute(
-                        "SELECT metadata_json, verification_status FROM agent_tasks "
-                        "WHERE task_id = ? AND status = 'completed_unverified' "
-                        "AND verification_status = 'needs_verification'",
-                        (task_id,),
+                        "SELECT completed_at, metadata_json, verification_status "
+                        "FROM agent_tasks WHERE task_id = ? "
+                        "AND status = 'completed_unverified' "
+                        f"AND verification_status IN ({pending_placeholders}) "
+                        "AND completed_at < ?",
+                        (task_id, *pending, overdue_before),
                     ).fetchone()
                     if row is None:
                         # Changed since the classify read — skip (idempotent).
                         continue
+                    previous_verification = str(row["verification_status"])
                     metadata = _loads_json(row["metadata_json"])
                     metadata.update(
                         {
                             "reconciled_drained": True,
                             "drained_from_status": "completed_unverified",
-                            "drained_from_verification_status": str(row["verification_status"]),
+                            "drained_from_verification_status": previous_verification,
                             "drained_reason": "read-only unverified lookup past reconciliation deadline",
                             "drained_at": now,
                         }
@@ -521,17 +560,52 @@ class TaskLedger:
                         ),
                     )
                     drained.append(task_id)
+                    closed_events.append(
+                        {
+                            "task_id": task_id,
+                            "previous_status": "completed_unverified",
+                            "previous_verification_status": previous_verification,
+                            "new_status": "cancelled",
+                            "new_verification_status": AUTO_CLOSED_UNVERIFIED_LOOKUP,
+                            "age_seconds": int(now - float(row["completed_at"] or now)),
+                            "recommended_action": "auto_close_as_unverified_lookup",
+                            "reason": "auto-closed unverified read-only lookup past deadline (not user-cancelled)",
+                            "apply": True,
+                            "dry_run": False,
+                        }
+                    )
                 if drained:
                     self._conn.commit()
-            if drained:
-                self._emit(
-                    "task_ledger_reconciled_drained",
-                    {
-                        "count": len(drained),
-                        "task_ids": drained,
-                        "deadline_seconds": float(deadline_seconds),
-                    },
-                )
+            # Emit one event per drained row AFTER releasing the lock (no
+            # observe I/O while holding it). Only actual closes emit here, so a
+            # second run (eligible=0) re-emits no per-row events.
+            for event in closed_events:
+                self._emit("pending_verification_readonly_auto_closed", event)
+        # Summary is emitted on EVERY call — including apply=False and no-op
+        # runs — so the reconciliation lane always has a durable trace.
+        scanned = len(cases)
+        scan_capped = scanned >= RECONCILIATION_SCAN_LIMIT
+        # Eligible rows the lock-held guard found already changed (TOCTOU). Only
+        # meaningful under apply; a dry run attempts nothing, so it is 0.
+        skipped_state_changed = (len(eligible_ids) - len(drained)) if apply else 0
+        self._emit(
+            "pending_verification_readonly_drain_summary",
+            {
+                "eligible": len(eligible_ids),
+                "closed": len(drained),
+                "skipped_mutating": skipped_mutating,
+                "skipped_error": skipped_error,
+                "skipped_not_overdue": skipped_not_overdue,
+                "skipped_needs_evidence_review": skipped_needs_evidence_review,
+                "skipped_state_changed": skipped_state_changed,
+                "scanned": scanned,
+                "scan_capped": scan_capped,
+                "limit": RECONCILIATION_SCAN_LIMIT,
+                "deadline_seconds": float(deadline_seconds),
+                "apply": apply,
+                "dry_run": not apply,
+            },
+        )
         return {
             "apply": apply,
             "deadline_seconds": float(deadline_seconds),
@@ -539,6 +613,13 @@ class TaskLedger:
             "eligible_count": len(eligible_ids),
             "drained_task_ids": drained,
             "drained_count": len(drained),
+            "skipped_mutating": skipped_mutating,
+            "skipped_error": skipped_error,
+            "skipped_not_overdue": skipped_not_overdue,
+            "skipped_needs_evidence_review": skipped_needs_evidence_review,
+            "skipped_state_changed": skipped_state_changed,
+            "scanned": scanned,
+            "scan_capped": scan_capped,
         }
 
     def get(self, task_id: str) -> TaskRecord | None:

@@ -69,7 +69,8 @@ class DaemonTickTests(unittest.TestCase):
 
         emitted = [call.args[0] for call in observe.emit.call_args_list]
         self.assertIn("pending_verification_reconciliation", emitted)
-        ledger.list.assert_any_call(statuses=("completed_unverified",), limit=500)
+        # RECONCILIATION_SCAN_LIMIT — the honest per-call cap (list clamps to 100).
+        ledger.list.assert_any_call(statuses=("completed_unverified",), limit=100)
         # Dry-run guarantee: Checkpoint A must not transition any row.
         ledger.mark_terminal.assert_not_called()
 

@@ -34,6 +34,12 @@ existing terminal ``status='cancelled'`` (reuse-states; no schema migration),
 matching the established prod convention, so it leaves the active queue (which
 lists only ``completed_unverified`` rows)."""
 
+RECONCILIATION_SCAN_LIMIT = 100
+"""Max ``completed_unverified`` rows examined per reconciliation/drain call.
+This is the real cap (``TaskLedger.list`` clamps to 100), so drain telemetry
+reports it honestly. Checkpoint D must page/lift this before a daemon consumes
+the backlog, so old rows are not hidden behind the first page."""
+
 _MUTATING_TOOLS = frozenset(
     {
         "Bash",
@@ -100,7 +106,7 @@ def build_reconciliation_report(
     with summary counts so the daemon trace records every review.
     """
     rows = task_ledger.list(
-        statuses=("completed_unverified",), limit=500
+        statuses=("completed_unverified",), limit=RECONCILIATION_SCAN_LIMIT
     )
     now = time.time()
     cases: list[dict[str, Any]] = []

@@ -172,7 +172,10 @@ invariants:
           turn still never auto-closes as verified. The drain is OFF by default
           (`TaskLedger.drain_reconcilable_unverified(apply=False)`) with no
           daemon caller at this checkpoint; wiring the live transition is
-          Checkpoint D.
+          Checkpoint D. The drain summary telemetry exposes
+          `scanned`/`scan_capped`/`limit` (the 100-row per-call scan cap,
+          `RECONCILIATION_SCAN_LIMIT`); D must page or lift it so older
+          read-only rows are not hidden behind the first page.
     enforced_by:
       - tests/test_brain_tooluse_ledger.py
       - tests/test_completed_unverified_reconciliation.py

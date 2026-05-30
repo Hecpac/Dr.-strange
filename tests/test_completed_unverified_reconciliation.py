@@ -174,7 +174,9 @@ class DrainReconcilableUnverifiedTests(unittest.TestCase):
         self.observe = _RecordingObserve()
         self.ledger = TaskLedger(Path(self._tmp.name) / "claw.db", observe=self.observe)
 
-    def _seed_unverified(self, task_id, tools, *, error="", overdue=True) -> None:
+    def _seed_unverified(
+        self, task_id, tools, *, error="", overdue=True, verification_status="needs_verification"
+    ) -> None:
         manifest = {"evidence_manifest": {"tools_run": list(tools)}}
         self.ledger.create(
             task_id=task_id,
@@ -191,7 +193,7 @@ class DrainReconcilableUnverifiedTests(unittest.TestCase):
             status="completed_unverified",
             summary="brain tool-use turn (unverified)",
             error=error,
-            verification_status="needs_verification",
+            verification_status=verification_status,
             artifacts=manifest,
         )
         if overdue:
@@ -217,12 +219,10 @@ class DrainReconcilableUnverifiedTests(unittest.TestCase):
         self.assertEqual(result["apply"], False)
         self.assertEqual(result["eligible_task_ids"], ["ro-overdue"])
         self.assertEqual(result["drained_count"], 0)
-        # Dry run mutates nothing and emits no drain event.
+        # Dry run mutates nothing and closes no row (no per-row event).
         self.assertEqual(self._verification_status("ro-overdue"), "needs_verification")
         self.assertEqual(self._verification_status("mut-overdue"), "needs_verification")
-        self.assertNotIn(
-            "task_ledger_reconciled_drained", [e[0] for e in self.observe.events]
-        )
+        self.assertEqual(self._payloads("pending_verification_readonly_auto_closed"), [])
 
     def test_apply_drains_only_readonly_overdue_no_error(self) -> None:
         self._seed_unverified("ro-overdue", ["Read", "Grep"])
@@ -252,14 +252,91 @@ class DrainReconcilableUnverifiedTests(unittest.TestCase):
         self.assertNotIn("ro-overdue", ids)
         self.assertEqual(report["unverified_count"], 0)
 
-    def test_apply_emits_drained_event(self) -> None:
+    def _payloads(self, event_type):
+        return [p["payload"] for et, p in self.observe.events if et == event_type]
+
+    def test_apply_emits_per_row_auto_closed_event(self) -> None:
         self._seed_unverified("ro-overdue", ["Read", "Grep"])
         self.ledger.drain_reconcilable_unverified(apply=True)
-        drained_events = [
-            p for et, p in self.observe.events if et == "task_ledger_reconciled_drained"
-        ]
-        self.assertEqual(len(drained_events), 1)
-        self.assertEqual(drained_events[0]["payload"]["count"], 1)
+        rows = self._payloads("pending_verification_readonly_auto_closed")
+        self.assertEqual(len(rows), 1)
+        pl = rows[0]
+        self.assertEqual(pl["task_id"], "ro-overdue")
+        self.assertEqual(pl["previous_status"], "completed_unverified")
+        self.assertEqual(pl["previous_verification_status"], "needs_verification")
+        self.assertEqual(pl["new_status"], "cancelled")
+        self.assertEqual(pl["new_verification_status"], "auto_closed_unverified_lookup")
+        self.assertEqual(pl["recommended_action"], "auto_close_as_unverified_lookup")
+        self.assertTrue(pl["apply"])
+        self.assertFalse(pl["dry_run"])
+        self.assertGreater(pl["age_seconds"], 0)
+
+    def test_apply_emits_summary_with_skip_breakdown(self) -> None:
+        self._seed_unverified("ro-overdue", ["Read", "Grep"])
+        self._seed_unverified("mut-overdue", ["Bash", "Write"])
+        self._seed_unverified("ro-err-overdue", ["Read"], error="boom")
+        self._seed_unverified("ro-fresh", ["Read", "Glob"], overdue=False)
+        self.ledger.drain_reconcilable_unverified(apply=True)
+        summaries = self._payloads("pending_verification_readonly_drain_summary")
+        self.assertEqual(len(summaries), 1)
+        s = summaries[0]
+        self.assertEqual(s["eligible"], 1)
+        self.assertEqual(s["closed"], 1)
+        self.assertEqual(s["skipped_mutating"], 1)
+        self.assertEqual(s["skipped_error"], 1)
+        self.assertEqual(s["skipped_not_overdue"], 1)
+        self.assertTrue(s["apply"])
+        self.assertFalse(s["dry_run"])
+
+    def test_dry_run_emits_summary_but_no_per_row(self) -> None:
+        self._seed_unverified("ro-overdue", ["Read", "Grep"])
+        self.ledger.drain_reconcilable_unverified(apply=False)
+        self.assertEqual(self._payloads("pending_verification_readonly_auto_closed"), [])
+        summaries = self._payloads("pending_verification_readonly_drain_summary")
+        self.assertEqual(len(summaries), 1)
+        s = summaries[0]
+        self.assertEqual(s["eligible"], 1)
+        self.assertEqual(s["closed"], 0)
+        self.assertFalse(s["apply"])
+        self.assertTrue(s["dry_run"])
+
+    def test_second_apply_emits_noop_summary_no_per_row(self) -> None:
+        self._seed_unverified("ro-overdue", ["Read", "Grep"])
+        self.ledger.drain_reconcilable_unverified(apply=True)
+        self.observe.events.clear()  # isolate the second run
+        self.ledger.drain_reconcilable_unverified(apply=True)
+        self.assertEqual(self._payloads("pending_verification_readonly_auto_closed"), [])
+        summaries = self._payloads("pending_verification_readonly_drain_summary")
+        self.assertEqual(len(summaries), 1)
+        self.assertEqual(summaries[0]["closed"], 0)
+        self.assertEqual(summaries[0]["eligible"], 0)
+
+    def test_summary_limit_matches_real_scan_cap(self) -> None:
+        # The reported limit/scan_capped must agree with the reconciler's real
+        # per-call row cap (100), not a dead 500. Small data => not capped.
+        self._seed_unverified("ro-overdue", ["Read", "Grep"])
+        self.ledger.drain_reconcilable_unverified(apply=True)
+        s = self._payloads("pending_verification_readonly_drain_summary")[0]
+        self.assertEqual(s["limit"], 100)
+        self.assertFalse(s["scan_capped"])
+        self.assertEqual(s["skipped_state_changed"], 0)
+
+    def test_needs_verify_alias_is_eligible_and_drained(self) -> None:
+        # task_completion treats 'needs_verify' as a pending alias; classify and
+        # apply must agree on it so it is not silently reported-eligible-but-skipped.
+        self._seed_unverified("ro-nv", ["Read", "Grep"], verification_status="needs_verify")
+        result = self.ledger.drain_reconcilable_unverified(apply=True)
+        self.assertEqual(result["drained_task_ids"], ["ro-nv"])
+        self.assertEqual(self.ledger.get("ro-nv").status, "cancelled")
+
+    def test_non_pending_verification_status_is_not_eligible(self) -> None:
+        # A read-only overdue row that is NOT pending verification (e.g. already
+        # 'passed') must not be counted eligible nor drained.
+        self._seed_unverified("ro-passed", ["Read", "Grep"], verification_status="passed")
+        result = self.ledger.drain_reconcilable_unverified(apply=True)
+        self.assertEqual(result["eligible_count"], 0)
+        self.assertEqual(result["drained_count"], 0)
+        self.assertEqual(self.ledger.get("ro-passed").status, "completed_unverified")
 
     def test_second_apply_is_noop(self) -> None:
         self._seed_unverified("ro-overdue", ["Read", "Grep"])
