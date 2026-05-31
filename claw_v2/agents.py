@@ -777,12 +777,34 @@ class GitWorktreeExperimentRunner:
         if worktree_path.exists():
             shutil.rmtree(worktree_path)
         if self._has_head_commit():
+            # Clear any stale registration left by a prior run that was
+            # SIGKILLed/OOMed after `worktree add` but before `_remove_workspace`.
+            # The directory may be gone from disk yet still listed in
+            # .git/worktrees, which makes `worktree add` exit 128.
             subprocess.run(
-                ["git", "-C", str(self.repo_root), "worktree", "add", "--detach", str(worktree_path), "HEAD"],
+                ["git", "-C", str(self.repo_root), "worktree", "remove", "--force", str(worktree_path)],
                 capture_output=True,
                 text=True,
-                check=True,
+                check=False,
             )
+            subprocess.run(
+                ["git", "-C", str(self.repo_root), "worktree", "prune"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            try:
+                subprocess.run(
+                    ["git", "-C", str(self.repo_root), "worktree", "add", "--detach", str(worktree_path), "HEAD"],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+            except subprocess.CalledProcessError as exc:
+                raise AdapterError(
+                    f"git worktree add failed (exit {exc.returncode}) for {worktree_path}: "
+                    f"{(exc.stderr or exc.stdout or '').strip()}"
+                ) from exc
             return "git_worktree"
         shutil.copytree(
             self.repo_root,

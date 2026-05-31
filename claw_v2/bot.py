@@ -297,6 +297,22 @@ _SIDE_EFFECT_CLAIM_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\b(?:archivo|file|comando|command|test|tests|deploy|mensaje|email|prompt|app|codex|approval|approvals|aprobaciones|ledger|cola)\b"),
     re.compile(r"\b(?:corr[ií]|ejecut[eé]|corr[eí]\s+tests?|ran|changed|updated|sent|submitted|pasted)\b"),
 )
+# A turn that attributes a CONCRETE returned record to a search/lookup
+# ("la busqueda me devolvio ...", "el lookup arrojo el dueno") AND frames the
+# data source as confirmed/real ("fuente ... confirmada", "datos confirmados",
+# "duenos reales"). Matched against `_normalize_command_text` (lowercase,
+# diacritics stripped) so all literals are ASCII-only. Used to block such a
+# claim when the only tool evidence for the turn is a FAILED tool run.
+_RETURNED_RECORD_ATTR_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\b(?:la\s+)?(?:busqueda|consulta|lookup|query)\s+(?:me\s+)?(?:devolvio|arrojo|retorno|trajo|dio)\b"),
+    re.compile(r"\b(?:devolvio|arrojo|retorno|trajo)\s+(?:el\s+|los\s+|un\s+|unos\s+)?(?:dueno|duenos|owner|owners|deed|record|registro|propietario|propietarios)\b"),
+)
+_CONFIRMED_SOURCE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bfuente\s+(?:de\s+datos\s+)?(?:esta\s+)?confirmad[ao]\b"),
+    re.compile(r"\bdatos\s+confirmad[oa]s\b"),
+    re.compile(r"\b(?:datos|fuente|owners?|duenos?)\s+reales\b"),
+    re.compile(r"\bduenos?\s+reales\b"),
+)
 _STARTING_ACTION_CLAIM_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\b(?:voy\s+a|procedo\s+a|empiezo|arranco|arrancando|iniciando)\b"),
     re.compile(r"\b(?:i\s+will|i'll|i\s+am\s+going\s+to|i'm\s+going\s+to|starting|started)\b"),
@@ -440,6 +456,23 @@ def _looks_like_starting_side_effect_claim(text: str) -> bool:
     if not any(pattern.search(normalized) for pattern in _STARTING_ACTION_CLAIM_PATTERNS):
         return False
     return any(pattern.search(normalized) for pattern in _STARTING_ACTION_OBJECT_PATTERNS)
+
+
+def _looks_like_confirmed_returned_record_claim(text: str) -> bool:
+    """True when the outgoing message both (a) attributes a concrete returned
+    record to a search/lookup and (b) frames the data source as confirmed/real.
+
+    This is the shape that justified a paid skip-trace spend off a record that
+    only existed in a FAILED tool run (msg 1095). It must not be surfaced as a
+    confirmed lookup unless an exit-0 tool result backs it.
+    """
+    normalized = _normalize_command_text(text)
+    if not normalized.strip():
+        return False
+    has_attr = any(pattern.search(normalized) for pattern in _RETURNED_RECORD_ATTR_PATTERNS)
+    if not has_attr:
+        return False
+    return any(pattern.search(normalized) for pattern in _CONFIRMED_SOURCE_PATTERNS)
 
 
 def _looks_like_plan_or_status_only_source(text: str) -> bool:
@@ -2419,6 +2452,47 @@ class BotService:
                     sanitized=corrected,
                 )
                 content = corrected
+        elif _looks_like_confirmed_returned_record_claim(content) and (
+            self._brain_trace_only_has_tool_failures(response)
+        ):
+            # msg 1095 class: the outgoing message presents a concrete owner
+            # record as a confirmed TAD lookup, but the only tool evidence for
+            # the turn is a FAILED (non-zero-exit) run for the wrong address.
+            # Block the "confirmada" framing and force a failure report so a
+            # paid decision can never rest on a failed tool's leaked snippet.
+            meta_kind = current_meta_introspection_kind()
+            if meta_kind is not None:
+                if meta_evidence_skip_reason is None:
+                    self._emit_safe(
+                        "evidence_gate_skipped_meta",
+                        {
+                            "session_id": session_id,
+                            "reason": "confirmed_record_from_failed_tool",
+                            "meta_kind": meta_kind,
+                        },
+                    )
+            else:
+                blocker_task_id = self._record_evidence_gate_explicit_blocker(
+                    session_id=session_id,
+                    source_text=source_text,
+                    blocked_content=content,
+                    reason="confirmed_record_from_failed_tool",
+                )
+                corrected = self._unconfirmed_record_response(blocker_task_id)
+                self._emit_identity_capability_binding_guard(
+                    "evidence_gate_blocked_confirmed_record",
+                    session_id,
+                    reason="confirmed_record_from_failed_tool",
+                    original=content,
+                    sanitized=corrected,
+                )
+                self._emit_internal_chat_suppressed(
+                    session_id,
+                    reason="confirmed_record_from_failed_tool",
+                    original=content,
+                    sanitized=corrected,
+                )
+                content = corrected
         elif _looks_like_identity_drift(content):
             corrected = self._identity_drift_corrected_response(content)
             self._emit_identity_capability_binding_guard(
@@ -2613,6 +2687,38 @@ class BotService:
                 for event in events
             )
         return False
+
+    def _brain_trace_only_has_tool_failures(self, response: Any | None) -> bool:
+        """True when the turn's trace has at least one ``sdk_post_tool_use_failure``
+        and NO exit-0 ``sdk_post_tool_use``.
+
+        ``_response_has_evidence_signal`` intentionally treats a failed tool run
+        as an evidence signal (a failure is still proof the runtime tried). That
+        is wrong for a *confirmed-returned-record* claim: a non-zero-exit run is
+        not a source of confirmed data. This narrower check exists only for that
+        gate branch and never weakens the broader evidence signal.
+        """
+        if response is None or self.observe is None:
+            return False
+        artifacts = getattr(response, "artifacts", {}) or {}
+        if not isinstance(artifacts, dict):
+            return False
+        trace_id = str(artifacts.get("trace_id") or "")
+        if not trace_id:
+            return False
+        try:
+            events = self.observe.trace_events(trace_id)
+        except Exception:
+            return False
+        has_success = False
+        has_failure = False
+        for event in events:
+            etype = str(event.get("event_type") or "")
+            if etype == "sdk_post_tool_use":
+                has_success = True
+            elif etype == "sdk_post_tool_use_failure":
+                has_failure = True
+        return has_failure and not has_success
 
     def _should_allow_tool_backed_handoff_response(self, response: Any | None, content: str) -> bool:
         if len(content or "") < 1200:
@@ -5290,14 +5396,19 @@ class BotService:
     def _identity_drift_corrected_response(self, content: str) -> str:
         if not _contains_substantive_operational_content(content):
             return self._identity_binding_response()
-        replacement = (
-            "Contexto corregido: soy Dr. Strange en el daemon local de Hector; "
-            "Claude, Codex, OpenAI y ChatGPT son proveedores o herramientas locales, no mi identidad."
-        )
         parts = re.split(r"(?<=[.!?])\s+|\n+", content)
+        # Re-join title abbreviations ("Dr. Strange") that the sentence split
+        # severs — otherwise only "...no Dr." is recognized as drift and the
+        # trailing "Strange." is orphaned into the cleaned output.
+        merged: list[str] = []
+        for part in parts:
+            if merged and re.search(r"\b(?:Dr|Dra|Sr|Sra|Srta|Mr|Mrs|Ms|St)\.\s*$", merged[-1]):
+                merged[-1] = f"{merged[-1]} {part}".strip()
+            else:
+                merged.append(part)
         kept: list[str] = []
         dropped = False
-        for part in parts:
+        for part in merged:
             stripped = part.strip()
             if not stripped:
                 continue
@@ -5310,9 +5421,12 @@ class BotService:
         cleaned = "\n".join(kept).strip()
         if not cleaned or not _contains_substantive_operational_content(cleaned):
             return self._identity_binding_response()
-        if _normalize_command_text(cleaned).startswith(_normalize_command_text(replacement)):
-            return cleaned
-        return f"{replacement}\n\n{cleaned}"
+        # Return the substantive content with the drifting sentences removed and
+        # no user-facing announcement. Prepending a "Contexto corregido" header
+        # would re-surface the very provider names the persona/redaction policy
+        # forbids in chat (msg 1047). The correction is recorded in
+        # observe_stream by the caller (identity_drift_guard_triggered).
+        return cleaned
 
     def _operator_handoff_binding_response(self) -> str:
         return (
@@ -5405,6 +5519,14 @@ class BotService:
 
     def _pending_evidence_response(self, task_id: str | None = None) -> str:
         return "Decime qué disparo y te lo ejecuto con evidencia."
+
+    def _unconfirmed_record_response(self, task_id: str | None = None) -> str:
+        return (
+            "Corrijo: la búsqueda de dueño falló (tool con exit distinto de cero), "
+            "así que NO tengo un registro confirmado ni una fuente verificada. "
+            "No baso ninguna decisión de gasto en eso. Decime si reintento el lookup "
+            "con evidencia antes de avanzar."
+        )
 
     def _unexecuted_start_response(self, task_id: str | None = None) -> str:
         if task_id:

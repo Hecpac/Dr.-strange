@@ -579,9 +579,50 @@ def deep_research(
             return _wait_for_verified_sources(page, before_count=before_source_count)
 
         # 1. Open the source-mode dropdown and switch to Deep Research.
+        # The source-mode toggle changed across NotebookLM builds. Older builds
+        # exposed a text chip "Fast Research"; the 2026 build exposes an icon-only
+        # button ("search_spark" / "travel_explore" material icon) with a dropdown
+        # arrow. The Deep Research menu item is also localized ("Deep Research" /
+        # "Investigación a fondo" / "Investigación profunda"). Try them all.
+        _open_selectors = (
+            'button:has-text("search_spark")',
+            'button:has-text("travel_explore")',
+            "text=Fast Research",
+            "text=Búsqueda rápida",
+            "text=Investigación rápida",
+        )
+        _dr_selectors = (
+            '[role="menuitem"]:has-text("Deep Research")',
+            '[role="option"]:has-text("Deep Research")',
+            "text=Deep Research",
+            '[role="menuitem"]:has-text("Investigación a fondo")',
+            "text=Investigación a fondo",
+            "text=Investigación profunda",
+        )
+
+        def _click_any(selectors, *, timeout, what):
+            for sel in selectors:
+                try:
+                    loc = page.locator(sel).first
+                    if loc.count() and loc.is_visible():
+                        loc.click(timeout=timeout)
+                        return True
+                except Exception:
+                    continue
+            return False
+
         try:
-            page.locator("text=Fast Research").first.click(timeout=15_000)
-            page.locator("text=Deep Research").first.click(timeout=10_000)
+            if not _click_any(_open_selectors, timeout=15_000, what="open"):
+                raise CdpNotebookLMError(
+                    "source-mode toggle not found (tried search_spark icon + text chips)"
+                )
+            time.sleep(1.0)
+            if not _click_any(_dr_selectors, timeout=10_000, what="deep-research"):
+                raise CdpNotebookLMError(
+                    "Deep Research menu item not found (tried EN + 'Investigación a fondo')"
+                )
+        except CdpNotebookLMError:
+            raise
         except Exception as exc:
             raise CdpNotebookLMError(
                 f"Could not switch to Deep Research mode: {exc}"

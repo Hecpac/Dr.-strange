@@ -108,7 +108,10 @@ class LinkedInAdapter:
             json=payload,
             headers={"Authorization": f"Bearer {self.access_token}", "X-Restli-Protocol-Version": "2.0.0"},
         )
+        response.raise_for_status()
         post_id = response.headers.get("x-restli-id", "")
+        if not post_id:
+            raise RuntimeError(f"linkedin publish returned no post id: {response.text[:200]}")
         return PublishResult(
             platform="linkedin", account=self.org_id, post_id=post_id,
             url=f"https://www.linkedin.com/feed/update/{post_id}", published_at=datetime.now(UTC).isoformat(),
@@ -140,7 +143,10 @@ class InstagramAdapter:
             f"https://graph.facebook.com/v19.0/{self.ig_user_id}/media",
             params={"caption": text, "access_token": self.access_token},
         )
+        response.raise_for_status()
         post_id = response.json().get("id", "")
+        if not post_id:
+            raise RuntimeError(f"instagram publish returned no post id: {response.text[:200]}")
         return PublishResult(
             platform="instagram", account=self.ig_user_id, post_id=post_id,
             url=f"https://www.instagram.com/p/{post_id}", published_at=datetime.now(UTC).isoformat(),

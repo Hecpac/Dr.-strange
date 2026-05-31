@@ -1321,7 +1321,39 @@ _INTERNAL_LEAK_PATTERNS: tuple[re.Pattern[str], ...] = (
 # verbatim prompt echoes. Soft phrases ("respuesta bloqueada", "trazas internas",
 # "circuit breaker", etc.) are inline-redacted further below so legitimate
 # technical references do not nuke an otherwise valid reply.
-_NUKE_PATTERN_INDICES: tuple[int, ...] = (4, 5, 6, 20, 21, 22, 23, 24, 25, 26, 33, 34)
+#
+# Index 26 (the structural ^role: line) is intentionally NOT in this set: a single
+# role-prefixed line also matches a legitimate Spanish reply that quotes/summarizes
+# a chat transcript or a log. It is gated by _role_echo_dominates() instead, which
+# only nukes when the role lines ARE the message (real prompt echo), not when they
+# are quoted prose inside a real answer.
+_NUKE_PATTERN_INDICES: tuple[int, ...] = (4, 5, 6, 20, 21, 22, 23, 24, 25, 33, 34)
+
+# A block of >=2 consecutive role-prefixed lines is a real conversation-prompt echo.
+_CONSECUTIVE_ROLE_ECHO = re.compile(
+    r"(?m)^\s*(?:user|assistant|system)\s*:\s*\S.*(?:\n\s*(?:user|assistant|system)\s*:\s*\S.*)+",
+    re.IGNORECASE,
+)
+# Full role lines, used to measure how much of the reply is bare role echo.
+_ROLE_LINE_FULL = re.compile(r"(?im)^\s*(?:user|assistant|system)\s*:.*$")
+
+
+def _role_echo_dominates(text: str) -> bool:
+    """True when ^role: lines are a verbatim prompt echo, not quoted transcript prose.
+
+    Nukes only when (a) 2+ consecutive role lines appear (a real multi-turn echo),
+    or (b) the role line(s) make up most of the message (a bare "user: Estatus"
+    echo with no surrounding answer). A reply that merely cites one transcript
+    line inside real prose is left intact.
+    """
+    # idx 26 — keep the trigger condition co-located with the pattern it gates.
+    if not _INTERNAL_LEAK_PATTERNS[26].search(text):
+        return False
+    if _CONSECUTIVE_ROLE_ECHO.search(text):
+        return True
+    role_chars = sum(len(m.group(0)) for m in _ROLE_LINE_FULL.finditer(text))
+    total = len(text.strip())
+    return total > 0 and role_chars / total >= 0.6
 
 
 def _chat_response_has_internal_leak(text: str) -> bool:
@@ -1334,7 +1366,7 @@ def _sanitize_chat_response(text: str) -> str:
     from claw_v2.leak_scrub import redact_system_reminders
 
     precleaned = redact_system_reminders(text)
-    if any(_INTERNAL_LEAK_PATTERNS[i].search(precleaned) for i in _NUKE_PATTERN_INDICES):
+    if any(_INTERNAL_LEAK_PATTERNS[i].search(precleaned) for i in _NUKE_PATTERN_INDICES) or _role_echo_dominates(precleaned):
         return (
             "Tuve un error preparando la respuesta. "
             "Retomo la acción con el contexto disponible o te diré el bloqueo verificado."

@@ -763,16 +763,17 @@ class MemoryStore:
 
     @_synchronized
     def get_recent_messages(self, session_id: str, limit: int = 20) -> list[dict]:
-        rows = self._conn.execute(
-            """
-            SELECT role, content, created_at
-            FROM messages
-            WHERE session_id = ?
-            ORDER BY id DESC
-            LIMIT ?
-            """,
-            (session_id, limit),
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT role, content, created_at
+                FROM messages
+                WHERE session_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (session_id, limit),
+            ).fetchall()
         return [dict(row) for row in reversed(rows)]
 
     def delete_last_messages(self, session_id: str, count: int) -> int:
@@ -819,26 +820,28 @@ class MemoryStore:
 
     @_synchronized
     def count_messages(self, session_id: str) -> int:
-        row = self._conn.execute(
-            """
-            SELECT COUNT(*) as count
-            FROM messages
-            WHERE session_id = ?
-            """,
-            (session_id,),
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT COUNT(*) as count
+                FROM messages
+                WHERE session_id = ?
+                """,
+                (session_id,),
+            ).fetchone()
         return row["count"] if row else 0
 
     @_synchronized
     def last_message_id(self, session_id: str) -> int:
-        row = self._conn.execute(
-            """
-            SELECT MAX(id) AS max_id
-            FROM messages
-            WHERE session_id = ?
-            """,
-            (session_id,),
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT MAX(id) AS max_id
+                FROM messages
+                WHERE session_id = ?
+                """,
+                (session_id,),
+            ).fetchone()
         return int(row["max_id"] or 0) if row else 0
 
     def replace_latest_assistant_message(self, session_id: str, previous_content: str, new_content: str) -> bool:
@@ -864,16 +867,17 @@ class MemoryStore:
 
     @_synchronized
     def get_session_state(self, session_id: str) -> dict:
-        row = self._conn.execute(
-            """
-            SELECT autonomy_mode, mode, current_goal, pending_action, step_budget, steps_taken,
-                   verification_status, active_object_json, last_options_json, task_queue_json, pending_approvals_json,
-                   last_checkpoint_json, rolling_summary, last_turn_summary
-            FROM session_state
-            WHERE session_id = ?
-            """,
-            (session_id,),
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT autonomy_mode, mode, current_goal, pending_action, step_budget, steps_taken,
+                       verification_status, active_object_json, last_options_json, task_queue_json, pending_approvals_json,
+                       last_checkpoint_json, rolling_summary, last_turn_summary
+                FROM session_state
+                WHERE session_id = ?
+                """,
+                (session_id,),
+            ).fetchone()
         if row is None:
             return {
                 "autonomy_mode": "assisted",
@@ -1132,54 +1136,57 @@ class MemoryStore:
 
     @_synchronized
     def search_facts(self, query: str, limit: int = 10, agent_name: str | None = None) -> list[dict]:
-        if agent_name:
-            rows = self._conn.execute(
-                """
-                SELECT key, value, source, source_trust, confidence, entity_tags, agent_name
-                FROM facts
-                WHERE (key LIKE ? OR value LIKE ?) AND agent_name = ?
-                ORDER BY confidence DESC, id DESC
-                LIMIT ?
-                """,
-                (f"%{query}%", f"%{query}%", agent_name, limit),
-            ).fetchall()
-        else:
-            rows = self._conn.execute(
-                """
-                SELECT key, value, source, source_trust, confidence, entity_tags, agent_name
-                FROM facts
-                WHERE key LIKE ? OR value LIKE ?
-                ORDER BY confidence DESC, id DESC
-                LIMIT ?
-                """,
-                (f"%{query}%", f"%{query}%", limit),
-            ).fetchall()
+        with self._lock:
+            if agent_name:
+                rows = self._conn.execute(
+                    """
+                    SELECT key, value, source, source_trust, confidence, entity_tags, agent_name
+                    FROM facts
+                    WHERE (key LIKE ? OR value LIKE ?) AND agent_name = ?
+                    ORDER BY confidence DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (f"%{query}%", f"%{query}%", agent_name, limit),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    """
+                    SELECT key, value, source, source_trust, confidence, entity_tags, agent_name
+                    FROM facts
+                    WHERE key LIKE ? OR value LIKE ?
+                    ORDER BY confidence DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (f"%{query}%", f"%{query}%", limit),
+                ).fetchall()
         return [dict(row) for row in rows]
 
     @_synchronized
     def get_profile_facts(self) -> list[dict]:
-        rows = self._conn.execute(
-            """
-            SELECT key, value, source_trust, confidence
-            FROM facts
-            WHERE key LIKE 'profile.%'
-            ORDER BY confidence DESC, id DESC
-            """
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT key, value, source_trust, confidence
+                FROM facts
+                WHERE key LIKE 'profile.%'
+                ORDER BY confidence DESC, id DESC
+                """
+            ).fetchall()
         return [dict(row) for row in rows]
 
     @_synchronized
     def get_learning_facts(self, limit: int = 3) -> list[dict]:
-        rows = self._conn.execute(
-            """
-            SELECT key, value, source, source_trust, confidence
-            FROM facts
-            WHERE key = 'learning_loop_consolidated' OR entity_tags LIKE '%"learning"%'
-            ORDER BY confidence DESC, id DESC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT key, value, source, source_trust, confidence
+                FROM facts
+                WHERE key = 'learning_loop_consolidated' OR entity_tags LIKE '%"learning"%'
+                ORDER BY confidence DESC, id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
         return [dict(row) for row in rows]
 
     @_synchronized
@@ -1524,7 +1531,8 @@ class MemoryStore:
 
     @_synchronized
     def load_cron_state(self) -> dict[str, tuple[float, int]]:
-        rows = self._conn.execute("SELECT job_name, last_run_at, runs FROM cron_state").fetchall()
+        with self._lock:
+            rows = self._conn.execute("SELECT job_name, last_run_at, runs FROM cron_state").fetchall()
         return {row["job_name"]: (row["last_run_at"], row["runs"]) for row in rows}
 
     def save_cron_job(self, job_name: str, last_run_at: float, runs: int) -> None:
@@ -1623,13 +1631,14 @@ class MemoryStore:
         query_vec = embedder(query)
         query_dim = len(query_vec)
         query_tokens = _tokenize(query)
-        rows = self._conn.execute(
-            """
-            SELECT f.id, f.key, f.value, f.source, f.source_trust, f.confidence, fe.embedding
-            FROM facts f
-            JOIN fact_embeddings fe ON f.id = fe.fact_id
-            """,
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT f.id, f.key, f.value, f.source, f.source_trust, f.confidence, fe.embedding
+                FROM facts f
+                JOIN fact_embeddings fe ON f.id = fe.fact_id
+                """,
+            ).fetchall()
         if not rows:
             return []
 
@@ -2015,10 +2024,11 @@ class MemoryStore:
             "o.feedback, oe.embedding "
             "FROM task_outcomes o JOIN outcome_embeddings oe ON o.id = oe.outcome_id"
         )
-        if task_type:
-            rows = self._conn.execute(base_sql + " WHERE o.task_type = ?", (task_type,)).fetchall()
-        else:
-            rows = self._conn.execute(base_sql).fetchall()
+        with self._lock:
+            if task_type:
+                rows = self._conn.execute(base_sql + " WHERE o.task_type = ?", (task_type,)).fetchall()
+            else:
+                rows = self._conn.execute(base_sql).fetchall()
         if not rows:
             return []
 
