@@ -74,6 +74,21 @@ SECRET_PATH_PATTERNS: tuple[str, ...] = (
     "id_dsa*",
     ".ssh/*",
     "*/.ssh/*",
+    # --- 2026-05-31 audit (H3): browser credential stores (named files, not
+    # caught by *cookies*). On-disk names are capitalized; matched via the
+    # case-insensitive comparison in path_is_secret. ---
+    "login data",  # Chrome saved passwords (SQLite, no extension)
+    "*/login data",
+    "web data",  # Chrome autofill / cards
+    "*/web data",
+    "key4.db",  # Firefox key store (current)
+    "*/key4.db",
+    "key3.db",  # Firefox key store (legacy)
+    "*/key3.db",
+    "logins.json",  # Firefox saved logins
+    "*/logins.json",
+    "signons.sqlite",  # Firefox saved logins (legacy)
+    "*/signons.sqlite",
 )
 
 
@@ -191,11 +206,16 @@ def daemon_can_auto_approve(name: str) -> bool:
 
 def path_is_secret(candidate: str | Path) -> bool:
     text = str(candidate)
-    base = Path(text).name
+    # SECRET_PATH_PATTERNS are all lowercase; match case-insensitively so macOS
+    # browser stores ("Cookies", "Login Data") and capitalized secrets ("ID_RSA")
+    # are caught. fnmatch.fnmatch is case-sensitive on POSIX (normcase=identity),
+    # so lower both sides and use fnmatchcase for deterministic matching.
+    text_lower = text.lower()
+    base_lower = Path(text).name.lower()
     for pattern in SECRET_PATH_PATTERNS:
-        if fnmatch.fnmatch(text, pattern):
+        if fnmatch.fnmatchcase(text_lower, pattern):
             return True
-        if fnmatch.fnmatch(base, pattern):
+        if fnmatch.fnmatchcase(base_lower, pattern):
             return True
     return False
 

@@ -189,6 +189,32 @@ class SafetyTests(unittest.TestCase):
             self.assertFalse(decision.allowed)
             self.assertIn("whitelist", decision.reason)
 
+    def test_sandbox_blocks_bare_envvar_expansion(self) -> None:
+        # 2026-05-31 audit (H1): a literal $VAR/${VAR} survived check_command
+        # (only `$(` was blocked), then resolved INSIDE the workspace while the
+        # real shell expanded it at exec time -> read outside the sandbox.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            policy = SandboxPolicy(workspace_root=workspace)
+            for command in (
+                "cat $HOME/Desktop/notes.txt",
+                "cp ${HOME}/.ssh/id_rsa .",
+                "grep secret $HOME/.netrc",
+            ):
+                with self.subTest(command=command):
+                    violation = check_command(command, policy)
+                    self.assertIsNotNone(violation, msg=command)
+                    self.assertIn("shell operators", violation)
+
+    def test_sandbox_still_blocks_command_substitution(self) -> None:
+        # Regression guard: `$(...)` must stay blocked after broadening to `$`.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            policy = SandboxPolicy(workspace_root=workspace)
+            self.assertIsNotNone(check_command("echo $(cat ~/.netrc)", policy))
+
     def test_engineer_profile_allows_development_tools(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir) / "workspace"

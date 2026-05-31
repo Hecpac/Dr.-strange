@@ -164,7 +164,7 @@ def _unwrap_command_tokens(tokens: list[str]) -> list[str]:
     return remaining
 
 
-_SHELL_OPERATORS_RE = __import__("re").compile(r"[;|&`<>]|\$\(")
+_SHELL_OPERATORS_RE = __import__("re").compile(r"[;|&`<>$]")
 
 
 def check_command(command: str, policy: SandboxPolicy) -> str | None:
