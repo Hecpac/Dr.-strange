@@ -5397,9 +5397,18 @@ class BotService:
         if not _contains_substantive_operational_content(content):
             return self._identity_binding_response()
         parts = re.split(r"(?<=[.!?])\s+|\n+", content)
+        # Re-join title abbreviations ("Dr. Strange") that the sentence split
+        # severs — otherwise only "...no Dr." is recognized as drift and the
+        # trailing "Strange." is orphaned into the cleaned output.
+        merged: list[str] = []
+        for part in parts:
+            if merged and re.search(r"\b(?:Dr|Dra|Sr|Sra|Srta|Mr|Mrs|Ms|St)\.\s*$", merged[-1]):
+                merged[-1] = f"{merged[-1]} {part}".strip()
+            else:
+                merged.append(part)
         kept: list[str] = []
         dropped = False
-        for part in parts:
+        for part in merged:
             stripped = part.strip()
             if not stripped:
                 continue

@@ -1867,12 +1867,16 @@ class BotTests(unittest.TestCase):
                 state = runtime.memory.get_session_state("s1")
                 self.assertEqual(state["step_budget"], 2)
                 self.assertEqual(state["steps_taken"], 1)
-                self.assertEqual(state["verification_status"], "pending")
+                # Self-claim quarantined: the authoritative verification_status
+                # stays "unknown" (no verifier ran); the reply's "Verificado:
+                # pending" survives only as a self-reported in-session signal.
+                self.assertEqual(state["verification_status"], "unknown")
                 self.assertEqual(state["last_checkpoint"]["pending_action"], "correr pytest -q")
+                self.assertEqual(state["last_checkpoint"]["self_reported_status"], "pending")
 
                 task_loop = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/task_loop"))
                 self.assertEqual(task_loop["steps_taken"], 1)
-                self.assertEqual(task_loop["verification_status"], "pending")
+                self.assertEqual(task_loop["verification_status"], "unknown")
 
                 queue = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/task_queue"))
                 self.assertEqual(queue[0]["summary"], "correr pytest -q")
@@ -4558,7 +4562,13 @@ class BotTests(unittest.TestCase):
                     runtime_channel="telegram",
                 )
 
-                self.assertIn("Contexto corregido", result)
+                # Correction is silent: a "Contexto corregido" header would
+                # re-surface the forbidden provider names the redaction policy
+                # strips; the guard is recorded via telemetry instead (below).
+                self.assertNotIn("Contexto corregido", result)
+                # Drift sentence removed cleanly — no orphaned "Strange." fragment
+                # from the sentence split severing the "Dr. Strange" abbreviation.
+                self.assertNotIn("Strange", result)
                 self.assertIn("Inventario verificado", result)
                 self.assertIn("Figma", result)
                 self.assertIn("Gmail", result)
