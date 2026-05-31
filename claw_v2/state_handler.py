@@ -273,8 +273,20 @@ class StateHandler:
             # next reload would resurrect an orphaned meta block.
             active_object.pop("pending_action_meta", None)
         last_turn_summary = _compact_summary(reply_text)
-        verification_status = _extract_verification_status(reply_text) or state.get("verification_status", "unknown")
+        # The assistant's own visible reply is NOT an authoritative verifier
+        # signal. session_state.verification_status is owned by the verifier /
+        # ledger terminal writers (bot._update_skill_active_task, task_handler);
+        # deriving it here would launder a self-claim into a verifier-backed
+        # field that source-blind consumers (idle_executor stall logic,
+        # morning_brief, task_handler) read as ground truth. So we keep the
+        # persisted column at its prior authoritative value and use the
+        # reply-derived verdict only as a *self-reported* in-session signal for
+        # local task_queue bookkeeping.
+        verification_status = state.get("verification_status", "unknown")
+        self_reported_status = _extract_verification_status(reply_text)
         checkpoint = _build_checkpoint(reply_text, pending_action=pending_action, verification_status=verification_status)
+        if self_reported_status is not None:
+            checkpoint["self_reported_status"] = self_reported_status
         steps_taken = state.get("steps_taken", 0)
         is_followup_selection = _extract_option_reference(user_text) is not None
         if state.get("mode") in {"coding", "research", "browse", "publish", "ops"} and not is_followup_selection:
@@ -301,10 +313,10 @@ class StateHandler:
                 priority=1,
                 depends_on=depends_on,
             )
-        elif verification_status == "passed":
+        elif self_reported_status == "passed":
             task_queue = self._task_handler.mark_first_task_queue_entry(task_queue, from_status="in_progress", to_status="done")
             task_queue = self._task_handler.mark_first_task_queue_entry(task_queue, from_status="pending", to_status="done")
-        elif verification_status == "failed":
+        elif self_reported_status == "failed":
             task_queue = self._task_handler.mark_first_task_queue_entry(task_queue, from_status="in_progress", to_status="blocked")
         self._memory.update_session_state(
             session_id,

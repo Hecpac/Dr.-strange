@@ -874,10 +874,15 @@ class KairosService:
             mutates_state=True,
             requires_network=True,
         )
+        if self._already_published_social(tweet_text):
+            logger.info("KAIROS auto_publish_social: skipping duplicate tweet (already posted)")
+            return
         from claw_v2.social import x_adapter_from_keychain
         adapter = x_adapter_from_keychain(handle="PachanoDesign")
         result = adapter.publish(tweet_text)
-        logger.info("KAIROS auto_publish_social: published=%s id=%s", result.success, result.post_id)
+        # PublishResult has no `success` field; a returned post_id means the tweet shipped.
+        success = bool(result.post_id)
+        logger.info("KAIROS auto_publish_social: published=%s id=%s", success, result.post_id)
         self.observe.emit("kairos_auto_publish_social",
                           trace_id=trace_context.get("trace_id") if trace_context else None,
                           root_trace_id=trace_context.get("root_trace_id") if trace_context else None,
@@ -885,7 +890,27 @@ class KairosService:
                           parent_span_id=trace_context.get("parent_span_id") if trace_context else None,
                           job_id=trace_context.get("job_id") if trace_context else None,
                           artifact_id=trace_context.get("artifact_id") if trace_context else None,
-                          payload={"tweet": tweet_text, "success": result.success, "post_id": result.post_id})
+                          payload={"tweet": tweet_text, "success": success, "post_id": result.post_id})
+
+    def _already_published_social(self, tweet_text: str) -> bool:
+        """Idempotency guard: True if this exact tweet was already posted by a prior tick.
+
+        Mirrors `_recent_duplicate_approval_notification`: looks at recent success
+        events so a re-decide of auto_publish_social does not double-post.
+        """
+        try:
+            events = self.observe.recent_events(limit=50, event_type="kairos_auto_publish_social")
+        except Exception:
+            return False
+        if not isinstance(events, list):
+            return False
+        for event in events:
+            payload = event.get("payload") if isinstance(event, dict) else None
+            if not isinstance(payload, dict):
+                continue
+            if payload.get("success") and str(payload.get("tweet") or "") == tweet_text:
+                return True
+        return False
 
     def _handle_auto_deploy(self, decision: TickDecision, trace_context: dict[str, Any] | None = None) -> None:
         """Trigger Vercel deploy via git push. Default: pending human approval.
