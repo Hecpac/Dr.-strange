@@ -215,6 +215,22 @@ class SafetyTests(unittest.TestCase):
             policy = SandboxPolicy(workspace_root=workspace)
             self.assertIsNotNone(check_command("echo $(cat ~/.netrc)", policy))
 
+    def test_sandbox_allows_regex_dollar_anchor(self) -> None:
+        # Guard against over-blocking: a `$` end-of-line regex anchor in a
+        # whitelisted text command (grep/rg) is NOT a variable expansion and
+        # must stay allowed — only `$word`/`${...}`/`$(...)` are blocked.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            policy = SandboxPolicy(workspace_root=workspace, capability_profile="engineer")
+            for command in (
+                "grep 'error$' app.log",
+                "rg 'foo$' src",
+                "grep -E '\\.py$' file.txt",
+            ):
+                with self.subTest(command=command):
+                    self.assertIsNone(check_command(command, policy), msg=command)
+
     def test_engineer_profile_allows_development_tools(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir) / "workspace"

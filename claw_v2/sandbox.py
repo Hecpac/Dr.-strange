@@ -164,7 +164,11 @@ def _unwrap_command_tokens(tokens: list[str]) -> list[str]:
     return remaining
 
 
-_SHELL_OPERATORS_RE = __import__("re").compile(r"[;|&`<>$]")
+# Block `$word`/`${...}`/`$(...)`: the shell expands them at exec time to a path
+# the boundary check cannot see (2026-05-31 audit H1). A bare `$` end-of-line
+# regex anchor (e.g. grep 'foo$') stays allowed — only `$` followed by a
+# name / `{` / `(` is a variable reference or command substitution.
+_SHELL_OPERATORS_RE = __import__("re").compile(r"[;|&`<>]|\$[\w{(]")
 
 
 def check_command(command: str, policy: SandboxPolicy) -> str | None:
