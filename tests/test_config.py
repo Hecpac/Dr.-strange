@@ -23,7 +23,12 @@ class AppConfigDefaultsTests(unittest.TestCase):
                 os.chdir(previous_cwd)
         self.assertEqual(config.workspace_root, Path(tmpdir).resolve())
 
-    def test_default_allowed_read_paths_allow_reading_from_home(self) -> None:
+    def test_default_allowed_read_paths_scoped_to_claw_not_home(self) -> None:
+        # 2026-05-31 audit (H2): the default read-root is ~/.claw (+ /private/tmp),
+        # NOT all of $HOME. Agent state under ~/.claw and the workspace stay
+        # readable; arbitrary private HOME files (Documents, Library, .aws,
+        # browser stores) do not. Work dirs are opted in separately via
+        # EXTRA_WORKSPACE_ROOTS, which this default change does not touch.
         home = Path.home()
         previous_cwd = Path.cwd()
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -34,14 +39,43 @@ class AppConfigDefaultsTests(unittest.TestCase):
             finally:
                 os.chdir(previous_cwd)
 
-        self.assertIn(home, config.allowed_read_paths)
+        self.assertIn(home / ".claw", config.allowed_read_paths)
+        self.assertNotIn(home, config.allowed_read_paths)
         policy = SandboxPolicy(
             workspace_root=config.workspace_root,
             allowed_paths=config.allowed_read_paths,
             writable_paths=[config.workspace_root],
         )
-        decision = sandbox_hook("Read", {"file_path": str(home / "agents" / "notes.txt")}, policy=policy)
-        self.assertTrue(decision.allowed)
+        # ~/.claw agent state -> allowed
+        self.assertTrue(
+            sandbox_hook("Read", {"file_path": str(home / ".claw" / "state.json")}, policy=policy).allowed
+        )
+        # workspace_root -> allowed
+        self.assertTrue(
+            sandbox_hook("Read", {"file_path": str(config.workspace_root / "README.md")}, policy=policy).allowed
+        )
+        # arbitrary private HOME file -> blocked
+        self.assertFalse(
+            sandbox_hook("Read", {"file_path": str(home / "Documents" / "private.txt")}, policy=policy).allowed
+        )
+
+    def test_allowed_read_paths_env_override_intact(self) -> None:
+        # The ALLOWED_READ_PATHS env override still fully replaces the default,
+        # so operators can opt back into broader read roots explicitly.
+        home = Path.home()
+        previous_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.chdir(tmpdir)
+            try:
+                with patch.dict(
+                    os.environ,
+                    {"HOME": str(home), "ALLOWED_READ_PATHS": str(home / "Documents")},
+                    clear=True,
+                ):
+                    config = AppConfig.from_env()
+            finally:
+                os.chdir(previous_cwd)
+        self.assertEqual(config.allowed_read_paths, [home / "Documents"])
 
     def test_browse_backend_defaults_and_accepts_override(self) -> None:
         previous_cwd = Path.cwd()
