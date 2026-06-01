@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 from typing import Any
 
 from claw_v2.adapters.base import LLMRequest, PreLLMHook, PostLLMHook
@@ -64,6 +65,21 @@ def make_daily_cost_gate(
         if request.provider not in billable:
             daily_cost_gate.block_reason = None
             return request
+        # Fail closed on unmetered billable spend: if a billable model with no
+        # price entry ran today, cost_estimate was 0.0 and total_today is blind
+        # to it (2026-05-31 audit H5). Block further billable calls until the
+        # operator opts in explicitly, so invisible spend cannot accumulate.
+        allow_unknown = os.getenv("CLAW_ALLOW_UNKNOWN_PROVIDER_COST", "").strip().lower() in {"1", "true", "yes"}
+        if not allow_unknown and observe.has_unknown_billable_cost_today(providers=billable):
+            logger.warning(
+                "Unknown billable provider cost recorded today; blocking further "
+                "billable LLM calls (set CLAW_ALLOW_UNKNOWN_PROVIDER_COST=1 to override)"
+            )
+            daily_cost_gate.block_reason = (
+                "unknown_billable_cost_metering (an unpriced billable model ran "
+                "today; set CLAW_ALLOW_UNKNOWN_PROVIDER_COST=1 to override)"
+            )
+            return None
         total_today = observe.total_cost_today(providers=billable)
         if total_today >= daily_limit:
             logger.warning("Daily cost limit reached: $%.2f >= $%.2f", total_today, daily_limit)

@@ -218,6 +218,36 @@ class ObserveStream:
             ).fetchone()
         return float(row[0]) if row else 0.0
 
+    def has_unknown_billable_cost_today(self, *, providers: set[str] | None = None) -> bool:
+        """True if any billable LLM call today had an unpriced (cost_unknown) model.
+
+        Lets the daily cost gate fail closed on unmetered billable spend instead
+        of treating cost_unknown as zero (2026-05-31 audit H5).
+        """
+        provider_filter = ""
+        params: tuple[object, ...] = ()
+        if providers is not None:
+            normalized = sorted(provider for provider in providers if provider)
+            if not normalized:
+                return False
+            placeholders = ",".join("?" for _ in normalized)
+            provider_filter = f" AND provider IN ({placeholders})"
+            params = tuple(normalized)
+        with self._lock:
+            row = self._conn.execute(
+                f"""
+                SELECT 1
+                FROM observe_stream
+                WHERE event_type = 'llm_response'
+                  AND timestamp >= date('now', 'start of day')
+                  AND json_extract(payload, '$.cost_unknown') = 1
+                  {provider_filter}
+                LIMIT 1
+                """,
+                params,
+            ).fetchone()
+        return row is not None
+
     def cost_per_agent_today(self) -> dict[str, float]:
         with self._lock:
             rows = self._conn.execute(

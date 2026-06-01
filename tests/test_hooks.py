@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from claw_v2.adapters.base import LLMRequest, PreLLMHook, PostLLMHook
 from claw_v2.hooks import make_anti_distillation_hook, make_daily_cost_gate, make_decision_logger, _select_decoys, _DECOY_POOL
 from claw_v2.llm import LLMRouter
 from claw_v2.observe import ObserveStream
+from claw_v2.pricing import estimate_cost_usd
 from claw_v2.types import LLMResponse
 
 
@@ -199,6 +202,64 @@ class DailyCostGateTests(unittest.TestCase):
             hooks=None,
             timeout=30.0,
         )
+
+    def _make_openai_request(self) -> LLMRequest:
+        return LLMRequest(
+            prompt="test prompt",
+            system_prompt=None,
+            lane="worker",
+            provider="openai",
+            model="gpt-5.5",
+            effort=None,
+            session_id=None,
+            max_budget=0.5,
+            evidence_pack=None,
+            allowed_tools=None,
+            agents=None,
+            hooks=None,
+            timeout=30.0,
+        )
+
+    def test_unknown_billable_cost_trips_daily_gate_and_requires_override(self) -> None:
+        # 2026-05-31 audit H5: an unpriced billable model recorded cost_estimate
+        # 0.0 + cost_unknown=True today. total_cost_today is blind to it, so the
+        # gate must fail closed on the unknown rather than treat it as $0.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "test.db")
+            observe.emit(
+                "llm_response", lane="worker", provider="openai", model="gpt-9-ultra",
+                payload={"cost_estimate": 0.0, "cost_unknown": True},
+            )
+            gate = make_daily_cost_gate(
+                observe, daily_limit=10.0, billable_providers={"openai", "google", "anthropic"}
+            )
+            request = self._make_openai_request()
+            self.assertIsNone(gate(request))  # blocked despite total reading $0.00
+            self.assertIn("unknown_billable_cost_metering", gate.block_reason)
+            with patch.dict(os.environ, {"CLAW_ALLOW_UNKNOWN_PROVIDER_COST": "1"}):
+                self.assertIsNotNone(gate(request))  # explicit opt-in escape hatch
+
+    def test_known_openai_cost_flows_into_observe_total_today(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "test.db")
+            est = estimate_cost_usd("openai", "gpt-5.5", {"input_tokens": 100_000, "output_tokens": 100_000})
+            observe.emit(
+                "llm_response", lane="worker", provider="openai", model="gpt-5.5",
+                payload={"cost_estimate": est.amount_usd, "cost_unknown": est.unknown},
+            )
+            self.assertAlmostEqual(observe.total_cost_today(providers={"openai"}), 3.5)
+            self.assertFalse(observe.has_unknown_billable_cost_today(providers={"openai", "google"}))
+
+    def test_anthropic_existing_cost_not_double_counted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "test.db")
+            observe.emit(
+                "llm_response", lane="brain", provider="anthropic", model="opus",
+                payload={"cost_estimate": 2.0, "cost_unknown": False},
+            )
+            self.assertAlmostEqual(
+                observe.total_cost_today(providers={"anthropic", "openai", "google"}), 2.0
+            )
 
     def test_allows_request_when_under_limit(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -1,0 +1,21 @@
+{
+  "as_of": "2026-06-01",
+  "sources": {
+    "openai": "official OpenAI API pricing (verified 2026-06-01)",
+    "google": "official Google AI Gemini API pricing (verified 2026-06-01, ai.google.dev/gemini-api/docs/pricing)"
+  },
+  "note": "USD per 1,000,000 tokens. Only models reachable via the current router/config/fallback are listed (OpenAI + Google = the two API-billed providers the audit found reporting cost_estimate=0.0; Anthropic reports real SDK cost and is intentionally absent). cached_input is recorded for reference but NOT used in estimation: the usage dicts do not yet separate cached tokens, so the estimate charges the full input rate = conservative (never under-bills the cost gates). gemini-2.5-pro is context-tiered: prompts over input_token_threshold use the 'above' rates.",
+  "prices_per_1m_tokens": {
+    "openai:gpt-5.5":      {"input": 5.0,  "output": 30.0, "cached_input": 0.5},
+    "openai:gpt-5.4":      {"input": 2.5,  "output": 15.0, "cached_input": 0.25},
+    "openai:gpt-5.4-mini": {"input": 0.75, "output": 4.5,  "cached_input": 0.075},
+    "google:gemini-2.5-pro": {
+      "input": 1.25,
+      "output": 10.0,
+      "context_tier": {
+        "input_token_threshold": 200000,
+        "above": {"input": 2.5, "output": 15.0}
+      }
+    }
+  }
+}

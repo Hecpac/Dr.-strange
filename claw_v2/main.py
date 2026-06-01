@@ -461,6 +461,7 @@ def _setup_llm_stack(
             payload={
                 "confidence": event["confidence"],
                 "cost_estimate": event["cost_estimate"],
+                "cost_unknown": event.get("cost_unknown", False),
                 "degraded_mode": event["degraded_mode"],
                 **event["metadata"],
             },

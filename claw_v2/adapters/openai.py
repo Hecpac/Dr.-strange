@@ -18,6 +18,7 @@ from claw_v2.adapters.base import (
     coerce_usage_dict,
 )
 from claw_v2.approval_gate import ApprovalPending
+from claw_v2.pricing import estimate_cost_usd
 from claw_v2.types import LLMResponse
 
 logger = logging.getLogger(__name__)
@@ -173,17 +174,22 @@ class OpenAIAdapter(ProviderAdapter):
         return response
 
     def _build_response(self, response: Any, request: LLMRequest) -> LLMResponse:
+        usage = coerce_usage_dict(getattr(response, "usage", None))
+        estimate = estimate_cost_usd("openai", request.model, usage)
         return LLMResponse(
             content=(getattr(response, "output_text", None) or "").strip(),
             lane=request.lane,
             provider="openai",
             model=request.model,
             confidence=0.7 if getattr(response, "output_text", None) else 0.0,
-            cost_estimate=0.0,
+            cost_estimate=estimate.amount_usd,
+            cost_unknown=estimate.unknown,
+            cost_source=estimate.price_source,
+            cost_price_as_of=estimate.price_as_of,
             artifacts={
                 "response_id": getattr(response, "id", None),
                 "session_id": getattr(response, "id", None),
-                "usage": coerce_usage_dict(getattr(response, "usage", None)),
+                "usage": usage,
             },
         )
 
