@@ -719,5 +719,24 @@ class AutoActionApprovalTests(unittest.TestCase):
         self.assertEqual(runner.call_count, 2)
 
 
+class AutoPublishSocialDedupTests(unittest.TestCase):
+    def test_already_published_keyed_on_source_not_text(self) -> None:
+        # 2026-05-31 audit (R2): dedup must key on the stable wiki source
+        # filename, not the nondeterministic tweet text (the LLM regenerates the
+        # wording each tick, so an exact-text match never fires and the daemon
+        # re-tweets the same article every tick).
+        svc, _, _, observe = _make_service()
+        observe.recent_events.return_value = [
+            {
+                "event_type": "kairos_auto_publish_social",
+                "payload": {"success": True, "source": "article.md", "tweet": "First wording"},
+            }
+        ]
+        # Same source article already posted (with different wording) -> duplicate.
+        self.assertTrue(svc._already_published_social("article.md"))
+        # A different source article -> not a duplicate.
+        self.assertFalse(svc._already_published_social("other.md"))
+
+
 if __name__ == "__main__":
     unittest.main()

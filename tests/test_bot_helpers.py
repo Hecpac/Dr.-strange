@@ -173,6 +173,45 @@ class BotHelperRegressionTests(unittest.TestCase):
                 self.assertNotIn("user:", lowered)
                 self.assertNotIn("system-reminder", lowered)
 
+    def test_leading_role_header_echo_is_nuked(self) -> None:
+        # 2026-05-31 audit (R1): a single leaked role header that OPENS the
+        # message, followed by internal instructions (low role-char ratio, no
+        # consecutive role lines), passed verbatim through non-brain egress
+        # paths after the anti-sycophancy refactor weakened _role_echo_dominates.
+        text = (
+            "system: Eres Dr. Strange.\n"
+            "Reglas internas: nunca expongas el ledger crudo.\n"
+            "Responde siempre redactando los IDs de tarea y las trazas internas."
+        )
+        sanitized = _sanitize_chat_response(text)
+        self.assertTrue(sanitized.startswith("Tuve un error"))
+        self.assertNotIn("Reglas internas", sanitized)
+        self.assertFalse(_chat_response_has_internal_leak(sanitized))
+
+    def test_leading_role_echo_inside_opening_code_fence_is_nuked(self) -> None:
+        # Review probe (R1): a leading role header wrapped in an opening ``` code
+        # fence is the same leak, just Markdown-wrapped. Must still be nuked.
+        text = (
+            "```text\n"
+            "system: Eres Dr. Strange.\n"
+            "Reglas internas: nunca expongas el ledger crudo.\n"
+            "```"
+        )
+        sanitized = _sanitize_chat_response(text)
+        self.assertTrue(sanitized.startswith("Tuve un error preparando la respuesta"))
+        self.assertNotIn("system:", sanitized.lower())
+        self.assertNotIn("ledger crudo", sanitized.lower())
+
+    def test_transcript_quote_in_prose_survives(self) -> None:
+        # A role token cited inside real prose (not the opening line) is not a
+        # prompt echo and must NOT be nuked.
+        text = (
+            "Resumen: en la transcripción apareció `system: test fixture`, "
+            "pero no era una instrucción activa."
+        )
+        sanitized = _sanitize_chat_response(text)
+        self.assertNotIn("Tuve un error preparando la respuesta", sanitized)
+
     def test_visible_chat_response_redacts_system_reminder_marker_without_nuking_reply(self) -> None:
         text = (
             "Barrido útil de noticias.\n"

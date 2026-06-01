@@ -179,9 +179,13 @@ class InstagramPublishService:
             detected = self._detect_account(page)
             if detected:
                 account = detected
-            if expected_account and detected and expected_account.lower() != detected.lower():
-                return PublishResult(ok=False, account=detected, video_path=video_path,
-                                     reason="wrong_account")
+            # Fail closed: if an account is required, abort unless detection
+            # positively confirms it. None (DOM change / JS error / no profile
+            # href) must NOT fall through to publishing on whatever IG account
+            # the shared CDP session happens to be logged into.
+            if expected_account and (not detected or expected_account.lower() != detected.lower()):
+                return PublishResult(ok=False, account=detected or account, video_path=video_path,
+                                     reason="wrong_account" if detected else "account_unverified")
 
             if not self._click_any_role(page, CREATE_LABELS, 6000):
                 try:
