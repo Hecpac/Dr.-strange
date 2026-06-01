@@ -183,6 +183,21 @@ def test_publish_wrong_account_guard(svc, tmp_path, monkeypatch):
     assert page.files_set == []  # never uploaded to the wrong account
 
 
+def test_publish_account_unverified_fails_closed(svc, tmp_path, monkeypatch):
+    # 2026-05-31 audit (H4): _detect_account returns None (DOM change / JS error
+    # / no profile href). The guard must fail CLOSED — never publish to whatever
+    # IG account the shared CDP session happens to be logged into.
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"x" * 1024)
+    page = _FakePage(hrefs=[])  # no profile href -> _detect_account -> None
+    _install_fake_playwright(monkeypatch, page)
+
+    res = svc.publish_reel(str(video), caption="x", expected_account="pachanodesign")
+    assert res.ok is False
+    assert res.reason == "account_unverified"
+    assert page.files_set == []  # never uploaded when the account is unconfirmed
+
+
 def test_publish_not_logged_in(svc, tmp_path, monkeypatch):
     video = tmp_path / "v.mp4"
     video.write_bytes(b"x" * 1024)
