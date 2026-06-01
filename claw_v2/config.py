@@ -423,8 +423,12 @@ class AppConfig:
         if runtime_config_path is not None and not runtime_config_path.is_absolute():
             runtime_config_path = (cwd / runtime_config_path).resolve()
         runtime_config = _load_runtime_config_file(runtime_config_path)
+        # Default read-root is the agent's own state dir, NOT all of $HOME
+        # (2026-05-31 audit H2): the native Read tool must not reach arbitrary
+        # private HOME files. Work dirs are opted in via EXTRA_WORKSPACE_ROOTS;
+        # operators can broaden reads explicitly via ALLOWED_READ_PATHS.
         default_allowed_read_paths = [
-            home,
+            home / ".claw",
             Path("/private/tmp"),
         ]
         worker_provider = os.getenv("WORKER_PROVIDER", "anthropic")
