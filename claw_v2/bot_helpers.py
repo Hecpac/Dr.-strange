@@ -1335,10 +1335,12 @@ _CONSECUTIVE_ROLE_ECHO = re.compile(
     re.IGNORECASE,
 )
 # A role header that OPENS the whole message is a verbatim prompt echo (e.g.
-# "system: Eres Dr. Strange.\n<internal instructions>"). A legitimate reply that
-# cites a transcript line carries it inside prose, not as the very first line.
+# "system: Eres Dr. Strange.\n<internal instructions>"), including when wrapped
+# in an opening ``` code fence (a Markdown wrapper that otherwise hides the leak,
+# same class as the #47 quoting bypass). A legitimate reply that cites a
+# transcript line carries it inside prose, not as the very first content line.
 _LEADING_ROLE_ECHO = re.compile(
-    r"(?s)\A\s*(?:user|assistant|system)\s*:\s*\S",
+    r"\A\s*(?:```[^\n]*\n\s*)?(?:user|assistant|system)\s*:\s*\S",
     re.IGNORECASE,
 )
 # Full role lines, used to measure how much of the reply is bare role echo.
