@@ -216,20 +216,41 @@ class SafetyTests(unittest.TestCase):
             self.assertIsNotNone(check_command("echo $(cat ~/.netrc)", policy))
 
     def test_sandbox_allows_regex_dollar_anchor(self) -> None:
-        # Guard against over-blocking: a `$` end-of-line regex anchor in a
-        # whitelisted text command (grep/rg) is NOT a variable expansion and
-        # must stay allowed — only `$word`/`${...}`/`$(...)` are blocked.
+        # Guard against over-blocking: a `$` end-of-line regex anchor inside
+        # single quotes is a literal, not a variable expansion, and must stay
+        # allowed for whitelisted text commands (grep/rg).
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir) / "workspace"
             workspace.mkdir()
             policy = SandboxPolicy(workspace_root=workspace, capability_profile="engineer")
             for command in (
                 "grep 'error$' app.log",
+                "grep '^$' file",
                 "rg 'foo$' src",
                 "grep -E '\\.py$' file.txt",
             ):
                 with self.subTest(command=command):
                     self.assertIsNone(check_command(command, policy), msg=command)
+
+    def test_sandbox_blocks_ansi_c_and_locale_quoting(self) -> None:
+        # 2026-05-31 audit (H1, review probe): $'...' (ANSI-C) and $"..." (locale)
+        # quoting are expanded by the shell BEFORE exec, so the pre-shell policy
+        # parser sees a token that differs from what runs (same class as $VAR /
+        # bash -c). shlex strips the `$` and the quotes, hiding the real path.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            policy = SandboxPolicy(workspace_root=workspace, capability_profile="engineer")
+            for command in (
+                "cat $'/Users/hector/Desktop/notes.txt'",
+                "cat $'\\x2fUsers\\x2fhector\\x2fDesktop\\x2fnotes.txt'",
+                "bash -c $'cat /Users/hector/Desktop/notes.txt'",
+                'cat $"/Users/hector/Desktop/notes.txt"',
+            ):
+                with self.subTest(command=command):
+                    violation = check_command(command, policy)
+                    self.assertIsNotNone(violation, msg=command)
+                    self.assertIn("shell operators", violation)
 
     def test_engineer_profile_allows_development_tools(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
