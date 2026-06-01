@@ -1334,6 +1334,13 @@ _CONSECUTIVE_ROLE_ECHO = re.compile(
     r"(?m)^\s*(?:user|assistant|system)\s*:\s*\S.*(?:\n\s*(?:user|assistant|system)\s*:\s*\S.*)+",
     re.IGNORECASE,
 )
+# A role header that OPENS the whole message is a verbatim prompt echo (e.g.
+# "system: Eres Dr. Strange.\n<internal instructions>"). A legitimate reply that
+# cites a transcript line carries it inside prose, not as the very first line.
+_LEADING_ROLE_ECHO = re.compile(
+    r"(?s)\A\s*(?:user|assistant|system)\s*:\s*\S",
+    re.IGNORECASE,
+)
 # Full role lines, used to measure how much of the reply is bare role echo.
 _ROLE_LINE_FULL = re.compile(r"(?im)^\s*(?:user|assistant|system)\s*:.*$")
 
@@ -1341,14 +1348,17 @@ _ROLE_LINE_FULL = re.compile(r"(?im)^\s*(?:user|assistant|system)\s*:.*$")
 def _role_echo_dominates(text: str) -> bool:
     """True when ^role: lines are a verbatim prompt echo, not quoted transcript prose.
 
-    Nukes only when (a) 2+ consecutive role lines appear (a real multi-turn echo),
-    or (b) the role line(s) make up most of the message (a bare "user: Estatus"
-    echo with no surrounding answer). A reply that merely cites one transcript
-    line inside real prose is left intact.
+    Nukes only when (a) a role header opens the message (a single leaked
+    "system:/user:" prompt header), (b) 2+ consecutive role lines appear (a real
+    multi-turn echo), or (c) the role line(s) make up most of the message (a bare
+    "user: Estatus" echo). A reply that merely cites one transcript line inside
+    real prose is left intact.
     """
     # idx 26 — keep the trigger condition co-located with the pattern it gates.
     if not _INTERNAL_LEAK_PATTERNS[26].search(text):
         return False
+    if _LEADING_ROLE_ECHO.search(text):
+        return True
     if _CONSECUTIVE_ROLE_ECHO.search(text):
         return True
     role_chars = sum(len(m.group(0)) for m in _ROLE_LINE_FULL.finditer(text))
