@@ -137,6 +137,25 @@ class SecretPathTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertTrue(path_is_secret(path), msg=path)
 
+    def test_browser_credential_stores_detected_case_insensitive(self) -> None:
+        # 2026-05-31 audit (H3): macOS browser credential stores have
+        # capitalized on-disk names ("Cookies", "Login Data") that the
+        # lowercase fnmatch patterns missed (fnmatch is case-sensitive on
+        # POSIX). Plus Firefox key/login stores, and capitalized generic
+        # secrets that the case-insensitive match must now catch.
+        for path in (
+            "/Users/x/Library/Application Support/Google/Chrome/Default/Cookies",
+            "/Users/x/Library/Application Support/Google/Chrome/Default/Login Data",
+            "/Users/x/Library/Application Support/Google/Chrome/Default/Web Data",
+            "/Users/x/Library/Application Support/Firefox/Profiles/abc/key4.db",
+            "/Users/x/Library/Application Support/Firefox/Profiles/abc/logins.json",
+            "/Users/x/.mozilla/firefox/abc/signons.sqlite",
+            "/Users/x/SECRET.PEM",
+            "/Users/x/My-Credentials.txt",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(path_is_secret(path), msg=path)
+
 
 class WorkspacePathValidationTests(unittest.TestCase):
     def test_valid_path_resolves(self) -> None:

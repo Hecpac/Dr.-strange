@@ -164,12 +164,49 @@ def _unwrap_command_tokens(tokens: list[str]) -> list[str]:
     return remaining
 
 
-_SHELL_OPERATORS_RE = __import__("re").compile(r"[;|&`<>]|\$\(")
+_SHELL_OPERATORS_RE = __import__("re").compile(r"[;|&`<>]")
+
+
+def _has_shell_expansion(command: str) -> bool:
+    """True if `command` contains a `$`-expansion or ANSI-C/locale quoting form
+    ($var, ${...}, $(...), $'...', $"...") that the shell resolves at exec time
+    to text the pre-shell policy parser cannot see — the same pre-shell-vs-
+    post-shell gap as the bash -c bypass (2026-05-31 audit H1). A `$` inside
+    single quotes is a literal (e.g. a grep 'foo$' end-anchor) and stays allowed.
+    """
+    in_single = False
+    in_double = False
+    i, n = 0, len(command)
+    while i < n:
+        c = command[i]
+        if in_single:
+            if c == "'":
+                in_single = False
+            i += 1
+            continue
+        if c == "\\":  # backslash escape (outside single quotes)
+            i += 2
+            continue
+        if in_double:
+            if c == '"':
+                in_double = False
+            elif c == "$":
+                return True
+            i += 1
+            continue
+        if c == "'":
+            in_single = True
+        elif c == '"':
+            in_double = True
+        elif c == "$":
+            return True
+        i += 1
+    return False
 
 
 def check_command(command: str, policy: SandboxPolicy) -> str | None:
-    if _SHELL_OPERATORS_RE.search(command):
-        return "shell operators (;|&`<>$) are not allowed"
+    if _SHELL_OPERATORS_RE.search(command) or _has_shell_expansion(command):
+        return "shell operators or expansions (;|&`<>$, $(...), ${...}, $'...') are not allowed"
     try:
         tokens = shlex.split(command)
     except ValueError:
