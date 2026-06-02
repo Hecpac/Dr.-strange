@@ -385,6 +385,12 @@ class AppConfig:
     observability_telegram_chat_id: str | None
     observation_cost_per_hour_threshold: float
     observation_tool_calls_per_minute_threshold: int
+    token_window_seconds: int
+    token_window_cap: int
+    token_soft_limit_ratio: float
+    token_hard_limit_ratio: float
+    command_isolation_mode: str
+    enable_trivial_automerge: bool
     chrome_cdp_enabled: bool
     claw_chrome_port: int
     computer_use_enabled: bool
@@ -529,6 +535,12 @@ class AppConfig:
             observability_telegram_chat_id=os.getenv("CLAW_OBSERVABILITY_TELEGRAM_CHAT_ID") or None,
             observation_cost_per_hour_threshold=_env_float("CLAW_OBSERVATION_COST_PER_HOUR", 10.00),
             observation_tool_calls_per_minute_threshold=_env_int("CLAW_OBSERVATION_TOOL_CALLS_PER_MINUTE", 10),
+            token_window_seconds=_env_int("CLAW_TOKEN_WINDOW_SECONDS", _env_int("TOKEN_WINDOW_SECONDS", 18_000)),
+            token_window_cap=_env_int("CLAW_TOKEN_WINDOW_CAP", _env_int("TOKEN_WINDOW_CAP", 1_000_000)),
+            token_soft_limit_ratio=_env_float("CLAW_TOKEN_SOFT_LIMIT_RATIO", _env_float("TOKEN_SOFT_LIMIT_RATIO", 0.8)),
+            token_hard_limit_ratio=_env_float("CLAW_TOKEN_HARD_LIMIT_RATIO", _env_float("TOKEN_HARD_LIMIT_RATIO", 1.0)),
+            command_isolation_mode=os.getenv("CLAW_COMMAND_ISOLATION_MODE", os.getenv("COMMAND_ISOLATION_MODE", "docker_ephemeral")),
+            enable_trivial_automerge=_env_bool("CLAW_ENABLE_TRIVIAL_AUTOMERGE", _env_bool("ENABLE_TRIVIAL_AUTOMERGE", False)),
             chrome_cdp_enabled=_env_bool("CHROME_CDP_ENABLED", True),
             claw_chrome_port=_env_int("CLAW_CHROME_PORT", 9250),
             computer_use_enabled=_env_bool("COMPUTER_USE_ENABLED", True),
@@ -604,6 +616,14 @@ class AppConfig:
             raise ValueError("observation_cost_per_hour_threshold must be positive.")
         if self.observation_tool_calls_per_minute_threshold <= 0:
             raise ValueError("observation_tool_calls_per_minute_threshold must be positive.")
+        if self.token_window_seconds <= 0:
+            raise ValueError("token_window_seconds must be positive.")
+        if self.token_window_cap <= 0:
+            raise ValueError("token_window_cap must be positive.")
+        if not 0 < self.token_soft_limit_ratio <= self.token_hard_limit_ratio:
+            raise ValueError("token limit ratios must satisfy 0 < soft <= hard.")
+        if self.command_isolation_mode not in {"host_sanitized", "docker_ephemeral"}:
+            raise ValueError("command_isolation_mode must be one of: host_sanitized, docker_ephemeral.")
         if self.claw_worker_summary_limit <= 0:
             raise ValueError("claw_worker_summary_limit must be positive.")
         if self.claw_phase_input_limit <= 0:
