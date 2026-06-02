@@ -55,6 +55,12 @@ def _token_count(usage: dict[str, Any], keys: tuple[str, ...]) -> int:
 # prompt_token_count/candidates_token_count. Legacy/chat fallbacks last.
 _INPUT_KEYS = ("input_tokens", "prompt_token_count", "prompt_tokens")
 _OUTPUT_KEYS = ("output_tokens", "candidates_token_count", "completion_tokens")
+# Google bills thinking tokens at the output rate but reports them separately
+# from candidates_token_count (the visible output). Add them so reasoning
+# responses are not under-billed. OpenAI's output_tokens already includes
+# reasoning tokens and OpenAI usage dicts don't carry this key, so this is
+# additive only for Google.
+_THINKING_KEYS = ("thoughts_token_count",)
 
 
 def estimate_cost_usd(provider: str, model: str, usage: dict[str, Any] | None) -> CostEstimate:
@@ -70,7 +76,7 @@ def estimate_cost_usd(provider: str, model: str, usage: dict[str, Any] | None) -
         return CostEstimate(amount_usd=0.0, unknown=True, provider=provider, model=model)
     usage = usage or {}
     in_tokens = _token_count(usage, _INPUT_KEYS)
-    out_tokens = _token_count(usage, _OUTPUT_KEYS)
+    out_tokens = _token_count(usage, _OUTPUT_KEYS) + _token_count(usage, _THINKING_KEYS)
     in_rate = float(entry["input"])
     out_rate = float(entry["output"])
     tier = entry.get("context_tier")

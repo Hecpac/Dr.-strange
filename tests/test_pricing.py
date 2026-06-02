@@ -66,6 +66,31 @@ class PricingTableTests(unittest.TestCase):
         # 300k in @ $0.75/1M + 10k out @ $4.5/1M = 0.225 + 0.045
         self.assertAlmostEqual(est.amount_usd, 0.27)
 
+    def test_google_thinking_tokens_billed_as_output(self) -> None:
+        # Gemini bills thinking tokens at the output rate, but reports them in
+        # thoughts_token_count, separate from candidates_token_count (the visible
+        # output). Output cost MUST include thinking or every reasoning response
+        # is under-billed and the cost gate goes blind to it.
+        est = estimate_cost_usd(
+            "google", "gemini-2.5-pro",
+            {"prompt_token_count": 100_000, "candidates_token_count": 20_000,
+             "thoughts_token_count": 50_000, "total_token_count": 170_000},
+        )
+        self.assertFalse(est.unknown)
+        # input 100k @ $1.25/1M + output (20k visible + 50k thinking) @ $10/1M
+        # = 0.125 + 0.700
+        self.assertAlmostEqual(est.amount_usd, 0.825)
+
+    def test_google_thinking_billed_at_long_context_output_rate(self) -> None:
+        # >200K prompt: thinking tokens bill at the above-threshold output rate.
+        est = estimate_cost_usd(
+            "google", "gemini-2.5-pro",
+            {"prompt_token_count": 250_000, "candidates_token_count": 10_000,
+             "thoughts_token_count": 40_000, "total_token_count": 300_000},
+        )
+        # > 200k: 250k in @ $2.5/1M + (10k + 40k) out @ $15/1M = 0.625 + 0.75
+        self.assertAlmostEqual(est.amount_usd, 1.375)
+
     def test_usage_field_styles_openai_vs_google(self) -> None:
         # OpenAI Responses API uses input_tokens/output_tokens.
         openai_est = estimate_cost_usd("openai", "gpt-5.4-mini", {"input_tokens": 1_000, "output_tokens": 2_000})
