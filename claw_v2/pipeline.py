@@ -17,6 +17,7 @@ from claw_v2.llm import LLMRouter
 from claw_v2.learning import LearningLoop
 from claw_v2.memory import MemoryStore
 from claw_v2.observe import ObserveStream
+from claw_v2.trivial_patch import TrivialPatchClassifier
 
 TERMINAL_STATUSES = frozenset({"done", "failed"})
 
@@ -34,6 +35,17 @@ class PipelineRun:
     approval_id: str | None = None
     approval_token: str | None = None
     retries: int = 0
+    changed_files: list[str] = field(default_factory=list)
+    verification_complete: bool = False
+    verification_passed: bool = False
+    risk_level: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _TrivialAutoMergeDecision:
+    allowed: bool
+    reasons: tuple[str, ...]
+    classifier: dict[str, Any] = field(default_factory=dict)
 
 
 class PipelineService:
@@ -50,6 +62,7 @@ class PipelineService:
         memory: MemoryStore | None = None,
         learning: LearningLoop | None = None,
         clock: Callable[[], float] | None = None,
+        enable_trivial_automerge: bool = False,
     ) -> None:
         self.linear = linear
         self.router = router
@@ -63,6 +76,7 @@ class PipelineService:
         self.memory = memory
         self.learning = learning
         self.clock = clock or time.time
+        self.enable_trivial_automerge = enable_trivial_automerge
         self._linear_poll_failures = 0
         self._linear_poll_backoff_until = 0.0
         cleanup_stale_worktrees(default_repo_root)
@@ -86,8 +100,12 @@ class PipelineService:
                     cwd=str(wt_path),
                 )
                 run.diff = _collect_diff(wt_path)
+                run.changed_files = _collect_changed_files(wt_path)
                 passed, output = _run_tests(wt_path)
                 run.test_output = output
+                run.verification_complete = True
+                run.verification_passed = passed
+                run.risk_level = "low" if passed else None
                 if passed:
                     run.status = "awaiting_approval"
                     self._record(issue, run, "success")
@@ -134,19 +152,123 @@ class PipelineService:
         if wt_path and wt_path.exists():
             _commit_worktree(wt_path, f"feat: {issue_id} pipeline implementation")
             _push_branch(repo, run.branch_name)
+        trivial_automerge = (
+            self._evaluate_trivial_automerge(run)
+            if self.enable_trivial_automerge
+            else None
+        )
         pr_result = self.pull_requests.create_pull_request(
             branch_name=run.branch_name,
             title=f"feat: {issue_id}",
             body=f"Automated PR from Claw pipeline.\n\nLinear: {issue_id}\n\nChanges:\n```\n{(run.diff or '')[:1000]}\n```",
             draft=False,
         )
-        run.pr_url = pr_result.url
+        pr_url = getattr(pr_result, "url", None) or ""
+        pr_title = getattr(pr_result, "title", None) or f"feat: {issue_id}"
+        run.pr_url = pr_url
         run.status = "pr_created"
-        self.linear.link_pr(issue_id, pr_result.url, pr_result.title)
+        self.linear.link_pr(issue_id, pr_url, pr_title)
         self.linear.update_status(issue_id, "In Review")
         if wt_path:
             _remove_worktree(repo, wt_path)
         self._save_run(run)
+        if trivial_automerge:
+            pr_gate = self._evaluate_trivial_automerge_pr(run, pr_result, trivial_automerge)
+            if pr_gate.allowed:
+                return self._auto_merge_trivial(issue_id, run, pr_result, pr_gate)
+        return run
+
+    def _evaluate_trivial_automerge(self, run: PipelineRun) -> _TrivialAutoMergeDecision:
+        reasons: list[str] = []
+        changed_files = tuple(run.changed_files or ())
+        if not changed_files or not (run.diff or "").strip() or not (run.test_output or "").strip():
+            reasons.append("missing_metadata")
+        if not run.verification_complete:
+            reasons.append("verification_incomplete")
+        if not run.verification_passed:
+            reasons.append("verification_not_green")
+        if (run.risk_level or "").lower() != "low":
+            reasons.append("risk_not_low")
+        if _has_untracked_file_without_diff(run.diff or "", changed_files):
+            reasons.append("untracked_without_diff")
+
+        classifier_decision = TrivialPatchClassifier().classify(
+            changed_files=changed_files,
+            diff=run.diff or "",
+        )
+        if not classifier_decision.allowed:
+            reasons.append("non_trivial_patch")
+
+        deduped = tuple(dict.fromkeys(reasons))
+        return _TrivialAutoMergeDecision(
+            allowed=not deduped,
+            reasons=deduped,
+            classifier=classifier_decision.to_dict(),
+        )
+
+    def _evaluate_trivial_automerge_pr(
+        self,
+        run: PipelineRun,
+        pr_result: Any,
+        decision: _TrivialAutoMergeDecision,
+    ) -> _TrivialAutoMergeDecision:
+        reasons = list(decision.reasons)
+        if getattr(pr_result, "branch_name", run.branch_name) != run.branch_name:
+            reasons.append("pr_branch_mismatch")
+        if getattr(pr_result, "draft", False):
+            reasons.append("draft_pr_not_mergeable")
+        pr_url = getattr(pr_result, "url", None) or ""
+        if not (getattr(pr_result, "number", None) or _parse_pr_number_from_url(pr_url)):
+            reasons.append("missing_pr_number")
+        deduped = tuple(dict.fromkeys(reasons))
+        return _TrivialAutoMergeDecision(
+            allowed=not deduped,
+            reasons=deduped,
+            classifier=decision.classifier,
+        )
+
+    def _auto_merge_trivial(self, issue_id: str, run: PipelineRun, pr_result: Any, decision: _TrivialAutoMergeDecision) -> PipelineRun:
+        pr_url = getattr(pr_result, "url", None) or ""
+        pr_number = getattr(pr_result, "number", None) or _parse_pr_number_from_url(pr_url)
+        if pr_number is None:
+            return run
+        self.pull_requests.merge_pull_request(pr_number)
+        run.status = "merged"
+        self._save_run(run)
+        self.linear.update_status(issue_id, "Done")
+        self.linear.post_comment(issue_id, f"Trivial PR auto-merged by Claw pipeline.\n\nPR: {run.pr_url}")
+        run.status = "done"
+        self._save_run(run)
+        if self.learning:
+            self.learning.record(
+                task_type="pipeline",
+                task_id=issue_id,
+                description=f"Trivial auto-merge for PR {run.pr_url}",
+                approach=f"branch={run.branch_name}, categories={decision.classifier.get('categories', [])}",
+                outcome="success",
+                lesson="Trivial patch auto-merged after full verification passed.",
+            )
+        elif self.memory:
+            self.memory.store_task_outcome(
+                task_type="pipeline",
+                task_id=issue_id,
+                description=f"Trivial auto-merge for PR {run.pr_url}",
+                approach=f"branch={run.branch_name}, categories={decision.classifier.get('categories', [])}",
+                outcome="success",
+                lesson="Trivial patch auto-merged after full verification passed.",
+            )
+        if self.observe:
+            self.observe.emit(
+                "pipeline_trivial_automerge",
+                payload={
+                    "issue": issue_id,
+                    "pr_url": run.pr_url,
+                    "pr_number": pr_number,
+                    "categories": decision.classifier.get("categories", []),
+                    "reasons": list(decision.reasons),
+                },
+            )
+            self.observe.emit("pipeline_done", payload={"issue": issue_id, "pr_url": run.pr_url})
         return run
 
     def _record(self, issue: LinearIssue, run: PipelineRun, outcome: str) -> None:
@@ -390,6 +512,54 @@ def _collect_diff(wt_path: Path) -> str:
     result = subprocess.run(["git", "-C", str(wt_path), "diff", "--", "."], capture_output=True, text=True, check=False)
     status = subprocess.run(["git", "-C", str(wt_path), "status", "--porcelain"], capture_output=True, text=True, check=False)
     return (result.stdout or "") + "\n" + (status.stdout or "")
+
+
+def _collect_changed_files(wt_path: Path) -> list[str]:
+    status = subprocess.run(["git", "-C", str(wt_path), "status", "--porcelain"], capture_output=True, text=True, check=False)
+    files: list[str] = []
+    for line in (status.stdout or "").splitlines():
+        if not line.strip():
+            continue
+        path = _decode_git_status_path(line[3:].strip())
+        if path:
+            files.append(path)
+    return files
+
+
+def _decode_git_status_path(path: str) -> str:
+    if " -> " in path:
+        path = path.rsplit(" -> ", 1)[1]
+    if path.startswith('"') and path.endswith('"'):
+        try:
+            return str(json.loads(path))
+        except json.JSONDecodeError:
+            return path[1:-1]
+    return path
+
+
+def _has_untracked_file_without_diff(diff_text: str, changed_files: tuple[str, ...]) -> bool:
+    if not changed_files:
+        return False
+    changed = set(changed_files)
+    diff_paths = _paths_with_diff_headers(diff_text)
+    for line in diff_text.splitlines():
+        if not line.startswith("?? "):
+            continue
+        path = _decode_git_status_path(line[3:].strip())
+        if path in changed and path not in diff_paths:
+            return True
+    return False
+
+
+def _paths_with_diff_headers(diff_text: str) -> set[str]:
+    paths: set[str] = set()
+    for line in diff_text.splitlines():
+        if not line.startswith("diff --git "):
+            continue
+        match = re.match(r"diff --git a/(.*) b/(.*)$", line)
+        if match:
+            paths.add(match.group(2))
+    return paths
 
 
 def _run_tests(wt_path: Path, *, timeout: int = 300) -> tuple[bool, str]:
