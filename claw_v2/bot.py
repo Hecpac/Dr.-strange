@@ -6319,6 +6319,14 @@ class BotService:
                 return self._browse_handler.browse_response(extracted_url, session_id=session_id)
             if any(token in normalized for token in _LINK_ANALYSIS_SHORTCUT_TOKENS) or _looks_like_standalone_url(text, extracted_url):
                 return self._browse_handler.link_review_shortcut(text, extracted_url, session_id=session_id)
+            if any(token in normalized for token in _BROWSE_OPEN_TOKENS):
+                # Open/operate intent on a site: a single site goes to the
+                # authenticated Chrome CDP path (not jina/markdown); multiple
+                # sites hand the full request to the brain so it can open and
+                # operate every tab, instead of reading just the first URL (H6).
+                if len(_extract_url_candidates(text)) > 1:
+                    return _BrainShortcut(text)
+                return self._chrome_handler.browse_response(extracted_url, session_id=session_id)
             if any(token in normalized for token in _BROWSE_SHORTCUT_TOKENS) or _looks_like_standalone_url(text, extracted_url):
                 return self._browse_handler.browse_response(extracted_url, session_id=session_id)
 

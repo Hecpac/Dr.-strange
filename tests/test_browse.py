@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 from claw_v2.bot import _extract_url_candidate, _is_login_wall, _select_navigation_strategy
 from claw_v2.browser import BrowseResult
+from claw_v2.state_handler import _BrainShortcut
 from tests.helpers import make_config
 
 
@@ -309,6 +310,89 @@ class BrowserPoolTests(unittest.TestCase):
         pool.shutdown()
         self.assertEqual(len(pool._active), 0)
         mock_browser.close.assert_called_once()
+
+
+class OpenSiteCdpRoutingTests(unittest.TestCase):
+    """H6: an open verb on a site ('abre fal.ai') must reach authenticated Chrome
+    CDP, not jina/markdown; multiple sites hand the full request to the brain;
+    read/review verbs and bare URLs keep their existing paths."""
+
+    def _bot(self):
+        bot = _make_bot()
+        bot._chrome_handler.browse_response = MagicMock(return_value="CDP-OK")
+        bot._browse_handler.browse_response = MagicMock(return_value="JINA-OK")
+        bot._browse_handler.link_review_shortcut = MagicMock(return_value="LINK-REVIEW")
+        return bot
+
+    def test_open_single_site_routes_to_authenticated_cdp_not_jina(self) -> None:
+        bot = self._bot()
+        reply = bot._maybe_handle_shortcut("abre fal.ai", session_id="s1")
+        self.assertEqual(reply, "CDP-OK")
+        bot._chrome_handler.browse_response.assert_called_once_with("fal.ai", session_id="s1")
+        bot._browse_handler.browse_response.assert_not_called()
+
+    def test_open_verb_variants_route_single_site_to_cdp(self) -> None:
+        for verb in ("abre", "abrir", "open", "visita", "navega"):
+            bot = self._bot()
+            reply = bot._maybe_handle_shortcut(f"{verb} fal.ai", session_id="s1")
+            self.assertEqual(reply, "CDP-OK", verb)
+            bot._chrome_handler.browse_response.assert_called_once_with("fal.ai", session_id="s1")
+            bot._browse_handler.browse_response.assert_not_called()
+
+    def test_open_multiple_sites_hands_full_request_to_brain(self) -> None:
+        bot = self._bot()
+        text = "abre heygen.com, fal.ai y higgsfield.ai"
+        reply = bot._maybe_handle_shortcut(text, session_id="s1")
+        self.assertIsInstance(reply, _BrainShortcut)
+        self.assertEqual(reply.text, text)
+        bot._chrome_handler.browse_response.assert_not_called()
+        bot._browse_handler.browse_response.assert_not_called()
+
+    def test_open_multiple_scheme_urls_hands_full_request_to_brain(self) -> None:
+        bot = self._bot()
+        reply = bot._maybe_handle_shortcut("abre https://heygen.com y https://fal.ai", session_id="s1")
+        self.assertIsInstance(reply, _BrainShortcut)
+        bot._chrome_handler.browse_response.assert_not_called()
+
+    def test_open_duplicate_site_dedups_to_single_cdp(self) -> None:
+        bot = self._bot()
+        reply = bot._maybe_handle_shortcut("abre fal.ai y fal.ai", session_id="s1")
+        self.assertEqual(reply, "CDP-OK")
+        bot._chrome_handler.browse_response.assert_called_once_with("fal.ai", session_id="s1")
+
+    def test_read_verb_single_url_still_uses_link_review(self) -> None:
+        bot = self._bot()
+        reply = bot._maybe_handle_shortcut("revisa https://fal.ai", session_id="s1")
+        self.assertEqual(reply, "LINK-REVIEW")
+        bot._browse_handler.link_review_shortcut.assert_called_once()
+        bot._chrome_handler.browse_response.assert_not_called()
+
+    def test_bare_url_does_not_route_to_cdp(self) -> None:
+        bot = self._bot()
+        reply = bot._maybe_handle_shortcut("https://fal.ai", session_id="s1")
+        # Bare URL keeps its existing link-review path; never the new CDP branch.
+        self.assertEqual(reply, "LINK-REVIEW")
+        bot._chrome_handler.browse_response.assert_not_called()
+
+    def test_open_non_url_does_not_trigger_cdp(self) -> None:
+        # D1 (Hector ruling 2026-06-02): "README.md" matches the host regex
+        # (.md is a TLD) and "read" is a substring of "readme", so it is caught
+        # by the pre-existing link-analysis branch — a separate, pre-existing
+        # quirk of the URL extractor, orthogonal to H6. The H6 invariant is only
+        # that an open verb on a non-site never reaches authenticated CDP.
+        bot = self._bot()
+        bot._maybe_handle_shortcut("abre el archivo README.md", session_id="s1")
+        bot._chrome_handler.browse_response.assert_not_called()
+        bot._browse_handler.browse_response.assert_not_called()
+
+    def test_open_without_url_candidate_does_not_trigger_cdp(self) -> None:
+        # "abre la app" / "abre chrome" carry no URL candidate, so the URL
+        # routing block is never entered and CDP is never called.
+        for text in ("abre la app", "abre chrome"):
+            bot = self._bot()
+            bot._maybe_handle_shortcut(text, session_id="s1")
+            bot._chrome_handler.browse_response.assert_not_called()
+            bot._browse_handler.browse_response.assert_not_called()
 
 
 if __name__ == "__main__":
