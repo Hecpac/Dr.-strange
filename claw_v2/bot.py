@@ -712,14 +712,51 @@ _FOLLOWUP_TERMS = (
 )
 
 
+def _contains_command_term(normalized: str, terms: tuple[str, ...]) -> bool:
+    for term in terms:
+        normalized_term = _normalize_command_text(term)
+        if " " in normalized_term:
+            if normalized_term in normalized:
+                return True
+            continue
+        if re.search(rf"(?<![a-z0-9_]){re.escape(normalized_term)}(?![a-z0-9_])", normalized):
+            return True
+    return False
+
+
 def _looks_like_task_diagnostic_question(text: str) -> bool:
     normalized = _normalize_command_text(text)
-    return any(t in normalized for t in _TASK_TERMS) and any(t in normalized for t in _DIAGNOSTIC_TERMS)
+    if not _contains_command_term(normalized, _TASK_TERMS):
+        return False
+    if not _contains_command_term(normalized, _DIAGNOSTIC_TERMS):
+        return False
+    broad_causal_only = _contains_command_term(normalized, ("por que", "porque"))
+    if broad_causal_only and not _contains_command_term(
+        normalized,
+        (
+            "fallo",
+            "falló",
+            "fallaste",
+            "no pudiste",
+            "no pudo",
+            "no completaste",
+            "no terminaste",
+            "no se completo",
+            "no quedo",
+            "no quedó",
+            "bloqueada",
+            "bloqueado",
+            "error",
+            "failed",
+        ),
+    ):
+        return False
+    return True
 
 
 def _looks_like_previous_task_followup(text: str) -> bool:
     normalized = _normalize_command_text(text)
-    return any(token in normalized for token in _FOLLOWUP_TERMS)
+    return _contains_command_term(normalized, _FOLLOWUP_TERMS)
 
 
 def _looks_like_short_meta_question(text: str) -> bool:
@@ -729,10 +766,9 @@ def _looks_like_short_meta_question(text: str) -> bool:
     is_question = "?" in text or normalized.startswith(("porque", "por que", "por qué", "que paso", "qué pasó"))
     if not is_question:
         return False
-    return any(token in normalized for token in (
-        "tarea", "task", "job", "cuaderno", "notebook",
-        "completaste", "fallo", "falló",
-    ))
+    if not _contains_command_term(normalized, ("tarea", "task", "job", "cuaderno", "notebook")):
+        return False
+    return _contains_command_term(normalized, ("completaste", "fallo", "falló", "no pudiste", "que paso"))
 
 
 def _looks_like_operational_alert(text: str) -> bool:

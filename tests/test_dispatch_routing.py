@@ -118,25 +118,10 @@ def test_ambiguous_task_language_falls_through_to_brain(bot, text: str) -> None:
     )
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Underlying classifier (`_classify_task_intent`) still mis-buckets "
-        "ambiguous messages into failure_diagnostic / resume_previous via "
-        "brittle keyword regexes. Production safety today comes from the "
-        "env-flag short-circuit in `_maybe_handle_task_intent` (default ON). "
-        "This test documents the residual bug and must be removed when "
-        "commit #5 of the brain-bypass refactor lands "
-        "(`refactor(dispatcher): make brain the default route`). "
-        "Anthropic sycophancy paper 2026-04-30 informs the message set."
-    ),
-    strict=True,
-)
 @pytest.mark.parametrize("text", AMBIGUOUS_MESSAGES)
 def test_ambiguous_messages_classify_to_unknown_intent(bot, text: str) -> None:
-    """Regression-detection test: bypass the env flag and exercise the
-    underlying classifier directly. When this test STARTS PASSING, it means
-    the underlying regex-based classifier was hardened — at that point the
-    `xfail(strict=True)` will turn it red and prompt removal of the marker."""
+    """Regression test: bypass the env flag and exercise the underlying
+    classifier directly so ambiguous prompts cannot hit canned routes."""
     intent = bot._classify_task_intent(text, session_id="test-session")
     assert intent.get("intent") in {"unknown", "command"}, (
         f"Ambiguous message misclassified as canned route: {text!r} → {intent!r}"
