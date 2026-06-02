@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shlex
 import fnmatch
 from dataclasses import dataclass
@@ -37,6 +38,90 @@ class RuntimeApprovalDefinition:
 
 
 ApprovalGate = Callable[[Any, dict], None]
+
+
+_DEFAULT_CHILD_ENV_ALLOWLIST = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "TERM",
+        "LANG",
+        "LC_ALL",
+        "SHELL",
+        "USER",
+        "TMPDIR",
+        "CLAW_RUNTIME_MODE",
+        "CLAW_HOME",
+    }
+)
+_DEFAULT_CHILD_ENV_DENY_SUBSTRINGS = frozenset(
+    {
+        "KEY",
+        "TOKEN",
+        "SECRET",
+        "PASSWORD",
+        "COOKIE",
+        "CREDENTIAL",
+        "AUTH",
+        "PRIVATE",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeChildEnvPolicy:
+    allowlist: frozenset[str] = _DEFAULT_CHILD_ENV_ALLOWLIST
+    deny_substrings: frozenset[str] = _DEFAULT_CHILD_ENV_DENY_SUBSTRINGS
+
+    def allows_name(self, name: str) -> bool:
+        normalized = str(name).upper()
+        if any(fragment in normalized for fragment in self.deny_substrings):
+            return False
+        return normalized in self.allowlist
+
+
+@dataclass(frozen=True, slots=True)
+class SanitizedChildEnv:
+    env: dict[str, str]
+    preserved_count: int
+    dropped_count: int
+    dropped_sensitive_count: int
+
+    def to_metadata(self) -> dict[str, int | str]:
+        return {
+            "policy": "RuntimeChildEnvPolicy",
+            "preserved_count": self.preserved_count,
+            "dropped_count": self.dropped_count,
+            "dropped_sensitive_count": self.dropped_sensitive_count,
+        }
+
+
+def sanitize_child_env(
+    source_env: dict[str, str] | None = None,
+    *,
+    policy: RuntimeChildEnvPolicy | None = None,
+) -> SanitizedChildEnv:
+    """Return an allowlisted child-process environment without secret values."""
+
+    selected_policy = policy or RuntimeChildEnvPolicy()
+    source = dict(os.environ if source_env is None else source_env)
+    clean: dict[str, str] = {}
+    dropped_sensitive = 0
+    for key, value in source.items():
+        normalized = str(key).upper()
+        sensitive = any(fragment in normalized for fragment in selected_policy.deny_substrings)
+        if sensitive:
+            dropped_sensitive += 1
+            continue
+        if normalized not in selected_policy.allowlist:
+            continue
+        clean[normalized] = str(value)
+    return SanitizedChildEnv(
+        env=clean,
+        preserved_count=len(clean),
+        dropped_count=max(len(source) - len(clean), 0),
+        dropped_sensitive_count=dropped_sensitive,
+    )
 
 
 _PATH_KEYS = frozenset(

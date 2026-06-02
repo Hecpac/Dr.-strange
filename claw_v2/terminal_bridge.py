@@ -14,6 +14,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
+from claw_v2.runtime_policy import sanitize_child_env
+
 
 class TerminalBridgeError(RuntimeError):
     """Raised when terminal bridge operations fail."""
@@ -256,8 +258,12 @@ def run_session(session_dir: Path | str) -> int:
     output_path = path / "output.log"
 
     master_fd, slave_fd = pty.openpty()
-    env = dict(os.environ)
-    env.setdefault("TERM", "xterm-256color")
+    raw_env = dict(os.environ)
+    raw_env.setdefault("TERM", "xterm-256color")
+    env_result = sanitize_child_env(raw_env)
+    env = env_result.env
+    meta["child_env"] = env_result.to_metadata()
+    service._write_meta(path, meta)
     output_handle = output_path.open("ab", buffering=0)
     input_offset = 0
     child: subprocess.Popen[Any] | None = None

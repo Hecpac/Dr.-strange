@@ -20,6 +20,7 @@ from claw_v2.pipeline import (
     _push_branch,
     _record_outcome,
     _retrieve_lessons,
+    _run_tests,
     _validate_branch_name,
 )
 from claw_v2.types import LLMResponse
@@ -118,6 +119,25 @@ class ProcessIssueTests(unittest.TestCase):
             self.assertEqual(run.status, "failed")
             linear.post_comment.assert_called_once()
             self.assertIn("failed", linear.post_comment.call_args[0][1].lower())
+
+    @patch("claw_v2.pipeline.sandboxed_run")
+    def test_run_tests_uses_sandboxed_run_with_network_disabled(self, mock_run) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=["python", "-m", "pytest", "-x", "-q"],
+            returncode=0,
+            stdout="5 passed",
+            stderr="",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            passed, output = _run_tests(Path(tmpdir), timeout=17)
+
+        self.assertTrue(passed)
+        self.assertIn("5 passed", output)
+        self.assertEqual(mock_run.call_args.args[0], ["python", "-m", "pytest", "-x", "-q"])
+        self.assertEqual(mock_run.call_args.kwargs["cwd"], str(Path(tmpdir)))
+        self.assertFalse(mock_run.call_args.kwargs["policy"].network_enabled)
+        self.assertEqual(mock_run.call_args.kwargs["policy"].timeout_seconds, 17)
+        self.assertFalse(mock_run.call_args.kwargs["shell"])
 
     def test_process_issue_rejects_unsafe_branch_name(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

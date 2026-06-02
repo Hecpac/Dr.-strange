@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from claw_v2.approval import ApprovalManager
+from claw_v2.container import ContainerPolicy, sandboxed_run
 from claw_v2.github import GitHubPullRequestService
 from claw_v2.linear import LinearIssue, LinearService
 from claw_v2.llm import LLMRouter
@@ -388,9 +389,11 @@ def _collect_diff(wt_path: Path) -> str:
 
 def _run_tests(wt_path: Path, *, timeout: int = 300) -> tuple[bool, str]:
     try:
-        result = subprocess.run(
+        result = sandboxed_run(
             ["python", "-m", "pytest", "-x", "-q"],
-            cwd=str(wt_path), capture_output=True, text=True, check=False, timeout=timeout,
+            cwd=str(wt_path),
+            policy=ContainerPolicy(timeout_seconds=timeout, network_enabled=False),
+            shell=False,
         )
     except subprocess.TimeoutExpired:
         return False, f"Tests timed out after {timeout}s"
