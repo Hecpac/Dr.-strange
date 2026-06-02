@@ -10,11 +10,63 @@ import unittest
 from pathlib import Path
 
 from claw_v2.approval import APPROVAL_TTL_SECONDS, ApprovalManager
+from claw_v2.approval_sensitivity import classify_sensitive_change
 from claw_v2.approval_gate import ApprovalPending, approved_tool_invocation, build_telegram_approval_gate
 from claw_v2.tools import TIER_REQUIRES_APPROVAL, ToolDefinition
 
 
 class ApprovalManagerTests(unittest.TestCase):
+    def test_sensitive_classifier_detects_runtime_policy_and_lockfile_changes(self) -> None:
+        diff = """diff --git a/claw_v2/runtime_policy.py b/claw_v2/runtime_policy.py
+--- a/claw_v2/runtime_policy.py
++++ b/claw_v2/runtime_policy.py
+@@
++TOKEN = "sk-abcdefghijklmnopqrstuvwxyz123456"
+diff --git a/package-lock.json b/package-lock.json
+--- a/package-lock.json
++++ b/package-lock.json
+@@
++{}
+"""
+        classification = classify_sensitive_change(diff=diff, action="pipeline:HEC-1")
+
+        self.assertTrue(classification.sensitive)
+        self.assertIn("runtime_policy", classification.categories)
+        self.assertIn("lockfile", classification.categories)
+        self.assertIn("claw_v2/runtime_policy.py", classification.sensitive_paths)
+        self.assertIn("[REDACTED]", classification.diff_summary)
+        self.assertRegex(classification.required_confirmation or "", r"^CONFIRMO RISK-[0-9A-F]{8}$")
+
+    def test_sensitive_approval_requires_exact_confirmation_not_ok(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = ApprovalManager(Path(tmpdir), "secret")
+            pending = manager.create(
+                "pipeline:HEC-1",
+                "Runtime policy change",
+                diff="diff --git a/claw_v2/runtime_policy.py b/claw_v2/runtime_policy.py\n",
+            )
+            payload = manager.read(pending.approval_id)
+            required = payload["metadata"]["required_confirmation"]
+
+            self.assertTrue(required.startswith("CONFIRMO RISK-"))
+            self.assertFalse(manager.approve_confirmation(pending.approval_id, "ok"))
+            self.assertEqual(manager.status(pending.approval_id), "pending")
+            self.assertFalse(manager.approve(pending.approval_id, pending.token))
+            self.assertEqual(manager.status(pending.approval_id), "rejected")
+
+    def test_sensitive_approval_accepts_exact_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = ApprovalManager(Path(tmpdir), "secret")
+            pending = manager.create(
+                "pipeline:HEC-1",
+                "Approval gate change",
+                diff="diff --git a/claw_v2/approval.py b/claw_v2/approval.py\n",
+            )
+            required = manager.read(pending.approval_id)["metadata"]["required_confirmation"]
+
+            self.assertTrue(manager.approve(pending.approval_id, required))
+            self.assertEqual(manager.status(pending.approval_id), "approved")
+
     def test_read_waits_for_writer_lock(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = ApprovalManager(Path(tmpdir), "secret")

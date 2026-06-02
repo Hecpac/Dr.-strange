@@ -565,22 +565,36 @@ def _parse_pre_hook_block(content: str) -> tuple[str, str] | None:
 
 def _format_approval_pending(exc: ApprovalPending) -> str:
     """Convert a Tier 3 soft-block into Telegram-ready instructions for Hector."""
-    return (
+    lines = [
         "⚠️ Acción de Tier 3 detectada. Requiere aprobación de Hector.\n\n"
-        f"Tool: `{exc.tool}`\n"
-        f"Resumen: {exc.summary}\n\n"
-        f"Comando: `/approve {exc.approval_id} {exc.token}`"
-    )
+        f"Tool: `{exc.tool}`",
+        f"Resumen: {exc.summary}",
+    ]
+    if exc.required_confirmation:
+        lines.append(f"Risk code: `{exc.risk_code}`")
+        if exc.sensitive_paths:
+            lines.append("Rutas sensibles: " + ", ".join(f"`{path}`" for path in exc.sensitive_paths[:8]))
+        if exc.diff_summary:
+            lines.append(f"Diff resumido:\n```\n{redact_sensitive(exc.diff_summary, limit=1200)}\n```")
+        lines.append(f"Confirmación exacta: `/approve {exc.approval_id} {exc.required_confirmation}`")
+    else:
+        lines.append(f"Comando: `/approve {exc.approval_id} {exc.token}`")
+    return "\n\n".join(lines)
 
 
 def _format_approval_pending_for_memory(exc: ApprovalPending) -> str:
-    return (
-        "Acción de Tier 3 pendiente de aprobación.\n"
-        f"Tool: {exc.tool}\n"
-        f"Resumen: {exc.summary}\n"
-        f"Approval ID: {exc.approval_id}\n"
-        "Token omitido en memoria."
-    )
+    lines = [
+        "Acción de Tier 3 pendiente de aprobación.",
+        f"Tool: {exc.tool}",
+        f"Resumen: {exc.summary}",
+        f"Approval ID: {exc.approval_id}",
+    ]
+    if exc.required_confirmation:
+        lines.append(f"Risk code: {exc.risk_code}")
+        lines.append(f"Confirmación exacta requerida: {exc.required_confirmation}")
+    else:
+        lines.append("Token omitido en memoria.")
+    return "\n".join(lines)
 
 
 def _looks_like_pending_tool_approval_grant(text: str) -> bool:
@@ -4289,7 +4303,7 @@ class BotService:
         if stripped.startswith("/approve "):
             parts = stripped.split(maxsplit=2)
             if len(parts) != 3:
-                return "usage: /approve <approval_id> <token>"
+                return "usage: /approve <approval_id> <token|CONFIRMO risk_code>"
             approved = self.approvals.approve(parts[1], parts[2])
             return "approval recorded" if approved else "approval rejected"
         if stripped.startswith("/task_approve "):
@@ -4341,7 +4355,7 @@ class BotService:
         if stripped.startswith("/pipeline_approve "):
             parts = stripped.split(maxsplit=2)
             if len(parts) != 3:
-                return "usage: /pipeline_approve <approval_id> <token>"
+                return "usage: /pipeline_approve <approval_id> <token|CONFIRMO risk_code>"
             approved = self.approvals.approve(parts[1], parts[2])
             if not approved:
                 return "approval rejected"
@@ -4412,7 +4426,10 @@ class BotService:
                     "pr_url": run.pr_url,
                     "branch": run.branch_name,
                 },
+                risk_basis="pipeline_merge_requires_human_hmac_confirmation",
             )
+            approval_payload = self.approvals.read(pending.approval_id)
+            approval_metadata = approval_payload.get("metadata") or {}
             return json.dumps(
                 {
                     "status": "approval_required",
@@ -4421,6 +4438,10 @@ class BotService:
                     "approval_id": pending.approval_id,
                     "approval_token": pending.token,
                     "confirm_with": f"/pipeline_merge_confirm {pending.approval_id} {pending.token}",
+                    "risk_basis": approval_payload.get("risk_basis"),
+                    "diff_summary": approval_metadata.get("diff_summary"),
+                    "sensitive_paths": approval_metadata.get("sensitive_paths"),
+                    "risk_code": approval_metadata.get("risk_code"),
                 },
                 indent=2,
             )
@@ -5662,20 +5683,31 @@ class BotService:
         pending = active_object.get("pending_tool_approval")
         if not isinstance(pending, dict):
             return None
-        if not _looks_like_pending_tool_approval_grant(text):
-            return None
         approval_id = str(pending.get("approval_id") or "")
         tool = str(pending.get("tool") or "")
         original_text = str(pending.get("original_text") or "").strip()
         if not approval_id or not tool or not original_text:
             return "Hay una aprobación pendiente, pero le falta contexto para reintentar. Reenvíame el objetivo concreto."
         try:
-            status = self.approvals.status(approval_id)
+            approval_payload = self.approvals.read(approval_id)
         except FileNotFoundError:
             self._clear_pending_tool_approval(session_id, approval_id)
             return f"La aprobación pendiente `{approval_id}` ya no existe. Reenvíame el objetivo concreto."
+        status = str(approval_payload.get("status") or "")
+        metadata = approval_payload.get("metadata") or {}
+        required_confirmation = str(metadata.get("required_confirmation") or "").strip()
+        if required_confirmation:
+            if text.strip() != required_confirmation:
+                if _looks_like_pending_tool_approval_grant(text) or text.strip().upper().startswith("CONFIRMO"):
+                    return (
+                        "Esta aprobación toca cambios sensibles. No alcanza con `ok`, `sí` o `dale`.\n"
+                        f"Responde exactamente: `{required_confirmation}`"
+                    )
+                return None
+        elif not _looks_like_pending_tool_approval_grant(text):
+            return None
         if status == "pending":
-            if not self.approvals.approve_internal(approval_id):
+            if not self.approvals.approve_confirmation(approval_id, text):
                 return "No pude registrar la aprobación pendiente. Usa `/approvals` para revisar el estado."
         elif status != "approved":
             self._clear_pending_tool_approval(session_id, approval_id)

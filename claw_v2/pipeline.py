@@ -103,10 +103,15 @@ class PipelineService:
                 pending = self.approvals.create(
                     action=f"pipeline:{issue_id}",
                     summary=f"Pipeline for {issue_id}: {issue.title}",
+                    diff=run.diff or "",
+                    risk_basis="pipeline_generated_diff_requires_human_approval",
                 )
                 run.approval_id = pending.approval_id
                 run.approval_token = pending.token
-                summary = f"Pipeline ready for {issue_id}.\n\n**Changes:**\n```\n{(run.diff or '')[:500]}\n```\n\n**Tests:** {run.test_output[:200] if run.test_output else 'passed'}\n\nApprove via: `/pipeline_approve {pending.approval_id} {pending.token}`"
+                approval_payload = self.approvals.read(pending.approval_id)
+                approval_metadata = approval_payload.get("metadata") or {}
+                confirmation = approval_metadata.get("required_confirmation") or pending.token
+                summary = f"Pipeline ready for {issue_id}.\n\n**Changes:**\n```\n{approval_metadata.get('diff_summary') or (run.diff or '')[:500]}\n```\n\n**Tests:** {run.test_output[:200] if run.test_output else 'passed'}\n\nApprove via: `/pipeline_approve {pending.approval_id} {confirmation}`"
                 self.linear.post_comment(issue_id, summary)
         finally:
             self._save_run(run)
