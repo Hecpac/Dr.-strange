@@ -4,12 +4,35 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from claw_v2.runtime_policy import RuntimePolicyEngine, _iter_path_values
+from claw_v2.runtime_policy import RuntimePolicyEngine, sanitize_child_env, _iter_path_values
 from claw_v2.sandbox import SandboxPolicy
 from claw_v2.tools import ToolDefinition, ToolRegistry
 
 
 class RuntimePolicyEngineTests(unittest.TestCase):
+    def test_sanitize_child_env_preserves_allowlist_and_drops_secrets(self) -> None:
+        result = sanitize_child_env(
+            {
+                "PATH": "/bin",
+                "HOME": "/home/test",
+                "TERM": "xterm",
+                "OPENAI_API_KEY": "sk-secret",
+                "SESSION_TOKEN": "tok",
+                "CUSTOM_FLAG": "1",
+                "AUTH_MODE": "api",
+            }
+        )
+
+        self.assertEqual(result.env["PATH"], "/bin")
+        self.assertEqual(result.env["HOME"], "/home/test")
+        self.assertEqual(result.env["TERM"], "xterm")
+        self.assertNotIn("OPENAI_API_KEY", result.env)
+        self.assertNotIn("SESSION_TOKEN", result.env)
+        self.assertNotIn("CUSTOM_FLAG", result.env)
+        self.assertNotIn("AUTH_MODE", result.env)
+        self.assertEqual(result.dropped_sensitive_count, 3)
+        self.assertEqual(result.to_metadata()["preserved_count"], 3)
+
     def test_unknown_tool_is_denied_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)

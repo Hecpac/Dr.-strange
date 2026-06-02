@@ -8,6 +8,11 @@ from claw_v2.container import ContainerPolicy, sandboxed_run, _docker_run
 
 
 class SandboxedRunTests(unittest.TestCase):
+    def test_default_policy_disables_network_and_uses_host_sanitized(self) -> None:
+        policy = ContainerPolicy()
+        self.assertFalse(policy.network_enabled)
+        self.assertEqual(policy.isolation_mode, "host_sanitized")
+
     def test_runs_command_with_timeout(self) -> None:
         policy = ContainerPolicy(timeout_seconds=5)
         result = sandboxed_run("echo hello", cwd="/tmp", policy=policy)
@@ -22,6 +27,25 @@ class SandboxedRunTests(unittest.TestCase):
     def test_default_policy_used(self) -> None:
         result = sandboxed_run("echo default", cwd="/tmp")
         self.assertIn("default", result.stdout)
+
+    @patch("claw_v2.container.subprocess.run")
+    def test_limited_run_uses_sanitized_child_env(self, mock_run) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        sandboxed_run("echo ok", cwd="/tmp", policy=ContainerPolicy())
+        env = mock_run.call_args.kwargs["env"]
+        self.assertIn("PATH", env)
+        self.assertNotIn("OPENAI_API_KEY", env)
+
+    @patch("claw_v2.container.subprocess.run")
+    def test_sandboxed_run_emits_env_counts_without_values(self, mock_run) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        observe = MagicMock()
+        sandboxed_run("echo ok", cwd="/tmp", policy=ContainerPolicy(), observe=observe)
+        payload = observe.emit.call_args.kwargs["payload"]
+        self.assertEqual(payload["runner"], "container.sandboxed_run")
+        self.assertIn("preserved_count", payload)
+        self.assertIn("dropped_count", payload)
+        self.assertNotIn("env", payload)
 
 
 class DockerRunTests(unittest.TestCase):
