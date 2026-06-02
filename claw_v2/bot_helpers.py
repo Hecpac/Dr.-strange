@@ -45,6 +45,7 @@ __all__ = [
     "_AUTONOMY_MODES",
     "_AUTONOMY_POLICY_MATRIX",
     "_AUTONOMY_TASK_ACTION_PATTERNS",
+    "_BROWSE_OPEN_TOKENS",
     "_BROWSE_SHORTCUT_TOKENS",
     "_COMPUTER_ACTION_TOKENS",
     "_COMPUTER_READ_TOKENS",
@@ -211,6 +212,18 @@ _TWEET_ANALYSIS_SHORTCUT_TOKENS = (
     "analyze",
 )
 _LINK_ANALYSIS_SHORTCUT_TOKENS = _TWEET_ANALYSIS_SHORTCUT_TOKENS
+# Open/operate verbs (subset of _BROWSE_SHORTCUT_TOKENS, sans the read/review
+# verbs): route a site to the authenticated Chrome CDP path so the bot opens and
+# operates the page, instead of the public jina read-to-markdown path (H6).
+_BROWSE_OPEN_TOKENS = (
+    "abre",
+    "abrir",
+    "open",
+    "visita",
+    "visit",
+    "navega",
+    "browse",
+)
 _COMPUTER_ACTION_TOKENS = (
     "haz click",
     "haz clic",
