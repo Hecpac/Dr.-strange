@@ -1,18 +1,13 @@
-"""xfail strict for proceed-class continuation staleness.
+"""Regression tests for proceed-class continuation staleness.
 
 State_handler resolves "proceed/dale/sí" by selecting the next pending task
-from `task_queue`. Today there is no TTL — a task that's been pending for
-weeks (because it was completed remotely or abandoned) still gets selected.
-
-The fix lands in Wave 3 (vector memory cold path + memory hygiene). Until
-then, this is xfail strict.
+from `task_queue`. Stale pending entries should not be selected just because
+they appear earlier in iteration order.
 """
 from __future__ import annotations
 
 import unittest
 from datetime import datetime, timedelta, timezone
-
-import pytest
 
 from claw_v2.bot_helpers import _select_next_task_queue_item
 
@@ -25,7 +20,6 @@ def _fresh_iso(seconds: int) -> str:
     return (datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat()
 
 
-@pytest.mark.xfail(strict=True, reason="Wave 3: task_queue staleness TTL not implemented.")
 class ProceedClassStalenessTests(unittest.TestCase):
     def test_select_next_skips_stale_entries_older_than_threshold(self) -> None:
         # 7 days old; should be considered abandoned in any reasonable design.

@@ -5,6 +5,7 @@ import contextlib
 import re
 import unicodedata
 from contextvars import ContextVar
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 from urllib.parse import urlsplit
@@ -161,6 +162,7 @@ _VERIFICATION_STATUS_RE = re.compile(
     r"(ok|passed|pending|failed|none|unknown)\b",
     re.IGNORECASE,
 )
+_TASK_QUEUE_ITEM_TTL_SECONDS = 60 * 60
 
 
 @contextlib.contextmanager
@@ -1606,15 +1608,42 @@ def _select_next_task_queue_item(task_queue: list[dict[str, Any]], *, preferred_
         item for item in task_queue
         if item.get("status") == "pending"
         and item.get("summary")
+        and not _task_queue_item_is_stale(item)
         and _task_queue_item_ready(task_queue, item)
         and _normalize_command_text(str(item.get("mode", ""))) == normalized_mode
     ]
     if preferred:
         return preferred[0]
     for item in task_queue:
-        if item.get("status") == "pending" and item.get("summary") and _task_queue_item_ready(task_queue, item):
+        if (
+            item.get("status") == "pending"
+            and item.get("summary")
+            and not _task_queue_item_is_stale(item)
+            and _task_queue_item_ready(task_queue, item)
+        ):
             return item
     return None
+
+
+def _task_queue_item_is_stale(item: dict[str, Any]) -> bool:
+    created_at = item.get("created_at")
+    if created_at in (None, ""):
+        return False
+    try:
+        created_ts = float(created_at)
+    except (TypeError, ValueError):
+        try:
+            raw = str(created_at).strip()
+            if raw.endswith("Z"):
+                raw = raw[:-1] + "+00:00"
+            created_dt = datetime.fromisoformat(raw)
+            if created_dt.tzinfo is None:
+                created_dt = created_dt.replace(tzinfo=timezone.utc)
+            created_ts = created_dt.timestamp()
+        except (TypeError, ValueError):
+            return False
+    age = datetime.now(timezone.utc).timestamp() - created_ts
+    return age > _TASK_QUEUE_ITEM_TTL_SECONDS
 
 
 def _task_queue_item_ready(task_queue: list[dict[str, Any]], item: dict[str, Any]) -> bool:
