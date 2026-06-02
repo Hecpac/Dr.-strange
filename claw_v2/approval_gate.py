@@ -98,6 +98,10 @@ class ApprovalPending(Exception):
     token: str
     tool: str
     summary: str
+    risk_code: str | None = None
+    required_confirmation: str | None = None
+    diff_summary: str | None = None
+    sensitive_paths: tuple[str, ...] = ()
 
     def __str__(self) -> str:
         return f"Tier 3 tool '{self.tool}' pending approval (id={self.approval_id})"
@@ -134,7 +138,10 @@ def build_telegram_approval_gate(
                 "tier": definition.tier,
                 "args_keys": sorted(args.keys()),
             },
+            risk_basis=f"tier3_tool:{definition.name}",
         )
+        payload = approvals.read(pending.approval_id)
+        pending_metadata = payload.get("metadata") or {}
         if notifier is not None:
             try:
                 notifier(pending)
@@ -147,6 +154,10 @@ def build_telegram_approval_gate(
             token=pending.token,
             tool=definition.name,
             summary=summary,
+            risk_code=pending_metadata.get("risk_code"),
+            required_confirmation=pending_metadata.get("required_confirmation"),
+            diff_summary=pending_metadata.get("diff_summary"),
+            sensitive_paths=tuple(pending_metadata.get("sensitive_paths") or ()),
         )
 
     return gate
@@ -175,6 +186,7 @@ def build_system_auto_approve_gate(
                 "args_keys": sorted(args.keys()),
                 "auto_approved_reason": reason,
             },
+            risk_basis=f"system_auto_tier3_tool:{definition.name}:{reason}",
         )
         approvals.approve_internal(pending.approval_id)
 

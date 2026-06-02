@@ -526,6 +526,10 @@ class BotTests(unittest.TestCase):
 
                 self.assertEqual(payload["status"], "approval_required")
                 self.assertEqual(payload["issue"], "HEC-9")
+                self.assertEqual(payload["risk_basis"], "pipeline_merge_requires_human_hmac_confirmation")
+                self.assertEqual(payload["sensitive_paths"], [])
+                self.assertIsNone(payload["risk_code"])
+                self.assertIn("/pipeline_merge_confirm", payload["confirm_with"])
                 self.assertEqual(pipeline_mock.merge_and_close.call_count, 0)
 
                 approval_id = payload["approval_id"]
@@ -3777,6 +3781,67 @@ class BotTests(unittest.TestCase):
                     mock_handle_message.call_args_list[1].kwargs["memory_text"],
                     "Ejecuta la herramienta protegida de prueba",
                 )
+
+    def test_sensitive_natural_language_tool_approval_requires_exact_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                pending = runtime.approvals.create(
+                    "tool:ApprovalEditor",
+                    "ApprovalEditor(diff)",
+                    diff="diff --git a/claw_v2/approval.py b/claw_v2/approval.py\n",
+                )
+                metadata = runtime.approvals.read(pending.approval_id)["metadata"]
+                required = metadata["required_confirmation"]
+                mock_handle_message = MagicMock(
+                    side_effect=[
+                        ApprovalPending(
+                            approval_id=pending.approval_id,
+                            token=pending.token,
+                            tool="ApprovalEditor",
+                            summary="ApprovalEditor(diff)",
+                            risk_code=metadata["risk_code"],
+                            required_confirmation=required,
+                            diff_summary=metadata["diff_summary"],
+                            sensitive_paths=tuple(metadata["sensitive_paths"]),
+                        ),
+                        LLMResponse(
+                            content="aprobación sensible aplicada",
+                            lane="brain",
+                            provider="openai",
+                            model="gpt-5.4-mini",
+                        ),
+                    ]
+                )
+
+                with patch.object(type(runtime.brain), "handle_message", mock_handle_message):
+                    first = runtime.bot.handle_text(
+                        user_id="123",
+                        session_id="tg-123",
+                        text="Edita la aprobación sensible",
+                    )
+                    self.assertIn(required, first)
+                    self.assertNotIn(pending.token, first)
+
+                    rejected = runtime.bot.handle_text(user_id="123", session_id="tg-123", text="ok")
+                    self.assertIn("No alcanza", rejected)
+                    self.assertEqual(runtime.approvals.status(pending.approval_id), "pending")
+                    self.assertEqual(mock_handle_message.call_count, 1)
+
+                    approved = runtime.bot.handle_text(user_id="123", session_id="tg-123", text=required)
+
+                self.assertEqual(runtime.approvals.status(pending.approval_id), "approved")
+                self.assertIn("Reintenté la acción original", approved)
+                self.assertIn("aprobación sensible aplicada", approved)
 
     def test_agent_control_commands(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

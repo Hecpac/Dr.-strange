@@ -99,6 +99,11 @@ class TelegramApprovalGateTests(unittest.TestCase):
         self.assertEqual(pending[0]["action"], "tool:SendMoney")
         self.assertEqual(pending[0]["metadata"]["tool"], "SendMoney")
         self.assertEqual(pending[0]["metadata"]["tier"], TIER_REQUIRES_APPROVAL)
+        self.assertEqual(pending[0]["risk_basis"], "tier3_tool:SendMoney")
+        self.assertIn("diff_summary", pending[0]["metadata"])
+        self.assertIn("sensitive_paths", pending[0]["metadata"])
+        self.assertIn("required_confirmation", pending[0]["metadata"])
+        self.assertIn("risk_code", pending[0]["metadata"])
 
         # Notifier was invoked with the same approval id.
         self.assertEqual(notified, [ctx.exception.approval_id])
@@ -186,6 +191,27 @@ class BotFormatterTests(unittest.TestCase):
         # Must not expose a traceback or "error" language.
         self.assertNotIn("Traceback", msg)
         self.assertNotIn("PermissionError", msg)
+
+    def test_format_sensitive_approval_pending_requires_exact_confirmation(self) -> None:
+        from claw_v2.bot import _format_approval_pending
+
+        exc = ApprovalPending(
+            approval_id="abc123",
+            token="tok-xyz",
+            tool="Deploy",
+            summary="Deploy(env)",
+            risk_code="RISK-1234ABCD",
+            required_confirmation="CONFIRMO RISK-1234ABCD",
+            diff_summary='+API_KEY="sk-abcdefghijklmnopqrstuvwxyz123456"',
+            sensitive_paths=("claw_v2/approval.py",),
+        )
+
+        msg = _format_approval_pending(exc)
+
+        self.assertIn("/approve abc123 CONFIRMO RISK-1234ABCD", msg)
+        self.assertIn("claw_v2/approval.py", msg)
+        self.assertIn("[REDACTED]", msg)
+        self.assertNotIn("tok-xyz", msg)
 
 
 class DaemonContextModeTests(unittest.TestCase):

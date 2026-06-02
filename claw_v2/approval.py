@@ -9,10 +9,34 @@ import secrets
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterable
 
+from claw_v2.approval_sensitivity import approval_metadata_for_change
 from claw_v2.turn_context import current_turn_id
 
 APPROVAL_TTL_SECONDS = 900  # 15 minutes
+
+_NON_SENSITIVE_CONFIRMATIONS = frozenset(
+    {
+        "aprobada",
+        "aprobado",
+        "apruebalo",
+        "apruebala",
+        "aprobalo",
+        "aprobala",
+        "autorizado",
+        "autorizada",
+        "confirmado",
+        "confirmada",
+        "confirmo",
+        "dale",
+        "ok",
+        "si",
+        "sí",
+        "yes",
+        "approved",
+    }
+)
 
 # Semantic axes — referenced by ApprovalManager.create defaults and by
 # downstream consumers (telegram notifier, backpressure counter, audit).
@@ -38,6 +62,8 @@ class PendingApproval:
     action: str
     summary: str
     token: str
+    risk_code: str | None = None
+    required_confirmation: str | None = None
 
 
 class ApprovalManager:
@@ -55,15 +81,25 @@ class ApprovalManager:
         risk_basis: str | None = None,
         requested_by: str | None = None,
         visible_to_user: bool = True,
+        diff: str | None = None,
+        changed_paths: Iterable[str] | None = None,
     ) -> PendingApproval:
         approval_id = secrets.token_hex(8)
         token = secrets.token_urlsafe(12)
         # P0-B: stamp the active turn_id on approval metadata so a single
         # turn_id query can pull message + tools + ledger + approval together.
-        merged_metadata = dict(metadata or {})
+        merged_metadata, sensitivity = approval_metadata_for_change(
+            metadata=metadata,
+            action=action,
+            summary=summary,
+            diff=diff,
+            paths=changed_paths,
+        )
         active_turn_id = current_turn_id()
         if active_turn_id and "turn_id" not in merged_metadata:
             merged_metadata["turn_id"] = active_turn_id
+        if risk_basis is None:
+            risk_basis = sensitivity.risk_basis
         payload = {
             "approval_id": approval_id,
             "action": action,
@@ -79,7 +115,14 @@ class ApprovalManager:
             "resolved_by": None,
         }
         self._path_for(approval_id).write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        return PendingApproval(approval_id=approval_id, action=action, summary=summary, token=token)
+        return PendingApproval(
+            approval_id=approval_id,
+            action=action,
+            summary=summary,
+            token=token,
+            risk_code=merged_metadata.get("risk_code"),
+            required_confirmation=merged_metadata.get("required_confirmation"),
+        )
 
     def approve(self, approval_id: str, token: str) -> bool:
         def _do_approve(payload: dict) -> None:
@@ -98,11 +141,46 @@ class ApprovalManager:
                 payload["resolved_at"] = time.time()
                 payload["_result"] = False
                 return
-            valid = hmac.compare_digest(payload["token_hash"], self._digest(token))
+            required_confirmation = _required_confirmation(payload)
+            if required_confirmation:
+                valid = hmac.compare_digest(str(token).strip(), required_confirmation)
+            else:
+                valid = hmac.compare_digest(payload["token_hash"], self._digest(token))
             payload["status"] = "approved" if valid else "rejected"
             payload["resolved_by"] = RESOLVED_BY_HUMAN
             payload["resolved_at"] = time.time()
             payload["_result"] = valid
+        result = self._locked_update(approval_id, _do_approve)
+        return result.pop("_result", False)
+
+    def approve_confirmation(self, approval_id: str, confirmation: str) -> bool:
+        payload = self.read(approval_id)
+        required_confirmation = _required_confirmation(payload)
+        if required_confirmation:
+            if not hmac.compare_digest(str(confirmation).strip(), required_confirmation):
+                return False
+            return self._approve_human_without_token(approval_id)
+        if _normalize_confirmation(confirmation) not in _NON_SENSITIVE_CONFIRMATIONS:
+            return False
+        return self._approve_human_without_token(approval_id)
+
+    def _approve_human_without_token(self, approval_id: str) -> bool:
+        def _do_approve(payload: dict) -> None:
+            if payload.get("status") != "pending":
+                payload["_result"] = False
+                return
+            created = payload.get("created_at", 0)
+            if time.time() - created > APPROVAL_TTL_SECONDS:
+                payload["status"] = "expired"
+                payload["resolved_by"] = RESOLVED_BY_EXPIRED
+                payload["resolved_at"] = time.time()
+                payload["_result"] = False
+                return
+            payload["status"] = "approved"
+            payload["resolved_by"] = RESOLVED_BY_HUMAN
+            payload["resolved_at"] = time.time()
+            payload["_result"] = True
+
         result = self._locked_update(approval_id, _do_approve)
         return result.pop("_result", False)
 
@@ -220,3 +298,15 @@ class ApprovalManager:
                 break
             chunks.append(chunk)
         return b"".join(chunks)
+
+
+def _required_confirmation(payload: dict) -> str | None:
+    metadata = payload.get("metadata") or {}
+    required = metadata.get("required_confirmation") if isinstance(metadata, dict) else None
+    if not required:
+        return None
+    return str(required).strip()
+
+
+def _normalize_confirmation(value: str) -> str:
+    return " ".join(str(value).strip().lower().split())
