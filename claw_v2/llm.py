@@ -543,7 +543,8 @@ _OUTPUT_TOKEN_KEYS = (
     "eval_count",
 )
 _AUX_OUTPUT_TOKEN_KEYS = ("thoughts_token_count", "reasoning_tokens")
-_CACHE_TOKEN_KEYS = ("cache_read_input_tokens", "cache_creation_input_tokens")
+_CACHE_READ_TOKEN_KEYS = ("cache_read_input_tokens",)
+_CACHE_CREATE_TOKEN_KEYS = ("cache_creation_input_tokens",)
 
 
 def _token_usage_metadata(
@@ -580,21 +581,42 @@ def _token_usage_metadata(
     }
 
 
-def _reported_token_total(usage: dict[str, object]) -> dict[str, int]:
-    total = _sum_token_keys(usage, _TOTAL_TOKEN_KEYS)
-    if total > 0:
-        return {
-            "total_tokens": total,
-            "input_tokens": _sum_token_keys(usage, _INPUT_TOKEN_KEYS),
-            "output_tokens": _sum_token_keys(usage, _OUTPUT_TOKEN_KEYS + _AUX_OUTPUT_TOKEN_KEYS),
-        }
-    input_tokens = _sum_token_keys(usage, _INPUT_TOKEN_KEYS) + _sum_token_keys(usage, _CACHE_TOKEN_KEYS)
+def _reported_token_total(usage: dict[str, object]) -> dict[str, int | bool]:
+    reported_total = _sum_token_keys(usage, _TOTAL_TOKEN_KEYS)
+    raw_input_tokens = _sum_token_keys(usage, _INPUT_TOKEN_KEYS)
     output_tokens = _sum_token_keys(usage, _OUTPUT_TOKEN_KEYS) + _sum_token_keys(usage, _AUX_OUTPUT_TOKEN_KEYS)
-    return {
-        "total_tokens": input_tokens + output_tokens,
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-    }
+    cache_read_tokens = _sum_token_keys(usage, _CACHE_READ_TOKEN_KEYS)
+    cache_create_tokens = _sum_token_keys(usage, _CACHE_CREATE_TOKEN_KEYS)
+    counted_input_tokens = raw_input_tokens + cache_create_tokens
+
+    if reported_total > 0:
+        total_tokens = max(reported_total - cache_read_tokens, 0)
+        if cache_read_tokens > 0 and counted_input_tokens + output_tokens > 0:
+            total_tokens = max(counted_input_tokens + output_tokens, 0)
+        payload: dict[str, int | bool] = {
+            "total_tokens": total_tokens,
+            "input_tokens": max(total_tokens - output_tokens, 0),
+            "output_tokens": output_tokens,
+            "provider_total_tokens": reported_total,
+        }
+    else:
+        total_tokens = counted_input_tokens + output_tokens
+        provider_total = total_tokens + cache_read_tokens
+        payload = {
+            "total_tokens": total_tokens,
+            "input_tokens": counted_input_tokens,
+            "output_tokens": output_tokens,
+            "provider_total_tokens": provider_total,
+        }
+
+    if cache_read_tokens > 0:
+        payload["cache_read_input_tokens"] = cache_read_tokens
+        payload["token_window_excludes_cache_read"] = True
+    if cache_create_tokens > 0:
+        payload["cache_creation_input_tokens"] = cache_create_tokens
+    if raw_input_tokens > 0:
+        payload["raw_input_tokens"] = raw_input_tokens
+    return payload
 
 
 def _sum_token_keys(usage: dict[str, object], keys: tuple[str, ...]) -> int:

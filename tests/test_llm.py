@@ -14,6 +14,14 @@ from claw_v2.types import LLMResponse
 from tests.helpers import make_config
 
 
+class _RecordingObserve:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict]] = []
+
+    def emit(self, event: str, **kwargs: object) -> None:
+        self.events.append((event, dict(kwargs)))
+
+
 class LLMRouterTests(unittest.TestCase):
     def test_secondary_lane_requires_evidence_pack(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -139,6 +147,73 @@ class LLMRouterTests(unittest.TestCase):
             self.assertGreater(prompt_size["effective_input_chars"], prompt_size["prompt_chars"])
             self.assertGreater(prompt_size["effective_system_prompt_chars"], 0)
             self.assertFalse(prompt_size["evidence_pack_truncated"])
+
+    def test_anthropic_cache_reads_do_not_count_against_token_window_total(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            audit_events: list[dict] = []
+            observe = _RecordingObserve()
+            window = ObservationWindowState(
+                observe=observe,
+                state_path=Path(tmpdir) / "window.json",
+                config=ObservationWindowConfig(
+                    token_window_cap=100_000,
+                    token_soft_limit_ratio=0.8,
+                    token_hard_limit_ratio=1.0,
+                ),
+            )
+
+            def cached_anthropic_response(request: LLMRequest) -> LLMResponse:
+                return LLMResponse(
+                    content="done",
+                    lane=request.lane,
+                    provider="anthropic",
+                    model=request.model,
+                    artifacts={
+                        "usage": {
+                            "input_tokens": 5_884,
+                            "cache_creation_input_tokens": 83_965,
+                            "cache_read_input_tokens": 1_734_440,
+                            "output_tokens": 6_861,
+                        }
+                    },
+                )
+
+            router = LLMRouter(
+                config=config,
+                adapters={
+                    "anthropic": StaticAdapter(
+                        "anthropic",
+                        tool_capable=True,
+                        responder=cached_anthropic_response,
+                    ),
+                },
+                audit_sink=audit_events.append,
+                observation_window=window,
+            )
+
+            router.ask("inspect", lane="brain", provider="anthropic")
+
+            token_usage = audit_events[-1]["metadata"]["token_usage"]
+            self.assertEqual(token_usage["provider_total_tokens"], 1_831_150)
+            self.assertEqual(token_usage["cache_read_input_tokens"], 1_734_440)
+            self.assertEqual(token_usage["cache_creation_input_tokens"], 83_965)
+            self.assertEqual(token_usage["raw_input_tokens"], 5_884)
+            self.assertEqual(token_usage["total_tokens"], 96_710)
+            self.assertTrue(token_usage["token_window_excludes_cache_read"])
+            token_window = window.status_payload()["token_window"]
+            self.assertEqual(token_window["total_tokens"], 96_710)
+            self.assertFalse(window.frozen)
+
+            recorded = [
+                payload["payload"]
+                for name, payload in observe.events
+                if name == "llm_token_window_recorded"
+            ][0]
+            self.assertEqual(recorded["tokens"], 96_710)
+            self.assertEqual(recorded["provider_total_tokens"], 1_831_150)
+            self.assertEqual(recorded["excluded_cache_read_tokens"], 1_734_440)
+            self.assertTrue(recorded["token_window_excludes_cache_read"])
 
     def test_secondary_fallback_uses_anthropic_worker_model(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
