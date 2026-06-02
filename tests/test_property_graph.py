@@ -66,6 +66,28 @@ class PropertyGraphSchemaTests(unittest.TestCase):
             self.assertEqual(len(graph.list_edges()), 1)
             self.assertEqual(graph.get_node_by_ref("goal_contract", "g_1").label, "Ship feature v2")
 
+    def test_upsert_node_preserves_descriptive_label_over_fallback_label(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            graph = PropertyGraphProjection(Path(tmpdir) / "claw.db")
+
+            graph.upsert_node(
+                kind="goal",
+                ref_table="goal_contract",
+                ref_id="g_1",
+                label="Ship feature",
+            )
+            graph.upsert_node(
+                kind="goal",
+                ref_table="goal_contract",
+                ref_id="g_1",
+                label="g_1",
+            )
+
+            node = graph.get_node_by_ref("goal_contract", "g_1")
+            self.assertIsNotNone(node)
+            assert node is not None
+            self.assertEqual(node.label, "Ship feature")
+
 
 class PropertyGraphMaterializationTests(unittest.TestCase):
     def test_materializes_existing_goal_evidence_task_observe_and_wiki_records(self) -> None:
@@ -152,6 +174,7 @@ class PropertyGraphMaterializationTests(unittest.TestCase):
             assert claim_node is not None
             assert task_node is not None
             assert wiki_alpha is not None
+            self.assertEqual(goal_node.label, "Add graph projection")
             goal_neighbors = graph.neighbors(goal_node.id, edge_kind="has_evidence")
             task_neighbors = graph.neighbors(task_node.id, edge_kind="emitted_event")
             wiki_neighbors = graph.neighbors(wiki_alpha.id, edge_kind="wiki_link")

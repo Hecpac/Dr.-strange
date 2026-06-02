@@ -83,6 +83,7 @@ class PropertyGraphProjection:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = connect_runtime_sqlite(self.db_path)
+        self._batch_mode = False
         self.ensure_schema()
 
     def ensure_schema(self) -> None:
@@ -114,11 +115,19 @@ class PropertyGraphProjection:
                 kind = excluded.kind,
                 ref_table = excluded.ref_table,
                 ref_id = excluded.ref_id,
-                label = excluded.label
+                label = CASE
+                    WHEN excluded.label = '' THEN graph_nodes.label
+                    WHEN excluded.label = excluded.ref_id
+                         AND graph_nodes.label != ''
+                         AND graph_nodes.label != graph_nodes.ref_id
+                    THEN graph_nodes.label
+                    ELSE excluded.label
+                END
             """,
             (node.id, node.kind, node.ref_table, node.ref_id, node.label, node.created_at),
         )
-        self._conn.commit()
+        if not self._batch_mode:
+            self._conn.commit()
         return self.get_node(node.id) or node
 
     def upsert_edge(
@@ -150,7 +159,8 @@ class PropertyGraphProjection:
             """,
             (edge.id, edge.src_id, edge.dst_id, edge.kind, edge.evidence_ref, edge.created_at),
         )
-        self._conn.commit()
+        if not self._batch_mode:
+            self._conn.commit()
         return self.get_edge(edge.id) or edge
 
     def materialize(
@@ -160,12 +170,24 @@ class PropertyGraphProjection:
         wiki_root: Path | str | None = None,
     ) -> MaterializationResult:
         result = MaterializationResult()
-        if telemetry_root is not None:
-            self._materialize_goals_and_claims(Path(telemetry_root), result)
-        self._materialize_sqlite_runtime(result)
-        if wiki_root is not None:
-            self._materialize_wiki_pages(Path(wiki_root), result)
-        return result
+        was_batching = self._batch_mode
+        self._batch_mode = True
+        try:
+            if telemetry_root is not None:
+                self._materialize_goals_and_claims(Path(telemetry_root), result)
+            self._materialize_sqlite_runtime(result)
+            if wiki_root is not None:
+                self._materialize_wiki_pages(Path(wiki_root), result)
+        except Exception:
+            if not was_batching:
+                self._conn.rollback()
+            raise
+        else:
+            if not was_batching:
+                self._conn.commit()
+            return result
+        finally:
+            self._batch_mode = was_batching
 
     def get_node(self, graph_id: str) -> GraphNode | None:
         row = self._conn.execute("SELECT * FROM graph_nodes WHERE id = ?", (graph_id,)).fetchone()
