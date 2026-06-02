@@ -851,6 +851,7 @@ def _setup_operational_services(
         state_root=config.pipeline_state_root,
         memory=memory,
         learning=learning,
+        enable_trivial_automerge=config.enable_trivial_automerge,
     )
     bot.pipeline = pipeline
     bot.learning = learning
