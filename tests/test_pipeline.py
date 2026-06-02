@@ -15,6 +15,7 @@ from claw_v2.observe import ObserveStream
 from claw_v2.pipeline import (
     PipelineRun,
     PipelineService,
+    _collect_changed_files,
     _create_branch,
     _create_worktree,
     _derive_lesson,
@@ -195,6 +196,27 @@ class BranchValidationTests(unittest.TestCase):
             self.assertIn("--", worktree_cmd)
             self.assertIn("--", push_cmd)
 
+    def test_collect_changed_files_unquotes_paths_and_renames(self) -> None:
+        output = (
+            ' M "docs/my file.md"\n'
+            'R  "docs/old file.md" -> "docs/new file.md"\n'
+            '?? "docs/new note.md"\n'
+        )
+        with patch("claw_v2.pipeline.subprocess.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(
+                args=["git", "status"],
+                returncode=0,
+                stdout=output,
+                stderr="",
+            )
+
+            files = _collect_changed_files(Path("/tmp/repo"))
+
+        self.assertEqual(
+            files,
+            ["docs/my file.md", "docs/new file.md", "docs/new note.md"],
+        )
+
 
 class CompletePipelineTests(unittest.TestCase):
     def test_creates_pr_after_approval(self) -> None:
@@ -356,7 +378,7 @@ class CompletePipelineTests(unittest.TestCase):
                 branch_name="feat/hec-1",
                 title="feat: HEC-1",
                 number=7,
-                draft=True,
+                draft=False,
             )
             svc = PipelineService(
                 linear=linear,
@@ -372,7 +394,7 @@ class CompletePipelineTests(unittest.TestCase):
             result = svc.complete_pipeline("HEC-1")
 
             self.assertEqual(result.status, "done")
-            self.assertTrue(pr_svc.create_pull_request.call_args.kwargs["draft"])
+            self.assertFalse(pr_svc.create_pull_request.call_args.kwargs["draft"])
             pr_svc.merge_pull_request.assert_called_once_with(7)
             linear.update_status.assert_any_call("HEC-1", "Done")
             observe.emit.assert_any_call(
@@ -434,6 +456,154 @@ class CompletePipelineTests(unittest.TestCase):
 
             self.assertEqual(result.status, "pr_created")
             self.assertFalse(pr_svc.create_pull_request.call_args.kwargs["draft"])
+            pr_svc.merge_pull_request.assert_not_called()
+
+    def test_trivial_automerge_rejects_draft_pr_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            state_root = root / "pipeline"
+            state_root.mkdir(parents=True)
+            approvals = ApprovalManager(root / "approvals", "secret")
+            pending = approvals.create(action="pipeline", summary="test")
+            approvals.approve(pending.approval_id, pending.token)
+
+            run_data = {
+                "issue_id": "HEC-1",
+                "branch_name": "feat/hec-1",
+                "repo_root": str(root),
+                "status": "awaiting_approval",
+                "approval_id": pending.approval_id,
+                "approval_token": pending.token,
+                "diff": _patch_diff("docs/runbook.md", "-Old note", "+New note"),
+                "test_output": "5 passed",
+                "changed_files": ["docs/runbook.md"],
+                "verification_complete": True,
+                "verification_passed": True,
+                "risk_level": "low",
+            }
+            (state_root / "HEC-1.json").write_text(json.dumps(run_data))
+
+            pr_svc = MagicMock()
+            pr_svc.create_pull_request.return_value = PullRequestResult(
+                url="https://github.com/owner/repo/pull/7",
+                branch_name="feat/hec-1",
+                title="feat: HEC-1",
+                number=7,
+                draft=True,
+            )
+            svc = PipelineService(
+                linear=MagicMock(spec=LinearService),
+                router=MagicMock(),
+                approvals=approvals,
+                pull_requests=pr_svc,
+                observe=None,
+                default_repo_root=root,
+                state_root=state_root,
+                enable_trivial_automerge=True,
+            )
+
+            result = svc.complete_pipeline("HEC-1")
+
+            self.assertEqual(result.status, "pr_created")
+            self.assertFalse(pr_svc.create_pull_request.call_args.kwargs["draft"])
+            pr_svc.merge_pull_request.assert_not_called()
+
+    def test_trivial_automerge_rejects_missing_pr_url_and_number(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            state_root = root / "pipeline"
+            state_root.mkdir(parents=True)
+            approvals = ApprovalManager(root / "approvals", "secret")
+            pending = approvals.create(action="pipeline", summary="test")
+            approvals.approve(pending.approval_id, pending.token)
+
+            run_data = {
+                "issue_id": "HEC-1",
+                "branch_name": "feat/hec-1",
+                "repo_root": str(root),
+                "status": "awaiting_approval",
+                "approval_id": pending.approval_id,
+                "approval_token": pending.token,
+                "diff": _patch_diff("docs/runbook.md", "-Old note", "+New note"),
+                "test_output": "5 passed",
+                "changed_files": ["docs/runbook.md"],
+                "verification_complete": True,
+                "verification_passed": True,
+                "risk_level": "low",
+            }
+            (state_root / "HEC-1.json").write_text(json.dumps(run_data))
+
+            pr_svc = MagicMock()
+            pr_svc.create_pull_request.return_value = PullRequestResult(
+                url=None,  # type: ignore[arg-type]
+                branch_name="feat/hec-1",
+                title="feat: HEC-1",
+                number=None,
+                draft=False,
+            )
+            svc = PipelineService(
+                linear=MagicMock(spec=LinearService),
+                router=MagicMock(),
+                approvals=approvals,
+                pull_requests=pr_svc,
+                observe=None,
+                default_repo_root=root,
+                state_root=state_root,
+                enable_trivial_automerge=True,
+            )
+
+            result = svc.complete_pipeline("HEC-1")
+
+            self.assertEqual(result.status, "pr_created")
+            pr_svc.merge_pull_request.assert_not_called()
+
+    def test_trivial_automerge_rejects_untracked_file_without_diff_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            state_root = root / "pipeline"
+            state_root.mkdir(parents=True)
+            approvals = ApprovalManager(root / "approvals", "secret")
+            pending = approvals.create(action="pipeline", summary="test")
+            approvals.approve(pending.approval_id, pending.token)
+
+            run_data = {
+                "issue_id": "HEC-1",
+                "branch_name": "feat/hec-1",
+                "repo_root": str(root),
+                "status": "awaiting_approval",
+                "approval_id": pending.approval_id,
+                "approval_token": pending.token,
+                "diff": "\n?? docs/new-runbook.md\n",
+                "test_output": "5 passed",
+                "changed_files": ["docs/new-runbook.md"],
+                "verification_complete": True,
+                "verification_passed": True,
+                "risk_level": "low",
+            }
+            (state_root / "HEC-1.json").write_text(json.dumps(run_data))
+
+            pr_svc = MagicMock()
+            pr_svc.create_pull_request.return_value = PullRequestResult(
+                url="https://github.com/owner/repo/pull/7",
+                branch_name="feat/hec-1",
+                title="feat: HEC-1",
+                number=7,
+                draft=False,
+            )
+            svc = PipelineService(
+                linear=MagicMock(spec=LinearService),
+                router=MagicMock(),
+                approvals=approvals,
+                pull_requests=pr_svc,
+                observe=None,
+                default_repo_root=root,
+                state_root=state_root,
+                enable_trivial_automerge=True,
+            )
+
+            result = svc.complete_pipeline("HEC-1")
+
+            self.assertEqual(result.status, "pr_created")
             pr_svc.merge_pull_request.assert_not_called()
 
 
