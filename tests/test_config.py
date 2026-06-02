@@ -141,6 +141,62 @@ class AppConfigDefaultsTests(unittest.TestCase):
             finally:
                 os.chdir(previous_cwd)
 
+    def test_hardening_config_surface_defaults_and_overrides(self) -> None:
+        previous_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.chdir(tmpdir)
+            try:
+                with patch.dict(os.environ, {}, clear=True):
+                    config = AppConfig.from_env()
+                self.assertFalse(config.enable_trivial_automerge)
+                self.assertEqual(config.token_window_seconds, 18_000)
+                self.assertEqual(config.token_window_cap, 1_000_000)
+                self.assertEqual(config.token_soft_limit_ratio, 0.8)
+                self.assertEqual(config.token_hard_limit_ratio, 1.0)
+                self.assertEqual(config.command_isolation_mode, "docker_ephemeral")
+
+                with patch.dict(
+                    os.environ,
+                    {
+                        "CLAW_ENABLE_TRIVIAL_AUTOMERGE": "true",
+                        "CLAW_TOKEN_WINDOW_SECONDS": "9000",
+                        "CLAW_TOKEN_WINDOW_CAP": "12345",
+                        "CLAW_TOKEN_SOFT_LIMIT_RATIO": "0.7",
+                        "CLAW_TOKEN_HARD_LIMIT_RATIO": "0.9",
+                        "CLAW_COMMAND_ISOLATION_MODE": "host_sanitized",
+                    },
+                    clear=True,
+                ):
+                    configured = AppConfig.from_env()
+                self.assertTrue(configured.enable_trivial_automerge)
+                self.assertEqual(configured.token_window_seconds, 9000)
+                self.assertEqual(configured.token_window_cap, 12345)
+                self.assertEqual(configured.token_soft_limit_ratio, 0.7)
+                self.assertEqual(configured.token_hard_limit_ratio, 0.9)
+                self.assertEqual(configured.command_isolation_mode, "host_sanitized")
+            finally:
+                os.chdir(previous_cwd)
+
+    def test_hardening_config_surface_validation(self) -> None:
+        invalid_envs = (
+            {"CLAW_TOKEN_WINDOW_SECONDS": "0"},
+            {"CLAW_TOKEN_WINDOW_CAP": "0"},
+            {"CLAW_TOKEN_SOFT_LIMIT_RATIO": "1.1", "CLAW_TOKEN_HARD_LIMIT_RATIO": "1.0"},
+            {"CLAW_COMMAND_ISOLATION_MODE": "none"},
+        )
+        previous_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.chdir(tmpdir)
+            try:
+                for env in invalid_envs:
+                    with self.subTest(env=env):
+                        with patch.dict(os.environ, env, clear=True):
+                            config = AppConfig.from_env()
+                        with self.assertRaises(ValueError):
+                            config.validate()
+            finally:
+                os.chdir(previous_cwd)
+
     def test_morning_brief_configuration_loads_from_env(self) -> None:
         previous_cwd = Path.cwd()
         with tempfile.TemporaryDirectory() as tmpdir:
