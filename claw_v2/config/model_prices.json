@@ -4,10 +4,26 @@
     "openai": "official OpenAI API pricing (verified 2026-06-01)",
     "google": "official Google AI Gemini API pricing (verified 2026-06-01, ai.google.dev/gemini-api/docs/pricing)"
   },
-  "note": "USD per 1,000,000 tokens. Only models reachable via the current router/config/fallback are listed (OpenAI + Google = the two API-billed providers the audit found reporting cost_estimate=0.0; Anthropic reports real SDK cost and is intentionally absent). cached_input is recorded for reference but NOT used in estimation: the usage dicts do not yet separate cached tokens, so the estimate charges the full input rate = conservative (never under-bills the cost gates). gemini-2.5-pro is context-tiered: prompts over input_token_threshold use the 'above' rates.",
+  "note": "USD per 1,000,000 tokens. Only models reachable via the current router/config/fallback are listed (OpenAI + Google = the two API-billed providers the audit found reporting cost_estimate=0.0; Anthropic reports real SDK cost and is intentionally absent). cached_input is recorded for reference but NOT used in estimation: the usage dicts do not yet separate cached tokens, so the estimate charges the full input rate = conservative (never under-bills the cost gates). context_tier models a higher long-context rate: prompts over input_token_threshold use the 'above' rates. gemini-2.5-pro tiers at 200K input (2.5/15). OpenAI gpt-5.5 and gpt-5.4 tier at 272K input (2x input, 1.5x output, for the full session); gpt-5.4-mini has no long-context tier.",
   "prices_per_1m_tokens": {
-    "openai:gpt-5.5":      {"input": 5.0,  "output": 30.0, "cached_input": 0.5},
-    "openai:gpt-5.4":      {"input": 2.5,  "output": 15.0, "cached_input": 0.25},
+    "openai:gpt-5.5": {
+      "input": 5.0,
+      "output": 30.0,
+      "cached_input": 0.5,
+      "context_tier": {
+        "input_token_threshold": 272000,
+        "above": {"input": 10.0, "output": 45.0}
+      }
+    },
+    "openai:gpt-5.4": {
+      "input": 2.5,
+      "output": 15.0,
+      "cached_input": 0.25,
+      "context_tier": {
+        "input_token_threshold": 272000,
+        "above": {"input": 5.0, "output": 22.5}
+      }
+    },
     "openai:gpt-5.4-mini": {"input": 0.75, "output": 4.5,  "cached_input": 0.075},
     "google:gemini-2.5-pro": {
       "input": 1.25,

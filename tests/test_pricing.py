@@ -42,6 +42,30 @@ class PricingTableTests(unittest.TestCase):
         # > 200k: 250k in @ $2.5/1M + 10k out @ $15/1M = 0.625 + 0.15
         self.assertAlmostEqual(est.amount_usd, 0.775)
 
+    def test_openai_context_tier_above_272k_uses_higher_rate(self) -> None:
+        # Official OpenAI pricing (verified 2026-06-01): gpt-5.5 and gpt-5.4
+        # prompts with >272K input tokens bill at 2x input / 1.5x output. The
+        # base-rate-only table previously UNDER-billed these, contradicting the
+        # "never under-bills the cost gates" invariant.
+        gpt55 = estimate_cost_usd("openai", "gpt-5.5", {"input_tokens": 300_000, "output_tokens": 10_000})
+        # > 272k: 300k in @ $10/1M + 10k out @ $45/1M = 3.0 + 0.45
+        self.assertAlmostEqual(gpt55.amount_usd, 3.45)
+        gpt54 = estimate_cost_usd("openai", "gpt-5.4", {"input_tokens": 300_000, "output_tokens": 10_000})
+        # > 272k: 300k in @ $5/1M + 10k out @ $22.5/1M = 1.5 + 0.225
+        self.assertAlmostEqual(gpt54.amount_usd, 1.725)
+
+    def test_openai_context_tier_at_threshold_uses_base_rate(self) -> None:
+        # Boundary: exactly 272K input is still base rate (tier is strict >).
+        est = estimate_cost_usd("openai", "gpt-5.5", {"input_tokens": 272_000, "output_tokens": 10_000})
+        # 272k in @ $5/1M + 10k out @ $30/1M = 1.36 + 0.30
+        self.assertAlmostEqual(est.amount_usd, 1.66)
+
+    def test_gpt_5_4_mini_has_no_context_tier(self) -> None:
+        # gpt-5.4-mini has no >272K tier in official pricing; stays at base rate.
+        est = estimate_cost_usd("openai", "gpt-5.4-mini", {"input_tokens": 300_000, "output_tokens": 10_000})
+        # 300k in @ $0.75/1M + 10k out @ $4.5/1M = 0.225 + 0.045
+        self.assertAlmostEqual(est.amount_usd, 0.27)
+
     def test_usage_field_styles_openai_vs_google(self) -> None:
         # OpenAI Responses API uses input_tokens/output_tokens.
         openai_est = estimate_cost_usd("openai", "gpt-5.4-mini", {"input_tokens": 1_000, "output_tokens": 2_000})
