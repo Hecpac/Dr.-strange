@@ -155,6 +155,8 @@ class LLMRouter:
         if lane not in self.NON_TOOL_LANES and not adapter.tool_capable:
             raise ValueError(f"Lane '{lane}' requires a tool-capable provider adapter.")
 
+        self._observation_before_llm_request(request)
+
         try:
             response = self._complete_with_circuit(adapter, request)
             _suppress_corrupt_provider_content(response)
@@ -175,6 +177,7 @@ class LLMRouter:
             )
             _validate_provider_model_pair(fallback_request.provider, fallback_request.model)
             fallback_request.validate()
+            self._observation_before_llm_request(fallback_request)
             response = self._complete_with_circuit(fb_adapter, fallback_request)
             _suppress_corrupt_provider_content(response)
             response.degraded_mode = True
@@ -285,6 +288,7 @@ class LLMRouter:
 
     def _audit(self, action: str, response: LLMResponse, metadata: dict, *, request: LLMRequest | None = None) -> None:
         trace = (request.evidence_pack or {}) if request is not None else {}
+        token_usage = _token_usage_metadata(response, request, metadata)
         event = {
             "action": action,
             "lane": response.lane,
@@ -296,6 +300,7 @@ class LLMRouter:
             "degraded_mode": response.degraded_mode,
             "metadata": {
                 **metadata,
+                "token_usage": token_usage,
                 "trace_id": trace.get("trace_id"),
                 "root_trace_id": trace.get("root_trace_id"),
                 "span_id": trace.get("span_id"),
@@ -306,6 +311,24 @@ class LLMRouter:
         }
         self.audit_sink(event)
         self._observation_audit(event)
+
+    def _observation_before_llm_request(self, request: LLMRequest) -> None:
+        if self.observation_window is None:
+            return
+        handler = getattr(self.observation_window, "before_llm_request", None)
+        if handler is None:
+            return
+        try:
+            handler(
+                lane=request.lane,
+                provider=request.provider,
+                model=request.model,
+                estimated_input_tokens=_prompt_size_metadata(request)["estimated_total_input_tokens"],
+            )
+        except PermissionError:
+            raise
+        except Exception:
+            return
 
     def _audit_event(self, action: str, *, request: LLMRequest, metadata: dict) -> None:
         trace = request.evidence_pack or {}
@@ -504,3 +527,85 @@ def _prompt_chars(prompt: UserPrompt) -> int:
 
 def _estimated_tokens(chars: int) -> int:
     return max(int(chars) // 4, 1) if chars else 0
+
+
+_TOTAL_TOKEN_KEYS = ("total_tokens", "total_token_count")
+_INPUT_TOKEN_KEYS = (
+    "input_tokens",
+    "prompt_tokens",
+    "prompt_token_count",
+    "prompt_eval_count",
+)
+_OUTPUT_TOKEN_KEYS = (
+    "output_tokens",
+    "completion_tokens",
+    "candidates_token_count",
+    "eval_count",
+)
+_AUX_OUTPUT_TOKEN_KEYS = ("thoughts_token_count", "reasoning_tokens")
+_CACHE_TOKEN_KEYS = ("cache_read_input_tokens", "cache_creation_input_tokens")
+
+
+def _token_usage_metadata(
+    response: LLMResponse,
+    request: LLMRequest | None,
+    metadata: dict,
+) -> dict[str, int | str | bool]:
+    artifacts = response.artifacts if isinstance(response.artifacts, dict) else {}
+    usage = artifacts.get("usage")
+    reported = _reported_token_total(usage if isinstance(usage, dict) else {})
+    source = "provider_usage"
+    if reported["total_tokens"] <= 0:
+        reported = _reported_token_total(artifacts)
+        source = "response_artifacts"
+    if reported["total_tokens"] > 0:
+        return {
+            **reported,
+            "estimated": False,
+            "source": source,
+        }
+
+    prompt_size = metadata.get("prompt_size") if isinstance(metadata.get("prompt_size"), dict) else {}
+    input_tokens = _coerce_int(prompt_size.get("estimated_total_input_tokens"), 0)
+    output_tokens = _estimated_tokens(len(response.content or ""))
+    total_tokens = input_tokens + output_tokens
+    if request is None and total_tokens <= 0:
+        total_tokens = output_tokens
+    return {
+        "total_tokens": total_tokens,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "estimated": True,
+        "source": "prompt_size_estimate",
+    }
+
+
+def _reported_token_total(usage: dict[str, object]) -> dict[str, int]:
+    total = _sum_token_keys(usage, _TOTAL_TOKEN_KEYS)
+    if total > 0:
+        return {
+            "total_tokens": total,
+            "input_tokens": _sum_token_keys(usage, _INPUT_TOKEN_KEYS),
+            "output_tokens": _sum_token_keys(usage, _OUTPUT_TOKEN_KEYS + _AUX_OUTPUT_TOKEN_KEYS),
+        }
+    input_tokens = _sum_token_keys(usage, _INPUT_TOKEN_KEYS) + _sum_token_keys(usage, _CACHE_TOKEN_KEYS)
+    output_tokens = _sum_token_keys(usage, _OUTPUT_TOKEN_KEYS) + _sum_token_keys(usage, _AUX_OUTPUT_TOKEN_KEYS)
+    return {
+        "total_tokens": input_tokens + output_tokens,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+    }
+
+
+def _sum_token_keys(usage: dict[str, object], keys: tuple[str, ...]) -> int:
+    total = 0
+    for key in keys:
+        total += _coerce_int(usage.get(key), 0)
+    return total
+
+
+def _coerce_int(value: object, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default

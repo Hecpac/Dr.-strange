@@ -1398,6 +1398,10 @@ def build_runtime(
             tool_calls_per_minute_threshold=config.observation_tool_calls_per_minute_threshold,
             daily_budget_cap=config.daily_cost_limit,
             notional_cost_providers=tuple(sorted(config.notional_cost_providers())),
+            token_window_seconds=config.token_window_seconds,
+            token_window_cap=config.token_window_cap,
+            token_soft_limit_ratio=config.token_soft_limit_ratio,
+            token_hard_limit_ratio=config.token_hard_limit_ratio,
         ),
     )
     agent_workspace = AgentWorkspace(config.workspace_root, template_root=Path(__file__).parent)

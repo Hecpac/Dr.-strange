@@ -5880,39 +5880,50 @@ class BotService:
 
 
     def _tokens_info_response(self, session_id: str) -> str:
-        message_count = self.brain.memory.count_messages(session_id)
+        if self.observation_window is None:
+            return json.dumps({
+                "session_id": session_id,
+                "token_window": {"available": False},
+            }, indent=2, sort_keys=True)
+        try:
+            status_payload = self.observation_window.status_payload()
+        except Exception:
+            return json.dumps({
+                "session_id": session_id,
+                "token_window": {"available": False},
+            }, indent=2, sort_keys=True)
 
-        # Estimación aproximada: ~500 tokens por mensaje (muy conservador)
-        estimated_tokens = message_count * 500
-        context_window = self.config.brain_context_window if self.config else 1_000_000
+        token_window = dict(status_payload.get("token_window") or {})
+        usage_pct = float(token_window.get("usage_ratio") or 0.0) * 100
 
-        estimated_pct = (estimated_tokens / context_window) * 100
-
-        if estimated_pct > 80:
+        if token_window.get("hard_limit_reached"):
             status = "critical"
             status_emoji = "🔴"
-            recommendation = "Compacta ahora para evitar pérdida de contexto"
-        elif estimated_pct > 60:
+            recommendation = "Autonomía no read-only congelada hasta que baje la ventana o haya override humano"
+        elif token_window.get("soft_limit_reached"):
             status = "warning"
             status_emoji = "🟡"
-            recommendation = "Considera compactar pronto"
+            recommendation = "Compacta antes de nuevas llamadas grandes"
         else:
             status = "healthy"
             status_emoji = "🟢"
-            recommendation = "Espacio saludable"
+            recommendation = "Ventana de tokens saludable"
 
         max_output = self.config.brain_max_output if self.config else 128_000
         return json.dumps({
             "session_id": session_id,
             "model": "Claude Opus 4.7 / Sonnet 4.6",
-            "context_window": context_window,
             "max_output": max_output,
-            "messages_count": message_count,
-            "estimated_tokens": estimated_tokens,
-            "estimated_percentage": round(estimated_pct, 1),
+            "token_window": {
+                **token_window,
+                "available": True,
+                "usage_percentage": round(usage_pct, 1),
+            },
             "status": status,
             "status_display": f"{status_emoji} {status.title()}",
             "recommendation": recommendation,
+            "frozen": bool(status_payload.get("frozen")),
+            "freeze_reason": status_payload.get("freeze_reason") or "",
         }, indent=2, sort_keys=True)
 
     def _quality_response(self) -> str:

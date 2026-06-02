@@ -249,6 +249,179 @@ class ObservationWindowTests(unittest.TestCase):
             self.assertTrue(any(name == "tool_hard_denylist_blocked" for name, _ in observe.events))
 
 
+class TokenWindowTests(unittest.TestCase):
+    def test_token_window_records_real_usage_and_recommends_compaction_at_soft_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = _RecordingObserve()
+            alerts: list[str] = []
+            window = ObservationWindowState(
+                observe=observe,
+                state_path=Path(tmpdir) / "window.json",
+                config=ObservationWindowConfig(
+                    token_window_seconds=18_000,
+                    token_window_cap=100,
+                    token_soft_limit_ratio=0.8,
+                    token_hard_limit_ratio=1.0,
+                ),
+            )
+            window.set_alert_notifier(alerts.append)
+
+            window.handle_llm_audit_event(
+                {
+                    "action": "llm_response",
+                    "lane": "brain",
+                    "provider": "anthropic",
+                    "model": "claude",
+                    "cost_estimate": 0.0,
+                    "metadata": {
+                        "token_usage": {
+                            "total_tokens": 80,
+                            "estimated": False,
+                        }
+                    },
+                }
+            )
+
+            token_window = window.status_payload()["token_window"]
+            self.assertEqual(token_window["total_tokens"], 80)
+            self.assertEqual(token_window["real_tokens"], 80)
+            self.assertEqual(token_window["estimated_tokens"], 0)
+            self.assertFalse(token_window["estimated"])
+            self.assertTrue(token_window["soft_limit_reached"])
+            self.assertFalse(window.frozen)
+            self.assertTrue(token_window["compact_before_large_calls"])
+            self.assertTrue(any("Token window soft limit reached" in alert for alert in alerts))
+            self.assertIn("token_window_soft_limit_reached", [name for name, _ in observe.events])
+
+            window.before_llm_request(
+                lane="brain",
+                provider="anthropic",
+                model="claude",
+                estimated_input_tokens=12,
+            )
+            self.assertIn("token_window_compaction_recommended", [name for name, _ in observe.events])
+
+    def test_token_window_records_estimated_usage_and_hard_freezes_non_read_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = _RecordingObserve()
+            window = ObservationWindowState(
+                observe=observe,
+                state_path=Path(tmpdir) / "window.json",
+                config=ObservationWindowConfig(
+                    token_window_seconds=18_000,
+                    token_window_cap=100,
+                    token_soft_limit_ratio=0.8,
+                    token_hard_limit_ratio=1.0,
+                ),
+            )
+
+            window.handle_llm_audit_event(
+                {
+                    "action": "llm_response",
+                    "lane": "brain",
+                    "provider": "anthropic",
+                    "model": "claude",
+                    "cost_estimate": 0.0,
+                    "metadata": {
+                        "token_usage": {
+                            "total_tokens": 100,
+                            "estimated": True,
+                        }
+                    },
+                }
+            )
+
+            token_window = window.status_payload()["token_window"]
+            self.assertEqual(token_window["total_tokens"], 100)
+            self.assertEqual(token_window["estimated_tokens"], 100)
+            self.assertTrue(token_window["estimated"])
+            self.assertTrue(token_window["hard_limit_reached"])
+            self.assertTrue(window.frozen)
+            self.assertEqual(window.freeze_reason, "circuit_breaker:token_window")
+
+            window.before_tool_execution(tool_name="Read", args={}, tier=LOCAL_READ_ONLY_TIER, actor="operator")
+            with self.assertRaises(ObservationWindowBlocked):
+                window.before_tool_execution(tool_name="Write", args={}, tier=2, actor="operator")
+            with self.assertRaises(ObservationWindowBlocked):
+                window.before_llm_request(
+                    lane="brain",
+                    provider="anthropic",
+                    model="claude",
+                    estimated_input_tokens=1,
+                )
+            self.assertIn("autonomy_degraded_by_token_window", [name for name, _ in observe.events])
+            self.assertIn("llm_blocked_by_token_window", [name for name, _ in observe.events])
+
+    def test_token_window_freeze_auto_clears_after_window_decays(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = _RecordingObserve()
+            now = [1000.0]
+            window = ObservationWindowState(
+                observe=observe,
+                state_path=Path(tmpdir) / "window.json",
+                config=ObservationWindowConfig(
+                    token_window_seconds=10,
+                    token_window_cap=100,
+                    token_soft_limit_ratio=0.8,
+                    token_hard_limit_ratio=1.0,
+                ),
+                clock=lambda: now[0],
+            )
+            window.handle_llm_audit_event(
+                {
+                    "action": "llm_response",
+                    "lane": "brain",
+                    "provider": "anthropic",
+                    "model": "claude",
+                    "cost_estimate": 0.0,
+                    "metadata": {
+                        "token_usage": {
+                            "total_tokens": 100,
+                            "estimated": False,
+                        }
+                    },
+                }
+            )
+            self.assertTrue(window.frozen)
+
+            now[0] += 11
+            token_window = window.status_payload()["token_window"]
+
+            self.assertFalse(window.frozen)
+            self.assertEqual(token_window["total_tokens"], 0)
+            self.assertFalse(token_window["hard_limit_reached"])
+            self.assertIn("observation_window_freeze_auto_cleared", [name for name, _ in observe.events])
+
+    def test_recent_persisted_token_window_freeze_survives_restart_without_samples(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "window.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "frozen": True,
+                        "reason": "circuit_breaker:token_window",
+                        "actor": "brain",
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            window = ObservationWindowState(
+                state_path=state_path,
+                config=ObservationWindowConfig(
+                    token_window_seconds=18_000,
+                    token_window_cap=100,
+                    token_soft_limit_ratio=0.8,
+                    token_hard_limit_ratio=1.0,
+                ),
+            )
+
+            self.assertTrue(window.frozen)
+            self.assertEqual(window.freeze_reason, "circuit_breaker:token_window")
+            self.assertTrue(window.status_payload()["frozen"])
+
+
 class CostBreakerTierSplitTests(unittest.TestCase):
     """PR 0A: LLM cost-per-hour breaker must not block Tier-1 local read tools."""
 

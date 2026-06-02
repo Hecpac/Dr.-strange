@@ -32,6 +32,10 @@ class ObservationWindowConfig:
     daily_budget_cap: float | None = None
     stale_freeze_seconds: float = 3600.0
     notional_cost_providers: tuple[str, ...] = ()
+    token_window_seconds: int = 18_000
+    token_window_cap: int = 1_000_000
+    token_soft_limit_ratio: float = 0.8
+    token_hard_limit_ratio: float = 1.0
 
 
 def hard_denylist_reason(tool_name: str, args: dict[str, Any]) -> str | None:
@@ -70,12 +74,15 @@ class ObservationWindowState:
         self._lock = threading.Lock()
         self._tool_call_times: deque[float] = deque()
         self._llm_costs: deque[tuple[float, float]] = deque()
+        self._llm_tokens: deque[tuple[float, int, bool]] = deque()
         self._tripped_breakers: set[str] = set()
         self._alert_notifier: NotifyCallback | None = None
         self._stream_notifier: NotifyCallback | None = None
         self._frozen = False
         self._freeze_reason = ""
         self._freeze_actor = ""
+        self._freeze_updated_at: float | None = None
+        self._token_soft_limit_active = False
         self._load_state()
 
     @property
@@ -100,6 +107,7 @@ class ObservationWindowState:
             self._frozen = True
             self._freeze_reason = reason
             self._freeze_actor = actor
+            self._freeze_updated_at = self._clock()
             self._persist_state_locked()
         if changed:
             self._emit(
@@ -115,6 +123,7 @@ class ObservationWindowState:
             self._frozen = False
             self._freeze_reason = ""
             self._freeze_actor = actor
+            self._freeze_updated_at = self._clock()
             self._tripped_breakers.clear()
             self._persist_state_locked()
         if was_frozen:
@@ -136,10 +145,15 @@ class ObservationWindowState:
             self._notify_alert(f"Blocked hard-denylisted tool: {tool_name} ({reason})")
             raise ObservationWindowBlocked(reason)
         with self._lock:
+            now = self._clock()
+            self._prune_locked(now)
+            auto_cleared = self._clear_token_window_freeze_if_decayed_locked(now)
             frozen = self._frozen
             freeze_reason = self._freeze_reason or "observation_window_frozen"
+        if auto_cleared:
+            self._emit("observation_window_freeze_auto_cleared", {"stale_reason": "circuit_breaker:token_window"})
         if frozen:
-            if _is_cost_breaker_reason(freeze_reason) and tier <= LOCAL_READ_ONLY_TIER:
+            if _allows_read_only_during_freeze(freeze_reason) and tier <= LOCAL_READ_ONLY_TIER:
                 self._emit(
                     "tool_allowed_during_cost_breaker",
                     {
@@ -154,7 +168,6 @@ class ObservationWindowState:
                 self._emit("tool_blocked_by_freeze", payload)
                 raise ObservationWindowBlocked(f"observation window frozen: {freeze_reason}")
         with self._lock:
-            now = self._clock()
             self._tool_call_times.append(now)
             self._prune_locked(now)
             tool_calls = len(self._tool_call_times)
@@ -198,6 +211,7 @@ class ObservationWindowState:
         cost = _coerce_float(event.get("cost_estimate"), 0.0)
         now = self._clock()
         provider = str(event.get("provider") or "")
+        self._record_token_window_event(event, now=now)
         if cost > 0 and provider in set(self.config.notional_cost_providers):
             self._emit(
                 "llm_notional_cost_ignored",
@@ -234,6 +248,48 @@ class ObservationWindowState:
                     cost=cost,
                     status="ok",
                 )
+            )
+
+    def before_llm_request(
+        self,
+        *,
+        lane: str,
+        provider: str,
+        model: str,
+        estimated_input_tokens: int = 0,
+    ) -> None:
+        now = self._clock()
+        with self._lock:
+            self._prune_locked(now)
+            auto_cleared = self._clear_token_window_freeze_if_decayed_locked(now)
+            frozen = self._frozen
+            freeze_reason = self._freeze_reason or "observation_window_frozen"
+            totals = self._token_window_totals_locked()
+            compact_before_large_calls = totals["total_tokens"] >= self._token_soft_threshold()
+        if auto_cleared:
+            self._emit("observation_window_freeze_auto_cleared", {"stale_reason": "circuit_breaker:token_window"})
+        if frozen and freeze_reason == "circuit_breaker:token_window":
+            payload = {
+                "lane": lane,
+                "provider": provider,
+                "model": model,
+                "reason": freeze_reason,
+                "rolling_tokens": totals["total_tokens"],
+                "token_window_cap": self.config.token_window_cap,
+            }
+            self._emit("llm_blocked_by_token_window", payload)
+            raise ObservationWindowBlocked("observation window frozen: circuit_breaker:token_window")
+        if compact_before_large_calls:
+            self._emit(
+                "token_window_compaction_recommended",
+                {
+                    "lane": lane,
+                    "provider": provider,
+                    "model": model,
+                    "rolling_tokens": totals["total_tokens"],
+                    "estimated_request_tokens": max(int(estimated_input_tokens), 0),
+                    "soft_limit": self._token_soft_threshold(),
+                },
             )
 
     def trip_breaker(
@@ -274,6 +330,23 @@ class ObservationWindowState:
             if provider is not None:
                 degraded_payload["provider"] = provider
             self._emit("autonomy_degraded_by_cost_breaker", degraded_payload)
+        elif name == "token_window":
+            degraded_payload = {
+                "actor": actor,
+                "value": round(value, 6),
+                "threshold": threshold,
+                "allowed_capabilities": ["tier_1_local_read_only"],
+                "blocked_capabilities": [
+                    "large_llm_calls_until_window_decays",
+                    "tier_2_local_mutation",
+                    "tier_3_external_or_approval_required",
+                ],
+            }
+            if lane is not None:
+                degraded_payload["lane"] = lane
+            if provider is not None:
+                degraded_payload["provider"] = provider
+            self._emit("autonomy_degraded_by_token_window", degraded_payload)
         if first_trip:
             logger.warning(
                 "Circuit breaker tripped: %s value=%.3f threshold=%.3f actor=%s",
@@ -291,12 +364,16 @@ class ObservationWindowState:
         now = self._clock()
         with self._lock:
             self._prune_locked(now)
+            auto_cleared = self._clear_token_window_freeze_if_decayed_locked(now)
             tool_calls = len(self._tool_call_times)
             rolling_cost = round(sum(cost for _, cost in self._llm_costs), 6)
+            token_window = self._token_window_payload_locked()
             frozen = self._frozen
             reason = self._freeze_reason
             actor = self._freeze_actor
             tripped = sorted(self._tripped_breakers)
+        if auto_cleared:
+            self._emit("observation_window_freeze_auto_cleared", {"stale_reason": "circuit_breaker:token_window"})
         cost_today = self._cost_today()
         daily_budget = self.config.daily_budget_cap
         remaining = None if daily_budget is None else round(max(daily_budget - cost_today, 0.0), 6)
@@ -311,6 +388,7 @@ class ObservationWindowState:
             "daily_budget_cap": daily_budget,
             "daily_budget_remaining": remaining,
             "rolling_cost_per_hour": rolling_cost,
+            "token_window": token_window,
             "actions_per_minute": tool_calls,
             "recent_failure_rate": failure_rate,
             "active_goal_id": active_goal_id,
@@ -318,6 +396,7 @@ class ObservationWindowState:
             "thresholds": {
                 "cost_per_hour": self.config.cost_per_hour_threshold,
                 "tool_calls_per_minute": self.config.tool_calls_per_minute_threshold,
+                "token_window_cap": self.config.token_window_cap,
             },
         }
 
@@ -363,25 +442,28 @@ class ObservationWindowState:
         self._frozen = bool(data.get("frozen"))
         self._freeze_reason = str(data.get("reason") or "")
         self._freeze_actor = str(data.get("actor") or "")
+        self._freeze_updated_at = _timestamp_from_iso(data.get("updated_at"))
         # circuit_breaker:* freezes are backed by rolling-window evidence (1h cost,
         # 1m tool-call rate). Once the window has decayed past the TTL, the freeze
         # is no longer evidence-backed; auto-clear so a restart isn't permanently
         # bricked. Manual freezes (manual_*) always require explicit unfreeze.
         if self._frozen and self._freeze_reason.startswith("circuit_breaker:"):
             age = _freeze_age_seconds(data.get("updated_at"))
-            if age > self.config.stale_freeze_seconds:
+            ttl_seconds = self._freeze_ttl_seconds(self._freeze_reason)
+            if age > ttl_seconds:
                 stale_reason = self._freeze_reason
                 stale_actor = self._freeze_actor
                 self._frozen = False
                 self._freeze_reason = ""
                 self._freeze_actor = "auto_clear_stale"
+                self._freeze_updated_at = self._clock()
                 self._persist_state_locked()
                 logger.warning(
                     "Auto-cleared stale circuit_breaker freeze: reason=%s prior_actor=%s age=%.0fs ttl=%.0fs",
                     stale_reason,
                     stale_actor,
                     age,
-                    self.config.stale_freeze_seconds,
+                    ttl_seconds,
                 )
                 self._emit(
                     "observation_window_freeze_auto_cleared",
@@ -389,7 +471,7 @@ class ObservationWindowState:
                         "stale_reason": stale_reason,
                         "stale_actor": stale_actor,
                         "age_seconds": round(age, 1),
-                        "ttl_seconds": self.config.stale_freeze_seconds,
+                        "ttl_seconds": ttl_seconds,
                     },
                 )
 
@@ -408,6 +490,133 @@ class ObservationWindowState:
             self._tool_call_times.popleft()
         while self._llm_costs and now - self._llm_costs[0][0] > 3600:
             self._llm_costs.popleft()
+        while self._llm_tokens and now - self._llm_tokens[0][0] > self.config.token_window_seconds:
+            self._llm_tokens.popleft()
+        self._token_soft_limit_active = self._token_window_totals_locked()["total_tokens"] >= self._token_soft_threshold()
+
+    def _record_token_window_event(self, event: dict[str, Any], *, now: float) -> None:
+        token_usage = _extract_token_usage(event)
+        tokens = int(token_usage.get("total_tokens") or 0)
+        if tokens <= 0:
+            return
+        estimated = bool(token_usage.get("estimated"))
+        lane = str(event.get("lane") or "llm")
+        provider = str(event.get("provider") or "")
+        model = str(event.get("model") or "")
+        with self._lock:
+            self._prune_locked(now)
+            was_soft_active = self._token_soft_limit_active
+            self._llm_tokens.append((now, tokens, estimated))
+            self._prune_locked(now)
+            totals = self._token_window_totals_locked()
+            soft_limit = self._token_soft_threshold()
+            hard_limit = self._token_hard_threshold()
+            soft_crossed = totals["total_tokens"] >= soft_limit and not was_soft_active
+            self._token_soft_limit_active = totals["total_tokens"] >= soft_limit
+        self._emit(
+            "llm_token_window_recorded",
+            {
+                "lane": lane,
+                "provider": provider,
+                "model": model,
+                "tokens": tokens,
+                "estimated": estimated,
+                "rolling_tokens": totals["total_tokens"],
+                "estimated_tokens": totals["estimated_tokens"],
+                "real_tokens": totals["real_tokens"],
+                "token_window_seconds": self.config.token_window_seconds,
+                "token_window_cap": self.config.token_window_cap,
+            },
+        )
+        if soft_crossed:
+            self._emit(
+                "token_window_soft_limit_reached",
+                {
+                    "lane": lane,
+                    "provider": provider,
+                    "model": model,
+                    "rolling_tokens": totals["total_tokens"],
+                    "soft_limit": soft_limit,
+                    "token_window_cap": self.config.token_window_cap,
+                    "compact_before_large_calls": True,
+                },
+            )
+            self._notify_alert(
+                f"Token window soft limit reached: {totals['total_tokens']} >= {soft_limit}. "
+                "Compact before large LLM calls."
+            )
+        if totals["total_tokens"] >= hard_limit:
+            self.trip_breaker(
+                "token_window",
+                value=float(totals["total_tokens"]),
+                threshold=float(hard_limit),
+                actor=lane or "llm",
+                lane=lane,
+                provider=provider or None,
+            )
+
+    def _token_window_totals_locked(self) -> dict[str, int]:
+        total = sum(tokens for _, tokens, _ in self._llm_tokens)
+        estimated = sum(tokens for _, tokens, is_estimated in self._llm_tokens if is_estimated)
+        real = total - estimated
+        return {
+            "total_tokens": total,
+            "estimated_tokens": estimated,
+            "real_tokens": real,
+        }
+
+    def _token_window_payload_locked(self) -> dict[str, Any]:
+        totals = self._token_window_totals_locked()
+        cap = max(int(self.config.token_window_cap), 1)
+        soft_limit = self._token_soft_threshold()
+        hard_limit = self._token_hard_threshold()
+        total = totals["total_tokens"]
+        return {
+            "window_seconds": int(self.config.token_window_seconds),
+            "cap": cap,
+            "soft_limit": soft_limit,
+            "hard_limit": hard_limit,
+            "total_tokens": total,
+            "real_tokens": totals["real_tokens"],
+            "estimated_tokens": totals["estimated_tokens"],
+            "estimated": totals["estimated_tokens"] > 0,
+            "usage_ratio": round(total / cap, 6),
+            "soft_limit_reached": total >= soft_limit,
+            "hard_limit_reached": total >= hard_limit,
+            "compact_before_large_calls": total >= soft_limit,
+        }
+
+    def _token_soft_threshold(self) -> int:
+        return max(int(self.config.token_window_cap * self.config.token_soft_limit_ratio), 1)
+
+    def _token_hard_threshold(self) -> int:
+        return max(int(self.config.token_window_cap * self.config.token_hard_limit_ratio), 1)
+
+    def _clear_token_window_freeze_if_decayed_locked(self, now: float) -> bool:
+        if self._freeze_reason != "circuit_breaker:token_window":
+            return False
+        totals = self._token_window_totals_locked()
+        if totals["total_tokens"] >= self._token_hard_threshold():
+            return False
+        if not self._llm_tokens and self._token_window_freeze_age_seconds(now) <= self.config.token_window_seconds:
+            return False
+        self._frozen = False
+        self._freeze_reason = ""
+        self._freeze_actor = "auto_clear_token_window"
+        self._freeze_updated_at = now
+        self._tripped_breakers.discard("token_window")
+        self._persist_state_locked()
+        return True
+
+    def _freeze_ttl_seconds(self, reason: str) -> float:
+        if reason == "circuit_breaker:token_window":
+            return float(self.config.token_window_seconds)
+        return self.config.stale_freeze_seconds
+
+    def _token_window_freeze_age_seconds(self, now: float) -> float:
+        if self._freeze_updated_at is None:
+            return float("inf")
+        return max(now - self._freeze_updated_at, 0.0)
 
     def _emit(self, event_type: str, payload: dict[str, Any]) -> None:
         if self.observe is None:
@@ -444,12 +653,40 @@ def _is_cost_breaker_reason(reason: str) -> bool:
     return reason == "circuit_breaker:cost_per_hour"
 
 
+def _is_token_window_breaker_reason(reason: str) -> bool:
+    return reason == "circuit_breaker:token_window"
+
+
+def _allows_read_only_during_freeze(reason: str) -> bool:
+    return _is_cost_breaker_reason(reason) or _is_token_window_breaker_reason(reason)
+
+
 def _diagnostic_only_freeze_reason(reason: str) -> bool:
     # cost_per_hour is a budget alarm — it must reach the operator (Telegram).
+    # token_window is also an autonomy budget alarm, not a diagnostic-only
+    # circuit breaker.
     # All other circuit_breaker:* reasons (provider, sdk, etc.) stay diagnostic.
-    if reason == "circuit_breaker:cost_per_hour":
+    if reason in {"circuit_breaker:cost_per_hour", "circuit_breaker:token_window"}:
         return False
     return reason.startswith("circuit_breaker:")
+
+
+def _extract_token_usage(event: dict[str, Any]) -> dict[str, Any]:
+    candidates: list[Any] = [event.get("token_usage")]
+    metadata = event.get("metadata")
+    if isinstance(metadata, dict):
+        candidates.append(metadata.get("token_usage"))
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        total = _coerce_int(candidate.get("total_tokens"), 0)
+        if total <= 0:
+            continue
+        return {
+            "total_tokens": total,
+            "estimated": bool(candidate.get("estimated")),
+        }
+    return {"total_tokens": 0, "estimated": True}
 
 
 def _shell_tokens(command: str) -> list[str]:
@@ -541,6 +778,13 @@ def _coerce_float(value: object, default: float) -> float:
         return default
 
 
+def _coerce_int(value: object, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _freeze_age_seconds(updated_at_raw: object) -> float:
     if not isinstance(updated_at_raw, str):
         return float("inf")
@@ -551,3 +795,15 @@ def _freeze_age_seconds(updated_at_raw: object) -> float:
     if updated_at.tzinfo is None:
         updated_at = updated_at.replace(tzinfo=timezone.utc)
     return max((datetime.now(timezone.utc) - updated_at).total_seconds(), 0.0)
+
+
+def _timestamp_from_iso(value: object) -> float | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
