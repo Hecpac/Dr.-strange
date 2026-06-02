@@ -25,6 +25,9 @@ class LLMResponse:
     model: str
     confidence: float = 0.0
     cost_estimate: float = 0.0
+    cost_unknown: bool = False
+    cost_source: str | None = None
+    cost_price_as_of: str | None = None
     artifacts: dict[str, Any] = field(default_factory=dict)
     degraded_mode: bool = False
 

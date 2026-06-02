@@ -210,6 +210,14 @@ class LLMRouter:
             },
             request=request,
         )
+        if response.cost_unknown:
+            # Billable provider returned a model with no price entry: surface it
+            # loudly so the cost gate can fail closed (2026-05-31 audit H5).
+            self._audit_event(
+                "cost_metering_unknown",
+                request=request,
+                metadata={"provider": response.provider, "model": response.model},
+            )
         return response
 
     def _complete_with_circuit(self, adapter: ProviderAdapter, request: LLMRequest) -> LLMResponse:
@@ -283,6 +291,7 @@ class LLMRouter:
             "provider": response.provider,
             "model": response.model,
             "cost_estimate": response.cost_estimate,
+            "cost_unknown": response.cost_unknown,
             "confidence": response.confidence,
             "degraded_mode": response.degraded_mode,
             "metadata": {

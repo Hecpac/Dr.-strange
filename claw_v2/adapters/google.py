@@ -12,6 +12,7 @@ from claw_v2.adapters.base import (
     build_effective_system_prompt,
     coerce_usage_dict,
 )
+from claw_v2.pricing import estimate_cost_usd
 from claw_v2.types import LLMResponse
 
 
@@ -46,16 +47,21 @@ class GoogleAdapter(ProviderAdapter):
             )
         except Exception as exc:  # pragma: no cover - live SDK path
             raise AdapterError(f"Google GenAI request failed: {exc}") from exc
+        usage = coerce_usage_dict(getattr(response, "usage_metadata", None))
+        estimate = estimate_cost_usd("google", request.model, usage)
         return LLMResponse(
             content=(getattr(response, "text", None) or "").strip(),
             lane=request.lane,
             provider="google",
             model=request.model,
             confidence=0.7 if getattr(response, "text", None) else 0.0,
-            cost_estimate=0.0,
+            cost_estimate=estimate.amount_usd,
+            cost_unknown=estimate.unknown,
+            cost_source=estimate.price_source,
+            cost_price_as_of=estimate.price_as_of,
             artifacts={
                 "response_id": getattr(response, "response_id", None),
-                "usage": coerce_usage_dict(getattr(response, "usage_metadata", None)),
+                "usage": usage,
             },
         )
 
