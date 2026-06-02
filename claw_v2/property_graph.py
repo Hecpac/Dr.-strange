@@ -295,12 +295,14 @@ class PropertyGraphProjection:
                 created_at=claim.created_at,
             )
             self._count_node(result, claim_node)
-            goal_node = self.upsert_node(
-                kind="goal",
-                ref_table="goal_contract",
-                ref_id=claim.goal_id,
-                label=claim.goal_id,
-            )
+            goal_node = self.get_node_by_ref("goal_contract", claim.goal_id)
+            if goal_node is None:
+                goal_node = self.upsert_node(
+                    kind="goal",
+                    ref_table="goal_contract",
+                    ref_id=claim.goal_id,
+                    label=claim.goal_id,
+                )
             self._count_node(result, goal_node)
             self._count_edge(
                 result,
