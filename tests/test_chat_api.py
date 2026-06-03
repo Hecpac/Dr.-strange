@@ -38,6 +38,25 @@ class LocalChatAPITests(unittest.TestCase):
             text="hola",
         )
 
+    def test_post_chat_sanitizes_reply_egress(self) -> None:
+        # #24: the web egress boundary must pass replies through the sanitizer,
+        # the same defence Telegram has per-channel.
+        bot_service = MagicMock()
+        bot_service.allowed_user_id = "123"
+        bot_service.handle_text.return_value = "tu key sk-proj-ABCDEFGHIJKLMNOP0123 lista"
+        api = LocalChatAPI(bot_service=bot_service)
+
+        status_code, _headers, body = api.handle_http(
+            method="POST",
+            path="/api/chat",
+            body=json.dumps({"session_id": "mac-main", "text": "hola"}).encode("utf-8"),
+        )
+
+        self.assertEqual(status_code, 200)
+        payload = json.loads(body.decode("utf-8"))
+        self.assertNotIn("sk-proj-ABCDEFGHIJKLMNOP0123", payload["reply"])
+        self.assertIn("[secreto omitido]", payload["reply"])
+
     def test_post_chat_uses_local_default_user_when_bot_has_no_allowed_user(self) -> None:
         bot_service = MagicMock()
         bot_service.allowed_user_id = None

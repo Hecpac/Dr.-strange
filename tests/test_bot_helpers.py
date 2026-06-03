@@ -51,6 +51,32 @@ class BotHelperRegressionTests(unittest.TestCase):
         self.assertNotIn("terminal bridge", sanitized.lower())
         self.assertNotIn("/Users/hector", sanitized)
 
+    def test_visible_chat_response_redacts_outbound_secrets_and_tracebacks(self) -> None:
+        # #9: token-shaped secrets and Python tracebacks must never reach the user.
+        secrets = (
+            "sk-proj-ABCDEFGHIJKLMNOP0123",
+            "AKIAIOSFODNN7EXAMPLE",
+            "ghp_ABCDEFGHIJ0123456789abcdefXYZ",
+            "AIzaSyABCDEFGHIJKLMNOPQRSTUVWX0123456",
+            "Authorization: Bearer eyJhbGciOi.payload.signature123",
+        )
+        for raw in secrets:
+            sanitized = _sanitize_chat_response(f"valor: {raw} fin")
+            self.assertNotIn(raw, sanitized)
+            self.assertIn("[secreto omitido]", sanitized)
+
+        tb = 'Traceback (most recent call last):\n  File "x.py", line 1\nRuntimeError: boom'
+        sanitized = _sanitize_chat_response(tb)
+        self.assertNotIn("RuntimeError: boom", sanitized)
+        self.assertIn("[traza interna omitida]", sanitized)
+
+    def test_visible_chat_response_keeps_word_bearer_in_prose(self) -> None:
+        # The outbound secret filter must not mangle ordinary prose.
+        text = "El bearer del mensaje quedó claro y todo en orden."
+        sanitized = _sanitize_chat_response(text)
+        self.assertNotIn("[secreto omitido]", sanitized)
+        self.assertIn("bearer", sanitized.lower())
+
     def test_visible_chat_response_replaces_internal_trace_fallback_text(self) -> None:
         text = (
             "La salida del modelo contenía trazas internas de herramientas y la oculté. "

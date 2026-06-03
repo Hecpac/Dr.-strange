@@ -1387,6 +1387,20 @@ def _chat_response_has_internal_leak(text: str) -> bool:
     return any(pattern.search(text) for pattern in _INTERNAL_LEAK_PATTERNS)
 
 
+# #9: token-shaped secrets and tracebacks must never egress to a user channel.
+# Inline value-redaction (idempotent): a legitimate mention of the concept
+# survives, only the secret VALUE / internal traceback disappears.
+_OUTBOUND_SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_-]{16,}"), "[secreto omitido]"),
+    (re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"), "[secreto omitido]"),
+    (re.compile(r"\bgh[posru]_[A-Za-z0-9]{20,}\b"), "[secreto omitido]"),
+    (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"), "[secreto omitido]"),
+    (re.compile(r"\bAIza[A-Za-z0-9_-]{20,}\b"), "[secreto omitido]"),
+    (re.compile(r"\b(?:Authorization:?\s*)?Bearer\s+[A-Za-z0-9._~+/=-]{12,}", re.IGNORECASE), "[secreto omitido]"),
+    (re.compile(r"Traceback \(most recent call last\):[\s\S]+?(?:Error|Exception)[^\n]*", re.IGNORECASE), "[traza interna omitida]"),
+)
+
+
 def _sanitize_chat_response(text: str) -> str:
     if not text:
         return text
@@ -1536,6 +1550,8 @@ def _sanitize_chat_response(text: str) -> str:
 
     sanitized = re.sub(r"`(/Users/hector/[^`]+)`", _redact_backticked_path, sanitized)
     sanitized = re.sub(r"(?<!`)/Users/hector/[^\n`]+", "[ruta local omitida]", sanitized)
+    for pattern, replacement in _OUTBOUND_SECRET_PATTERNS:
+        sanitized = pattern.sub(replacement, sanitized)
     return sanitized
 
 
