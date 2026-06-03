@@ -348,13 +348,23 @@ def _is_typing_line(raw_line: str) -> bool:
     if not raw_line.startswith(("+", "-")):
         return False
     line = raw_line[1:].strip()
+    # A semicolon smuggles a second statement onto a "typing" line
+    # (e.g. `from typing import Any; CRED = open(...).read()`): never trivial.
+    if ";" in line:
+        return False
     if line.startswith(("from typing import ", "import typing", "if TYPE_CHECKING:")):
         return True
     if line.startswith(("def ", "async def ")):
         return "->" in line or bool(re.search(r"\([^)]*:\s*[^)]+\)", line))
     if line.startswith("type ") and "=" in line:
         return True
-    return bool(re.match(r"[A-Za-z_][\w.]*\s*:\s*[^=]+$", line))
+    # Variable annotation: trivial ONLY when the RHS is a pure type expression
+    # (name / subscript / union / forward-ref string). A call executes at
+    # module/class import time, so `name: __import__('os').system('id')` is an
+    # RCE channel, not a type annotation.
+    if "(" in line:
+        return False
+    return bool(re.match(r"[A-Za-z_][\w.]*\s*:\s*[A-Za-z_][\w.\[\], |\"']*$", line))
 
 
 def _is_python_typing_only_change(changed_lines: list[str]) -> bool:

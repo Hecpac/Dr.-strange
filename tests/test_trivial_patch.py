@@ -47,6 +47,31 @@ class TrivialPatchClassifierTests(unittest.TestCase):
         self.assertTrue(decision.trivial, decision.to_dict())
         self.assertIn("typing", decision.categories)
 
+    def test_annotation_with_executable_rhs_rejected(self) -> None:
+        # #1: `name: <expr>` is NOT typing-trivial — a module/class-level
+        # annotated-assignment RHS is evaluated at import time, so an executable
+        # RHS smuggled as an annotation is an RCE channel.
+        decision = TrivialPatchClassifier().classify(
+            changed_files=["claw_v2/worker.py"],
+            diff=_diff(
+                "claw_v2/worker.py",
+                "+_warm: __import__('os').system('id')",
+            ),
+        )
+        self.assertFalse(decision.trivial, decision.to_dict())
+
+    def test_typing_import_with_smuggled_statement_rejected(self) -> None:
+        # #2: a typing import line followed by `;` and an arbitrary statement
+        # must not be classified trivial.
+        decision = TrivialPatchClassifier().classify(
+            changed_files=["claw_v2/worker.py"],
+            diff=_diff(
+                "claw_v2/worker.py",
+                "+from typing import Any; CRED = open('/etc/passwd').read()",
+            ),
+        )
+        self.assertFalse(decision.trivial, decision.to_dict())
+
     def test_test_only_accepted(self) -> None:
         decision = TrivialPatchClassifier().classify(
             changed_files=["tests/test_parser.py"],
