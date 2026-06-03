@@ -257,6 +257,92 @@ class WorktreeRunnerTests(unittest.TestCase):
             self.assertTrue(events[0]["payload"]["worktree_preserved"])
             self.assertTrue((root / "worktrees" / "agent-observed-failure" / "exp-1").exists())
 
+    def test_worktree_runner_does_not_preserve_when_preparation_fails(self) -> None:
+        # Review blocker 1: if _prepare_workspace fails (workspace_mode stays
+        # "unprepared") there is nothing useful to preserve, and a leftover
+        # partial/stale worktree auto-perpetuates the exit-128 collision. The
+        # run must clean the partial workspace and re-raise the ORIGINAL error,
+        # not claim it preserved a workspace.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo = root / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+            (repo / "README.md").write_text("hello\n", encoding="utf-8")
+            subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True, text=True)
+            observe = ObserveStream(root / "observe.db")
+
+            class FailingPrepRunner(GitWorktreeExperimentRunner):
+                def _prepare_workspace(self, worktree_path: Path) -> str:
+                    worktree_path.mkdir(parents=True, exist_ok=True)
+                    (worktree_path / "stale.txt").write_text("stale\n", encoding="utf-8")
+                    raise AdapterError("git worktree add failed (exit 128) for stale path")
+
+            runner = FailingPrepRunner(
+                repo_root=repo,
+                worktree_root=root / "worktrees",
+                router=FakeRouter(),
+                evaluator=lambda path, state, diff: ExperimentEvaluation(0.75, "improved", "0.75"),
+                docker_sandbox=FakeDockerSandbox(),
+                observe=observe,
+            )
+
+            with self.assertRaises(AdapterError) as ctx:
+                runner(
+                    "agent-prep-fail",
+                    1,
+                    {"instruction": "x", "allowed_tools": ["Write"], "last_verified_state": {"metric": 0.5}},
+                )
+
+            self.assertNotIn("preserved experiment workspace", str(ctx.exception))
+            self.assertFalse((root / "worktrees" / "agent-prep-fail" / "exp-1").exists())
+            events = observe.recent_events(limit=5)
+            self.assertEqual(events[0]["event_type"], "worktree_experiment_failed")
+            self.assertEqual(events[0]["payload"]["workspace_mode"], "unprepared")
+            self.assertFalse(events[0]["payload"]["worktree_preserved"])
+
+    def test_worktree_runner_threads_trace_context_to_worker_ask(self) -> None:
+        # Review blocker 2: the worker LLMRouter.ask must receive the experiment
+        # trace in evidence_pack so the llm_response/cost correlates with the
+        # worktree_experiment_* events in `claw think trace`.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo = root / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+            (repo / "README.md").write_text("hello\n", encoding="utf-8")
+            subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True, text=True)
+            observe = ObserveStream(root / "observe.db")
+
+            router = FakeRouter()
+            runner = GitWorktreeExperimentRunner(
+                repo_root=repo,
+                worktree_root=root / "worktrees",
+                router=router,
+                evaluator=lambda path, state, diff: ExperimentEvaluation(0.75, "improved", "0.75"),
+                docker_sandbox=FakeDockerSandbox(),
+                observe=observe,
+            )
+            runner(
+                "agent-trace",
+                1,
+                {"instruction": "x", "allowed_tools": ["Write"], "last_verified_state": {"metric": 0.5}},
+            )
+
+            evidence = router.calls[0]["evidence_pack"]
+            started = [
+                event for event in observe.recent_events(limit=5)
+                if event["event_type"] == "worktree_experiment_started"
+            ][0]
+            self.assertEqual(evidence.get("trace_id"), started["trace_id"])
+            self.assertEqual(evidence.get("root_trace_id"), started["root_trace_id"])
+
     def test_worktree_runner_can_gate_promotion_through_brain(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

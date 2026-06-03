@@ -706,6 +706,10 @@ class GitWorktreeExperimentRunner:
                     "experiment_number": experiment_number,
                     "state": state,
                     "worktree_path": str(worktree_path),
+                    # Review blocker 2: propagate the experiment trace so the
+                    # worker's llm_response / cost correlates with the
+                    # worktree_experiment_* events under the same trace_id.
+                    **trace,
                 },
                 cwd=str(worktree_path),
                 timeout=900.0,
@@ -763,7 +767,13 @@ class GitWorktreeExperimentRunner:
             )
             return record
         except AdapterError as exc:
-            remove_workspace = False
+            # Review blocker 1: only preserve a workspace that was actually
+            # prepared. If preparation itself failed (workspace_mode stays
+            # "unprepared") there is nothing useful to keep, and a leftover
+            # partial/stale worktree auto-perpetuates the exit-128 collision —
+            # let the finally clean it up and re-raise the original error.
+            prepared = workspace_mode != "unprepared"
+            remove_workspace = not prepared
             self._emit_experiment_event(
                 "worktree_experiment_failed",
                 trace=trace,
@@ -776,10 +786,12 @@ class GitWorktreeExperimentRunner:
                     "promotion_enabled": bool(state.get("promote_on_improvement")),
                     "error": str(exc)[:_ERROR_SNIPPET_CHARS],
                     "error_type": type(exc).__name__,
-                    "worktree_preserved": True,
+                    "worktree_preserved": prepared,
                 },
             )
-            raise AdapterError(f"{exc}; preserved experiment workspace at {worktree_path}") from exc
+            if prepared:
+                raise AdapterError(f"{exc}; preserved experiment workspace at {worktree_path}") from exc
+            raise
         except Exception as exc:
             self._emit_experiment_event(
                 "worktree_experiment_failed",
