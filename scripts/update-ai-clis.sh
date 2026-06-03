@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CODEX_VERSION="0.134.0"
+CODEX_VERSION="0.136.0"
 CLAUDE_CODE_VERSION="2.1.152"
 
 codex_version="$(codex --version 2>/dev/null || true)"

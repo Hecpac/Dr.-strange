@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -105,23 +106,55 @@ class LocalChatAPI:
             return ChatAPIResponse(status_code=400, payload={"error": "text must be a non-empty string"})
 
         session_id = session_id.strip()
-        if self._agent_runtime is not None:
-            agent_response = self._agent_runtime.handle_text(
-                channel="web",
-                external_user_id=self._default_user_id,
-                external_session_id=session_id,
-                session_id=session_id,
-                text=text,
+        text = text.strip()
+        started_at = time.perf_counter()
+        self._emit_chat_event(
+            "web_chat_request_received",
+            {
+                "session_id": session_id,
+                "text_length": len(text),
+                "agent_runtime": self._agent_runtime is not None,
+            },
+        )
+        try:
+            if self._agent_runtime is not None:
+                agent_response = self._agent_runtime.handle_text(
+                    channel="web",
+                    external_user_id=self._default_user_id,
+                    external_session_id=session_id,
+                    session_id=session_id,
+                    text=text,
+                )
+                reply = agent_response.text
+                agent_session_id = agent_response.session_id
+            else:
+                reply = self._bot_service.handle_text(
+                    user_id=self._default_user_id,
+                    session_id=session_id,
+                    text=text,
+                )
+                agent_session_id = session_id
+        except Exception as exc:
+            self._emit_chat_event(
+                "web_chat_request_failed",
+                {
+                    "session_id": session_id,
+                    "duration_ms": round((time.perf_counter() - started_at) * 1000, 1),
+                    "error": f"{type(exc).__name__}: {exc}"[:500],
+                    "agent_runtime": self._agent_runtime is not None,
+                },
             )
-            reply = agent_response.text
-            agent_session_id = agent_response.session_id
-        else:
-            reply = self._bot_service.handle_text(
-                user_id=self._default_user_id,
-                session_id=session_id,
-                text=text,
-            )
-            agent_session_id = session_id
+            raise
+        self._emit_chat_event(
+            "web_chat_response_ready",
+            {
+                "session_id": session_id,
+                "agent_session_id": agent_session_id,
+                "duration_ms": round((time.perf_counter() - started_at) * 1000, 1),
+                "response_length": len(reply or ""),
+                "agent_runtime": self._agent_runtime is not None,
+            },
+        )
         return ChatAPIResponse(
             status_code=200,
             payload={
@@ -131,6 +164,16 @@ class LocalChatAPI:
                 "trace_id": None,
             },
         )
+
+    def _emit_chat_event(self, event_type: str, payload: dict[str, Any]) -> None:
+        emit = getattr(self._observe, "emit", None)
+        if not callable(emit):
+            return
+        try:
+            emit(event_type, lane="web_chat", payload=payload)
+        except Exception:
+            # Observability must not break the local chat endpoint.
+            return
 
     # ------------------------------------------------------------------
     # Wave 3.7: dashboard endpoints. JSON payloads only; no HTML in this

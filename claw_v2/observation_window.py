@@ -500,6 +500,9 @@ class ObservationWindowState:
         if tokens <= 0:
             return
         estimated = bool(token_usage.get("estimated"))
+        provider_total_tokens = _coerce_int(token_usage.get("provider_total_tokens"), 0)
+        cache_read_tokens = _coerce_int(token_usage.get("cache_read_input_tokens"), 0)
+        cache_create_tokens = _coerce_int(token_usage.get("cache_creation_input_tokens"), 0)
         lane = str(event.get("lane") or "llm")
         provider = str(event.get("provider") or "")
         model = str(event.get("model") or "")
@@ -513,21 +516,27 @@ class ObservationWindowState:
             hard_limit = self._token_hard_threshold()
             soft_crossed = totals["total_tokens"] >= soft_limit and not was_soft_active
             self._token_soft_limit_active = totals["total_tokens"] >= soft_limit
-        self._emit(
-            "llm_token_window_recorded",
-            {
-                "lane": lane,
-                "provider": provider,
-                "model": model,
-                "tokens": tokens,
-                "estimated": estimated,
-                "rolling_tokens": totals["total_tokens"],
-                "estimated_tokens": totals["estimated_tokens"],
-                "real_tokens": totals["real_tokens"],
-                "token_window_seconds": self.config.token_window_seconds,
-                "token_window_cap": self.config.token_window_cap,
-            },
-        )
+        recorded_payload = {
+            "lane": lane,
+            "provider": provider,
+            "model": model,
+            "tokens": tokens,
+            "estimated": estimated,
+            "rolling_tokens": totals["total_tokens"],
+            "estimated_tokens": totals["estimated_tokens"],
+            "real_tokens": totals["real_tokens"],
+            "token_window_seconds": self.config.token_window_seconds,
+            "token_window_cap": self.config.token_window_cap,
+        }
+        if provider_total_tokens > 0:
+            recorded_payload["provider_total_tokens"] = provider_total_tokens
+        if cache_read_tokens > 0:
+            recorded_payload["excluded_cache_read_tokens"] = cache_read_tokens
+        if cache_create_tokens > 0:
+            recorded_payload["cache_creation_input_tokens"] = cache_create_tokens
+        if bool(token_usage.get("token_window_excludes_cache_read")):
+            recorded_payload["token_window_excludes_cache_read"] = True
+        self._emit("llm_token_window_recorded", recorded_payload)
         if soft_crossed:
             self._emit(
                 "token_window_soft_limit_reached",
@@ -685,6 +694,10 @@ def _extract_token_usage(event: dict[str, Any]) -> dict[str, Any]:
         return {
             "total_tokens": total,
             "estimated": bool(candidate.get("estimated")),
+            "provider_total_tokens": _coerce_int(candidate.get("provider_total_tokens"), 0),
+            "cache_read_input_tokens": _coerce_int(candidate.get("cache_read_input_tokens"), 0),
+            "cache_creation_input_tokens": _coerce_int(candidate.get("cache_creation_input_tokens"), 0),
+            "token_window_excludes_cache_read": bool(candidate.get("token_window_excludes_cache_read")),
         }
     return {"total_tokens": 0, "estimated": True}
 

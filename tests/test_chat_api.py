@@ -5,9 +5,10 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from claw_v2.chat_api import LocalChatAPI
+from claw_v2.cli.think import main as think_main
 from claw_v2.observe import ObserveStream
 from tests.helpers import make_config
 
@@ -141,6 +142,42 @@ class LocalChatAPITests(unittest.TestCase):
         payload = json.loads(body.decode("utf-8"))
         self.assertEqual(payload["reply"], "reply text")
         bot_service.handle_text.assert_called_once()
+
+    def test_post_chat_emits_replayable_session_events(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "observe.db"
+            observe = ObserveStream(db_path)
+            bot_service = MagicMock()
+            bot_service.allowed_user_id = "123"
+            bot_service.handle_text.return_value = "reply text"
+            api = LocalChatAPI(bot_service=bot_service, observe=observe)
+
+            status_code, _, body = api.handle_http(
+                method="POST",
+                path="/api/chat",
+                body=json.dumps({"session_id": "mac-main", "text": " hola "}).encode("utf-8"),
+            )
+
+            self.assertEqual(status_code, 200)
+            self.assertEqual(json.loads(body.decode("utf-8"))["reply"], "reply text")
+            events = observe.recent_events(limit=5)
+            session_events = [
+                event for event in events
+                if (event.get("payload") or {}).get("session_id") == "mac-main"
+            ]
+            self.assertEqual(
+                [event["event_type"] for event in session_events],
+                ["web_chat_response_ready", "web_chat_request_received"],
+            )
+
+            replay = io.StringIO()
+            with patch("sys.stdout", replay):
+                rc = think_main(["--db", str(db_path), "replay", "mac-main", "--limit", "10"])
+            self.assertEqual(rc, 0)
+            output = replay.getvalue()
+            self.assertIn("# Session mac-main", output)
+            self.assertIn("web_chat_request_received", output)
+            self.assertIn("web_chat_response_ready", output)
 
     def test_wsgi_app_wraps_http_handler(self) -> None:
         bot_service = MagicMock()

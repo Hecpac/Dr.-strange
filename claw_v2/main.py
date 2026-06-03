@@ -615,6 +615,7 @@ def _setup_agent_services(
             brain=brain,
             evaluator=wiki_quality_evaluator,
             promotion_executor=GitBranchPromotionExecutor(config.workspace_root),
+            observe=observe,
         )
 
     auto_research = AutoResearchAgentService(
