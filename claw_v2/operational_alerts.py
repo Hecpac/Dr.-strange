@@ -29,6 +29,16 @@ DEFAULT_ALERT_RULES: dict[str, AlertRule] = {
     ),
     "session_resume_failed": AlertRule("Provider session resume failed", cooldown_seconds=1800),
     "llm_circuit_open": AlertRule("LLM provider circuit opened", severity="critical", cooldown_seconds=1800),
+    "autonomy_degraded_by_token_window": AlertRule(
+        "Autonomy degraded: token window breaker",
+        severity="critical",
+        cooldown_seconds=1800,
+    ),
+    "autonomy_degraded_by_cost_breaker": AlertRule(
+        "Autonomy degraded: cost breaker",
+        severity="critical",
+        cooldown_seconds=1800,
+    ),
     "auto_research_adapter_error": AlertRule("Auto-research provider failure", severity="critical", cooldown_seconds=1800),
     "pipeline_poll_degraded": AlertRule("Pipeline poll degraded", cooldown_seconds=1800),
     "telegram_transport_stop_error": AlertRule("Telegram transport stop degraded", cooldown_seconds=1800),
