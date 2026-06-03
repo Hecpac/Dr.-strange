@@ -143,7 +143,22 @@ def _docker_run(
 
 
 def docker_available() -> bool:
-    return shutil.which("docker") is not None
+    # P2: a present binary is not enough — the daemon must respond. shutil.which
+    # alone returned True even when `docker run` would fail with "Cannot connect
+    # to the Docker daemon". Probe with a short-timeout `docker info`.
+    if shutil.which("docker") is None:
+        return False
+    try:
+        result = subprocess.run(
+            ["docker", "info", "--format", "{{.ServerVersion}}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    return result.returncode == 0
 
 
 def _emit_env_event(

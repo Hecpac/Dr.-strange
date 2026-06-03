@@ -542,6 +542,53 @@ class BotTests(unittest.TestCase):
                 self.assertEqual(pipeline_mock.merge_and_close.call_count, 1)
                 self.assertIn("done", second)
 
+    def test_pipeline_approve_surfaces_trivial_merge_gate(self) -> None:
+        # P2/#7: when a trivial automerge stages a separate pipeline_merge gate,
+        # /pipeline_approve must surface approval_id/token/confirm_with like
+        # /pipeline_merge does — otherwise the human can't confirm the merge.
+        from unittest.mock import MagicMock
+        from claw_v2.pipeline import PipelineRun
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                diff_approval = runtime.bot.approvals.create(action="pipeline:HEC-9", summary="diff")
+                merge_approval = runtime.bot.approvals.create(action="pipeline_merge:HEC-9", summary="merge")
+
+                pipeline_mock = MagicMock()
+                pipeline_mock.list_active.return_value = [
+                    PipelineRun(
+                        issue_id="HEC-9", branch_name="feat/hec-9", repo_root=str(root),
+                        status="awaiting_approval", approval_id=diff_approval.approval_id,
+                    )
+                ]
+                pipeline_mock.complete_pipeline.return_value = PipelineRun(
+                    issue_id="HEC-9", branch_name="feat/hec-9", repo_root=str(root),
+                    status="pr_created", pr_url="https://github.com/owner/repo/pull/9",
+                    approval_id=merge_approval.approval_id, approval_token=merge_approval.token,
+                )
+                runtime.bot.pipeline = pipeline_mock
+
+                out = runtime.bot.handle_text(
+                    user_id="123", session_id="s1",
+                    text=f"/pipeline_approve {diff_approval.approval_id} {diff_approval.token}",
+                )
+                payload = json.loads(out)
+
+                self.assertEqual(payload["approval_id"], merge_approval.approval_id)
+                self.assertEqual(payload["approval_token"], merge_approval.token)
+                self.assertIn("/pipeline_merge_confirm", payload["confirm_with"])
+                self.assertIn(merge_approval.approval_id, payload["confirm_with"])
+
     def test_pipeline_merge_blocks_when_pr_not_created(self) -> None:
         from unittest.mock import MagicMock
         from claw_v2.pipeline import PipelineRun

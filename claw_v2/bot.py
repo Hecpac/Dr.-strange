@@ -4364,7 +4364,34 @@ class BotService:
             for run in self.pipeline.list_active():
                 if run.approval_id == parts[1]:
                     result = self.pipeline.complete_pipeline(run.issue_id)
-                    return json.dumps({"status": result.status, "pr_url": result.pr_url}, indent=2)
+                    response = {"status": result.status, "pr_url": result.pr_url}
+                    # #7/P2: if a trivial automerge staged a separate
+                    # pipeline_merge gate, surface it like /pipeline_merge so the
+                    # human can actually confirm the merge (id + token + command),
+                    # instead of leaving a silent, hard-to-find second gate.
+                    if (
+                        self.approvals is not None
+                        and result.approval_id
+                        and result.approval_id != parts[1]
+                    ):
+                        try:
+                            merge_payload = self.approvals.read(result.approval_id)
+                        except FileNotFoundError:
+                            merge_payload = {}
+                        merge_meta = merge_payload.get("metadata") or {}
+                        if (
+                            str(merge_payload.get("action", "")).startswith("pipeline_merge:")
+                            and merge_payload.get("status") == "pending"
+                        ):
+                            confirmation = merge_meta.get("required_confirmation") or result.approval_token
+                            response["approval_id"] = result.approval_id
+                            response["approval_token"] = result.approval_token
+                            response["confirm_with"] = (
+                                f"/pipeline_merge_confirm {result.approval_id} {confirmation}"
+                            )
+                            if merge_meta.get("risk_code"):
+                                response["risk_code"] = merge_meta["risk_code"]
+                    return json.dumps(response, indent=2)
             return "approval recorded but no matching pipeline run found"
         if stripped.startswith("/pipeline_merge_confirm "):
             if self.pipeline is None:

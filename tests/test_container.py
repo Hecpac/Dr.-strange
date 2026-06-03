@@ -4,7 +4,7 @@ import subprocess
 import unittest
 from unittest.mock import MagicMock, patch
 
-from claw_v2.container import ContainerPolicy, sandboxed_run, _docker_run
+from claw_v2.container import ContainerPolicy, docker_available, sandboxed_run, _docker_run
 
 
 class SandboxedRunTests(unittest.TestCase):
@@ -94,6 +94,29 @@ class DockerRunTests(unittest.TestCase):
         mock_limited.assert_called_once()
         emitted = [call.args[0] for call in observe.emit.call_args_list]
         self.assertIn("runtime_isolation_degraded", emitted)
+
+
+class DockerAvailableTests(unittest.TestCase):
+    @patch("claw_v2.container.subprocess.run")
+    @patch("claw_v2.container.shutil.which", return_value="/usr/bin/docker")
+    def test_false_when_daemon_unresponsive(self, _which, mock_run) -> None:
+        # P2: the binary being present is not enough — the daemon must respond.
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="Cannot connect to the Docker daemon",
+        )
+        self.assertFalse(docker_available())
+
+    @patch("claw_v2.container.subprocess.run")
+    @patch("claw_v2.container.shutil.which", return_value="/usr/bin/docker")
+    def test_true_when_daemon_responds(self, _which, mock_run) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="27.0.0", stderr="",
+        )
+        self.assertTrue(docker_available())
+
+    @patch("claw_v2.container.shutil.which", return_value=None)
+    def test_false_when_binary_missing(self, _which) -> None:
+        self.assertFalse(docker_available())
 
 
 if __name__ == "__main__":
