@@ -13,6 +13,7 @@ from claw_v2.agents import (
     GitWorktreeExperimentRunner,
     WorkspacePromotionExecutor,
 )
+from claw_v2.observe import ObserveStream
 from claw_v2.types import CriticalActionExecution, CriticalActionVerification, LLMResponse
 
 
@@ -52,6 +53,14 @@ class FakeBrain:
                 should_proceed=True,
             ),
         )
+
+
+class FakeDockerSandbox:
+    def __init__(self, available: bool = True) -> None:
+        self.available = available
+
+    def is_available(self) -> bool:
+        return self.available
 
 
 class WorktreeRunnerTests(unittest.TestCase):
@@ -108,6 +117,55 @@ class WorktreeRunnerTests(unittest.TestCase):
             self.assertFalse((repo / "experiment.txt").exists())
             self.assertFalse((root / "worktrees" / "agent-a" / "exp-1").exists())
 
+    def test_worktree_runner_emits_replayable_observe_events(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo = root / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+            (repo / "README.md").write_text("hello\n", encoding="utf-8")
+            subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True, text=True)
+            observe = ObserveStream(root / "observe.db")
+
+            runner = GitWorktreeExperimentRunner(
+                repo_root=repo,
+                worktree_root=root / "worktrees",
+                router=FakeRouter(),
+                evaluator=lambda path, state, diff: ExperimentEvaluation(0.75, "improved", "0.75"),
+                docker_sandbox=FakeDockerSandbox(),
+                observe=observe,
+            )
+            record = runner(
+                "agent-observed",
+                1,
+                {
+                    "instruction": "Change the workspace",
+                    "allowed_tools": ["Write"],
+                    "last_verified_state": {"metric": 0.5},
+                    "session_id": "observed-session",
+                },
+            )
+
+            self.assertEqual(record.status, "improved")
+            events = observe.recent_events(limit=5)
+            self.assertEqual(events[0]["event_type"], "worktree_experiment_completed")
+            self.assertEqual(events[1]["event_type"], "worktree_experiment_started")
+            self.assertEqual(events[0]["trace_id"], events[1]["trace_id"])
+            self.assertEqual(events[0]["payload"]["session_id"], "observed-session")
+            self.assertEqual(events[0]["payload"]["workspace_mode"], "git_worktree")
+            self.assertTrue(events[0]["payload"]["docker_available"])
+            self.assertFalse(events[0]["payload"]["promotion_enabled"])
+            self.assertEqual(events[0]["payload"]["metric_value"], 0.75)
+            self.assertFalse(events[0]["payload"]["worktree_preserved"])
+            trace_events = observe.trace_events(events[0]["trace_id"])
+            self.assertEqual(
+                [event["event_type"] for event in trace_events],
+                ["worktree_experiment_started", "worktree_experiment_completed"],
+            )
+
     def test_worktree_runner_preserves_workspace_on_adapter_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -150,6 +208,54 @@ class WorktreeRunnerTests(unittest.TestCase):
             self.assertTrue(preserved.exists())
             self.assertEqual((preserved / "partial.txt").read_text(encoding="utf-8"), "partial\n")
             self.assertFalse((repo / "partial.txt").exists())
+
+    def test_worktree_runner_emits_failed_event_when_workspace_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo = root / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+            (repo / "README.md").write_text("hello\n", encoding="utf-8")
+            subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True, text=True)
+            observe = ObserveStream(root / "observe.db")
+
+            class TimeoutRouter(FakeRouter):
+                def ask(self, prompt: str, **kwargs) -> LLMResponse:
+                    worktree = Path(kwargs["cwd"])
+                    (worktree / "partial.txt").write_text("partial\n", encoding="utf-8")
+                    raise AdapterError("Codex CLI timed out after 300.0s")
+
+            runner = GitWorktreeExperimentRunner(
+                repo_root=repo,
+                worktree_root=root / "worktrees",
+                router=TimeoutRouter(),
+                evaluator=lambda path, state, diff: ExperimentEvaluation(0.75, "improved", "0.75"),
+                docker_sandbox=FakeDockerSandbox(),
+                observe=observe,
+            )
+
+            with self.assertRaisesRegex(AdapterError, "preserved experiment workspace"):
+                runner(
+                    "agent-observed-failure",
+                    1,
+                    {
+                        "instruction": "Change the workspace",
+                        "allowed_tools": ["Write"],
+                        "last_verified_state": {"metric": 0.5},
+                    },
+                )
+
+            events = observe.recent_events(limit=5)
+            self.assertEqual(events[0]["event_type"], "worktree_experiment_failed")
+            self.assertEqual(events[1]["event_type"], "worktree_experiment_started")
+            self.assertEqual(events[0]["trace_id"], events[1]["trace_id"])
+            self.assertEqual(events[0]["payload"]["session_id"], "auto-research:agent-observed-failure")
+            self.assertEqual(events[0]["payload"]["error_type"], "AdapterError")
+            self.assertTrue(events[0]["payload"]["worktree_preserved"])
+            self.assertTrue((root / "worktrees" / "agent-observed-failure" / "exp-1").exists())
 
     def test_worktree_runner_can_gate_promotion_through_brain(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

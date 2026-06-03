@@ -16,6 +16,7 @@ from claw_v2.adapters.base import AdapterError
 from claw_v2.brain import BrainService
 from claw_v2.llm import LLMRouter
 from claw_v2.tools import default_allowed_tools_for, is_valid_agent_class
+from claw_v2.tracing import new_trace_context
 
 _UNSET = object()
 _ERROR_SNIPPET_CHARS = 500
@@ -658,6 +659,7 @@ class GitWorktreeExperimentRunner:
         evaluator: Callable[[Path, dict, str], ExperimentEvaluation] | None = None,
         promotion_executor: Callable[[Path, dict, str], Any] | None = None,
         docker_sandbox: DockerSandbox | None = None,
+        observe: Any | None = None,
     ) -> None:
         self.repo_root = Path(repo_root)
         self.worktree_root = Path(worktree_root)
@@ -666,14 +668,34 @@ class GitWorktreeExperimentRunner:
         self.evaluator = evaluator
         self.promotion_executor = promotion_executor or WorkspacePromotionExecutor(self.repo_root)
         self.docker_sandbox = docker_sandbox or DockerSandbox()
+        self.observe = observe
         self.worktree_root.mkdir(parents=True, exist_ok=True)
 
     def __call__(self, agent_name: str, experiment_number: int, state: dict) -> ExperimentRecord:
         worktree_path = self.worktree_root / agent_name / f"exp-{experiment_number}"
         worktree_path.parent.mkdir(parents=True, exist_ok=True)
-        workspace_mode = self._prepare_workspace(worktree_path)
+        workspace_mode = "unprepared"
+        session_id = self._experiment_session_id(agent_name, state)
+        trace = new_trace_context(
+            job_id=f"worktree_experiment:{agent_name}:{experiment_number}",
+            artifact_id=f"{agent_name}:exp-{experiment_number}",
+        )
         remove_workspace = True
         try:
+            workspace_mode = self._prepare_workspace(worktree_path)
+            self._emit_experiment_event(
+                "worktree_experiment_started",
+                trace=trace,
+                payload={
+                    "session_id": session_id,
+                    "agent": agent_name,
+                    "experiment_number": experiment_number,
+                    "workspace_mode": workspace_mode,
+                    "docker_available": self._docker_available(),
+                    "promotion_enabled": bool(state.get("promote_on_improvement")),
+                    "baseline_value": self._baseline(state),
+                },
+            )
             response = self.router.ask(
                 self._build_worker_prompt(agent_name, experiment_number, state),
                 system_prompt="You are a careful coding worker operating inside a disposable git worktree.",
@@ -713,7 +735,7 @@ class GitWorktreeExperimentRunner:
                 promotion_commit_sha = getattr(promotion_result, "commit_sha", None)
                 promotion_branch_name = getattr(promotion_result, "branch_name", None)
 
-            return ExperimentRecord(
+            record = ExperimentRecord(
                 experiment_number=experiment_number,
                 metric_value=evaluation.metric_value,
                 baseline_value=self._baseline(state),
@@ -722,12 +744,99 @@ class GitWorktreeExperimentRunner:
                 promotion_commit_sha=promotion_commit_sha,
                 promotion_branch_name=promotion_branch_name,
             )
+            self._emit_experiment_event(
+                "worktree_experiment_completed",
+                trace=trace,
+                payload={
+                    "session_id": session_id,
+                    "agent": agent_name,
+                    "experiment_number": experiment_number,
+                    "workspace_mode": workspace_mode,
+                    "docker_available": self._docker_available(),
+                    "promotion_enabled": bool(state.get("promote_on_improvement")),
+                    "promotion_executed": bool(promotion_commit_sha or promotion_branch_name or status == "executed"),
+                    "metric_value": record.metric_value,
+                    "baseline_value": record.baseline_value,
+                    "status": record.status,
+                    "worktree_preserved": False,
+                },
+            )
+            return record
         except AdapterError as exc:
             remove_workspace = False
+            self._emit_experiment_event(
+                "worktree_experiment_failed",
+                trace=trace,
+                payload={
+                    "session_id": session_id,
+                    "agent": agent_name,
+                    "experiment_number": experiment_number,
+                    "workspace_mode": workspace_mode,
+                    "docker_available": self._docker_available(),
+                    "promotion_enabled": bool(state.get("promote_on_improvement")),
+                    "error": str(exc)[:_ERROR_SNIPPET_CHARS],
+                    "error_type": type(exc).__name__,
+                    "worktree_preserved": True,
+                },
+            )
             raise AdapterError(f"{exc}; preserved experiment workspace at {worktree_path}") from exc
+        except Exception as exc:
+            self._emit_experiment_event(
+                "worktree_experiment_failed",
+                trace=trace,
+                payload={
+                    "session_id": session_id,
+                    "agent": agent_name,
+                    "experiment_number": experiment_number,
+                    "workspace_mode": workspace_mode,
+                    "docker_available": self._docker_available(),
+                    "promotion_enabled": bool(state.get("promote_on_improvement")),
+                    "error": str(exc)[:_ERROR_SNIPPET_CHARS],
+                    "error_type": type(exc).__name__,
+                    "worktree_preserved": False,
+                },
+            )
+            raise
         finally:
             if remove_workspace:
                 self._remove_workspace(worktree_path, workspace_mode)
+
+    def _emit_experiment_event(
+        self,
+        event_type: str,
+        *,
+        trace: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> None:
+        if self.observe is None:
+            return
+        try:
+            self.observe.emit(
+                event_type,
+                lane="worker",
+                trace_id=trace.get("trace_id"),
+                root_trace_id=trace.get("root_trace_id"),
+                span_id=trace.get("span_id"),
+                parent_span_id=trace.get("parent_span_id"),
+                job_id=trace.get("job_id"),
+                artifact_id=trace.get("artifact_id"),
+                payload=payload,
+            )
+        except Exception:
+            logger.exception("worktree experiment observe emit failed for %s", event_type)
+
+    def _docker_available(self) -> bool:
+        try:
+            return bool(self.docker_sandbox.is_available())
+        except Exception:
+            return False
+
+    @staticmethod
+    def _experiment_session_id(agent_name: str, state: dict) -> str:
+        explicit = state.get("session_id") or state.get("agent_session_id")
+        if explicit:
+            return str(explicit)
+        return f"auto-research:{agent_name}"
 
     def _build_worker_prompt(self, agent_name: str, experiment_number: int, state: dict) -> str:
         instruction = state.get("instruction", "").strip()
