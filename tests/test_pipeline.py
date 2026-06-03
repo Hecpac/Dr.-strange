@@ -345,7 +345,7 @@ class CompletePipelineTests(unittest.TestCase):
             self.assertFalse(pr_svc.create_pull_request.call_args.kwargs["draft"])
             pr_svc.merge_pull_request.assert_not_called()
 
-    def test_trivial_automerge_enabled_merges_when_all_gates_pass(self) -> None:
+    def test_trivial_automerge_enabled_stages_merge_approval_not_immediate_merge(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             state_root = root / "pipeline"
@@ -393,18 +393,22 @@ class CompletePipelineTests(unittest.TestCase):
 
             result = svc.complete_pipeline("HEC-1")
 
-            self.assertEqual(result.status, "done")
-            self.assertFalse(pr_svc.create_pull_request.call_args.kwargs["draft"])
-            pr_svc.merge_pull_request.assert_called_once_with(7)
-            linear.update_status.assert_any_call("HEC-1", "Done")
+            # #7: a trivial classification stages a SEPARATE pipeline_merge
+            # approval; it must NOT merge to main off the diff approval alone.
+            self.assertEqual(result.status, "pr_created")
+            pr_svc.merge_pull_request.assert_not_called()
+            self.assertNotEqual(result.approval_id, pending.approval_id)
+            merge_payload = approvals.read(result.approval_id)
+            self.assertTrue(str(merge_payload.get("action", "")).startswith("pipeline_merge:"))
+            self.assertEqual(merge_payload.get("status"), "pending")
             observe.emit.assert_any_call(
-                "pipeline_trivial_automerge",
+                "pipeline_trivial_automerge_pending",
                 payload={
                     "issue": "HEC-1",
                     "pr_url": "https://github.com/owner/repo/pull/7",
                     "pr_number": 7,
+                    "approval_id": result.approval_id,
                     "categories": ["docs"],
-                    "reasons": [],
                 },
             )
 
