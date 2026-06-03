@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from claw_v2.skills import SkillRegistry
 
 from claw_v2.approval_gate import system_approval_mode
+from claw_v2.tool_policy import daemon_can_auto_approve
 from claw_v2.tracing import attach_trace, child_trace_context, new_trace_context
 
 logger = logging.getLogger(__name__)
@@ -596,6 +597,20 @@ class KairosService:
             raise RuntimeError("Approvals not configured")
         data = json.loads(decision.detail)
         approval_id = data["approval_id"]
+        # #4: a pending record exists to force a human decision. The daemon may
+        # auto-approve ONLY a still-pending, non-sensitive record whose tool is
+        # on the read-only daemon allowlist. External mutations (social publish,
+        # deploy, pipeline merge) and tool approvals outside the allowlist must
+        # wait for a human — Kairos cannot self-clear its own mutation gate.
+        payload = self.approvals.read(approval_id)
+        if str(payload.get("status") or "") != "pending":
+            raise RuntimeError(f"approval not pending, refusing auto-approve: {approval_id}")
+        meta = payload.get("metadata") or {}
+        tool_name = str(meta.get("tool") or "")
+        if meta.get("required_confirmation") or not (tool_name and daemon_can_auto_approve(tool_name)):
+            raise RuntimeError(
+                f"approval requires a human decision, daemon may not auto-approve: {approval_id}"
+            )
         approved = self.approvals.approve_internal(approval_id)
         if not approved:
             raise RuntimeError(f"approval could not be auto-approved: {approval_id}")
