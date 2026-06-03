@@ -65,6 +65,36 @@ class DockerRunTests(unittest.TestCase):
         self.assertIn("python:3.12-slim", args)
         self.assertIn("pytest -x", args)
 
+    @patch("claw_v2.container.subprocess.run")
+    def test_docker_cpus_is_core_count_not_cpu_seconds(self, mock_run) -> None:
+        # #33: --cpus is a fractional core count; cpu_seconds is a CPU-time
+        # budget (RLIMIT_CPU). Mapping --cpus=cpu_seconds requested 120 cores.
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="ok", stderr="")
+        policy = ContainerPolicy(cpu_seconds=120, docker_image="python:3.12-slim")
+        _docker_run("pytest -x", cwd="/tmp/worktree", policy=policy)
+        args = mock_run.call_args[0][0]
+        self.assertNotIn("--cpus=120", args)
+        cpus = [a for a in args if isinstance(a, str) and a.startswith("--cpus=")]
+        self.assertTrue(cpus)
+        self.assertLessEqual(float(cpus[0].split("=", 1)[1]), 8.0)
+
+    @patch("claw_v2.container.docker_available", return_value=False)
+    @patch("claw_v2.container._docker_run")
+    @patch("claw_v2.container._limited_run")
+    def test_docker_ephemeral_falls_back_to_host_when_docker_unavailable(
+        self, mock_limited, mock_docker, _mock_avail
+    ) -> None:
+        # #15: honouring docker_ephemeral must not crash when docker is absent;
+        # degrade to host_sanitized with an observable event (no_silent_degrade).
+        mock_limited.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        observe = MagicMock()
+        policy = ContainerPolicy(isolation_mode="docker_ephemeral")
+        sandboxed_run("echo ok", cwd="/tmp", policy=policy, observe=observe)
+        mock_docker.assert_not_called()
+        mock_limited.assert_called_once()
+        emitted = [call.args[0] for call in observe.emit.call_args_list]
+        self.assertIn("runtime_isolation_degraded", emitted)
+
 
 if __name__ == "__main__":
     unittest.main()

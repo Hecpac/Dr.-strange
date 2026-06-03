@@ -63,6 +63,7 @@ class PipelineService:
         learning: LearningLoop | None = None,
         clock: Callable[[], float] | None = None,
         enable_trivial_automerge: bool = False,
+        isolation_mode: str = "host_sanitized",
     ) -> None:
         self.linear = linear
         self.router = router
@@ -77,6 +78,7 @@ class PipelineService:
         self.learning = learning
         self.clock = clock or time.time
         self.enable_trivial_automerge = enable_trivial_automerge
+        self.isolation_mode = isolation_mode
         self._linear_poll_failures = 0
         self._linear_poll_backoff_until = 0.0
         cleanup_stale_worktrees(default_repo_root)
@@ -101,7 +103,7 @@ class PipelineService:
                 )
                 run.diff = _collect_diff(wt_path)
                 run.changed_files = _collect_changed_files(wt_path)
-                passed, output = _run_tests(wt_path)
+                passed, output = _run_tests(wt_path, isolation_mode=self.isolation_mode)
                 run.test_output = output
                 run.verification_complete = True
                 run.verification_passed = passed
@@ -551,12 +553,16 @@ def _paths_with_diff_headers(diff_text: str) -> set[str]:
     return paths
 
 
-def _run_tests(wt_path: Path, *, timeout: int = 300) -> tuple[bool, str]:
+def _run_tests(wt_path: Path, *, timeout: int = 300, isolation_mode: str = "host_sanitized") -> tuple[bool, str]:
     try:
         result = sandboxed_run(
             ["python", "-m", "pytest", "-x", "-q"],
             cwd=str(wt_path),
-            policy=ContainerPolicy(timeout_seconds=timeout, network_enabled=False),
+            policy=ContainerPolicy(
+                timeout_seconds=timeout,
+                network_enabled=False,
+                isolation_mode=isolation_mode,
+            ),
             shell=False,
         )
     except subprocess.TimeoutExpired:

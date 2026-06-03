@@ -853,6 +853,7 @@ def _setup_operational_services(
         memory=memory,
         learning=learning,
         enable_trivial_automerge=config.enable_trivial_automerge,
+        isolation_mode=config.command_isolation_mode,
     )
     bot.pipeline = pipeline
     bot.learning = learning

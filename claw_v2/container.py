@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 @dataclass(slots=True)
 class ContainerPolicy:
     cpu_seconds: int = 120
+    cpu_count: float = 2.0
     memory_mb: int = 512
     max_processes: int = 64
     timeout_seconds: int = 300
@@ -38,7 +39,26 @@ def sandboxed_run(
     if mode not in {"host_sanitized", "docker_ephemeral"}:
         raise ValueError("isolation_mode must be one of: host_sanitized, docker_ephemeral")
     env_result = sanitize_child_env()
-    if policy.docker_image or mode == "docker_ephemeral":
+    use_docker = bool(policy.docker_image) or mode == "docker_ephemeral"
+    if use_docker and not docker_available():
+        # no_silent_degrade: docker isolation was requested but docker is not
+        # available. Degrade to host_sanitized rather than crashing the caller,
+        # and make the downgrade observable.
+        if observe is not None:
+            try:
+                observe.emit(
+                    "runtime_isolation_degraded",
+                    payload={
+                        "requested_mode": mode,
+                        "effective_mode": "host_sanitized",
+                        "reason": "docker_unavailable",
+                    },
+                )
+            except Exception:
+                logger.debug("runtime isolation degrade observe emit failed", exc_info=True)
+        use_docker = False
+        mode = "host_sanitized"
+    if use_docker:
         result = _docker_run(command, cwd=cwd, policy=policy, shell=shell, env_result=env_result)
     else:
         result = _limited_run(command, cwd=cwd, policy=policy, shell=shell, env_result=env_result)
@@ -100,7 +120,7 @@ def _docker_run(
     env_result = env_result or sanitize_child_env()
     docker_args = [
         "docker", "run", "--rm",
-        f"--cpus={policy.cpu_seconds}",
+        f"--cpus={policy.cpu_count}",
         f"--memory={policy.memory_mb}m",
         f"--pids-limit={policy.max_processes}",
         "--read-only",
