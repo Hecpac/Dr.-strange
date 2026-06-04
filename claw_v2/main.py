@@ -73,12 +73,15 @@ from claw_v2.types import LLMResponse
 from claw_v2.workspace import AgentWorkspace
 from claw_v2.wiki import WikiService
 from claw_v2.scheduled_background_jobs import (
+    KAIROS_TICK_JOB_KIND,
+    KAIROS_TICK_RESUME_KEY,
     PERF_OPTIMIZER_JOB_KIND,
     PERF_OPTIMIZER_RESUME_KEY,
     WIKI_RESEARCH_JOB_KIND,
     WIKI_RESEARCH_RESUME_KEY,
     ScheduledBackgroundJobRunner,
     enqueue_scheduled_background_job,
+    kairos_tick_result_summary,
     safe_non_negative_int,
     wiki_research_result_summary,
 )
@@ -1219,6 +1222,21 @@ def _setup_scheduler(
             },
         )
 
+    if daemon is not None and job_service is not None:
+        kairos_tick_runner = ScheduledBackgroundJobRunner(
+            job_name="kairos_tick",
+            job_kind=KAIROS_TICK_JOB_KIND,
+            job_service=job_service,
+            handler=lambda _payload: kairos.tick(),
+            observe=observe,
+            worker_id="kairos-tick-runner",
+            result_summary=kairos_tick_result_summary,
+        )
+        daemon.register_background_job_runner(
+            name="kairos_tick",
+            handler=lambda: kairos_tick_runner.run_available(limit=1),
+        )
+
     scheduler.register(ScheduledJob(name="heartbeat", interval_seconds=config.heartbeat_interval, handler=heartbeat.emit))
     scheduler.register(ScheduledJob(name="task_lifecycle_watchdog", interval_seconds=300, handler=_task_lifecycle_watchdog_handler))
     scheduler.register(
@@ -1228,7 +1246,13 @@ def _setup_scheduler(
             handler=_wrap_job_handler(
                 name="kairos_tick",
                 observe=observe,
-                handler=kairos.tick,
+                handler=lambda: enqueue_scheduled_background_job(
+                    job_name="kairos_tick",
+                    job_kind=KAIROS_TICK_JOB_KIND,
+                    resume_key=KAIROS_TICK_RESUME_KEY,
+                    job_service=job_service,
+                    observe=observe,
+                ),
                 skip_if=_maintenance_skip,
             ),
         )
