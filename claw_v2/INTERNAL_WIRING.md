@@ -74,10 +74,10 @@ invariants:
           ClawDaemon background runner, not in daemon.tick()'s control path.
     migrated:
       - skill_expand -> scheduler.skill_expand  # PR1B-a, uses JobService + SkillExpandJobRunner
+      - wiki_research -> scheduler.wiki_research  # PR1B-b, uses JobService + ScheduledBackgroundJobRunner
+      - perf_optimizer -> scheduler.perf_optimizer  # PR1B-b, uses JobService + ScheduledBackgroundJobRunner
     pending_migration:
       - kairos_tick
-      - wiki_research
-      - perf_optimizer
     why: CronScheduler.run_due() still invokes handlers synchronously. Any
          provider call, code generation, verifier, subprocess, or research
          workload left inline can freeze the daemon tick and delay heartbeat /

@@ -72,6 +72,15 @@ from claw_v2.terminal_bridge import TerminalBridgeService
 from claw_v2.types import LLMResponse
 from claw_v2.workspace import AgentWorkspace
 from claw_v2.wiki import WikiService
+from claw_v2.scheduled_background_jobs import (
+    PERF_OPTIMIZER_JOB_KIND,
+    PERF_OPTIMIZER_RESUME_KEY,
+    WIKI_RESEARCH_JOB_KIND,
+    WIKI_RESEARCH_RESUME_KEY,
+    ScheduledBackgroundJobRunner,
+    enqueue_scheduled_background_job,
+    wiki_research_result_summary,
+)
 from claw_v2.skill_expand_jobs import SkillExpandJobRunner, enqueue_skill_expand_job
 
 logger = logging.getLogger(__name__)
@@ -976,6 +985,7 @@ def _setup_scheduler(
     startup_health: StartupHealthReport,
     approvals: ApprovalManager,
     job_service: JobService | None = None,
+    daemon: ClawDaemon | None = None,
 ) -> tuple[CronScheduler, AutoDreamService, WikiService, SkillRegistry, A2AService]:
     def _cron_error_sink(job: ScheduledJob, exc: BaseException) -> None:
         observe.emit(
@@ -1269,6 +1279,34 @@ def _setup_scheduler(
     wiki = WikiService(router=router, observe=observe)
     bot.wiki = wiki
     kairos.wiki = wiki
+    if daemon is not None and job_service is not None:
+        wiki_research_runner = ScheduledBackgroundJobRunner(
+            job_name="wiki_research",
+            job_kind=WIKI_RESEARCH_JOB_KIND,
+            job_service=job_service,
+            handler=lambda payload: wiki.auto_research(
+                max_topics=max(0, int(payload.get("max_topics", 3)))
+            ),
+            observe=observe,
+            worker_id="wiki-research-runner",
+            result_summary=wiki_research_result_summary,
+        )
+        daemon.register_background_job_runner(
+            name="wiki_research",
+            handler=lambda: wiki_research_runner.run_available(limit=1),
+        )
+        perf_optimizer_runner = ScheduledBackgroundJobRunner(
+            job_name="perf_optimizer",
+            job_kind=PERF_OPTIMIZER_JOB_KIND,
+            job_service=job_service,
+            handler=lambda _payload: _perf_optimizer_handler(),
+            observe=observe,
+            worker_id="perf-optimizer-runner",
+        )
+        daemon.register_background_job_runner(
+            name="perf_optimizer",
+            handler=lambda: perf_optimizer_runner.run_available(limit=1),
+        )
     scheduler.register(
         ScheduledJob(
             name="wiki_lint",
@@ -1298,7 +1336,17 @@ def _setup_scheduler(
             name="wiki_research",
             interval_seconds=43200,
             handler=_wrap_job_handler(
-                name="wiki_research", observe=observe, handler=wiki.auto_research, skip_if=_maintenance_skip,
+                name="wiki_research",
+                observe=observe,
+                handler=lambda: enqueue_scheduled_background_job(
+                    job_name="wiki_research",
+                    job_kind=WIKI_RESEARCH_JOB_KIND,
+                    resume_key=WIKI_RESEARCH_RESUME_KEY,
+                    job_service=job_service,
+                    observe=observe,
+                    payload={"max_topics": 3},
+                ),
+                skip_if=_maintenance_skip,
             ),
         )
     )
@@ -1354,7 +1402,13 @@ def _setup_scheduler(
             handler=_wrap_job_handler(
                 name="perf_optimizer",
                 observe=observe,
-                handler=_perf_optimizer_handler,
+                handler=lambda: enqueue_scheduled_background_job(
+                    job_name="perf_optimizer",
+                    job_kind=PERF_OPTIMIZER_JOB_KIND,
+                    resume_key=PERF_OPTIMIZER_RESUME_KEY,
+                    job_service=job_service,
+                    observe=observe,
+                ),
                 skip_if=_skip_maintenance_or("git"),
             ),
         )
@@ -1510,6 +1564,7 @@ def build_runtime(
         startup_health=startup_health,
         approvals=approvals,
         job_service=job_service,
+        daemon=daemon,
     )
     daemon.scheduler = scheduler
     skill_expand_runner = SkillExpandJobRunner(
