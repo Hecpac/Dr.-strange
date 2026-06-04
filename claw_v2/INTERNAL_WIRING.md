@@ -614,6 +614,30 @@ draft + pending approval — they call `approvals.create(...)` and emit
 fully autonomously the operator sets `KAIROS_AUTO_PUBLISH_SOCIAL=1` or
 `KAIROS_AUTO_DEPLOY=1`; default off. See invariant §1 `kairos_external_mutation_gated`.
 
+### 5.9 CodeSkill governance
+
+`SkillRegistry` is the enforcement point for generated executable skills.
+Tool tier policy still applies at `SkillExecute`, but CodeSkills can also be
+created by Kairos and the scheduled `skill_expand` runner, so governance is
+centralized in `claw_v2/skills.py`.
+
+Contract:
+
+```yaml
+generated_skill_status: pending_review
+execute_allowed_status: active
+sensitive_generation_targets: denied_before_router_call
+invalid_skill_names: denied_before_file_write
+events:
+  allow: codeskill_governance_allowed
+  deny: codeskill_governance_denied
+```
+
+Generated skills may be written and tested, but they are not executable until
+explicitly activated outside the generation path. Denials fail closed and emit
+audit events without persisting raw prompts, generated code, or secret-like
+payloads.
+
 ---
 
 ## 6. do_not (prescriptive)

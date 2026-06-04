@@ -1396,7 +1396,7 @@ def _setup_scheduler(
         skip_if=_maintenance_skip,
     )
 
-    skill_registry = SkillRegistry(router=router)
+    skill_registry = SkillRegistry(router=router, observe=observe)
     a2a = A2AService(router=router)
     kairos.skill_registry = skill_registry
     kairos.a2a = a2a
