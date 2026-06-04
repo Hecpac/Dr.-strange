@@ -202,6 +202,13 @@ class ScheduledBackgroundJobTests(unittest.TestCase):
         self.assertNotIn("sk-secret-value", summary["error_preview"])
         self.assertNotIn("detail", summary)
 
+    def test_kairos_tick_result_summary_defaults_none_action_to_unknown(self) -> None:
+        decision = TickDecision(action=None)  # type: ignore[arg-type]
+
+        summary = kairos_tick_result_summary(decision)
+
+        self.assertEqual(summary["action"], "unknown")
+
     def test_stale_running_perf_optimizer_job_is_reclaimed_and_completed(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             observe = MagicMock()
