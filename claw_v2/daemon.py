@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import time
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import Any, Callable
 
 from claw_v2.cron import CronScheduler
 from claw_v2.heartbeat import HeartbeatService, HeartbeatSnapshot
@@ -14,6 +15,11 @@ from claw_v2.task_ledger import TaskLedger
 from claw_v2.tracing import new_trace_context
 
 logger = logging.getLogger(__name__)
+
+PENDING_VERIFICATION_RECONCILIATION_JOB_KIND = "daemon.pending_verification_reconciliation"
+PENDING_VERIFICATION_RECONCILIATION_RESUME_KEY = "daemon:pending_verification_reconciliation"
+PENDING_VERIFICATION_RECONCILIATION_STALE_RUNNING_SECONDS = 120.0
+_ERROR_PREVIEW_LIMIT = 200
 
 
 def _env_flag(name: str) -> bool:
@@ -66,7 +72,7 @@ class ClawDaemon:
         trace = new_trace_context(artifact_id="daemon_tick")
         reconciled_lost = self._reconcile_stale_tasks(now=now)
         reconciled_orphan_jobs = self._reconcile_orphaned_jobs()
-        reconciled_pending = self._reconcile_pending_verification(now=now)
+        pending_reconciliation_job_id = self._enqueue_pending_verification_reconciliation(now=now)
         executed_jobs = self.scheduler.run_due(now=now)
         snapshot = self.heartbeat.collect()
         if self.observe is not None:
@@ -76,11 +82,11 @@ class ClawDaemon:
                 "reconciled_lost_tasks": reconciled_lost,
                 "reconciled_orphan_jobs": reconciled_orphan_jobs,
             }
-            # Omit the field when the reconciler did not run this tick, so a skip
-            # is not logged as a real backlog of 0 (the authoritative count lives
-            # in the pending_verification_reconciliation event).
-            if reconciled_pending is not None:
-                payload["pending_verification_unverified"] = reconciled_pending
+            # The authoritative backlog count lives in the async
+            # pending_verification_reconciliation job result/event, not in the
+            # daemon control path.
+            if pending_reconciliation_job_id is not None:
+                payload["pending_verification_reconciliation_job_id"] = pending_reconciliation_job_id
             self.observe.emit(
                 "daemon_tick",
                 trace_id=trace["trace_id"],
@@ -138,49 +144,85 @@ class ClawDaemon:
             )
         return changed
 
-    def _reconcile_pending_verification(self, *, now: float | None = None) -> int | None:
-        """Dry-run telemetry for the completed_unverified backlog (P1 Checkpoint A).
+    def _enqueue_pending_verification_reconciliation(self, *, now: float | None = None) -> str | None:
+        """Enqueue pending-verification reconciliation work outside daemon tick.
 
-        Returns the unverified count when the reconciler ran, or ``None`` when it
-        was skipped (no ledger / interval not elapsed) or failed — so
-        ``daemon_tick`` can distinguish "did not run" from "ran, backlog == 0".
-        Calls the reconciler so ``pending_verification_reconciliation`` is emitted
-        (it had no caller before); NEVER mutates ``agent_tasks``. A reconciler
-        failure is contained here so the rest of the tick (scheduler, stale/orphan
-        reconciliation) still runs. Interval-gated like ``_reconcile_stale_tasks``.
+        Returns the job id when a queued/running active job exists for this
+        reconciliation lane, or ``None`` when skipped (no ledger/job service,
+        interval not elapsed) or enqueue failed. The actual report and optional
+        drain run through ``JobService.claim_next`` in
+        ``PendingVerificationReconciliationJobRunner``.
         """
         if self.task_ledger is None:
             return None
         current = time.time() if now is None else now
         if current - self._last_pending_verification_at < self.pending_verification_interval:
             return None
-        from claw_v2.reconciliation import build_reconciliation_report
-
-        try:
-            report = build_reconciliation_report(self.task_ledger, observe=self.observe)
-        except Exception:
-            logger.exception("pending verification reconciliation failed")
-            return None
-        self._last_pending_verification_at = current
-        # Checkpoint D: gated live drain of the safe read-only subset. OFF by
-        # default; contained like the report above so a drain failure never
-        # stops the scheduler / stale / orphan reconciliation in this tick.
-        if self.pending_verification_drain_apply:
-            try:
-                self.task_ledger.drain_reconcilable_unverified(
-                    apply=True,
-                    max_scan=self.pending_verification_drain_max_scan,
-                    max_apply=self.pending_verification_drain_max_apply,
+        if self.job_service is None:
+            self._last_pending_verification_at = current
+            if self.observe is not None:
+                self.observe.emit(
+                    "pending_verification_reconciliation_enqueue_skipped",
+                    payload={"reason": "job_service_unavailable"},
                 )
-            except Exception:
-                logger.exception("pending verification drain failed")
-        return int(report.get("unverified_count", 0))
+            return None
+
+        payload = {
+            "requested_at": current,
+            "drain_apply": self.pending_verification_drain_apply,
+            "drain_max_apply": self.pending_verification_drain_max_apply,
+            "drain_max_scan": self.pending_verification_drain_max_scan,
+        }
+        metadata = {
+            "source": "daemon.tick",
+            "interval_seconds": self.pending_verification_interval,
+        }
+        try:
+            job = self.job_service.enqueue(
+                kind=PENDING_VERIFICATION_RECONCILIATION_JOB_KIND,
+                payload=payload,
+                resume_key=PENDING_VERIFICATION_RECONCILIATION_RESUME_KEY,
+                metadata=metadata,
+                max_attempts=3,
+            )
+        except Exception as exc:
+            logger.exception("pending verification reconciliation enqueue failed")
+            if self.observe is not None:
+                self.observe.emit(
+                    "pending_verification_reconciliation_enqueue_error",
+                    payload={"error": str(exc)},
+                )
+            return None
+
+        self._last_pending_verification_at = current
+        if self.observe is not None:
+            self.observe.emit(
+                "pending_verification_reconciliation_enqueued",
+                payload={
+                    "job_id": job.job_id,
+                    "kind": job.kind,
+                    "status": job.status,
+                    "resume_key": job.resume_key,
+                },
+            )
+        return str(job.job_id)
 
     async def run_loop(self, shutdown: asyncio.Event, interval: float = 60.0) -> None:
-        liveness_task = None
+        background_tasks: list[asyncio.Task[None]] = []
         if self.observe is not None:
-            liveness_task = asyncio.create_task(
-                self._run_liveness_heartbeat_loop(shutdown, interval=interval)
+            background_tasks.append(
+                asyncio.create_task(
+                    self._run_liveness_heartbeat_loop(shutdown, interval=interval)
+                )
+            )
+        if self.job_service is not None and self.task_ledger is not None:
+            background_tasks.append(
+                asyncio.create_task(
+                    self._run_pending_verification_reconciliation_job_loop(
+                        shutdown,
+                        interval=interval,
+                    )
+                )
             )
         try:
             while not shutdown.is_set():
@@ -203,10 +245,11 @@ class ClawDaemon:
                 except asyncio.TimeoutError:
                     pass
         finally:
-            if liveness_task is not None:
-                liveness_task.cancel()
+            for task in background_tasks:
+                task.cancel()
+            for task in background_tasks:
                 try:
-                    await liveness_task
+                    await task
                 except asyncio.CancelledError:
                     pass
 
@@ -234,3 +277,240 @@ class ClawDaemon:
                 "source": "daemon_liveness_loop",
             },
         )
+
+    async def _run_pending_verification_reconciliation_job_loop(
+        self,
+        shutdown: asyncio.Event,
+        *,
+        interval: float,
+    ) -> None:
+        if self.job_service is None or self.task_ledger is None:
+            return
+        runner = PendingVerificationReconciliationJobRunner(
+            job_service=self.job_service,
+            task_ledger=self.task_ledger,
+            observe=self.observe,
+            should_stop=shutdown.is_set,
+        )
+        while not shutdown.is_set():
+            try:
+                await asyncio.to_thread(runner.run_available, limit=1)
+            except Exception as exc:
+                logger.exception("pending verification reconciliation runner failed")
+                if self.observe is not None:
+                    self.observe.emit(
+                        "pending_verification_reconciliation_runner_error",
+                        payload={"error": str(exc)},
+                    )
+            try:
+                await asyncio.wait_for(shutdown.wait(), timeout=interval)
+            except asyncio.TimeoutError:
+                pass
+
+
+class PendingVerificationReconciliationJobRunner:
+    """Minimal runner for the daemon pending-verification reconciliation job."""
+
+    def __init__(
+        self,
+        *,
+        job_service: Any,
+        task_ledger: TaskLedger,
+        observe: ObserveStream | None = None,
+        worker_id: str = "pending-verification-reconciler",
+        retry_delay_seconds: float = 60.0,
+        stale_running_seconds: float = PENDING_VERIFICATION_RECONCILIATION_STALE_RUNNING_SECONDS,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> None:
+        self.job_service = job_service
+        self.task_ledger = task_ledger
+        self.observe = observe
+        self.worker_id = worker_id
+        self.retry_delay_seconds = retry_delay_seconds
+        self.stale_running_seconds = max(0.001, float(stale_running_seconds))
+        self.should_stop = should_stop
+
+    def run_available(self, *, limit: int = 1, now: float | None = None) -> int:
+        if self._should_stop():
+            return 0
+        self.reclaim_stale_running(now=now)
+        claimed = 0
+        for _ in range(max(0, int(limit))):
+            if self._should_stop():
+                break
+            if not self.run_once(now=now):
+                break
+            claimed += 1
+        return claimed
+
+    def reclaim_stale_running(self, *, now: float | None = None) -> int:
+        current = time.time() if now is None else now
+        reclaimed = 0
+        running = self.job_service.list(
+            statuses=("running",),
+            kinds=(PENDING_VERIFICATION_RECONCILIATION_JOB_KIND,),
+            limit=100,
+        )
+        for job in running:
+            reference = job.updated_at or job.started_at or job.created_at or current
+            age_seconds = max(0.0, current - float(reference))
+            if age_seconds < self.stale_running_seconds:
+                continue
+            checkpoint = {
+                "reclaimed_at": current,
+                "age_seconds": age_seconds,
+                "previous_worker_id": job.worker_id or "",
+                "reason": "stale_running_timeout",
+            }
+            record = self.job_service.fail(
+                job.job_id,
+                error="stale_running_timeout",
+                retry=True,
+                retry_delay_seconds=0,
+                checkpoint=checkpoint,
+            )
+            reclaimed += 1
+            self._emit_job_event(
+                "daemon_reconciliation_job_stale_reclaimed",
+                job,
+                duration_seconds=age_seconds,
+                extra={
+                    "stale_running_seconds": self.stale_running_seconds,
+                    "source": "stale_running_reaper",
+                    "status": getattr(record, "status", None),
+                },
+            )
+        return reclaimed
+
+    def run_once(self, *, now: float | None = None) -> bool:
+        if self._should_stop():
+            return False
+        job = self.job_service.claim_next(
+            worker_id=self.worker_id,
+            kinds=(PENDING_VERIFICATION_RECONCILIATION_JOB_KIND,),
+            now=now,
+        )
+        if job is None:
+            return False
+        started = time.monotonic()
+        self._emit_job_event("daemon_reconciliation_job_started", job)
+        try:
+            result = self._execute(job)
+        except Exception as exc:
+            duration_seconds = time.monotonic() - started
+            logger.exception("pending verification reconciliation job failed")
+            self.job_service.fail(
+                job.job_id,
+                error=str(exc),
+                retry=True,
+                retry_delay_seconds=self.retry_delay_seconds,
+            )
+            self._emit_job_event(
+                "daemon_reconciliation_job_failed",
+                job,
+                duration_seconds=duration_seconds,
+                exc=exc,
+            )
+            return True
+        self.job_service.complete(job.job_id, result=result)
+        duration_seconds = time.monotonic() - started
+        self._emit_job_event(
+            "daemon_reconciliation_job_completed",
+            job,
+            duration_seconds=duration_seconds,
+            extra={
+                "unverified_count": result.get("unverified_count"),
+                "overdue_count": result.get("overdue_count"),
+                "drain_apply": result.get("drain_apply"),
+            },
+        )
+        if self.observe is not None:
+            self.observe.emit(
+                "pending_verification_reconciliation_job_completed",
+                payload={"job_id": job.job_id, **result},
+            )
+        return True
+
+    def _execute(self, job: Any) -> dict[str, Any]:
+        from claw_v2.reconciliation import build_reconciliation_report
+
+        report = build_reconciliation_report(self.task_ledger, observe=self.observe)
+        payload = job.payload if isinstance(job.payload, dict) else {}
+        drain_apply = bool(payload.get("drain_apply", False))
+        result: dict[str, Any] = {
+            "unverified_count": int(report.get("unverified_count", 0)),
+            "overdue_count": int(report.get("overdue_count", 0)),
+            "by_recommended_action": dict(report.get("by_recommended_action", {}) or {}),
+            "drain_apply": drain_apply,
+        }
+        if not drain_apply:
+            return result
+
+        try:
+            drain_result = self.task_ledger.drain_reconcilable_unverified(
+                apply=True,
+                max_scan=int(payload.get("drain_max_scan", 500)),
+                max_apply=int(payload.get("drain_max_apply", 10)),
+            )
+        except Exception as exc:
+            logger.exception("pending verification drain failed")
+            result["drain_error"] = str(exc)
+            return result
+
+        result["drain_result"] = _compact_drain_result(drain_result)
+        return result
+
+    def _should_stop(self) -> bool:
+        return bool(self.should_stop and self.should_stop())
+
+    def _emit_job_event(
+        self,
+        event_type: str,
+        job: Any,
+        *,
+        duration_seconds: float | None = None,
+        exc: BaseException | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        if self.observe is None:
+            return
+        payload: dict[str, Any] = {
+            "job_id": job.job_id,
+            "kind": job.kind,
+            "attempts": job.attempts,
+        }
+        if duration_seconds is not None:
+            payload["duration_seconds"] = round(float(duration_seconds), 3)
+        if exc is not None:
+            payload["error_type"] = exc.__class__.__name__
+            payload["error_preview"] = _safe_error_preview(exc)
+        if extra:
+            payload.update(extra)
+        self.observe.emit(event_type, payload=payload)
+
+
+def _compact_drain_result(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    compact: dict[str, Any] = {}
+    missing = object()
+    for key in ("scanned", "eligible", "applied", "skipped", "scan_capped", "limit"):
+        raw = getattr(value, key, missing)
+        if raw is missing:
+            continue
+        if isinstance(raw, (str, int, float, bool, list, dict)) or raw is None:
+            compact[key] = raw
+    return compact
+
+
+def _safe_error_preview(exc: BaseException) -> str:
+    text = str(exc).replace("\n", " ").strip()
+    text = re.sub(
+        r"(?i)\b(api[_-]?key|token|password|secret|authorization|cookie)(\s*[=:]\s*)\S+",
+        r"\1\2REDACTED",
+        text,
+    )
+    text = re.sub(r"\bsk-[A-Za-z0-9_-]+", "REDACTED", text)
+    if len(text) > _ERROR_PREVIEW_LIMIT:
+        return f"{text[:_ERROR_PREVIEW_LIMIT]}..."
+    return text

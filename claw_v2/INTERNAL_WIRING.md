@@ -182,15 +182,26 @@ invariants:
           classify and apply is left for the human/verifier lane
           (`skipped_classification_changed`), distinct from a status/pending/
           overdue drift (`skipped_state_changed`). The batch rolls back on any
-          mid-loop failure. D (2026-05-30): the daemon tick
-          (`_reconcile_pending_verification`) calls the drain with `apply=True`
+          mid-loop failure. D (2026-05-30): the drain runs with `apply=True`
           ONLY when `CLAW_PENDING_VERIFICATION_DRAIN_APPLY` (default OFF) is set,
           bounded by the drain's `max_scan` (daemon arg
           `pending_verification_drain_max_scan`, default 500; oldest-first,
           `limit+1` proves `scan_capped`) and `max_apply` (daemon arg
-          `pending_verification_drain_max_apply`, default 10). The drain call is
-          contained in its own try/except so a failure never stops the
-          scheduler / stale / orphan reconciliation (like the A1 report guard).
+          `pending_verification_drain_max_apply`, default 10). PR1A
+          (2026-06-04): daemon tick no longer calls the report or drain inline.
+          It enqueues a `daemon.pending_verification_reconciliation` agent job
+          through `JobService.enqueue` with resume key
+          `daemon:pending_verification_reconciliation`; the
+          `ClawDaemon.run_loop` starts a background
+          `PendingVerificationReconciliationJobRunner` task that claims that
+          kind with `claim_next`, emits the dry-run report, and applies the
+          gated drain. The runner emits bounded lifecycle events
+          (`daemon_reconciliation_job_started` / completed / failed) and
+          reclaims stale `running` jobs of this kind before claiming so the
+          active `resume_key` cannot block reconciliation forever after a
+          process death or restart.
+          Report/drain failures are contained in job retry/result handling, so
+          scheduler / stale / orphan reconciliation stay out of the slow path.
     enforced_by:
       - tests/test_brain_tooluse_ledger.py
       - tests/test_completed_unverified_reconciliation.py
