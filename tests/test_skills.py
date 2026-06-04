@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -126,6 +127,56 @@ class SkillRegistryTests(unittest.TestCase):
             self.assertEqual(registry.list_skills(), [])
             denied = [payload for name, payload in observe.events if name == "codeskill_governance_denied"]
             self.assertEqual(denied[-1]["action"], "generate")
+
+    def test_generate_skill_blocks_dotenv_target_before_router(self) -> None:
+        class Router:
+            def ask(self, *args, **kwargs):
+                raise AssertionError("router should not be called")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = SkillRegistry(root=Path(tmp), router=Router())
+
+            result = registry.generate_skill(task_description="edit .env file")
+
+            self.assertFalse(result["success"])
+            self.assertTrue(result["blocked"])
+            self.assertEqual(result["reason"], "sensitive_generation_target_requires_approval")
+
+    def test_generate_skill_blocks_agents_md_target_before_router(self) -> None:
+        class Router:
+            def ask(self, *args, **kwargs):
+                raise AssertionError("router should not be called")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = SkillRegistry(root=Path(tmp), router=Router())
+
+            result = registry.generate_skill(task_description="update AGENTS.md instructions")
+
+            self.assertFalse(result["success"])
+            self.assertTrue(result["blocked"])
+            self.assertEqual(result["reason"], "sensitive_generation_target_requires_approval")
+
+    def test_governance_event_does_not_emit_raw_sensitive_tags(self) -> None:
+        observe = _RecordingObserve()
+
+        class Router:
+            def ask(self, *args, **kwargs):
+                raise AssertionError("router should not be called")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = SkillRegistry(root=Path(tmp), router=Router(), observe=observe)
+
+            registry.generate_skill(
+                task_description="create utility",
+                tags=["sk-secret-value"],
+            )
+
+            serialized = json.dumps(observe.events)
+            self.assertNotIn("sk-secret-value", serialized)
+            denied = [payload for name, payload in observe.events if name == "codeskill_governance_denied"]
+            self.assertEqual(denied[-1]["tag_count"], 1)
+            self.assertNotIn("tags", denied[-1])
+            self.assertRegex(denied[-1]["tag_sha256"][0], r"^[0-9a-f]{64}$")
 
     def test_generate_skill_blocks_path_traversal_name_without_writing(self) -> None:
         observe = _RecordingObserve()

@@ -32,7 +32,7 @@ _ACTIVE_SKILL_STATUS = "active"
 _SKILL_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _SENSITIVE_TARGET_RE = re.compile(
     r"(?i)(?:"
-    r"(?:^|[/\\])(?:\.env|AGENTS\.md|BOOT_PROTOCOL\.md|SOUL\.md|IDENTITY\.md|USER\.md|MEMORY\.md|CLAUDE\.md|TOOLS\.md|HEARTBEAT\.md)(?:$|[/\\])"
+    r"(?<![\w.-])(?:\.env|AGENTS\.md|BOOT_PROTOCOL\.md|SOUL\.md|IDENTITY\.md|USER\.md|MEMORY\.md|CLAUDE\.md|TOOLS\.md|HEARTBEAT\.md)(?![\w.-])"
     r"|tool_policies\.json"
     r"|ops[/\\]"
     r"|com\.pachano\.claw\.plist"
@@ -687,7 +687,12 @@ class SkillRegistry:
         if status:
             payload["status"] = status
         if tags:
-            payload["tags"] = list(tags)[:20]
+            tag_values = [str(tag) for tag in tags[:20]]
+            payload["tag_count"] = len(tags)
+            payload["tag_sha256"] = [
+                hashlib.sha256(tag.encode("utf-8")).hexdigest()
+                for tag in tag_values
+            ]
         if task_description is not None:
             payload["task_length"] = len(task_description)
             payload["task_sha256"] = hashlib.sha256(task_description.encode("utf-8")).hexdigest()
