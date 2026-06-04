@@ -196,10 +196,10 @@ invariants:
           `PendingVerificationReconciliationJobRunner` task that claims that
           kind with `claim_next`, emits the dry-run report, and applies the
           gated drain. The runner emits bounded lifecycle events
-          (`daemon_reconciliation_job_started` / completed / failed / timeout),
-          fails timed-out jobs back to retry, and reclaims stale `running`
-          jobs of this kind before claiming so the active `resume_key` cannot
-          block reconciliation forever after a process death.
+          (`daemon_reconciliation_job_started` / completed / failed) and
+          reclaims stale `running` jobs of this kind before claiming so the
+          active `resume_key` cannot block reconciliation forever after a
+          process death or restart.
           Report/drain failures are contained in job retry/result handling, so
           scheduler / stale / orphan reconciliation stay out of the slow path.
     enforced_by:

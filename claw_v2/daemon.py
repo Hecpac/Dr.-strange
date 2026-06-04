@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
 import logging
 import os
 import re
@@ -19,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 PENDING_VERIFICATION_RECONCILIATION_JOB_KIND = "daemon.pending_verification_reconciliation"
 PENDING_VERIFICATION_RECONCILIATION_RESUME_KEY = "daemon:pending_verification_reconciliation"
-PENDING_VERIFICATION_RECONCILIATION_TIMEOUT_SECONDS = 120.0
+PENDING_VERIFICATION_RECONCILIATION_STALE_RUNNING_SECONDS = 120.0
 _ERROR_PREVIEW_LIMIT = 200
 
 
@@ -320,7 +319,7 @@ class PendingVerificationReconciliationJobRunner:
         observe: ObserveStream | None = None,
         worker_id: str = "pending-verification-reconciler",
         retry_delay_seconds: float = 60.0,
-        job_timeout_seconds: float = PENDING_VERIFICATION_RECONCILIATION_TIMEOUT_SECONDS,
+        stale_running_seconds: float = PENDING_VERIFICATION_RECONCILIATION_STALE_RUNNING_SECONDS,
         should_stop: Callable[[], bool] | None = None,
     ) -> None:
         self.job_service = job_service
@@ -328,7 +327,7 @@ class PendingVerificationReconciliationJobRunner:
         self.observe = observe
         self.worker_id = worker_id
         self.retry_delay_seconds = retry_delay_seconds
-        self.job_timeout_seconds = max(0.001, float(job_timeout_seconds))
+        self.stale_running_seconds = max(0.001, float(stale_running_seconds))
         self.should_stop = should_stop
 
     def run_available(self, *, limit: int = 1, now: float | None = None) -> int:
@@ -355,7 +354,7 @@ class PendingVerificationReconciliationJobRunner:
         for job in running:
             reference = job.updated_at or job.started_at or job.created_at or current
             age_seconds = max(0.0, current - float(reference))
-            if age_seconds < self.job_timeout_seconds:
+            if age_seconds < self.stale_running_seconds:
                 continue
             checkpoint = {
                 "reclaimed_at": current,
@@ -372,11 +371,11 @@ class PendingVerificationReconciliationJobRunner:
             )
             reclaimed += 1
             self._emit_job_event(
-                "daemon_reconciliation_job_timeout",
+                "daemon_reconciliation_job_stale_reclaimed",
                 job,
                 duration_seconds=age_seconds,
                 extra={
-                    "timeout_seconds": self.job_timeout_seconds,
+                    "stale_running_seconds": self.stale_running_seconds,
                     "source": "stale_running_reaper",
                     "status": getattr(record, "status", None),
                 },
@@ -396,43 +395,7 @@ class PendingVerificationReconciliationJobRunner:
         started = time.monotonic()
         self._emit_job_event("daemon_reconciliation_job_started", job)
         try:
-            result = self._execute_with_timeout(job)
-        except TimeoutError as exc:
-            duration_seconds = time.monotonic() - started
-            self.job_service.fail(
-                job.job_id,
-                error=str(exc),
-                retry=True,
-                retry_delay_seconds=0,
-                checkpoint={
-                    "timeout_seconds": self.job_timeout_seconds,
-                    "duration_seconds": duration_seconds,
-                },
-            )
-            self._emit_job_event(
-                "daemon_reconciliation_job_timeout",
-                job,
-                duration_seconds=duration_seconds,
-                exc=exc,
-                extra={"timeout_seconds": self.job_timeout_seconds},
-            )
-            return True
-        except _RunnerShutdownRequested as exc:
-            duration_seconds = time.monotonic() - started
-            self.job_service.fail(
-                job.job_id,
-                error=str(exc),
-                retry=True,
-                retry_delay_seconds=0,
-                checkpoint={"duration_seconds": duration_seconds, "reason": "shutdown_requested"},
-            )
-            self._emit_job_event(
-                "daemon_reconciliation_job_failed",
-                job,
-                duration_seconds=duration_seconds,
-                exc=exc,
-            )
-            return True
+            result = self._execute(job)
         except Exception as exc:
             duration_seconds = time.monotonic() - started
             logger.exception("pending verification reconciliation job failed")
@@ -467,32 +430,6 @@ class PendingVerificationReconciliationJobRunner:
                 payload={"job_id": job.job_id, **result},
             )
         return True
-
-    def _execute_with_timeout(self, job: Any) -> dict[str, Any]:
-        started = time.monotonic()
-        executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=1,
-            thread_name_prefix="pending-reconciliation-job",
-        )
-        future = executor.submit(self._execute, job)
-        try:
-            while True:
-                if self._should_stop():
-                    future.cancel()
-                    raise _RunnerShutdownRequested("shutdown_requested")
-                elapsed = time.monotonic() - started
-                remaining = self.job_timeout_seconds - elapsed
-                if remaining <= 0:
-                    future.cancel()
-                    raise TimeoutError(
-                        f"job exceeded timeout_seconds={self.job_timeout_seconds:g}"
-                    )
-                try:
-                    return future.result(timeout=min(0.1, remaining))
-                except concurrent.futures.TimeoutError:
-                    continue
-        finally:
-            executor.shutdown(wait=False, cancel_futures=True)
 
     def _execute(self, job: Any) -> dict[str, Any]:
         from claw_v2.reconciliation import build_reconciliation_report
@@ -550,10 +487,6 @@ class PendingVerificationReconciliationJobRunner:
         if extra:
             payload.update(extra)
         self.observe.emit(event_type, payload=payload)
-
-
-class _RunnerShutdownRequested(Exception):
-    pass
 
 
 def _compact_drain_result(value: Any) -> dict[str, Any]:

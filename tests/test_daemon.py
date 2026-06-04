@@ -271,7 +271,7 @@ class DaemonTickTests(unittest.TestCase):
                 job_service=jobs,
                 task_ledger=ledger,
                 observe=observe,
-                job_timeout_seconds=1,
+                stale_running_seconds=1,
             )
             processed = runner.run_available(now=claimed_at + 2)
 
@@ -281,51 +281,16 @@ class DaemonTickTests(unittest.TestCase):
             self.assertEqual(job.status, "completed")
             self.assertEqual(job.attempts, 2)
             ledger.list.assert_called_once_with(statuses=("completed_unverified",), limit=100)
-            timeout_events = [
+            stale_events = [
                 c.kwargs["payload"]
                 for c in observe.emit.call_args_list
-                if c.args[0] == "daemon_reconciliation_job_timeout"
+                if c.args[0] == "daemon_reconciliation_job_stale_reclaimed"
             ]
-            self.assertEqual(timeout_events[0]["source"], "stale_running_reaper")
-            self.assertEqual(timeout_events[0]["job_id"], stuck.job_id)
+            self.assertEqual(stale_events[0]["source"], "stale_running_reaper")
+            self.assertEqual(stale_events[0]["job_id"], stuck.job_id)
             event_names = [c.args[0] for c in observe.emit.call_args_list]
             self.assertIn("daemon_reconciliation_job_started", event_names)
             self.assertIn("daemon_reconciliation_job_completed", event_names)
-
-    def test_reconciliation_job_timeout_retries_and_emits_event(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            ledger = MagicMock()
-            ledger.mark_stale_running_lost.return_value = 0
-            jobs = JobService(Path(tmpdir) / "claw.db")
-            daemon, observe = self._make_daemon_with_ledger(ledger, job_service=jobs)
-            daemon.tick(now=1_000_000)
-            runner = PendingVerificationReconciliationJobRunner(
-                job_service=jobs,
-                task_ledger=ledger,
-                observe=observe,
-                job_timeout_seconds=0.01,
-            )
-
-            def slow_execute(job):
-                time.sleep(0.05)
-                return {"unverified_count": 0, "overdue_count": 0, "drain_apply": False}
-
-            runner._execute = slow_execute
-            self.assertTrue(runner.run_once())
-            time.sleep(0.06)
-
-            job = jobs.list(kinds=(PENDING_VERIFICATION_RECONCILIATION_JOB_KIND,), limit=10)[0]
-            self.assertEqual(job.status, "retrying")
-            self.assertIn("timeout_seconds", job.error)
-            timeout_events = [
-                c.kwargs["payload"]
-                for c in observe.emit.call_args_list
-                if c.args[0] == "daemon_reconciliation_job_timeout"
-            ]
-            self.assertEqual(len(timeout_events), 1)
-            self.assertEqual(timeout_events[0]["job_id"], job.job_id)
-            self.assertEqual(timeout_events[0]["error_type"], "TimeoutError")
-            self.assertIn("error_preview", timeout_events[0])
 
     def test_reconciliation_runner_respects_shutdown_before_claim(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -393,6 +358,15 @@ class DaemonTickTests(unittest.TestCase):
             job = jobs.list(kinds=(PENDING_VERIFICATION_RECONCILIATION_JOB_KIND,), limit=10)[0]
             self.assertEqual(job.status, "retrying")
             self.assertEqual(job.error, "boom")
+            failed_events = [
+                c.kwargs["payload"]
+                for c in observe.emit.call_args_list
+                if c.args[0] == "daemon_reconciliation_job_failed"
+            ]
+            self.assertEqual(len(failed_events), 1)
+            self.assertEqual(failed_events[0]["job_id"], job.job_id)
+            self.assertEqual(failed_events[0]["error_type"], "RuntimeError")
+            self.assertEqual(failed_events[0]["error_preview"], "boom")
             probe = MagicMock()
             daemon.scheduler.register(ScheduledJob(name="probe", interval_seconds=60, handler=probe))
 
