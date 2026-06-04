@@ -8,9 +8,9 @@
 ## meta
 
 ```yaml
-describes_commit: 448ef39+pr2-checkpoint-d
-doc_version: 1.9
-last_verified: 2026-05-30
+describes_commit: 3cca79f+pr1b-a-skill-expand-job
+doc_version: 2.1
+last_verified: 2026-06-04
 verification_method: manual + grep cross-check
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
@@ -67,6 +67,21 @@ invariants:
          entirely (calling adapter.publish or subprocess directly) would
          escape every gate. The pending-record path forces a human action
          from Telegram before the side effect lands.
+
+  scheduler_slow_jobs_off_tick:
+    rule: CronScheduler handlers for LLM/subprocess/heavy autonomous jobs should
+          enqueue durable agent_jobs and return quickly; execution belongs in a
+          ClawDaemon background runner, not in daemon.tick()'s control path.
+    migrated:
+      - skill_expand -> scheduler.skill_expand  # PR1B-a, uses JobService + SkillExpandJobRunner
+    pending_migration:
+      - kairos_tick
+      - wiki_research
+      - perf_optimizer
+    why: CronScheduler.run_due() still invokes handlers synchronously. Any
+         provider call, code generation, verifier, subprocess, or research
+         workload left inline can freeze the daemon tick and delay heartbeat /
+         reconciliation observability.
 
   evidence_gate_meta_skip_sync_path:
     rule: The chain handle_text → _brain_text_response →

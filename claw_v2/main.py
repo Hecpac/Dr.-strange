@@ -72,6 +72,7 @@ from claw_v2.terminal_bridge import TerminalBridgeService
 from claw_v2.types import LLMResponse
 from claw_v2.workspace import AgentWorkspace
 from claw_v2.wiki import WikiService
+from claw_v2.skill_expand_jobs import SkillExpandJobRunner, enqueue_skill_expand_job
 
 logger = logging.getLogger(__name__)
 
@@ -974,6 +975,7 @@ def _setup_scheduler(
     pipeline: PipelineService,
     startup_health: StartupHealthReport,
     approvals: ApprovalManager,
+    job_service: JobService | None = None,
 ) -> tuple[CronScheduler, AutoDreamService, WikiService, SkillRegistry, A2AService]:
     def _cron_error_sink(job: ScheduledJob, exc: BaseException) -> None:
         observe.emit(
@@ -1329,7 +1331,10 @@ def _setup_scheduler(
             handler=_wrap_job_handler(
                 name="skill_expand",
                 observe=observe,
-                handler=skill_registry.auto_expand,
+                handler=lambda: enqueue_skill_expand_job(
+                    job_service=job_service,
+                    observe=observe,
+                ),
                 skip_if=_maintenance_skip,
             ),
         )
@@ -1504,8 +1509,18 @@ def build_runtime(
         pipeline=pipeline,
         startup_health=startup_health,
         approvals=approvals,
+        job_service=job_service,
     )
     daemon.scheduler = scheduler
+    skill_expand_runner = SkillExpandJobRunner(
+        job_service=job_service,
+        skill_registry=skill_registry,
+        observe=observe,
+    )
+    daemon.register_background_job_runner(
+        name="skill_expand",
+        handler=lambda: skill_expand_runner.run_available(limit=1),
+    )
     brain.wiki = wiki
     agent_runtime = AgentRuntime(bot_service=bot, memory=memory, observe=observe)
     recovered_orphans = recover_orphan_actions(config.telemetry_root, observe=observe)
