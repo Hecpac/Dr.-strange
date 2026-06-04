@@ -424,7 +424,7 @@ class CoordinatorService:
         kwargs: dict[str, Any] = {
             "lane": task.lane,
             "role": self._role_for_worker_task(task),
-            "timeout": task.timeout_seconds or self._timeout_for_worker_task(task),
+            "timeout": task.timeout_seconds if task.timeout_seconds is not None else self._timeout_for_worker_task(task),
             "evidence_pack": attach_trace({"coordinator_task": task.name}, task_trace),
         }
         if task.assigned_agent and task.assigned_agent in self.agent_registry:
@@ -542,7 +542,11 @@ class CoordinatorService:
                 model=(lane_overrides or {}).get("research", {}).get("model"),
                 effort=(lane_overrides or {}).get("research", {}).get("effort"),
                 role="coordinator_research",
-                timeout=float((lane_overrides or {}).get("research", {}).get("timeout") or self.default_research_timeout_seconds),
+                timeout=_lane_override_timeout(
+                    lane_overrides,
+                    "research",
+                    default=self.default_research_timeout_seconds,
+                ),
                 evidence_pack=attach_trace(
                     {"coordinator_phase": "synthesis", "objective": objective},
                     synthesis_trace,
@@ -704,7 +708,11 @@ class CoordinatorService:
                 model=(lane_overrides or {}).get("research", {}).get("model"),
                 effort=(lane_overrides or {}).get("research", {}).get("effort"),
                 role="coordinator_research",
-                timeout=float((lane_overrides or {}).get("research", {}).get("timeout") or self.default_research_timeout_seconds),
+                timeout=_lane_override_timeout(
+                    lane_overrides,
+                    "research",
+                    default=self.default_research_timeout_seconds,
+                ),
                 evidence_pack=attach_trace(
                     {"coordinator_phase": "semantic_distillation", "limit": limit},
                     distill_trace,
@@ -1006,6 +1014,18 @@ def _worker_result_payload(result: WorkerResult) -> dict[str, Any]:
         "error": result.error,
         "degraded_compaction": result.degraded_compaction,
     }
+
+
+def _lane_override_timeout(
+    lane_overrides: dict[str, dict[str, Any]] | None,
+    lane: str,
+    *,
+    default: float,
+) -> float:
+    value = (lane_overrides or {}).get(lane, {}).get("timeout")
+    if value is None:
+        return float(default)
+    return float(value)
 
 
 def _phase_results_summary(results: list[WorkerResult], *, limit: int) -> str:

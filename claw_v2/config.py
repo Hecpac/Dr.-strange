@@ -786,13 +786,16 @@ class AppConfig:
         if role == "coordinator_worker":
             return self.worker_model
         provider = self.provider_for_role(role)
+        if role == "coordinator_verification":
+            if self.verifier_provider and self.verifier_model:
+                return self.verifier_model
+            return self.advisory_model_for_provider(provider)
         explicit = {
             "research_synthesis": self.research_model,
             "control_judge": self.control_judge_model,
             "control_verifier": self.control_verifier_model,
             "critical_verifier": self.critical_verifier_model,
             "coordinator_research": self.research_model,
-            "coordinator_verification": self.verifier_model,
         }.get(role)
         if explicit:
             return explicit

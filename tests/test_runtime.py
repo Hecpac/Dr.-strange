@@ -138,6 +138,29 @@ class RuntimeTests(unittest.TestCase):
                 self.assertEqual((hex_def.provider, hex_def.model), ("openai", "gpt-5.5"))
                 self.assertEqual((eval_def.provider, eval_def.model), ("anthropic", "claude-opus-4-7"))
 
+    def test_build_runtime_wires_coordinator_timeout_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "PIPELINE_STATE_ROOT": str(root / "pipeline"),
+                "CLAW_PROVIDER_TIMEOUT_COORDINATOR_WORKER_SECONDS": "121",
+                "CLAW_PROVIDER_TIMEOUT_COORDINATOR_RESEARCH_SECONDS": "91",
+                "CLAW_PROVIDER_TIMEOUT_COORDINATOR_VERIFICATION_SECONDS": "61",
+                "CLAW_PROVIDER_TIMEOUT_COORDINATOR_IMPLEMENTATION_SECONDS": "181",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+
+            self.assertEqual(runtime.coordinator.default_worker_timeout_seconds, 121.0)
+            self.assertEqual(runtime.coordinator.default_research_timeout_seconds, 91.0)
+            self.assertEqual(runtime.coordinator.default_verification_timeout_seconds, 61.0)
+            self.assertEqual(runtime.coordinator.default_implementation_timeout_seconds, 181.0)
+
     def test_build_runtime_bootstraps_agent_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
