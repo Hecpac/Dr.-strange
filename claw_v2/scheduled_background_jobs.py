@@ -14,6 +14,8 @@ WIKI_RESEARCH_JOB_KIND = "scheduler.wiki_research"
 WIKI_RESEARCH_RESUME_KEY = "scheduler:wiki_research"
 PERF_OPTIMIZER_JOB_KIND = "scheduler.perf_optimizer"
 PERF_OPTIMIZER_RESUME_KEY = "scheduler:perf_optimizer"
+KAIROS_TICK_JOB_KIND = "scheduler.kairos_tick"
+KAIROS_TICK_RESUME_KEY = "scheduler:kairos_tick"
 SCHEDULED_BACKGROUND_STALE_RUNNING_SECONDS = 60 * 60
 _ERROR_PREVIEW_LIMIT = 200
 _RESULT_STRING_LIMIT = 200
@@ -233,6 +235,21 @@ def wiki_research_result_summary(result: object) -> dict[str, Any]:
     }
 
 
+def kairos_tick_result_summary(result: object) -> dict[str, Any]:
+    action = _safe_text_preview(str(getattr(result, "action", "")), limit=_RESULT_STRING_LIMIT)
+    summary: dict[str, Any] = {
+        "action": action or "unknown",
+        "duration_seconds": _safe_float(getattr(result, "duration_seconds", 0.0)),
+    }
+    reason = str(getattr(result, "reason", "") or "")
+    if reason:
+        summary["reason_preview"] = _safe_text_preview(reason, limit=_RESULT_STRING_LIMIT)
+    error = str(getattr(result, "error", "") or "")
+    if error:
+        summary["error_preview"] = _safe_text_preview(error, limit=_RESULT_STRING_LIMIT)
+    return summary
+
+
 def safe_non_negative_int(value: object, *, default: int) -> int:
     if value is None:
         return max(0, int(default))
@@ -259,6 +276,13 @@ def _safe_int(value: object) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _safe_float(value: object) -> float:
+    try:
+        return round(float(value or 0.0), 3)
+    except (OverflowError, TypeError, ValueError):
+        return 0.0
 
 
 def _safe_error_preview(exc: BaseException) -> str:

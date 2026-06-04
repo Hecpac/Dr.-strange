@@ -13,14 +13,18 @@ from claw_v2.cron import CronScheduler, ScheduledJob
 from claw_v2.daemon import ClawDaemon
 from claw_v2.heartbeat import HeartbeatSnapshot
 from claw_v2.jobs import JobService
+from claw_v2.kairos import TickDecision
 from claw_v2.main import build_runtime
 from claw_v2.scheduled_background_jobs import (
+    KAIROS_TICK_JOB_KIND,
+    KAIROS_TICK_RESUME_KEY,
     PERF_OPTIMIZER_JOB_KIND,
     PERF_OPTIMIZER_RESUME_KEY,
     WIKI_RESEARCH_JOB_KIND,
     WIKI_RESEARCH_RESUME_KEY,
     ScheduledBackgroundJobRunner,
     enqueue_scheduled_background_job,
+    kairos_tick_result_summary,
     safe_non_negative_int,
     wiki_research_result_summary,
 )
@@ -95,18 +99,34 @@ class ScheduledBackgroundJobTests(unittest.TestCase):
                 resume_key=PERF_OPTIMIZER_RESUME_KEY,
                 job_service=jobs,
             )
+            kairos_first = enqueue_scheduled_background_job(
+                job_name="kairos_tick",
+                job_kind=KAIROS_TICK_JOB_KIND,
+                resume_key=KAIROS_TICK_RESUME_KEY,
+                job_service=jobs,
+            )
+            kairos_second = enqueue_scheduled_background_job(
+                job_name="kairos_tick",
+                job_kind=KAIROS_TICK_JOB_KIND,
+                resume_key=KAIROS_TICK_RESUME_KEY,
+                job_service=jobs,
+            )
 
             self.assertEqual(wiki_first, wiki_second)
             self.assertEqual(perf_first, perf_second)
+            self.assertEqual(kairos_first, kairos_second)
             self.assertNotEqual(wiki_first, perf_first)
+            self.assertNotEqual(wiki_first, kairos_first)
+            self.assertNotEqual(perf_first, kairos_first)
             self.assertEqual(len(jobs.list(kinds=(WIKI_RESEARCH_JOB_KIND,), limit=10)), 1)
             self.assertEqual(len(jobs.list(kinds=(PERF_OPTIMIZER_JOB_KIND,), limit=10)), 1)
+            self.assertEqual(len(jobs.list(kinds=(KAIROS_TICK_JOB_KIND,), limit=10)), 1)
             active = jobs.list(
                 statuses=("queued", "running", "retrying", "waiting_approval"),
-                kinds=(WIKI_RESEARCH_JOB_KIND, PERF_OPTIMIZER_JOB_KIND),
+                kinds=(WIKI_RESEARCH_JOB_KIND, PERF_OPTIMIZER_JOB_KIND, KAIROS_TICK_JOB_KIND),
                 limit=10,
             )
-            self.assertEqual(len(active), 2)
+            self.assertEqual(len(active), 3)
 
     def test_wiki_research_runner_completes_with_bounded_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -163,6 +183,25 @@ class ScheduledBackgroundJobTests(unittest.TestCase):
         self.assertEqual(safe_non_negative_int(-1, default=3), 0)
         self.assertEqual(safe_non_negative_int("2", default=3), 2)
 
+    def test_kairos_tick_result_summary_is_bounded_and_redacted(self) -> None:
+        decision = TickDecision(
+            action="notify_user",
+            reason='api_key = "secret with spaces"',
+            detail="raw detail should not persist",
+            duration_seconds=1.23456,
+            error="token=sk-secret-value",
+        )
+
+        summary = kairos_tick_result_summary(decision)
+
+        self.assertEqual(summary["action"], "notify_user")
+        self.assertEqual(summary["duration_seconds"], 1.235)
+        self.assertIn("REDACTED", summary["reason_preview"])
+        self.assertNotIn("secret with spaces", summary["reason_preview"])
+        self.assertIn("REDACTED", summary["error_preview"])
+        self.assertNotIn("sk-secret-value", summary["error_preview"])
+        self.assertNotIn("detail", summary)
+
     def test_stale_running_perf_optimizer_job_is_reclaimed_and_completed(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             observe = MagicMock()
@@ -202,6 +241,50 @@ class ScheduledBackgroundJobTests(unittest.TestCase):
                 call.kwargs["payload"]
                 for call in observe.emit.call_args_list
                 if call.args[0] == "perf_optimizer_job_stale_reclaimed"
+            ]
+            self.assertEqual(stale_events[0]["job_id"], stuck.job_id)
+
+    def test_stale_running_kairos_tick_job_is_reclaimed_and_completed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = MagicMock()
+            jobs = JobService(Path(tmpdir) / "claw.db")
+            handler = MagicMock(return_value=TickDecision(action="none"))
+            enqueue_scheduled_background_job(
+                job_name="kairos_tick",
+                job_kind=KAIROS_TICK_JOB_KIND,
+                resume_key=KAIROS_TICK_RESUME_KEY,
+                job_service=jobs,
+            )
+            claimed_at = time.time() + 1
+            stuck = jobs.claim_next(
+                worker_id="dead-worker",
+                kinds=(KAIROS_TICK_JOB_KIND,),
+                now=claimed_at,
+            )
+            self.assertIsNotNone(stuck)
+            runner = ScheduledBackgroundJobRunner(
+                job_name="kairos_tick",
+                job_kind=KAIROS_TICK_JOB_KIND,
+                job_service=jobs,
+                handler=handler,
+                observe=observe,
+                stale_running_seconds=1,
+                result_summary=kairos_tick_result_summary,
+            )
+
+            processed = runner.run_available(now=claimed_at + 2)
+
+            self.assertEqual(processed, 1)
+            handler.assert_called_once()
+            job = jobs.get(stuck.job_id)
+            self.assertIsNotNone(job)
+            self.assertEqual(job.status, "completed")
+            self.assertEqual(job.attempts, 2)
+            self.assertEqual(job.result["action"], "none")
+            stale_events = [
+                call.kwargs["payload"]
+                for call in observe.emit.call_args_list
+                if call.args[0] == "kairos_tick_job_stale_reclaimed"
             ]
             self.assertEqual(stale_events[0]["job_id"], stuck.job_id)
 
@@ -315,10 +398,67 @@ class ScheduledBackgroundJobTests(unittest.TestCase):
             self.assertIn("probe", result.executed_jobs)
             probe.assert_called_once()
 
+    def test_kairos_tick_failure_retries_observably_and_daemon_tick_continues(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = MagicMock()
+            jobs = JobService(Path(tmpdir) / "claw.db")
+            handler = MagicMock(side_effect=RuntimeError("boom token=sk-secret-value"))
+            enqueue_scheduled_background_job(
+                job_name="kairos_tick",
+                job_kind=KAIROS_TICK_JOB_KIND,
+                resume_key=KAIROS_TICK_RESUME_KEY,
+                job_service=jobs,
+            )
+            runner = ScheduledBackgroundJobRunner(
+                job_name="kairos_tick",
+                job_kind=KAIROS_TICK_JOB_KIND,
+                job_service=jobs,
+                handler=handler,
+                observe=observe,
+                retry_delay_seconds=0,
+                result_summary=kairos_tick_result_summary,
+            )
+
+            self.assertTrue(runner.run_once())
+
+            job = jobs.list(kinds=(KAIROS_TICK_JOB_KIND,), limit=10)[0]
+            self.assertEqual(job.status, "retrying")
+            self.assertIn("REDACTED", job.error)
+            self.assertNotIn("sk-secret-value", job.error)
+            failed_events = [
+                call.kwargs["payload"]
+                for call in observe.emit.call_args_list
+                if call.args[0] == "kairos_tick_job_failed"
+            ]
+            self.assertEqual(len(failed_events), 1)
+            self.assertEqual(failed_events[0]["job_id"], job.job_id)
+            self.assertEqual(failed_events[0]["error_type"], "RuntimeError")
+            self.assertIn("REDACTED", failed_events[0]["error_preview"])
+            self.assertNotIn("sk-secret-value", failed_events[0]["error_preview"])
+
+            scheduler = CronScheduler()
+            probe = MagicMock()
+            scheduler.register(ScheduledJob(name="probe", interval_seconds=60, handler=probe))
+            heartbeat = MagicMock()
+            heartbeat.collect.return_value = HeartbeatSnapshot(
+                timestamp="t",
+                pending_approvals=0,
+                pending_approval_ids=[],
+                agents={},
+                lane_metrics={},
+            )
+            daemon = ClawDaemon(scheduler=scheduler, heartbeat=heartbeat, observe=observe)
+
+            result = daemon.tick(now=1_000_000)
+
+            self.assertIn("probe", result.executed_jobs)
+            probe.assert_called_once()
+
     def test_runner_respects_shutdown_before_claim_for_each_kind(self) -> None:
         cases = (
             ("wiki_research", WIKI_RESEARCH_JOB_KIND, WIKI_RESEARCH_RESUME_KEY),
             ("perf_optimizer", PERF_OPTIMIZER_JOB_KIND, PERF_OPTIMIZER_RESUME_KEY),
+            ("kairos_tick", KAIROS_TICK_JOB_KIND, KAIROS_TICK_RESUME_KEY),
         )
         for job_name, job_kind, resume_key in cases:
             with self.subTest(job_name=job_name), tempfile.TemporaryDirectory() as tmpdir:
@@ -373,19 +513,84 @@ class ScheduledBackgroundRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     return_value={"topics_researched": 1, "pages_written": 0, "candidates": []}
                 )
                 runtime.auto_research.run_loop = MagicMock()
+                runtime.kairos.tick = MagicMock(return_value=TickDecision(action="none"))
                 jobs = {job.name: job for job in runtime.scheduler.list_jobs()}
 
+                jobs["kairos_tick"].handler()
                 jobs["wiki_research"].handler()
                 jobs["perf_optimizer"].handler()
 
+                runtime.kairos.tick.assert_not_called()
                 runtime.bot.wiki.auto_research.assert_not_called()
                 runtime.auto_research.run_loop.assert_not_called()
+                queued_kairos = runtime.job_service.list(kinds=(KAIROS_TICK_JOB_KIND,), limit=10)
                 queued_wiki = runtime.job_service.list(kinds=(WIKI_RESEARCH_JOB_KIND,), limit=10)
                 queued_perf = runtime.job_service.list(kinds=(PERF_OPTIMIZER_JOB_KIND,), limit=10)
+                self.assertEqual(len(queued_kairos), 1)
+                self.assertEqual(queued_kairos[0].status, "queued")
                 self.assertEqual(len(queued_wiki), 1)
                 self.assertEqual(queued_wiki[0].status, "queued")
                 self.assertEqual(len(queued_perf), 1)
                 self.assertEqual(queued_perf[0].status, "queued")
+
+    async def test_run_loop_processes_kairos_tick_job_outside_tick(self) -> None:
+        def fake_anthropic(req: LLMRequest) -> LLMResponse:
+            return LLMResponse(content="<response>ok</response>", lane=req.lane, provider="anthropic")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "PIPELINE_STATE_ROOT": str(root / "pipeline"),
+                "WORKER_PROVIDER": "anthropic",
+                "CLAW_AUTONOMOUS_MAINTENANCE": "false",
+                "CLAW_AUTONOMOUS_MAINTENANCE_ENABLED": "false",
+                "EVAL_ON_SELF_IMPROVE": "false",
+            }
+
+            with patch.dict("os.environ", env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.kairos.tick = MagicMock(
+                    return_value=TickDecision(
+                        action="none",
+                        reason="nothing urgent",
+                        duration_seconds=0.01,
+                    )
+                )
+                enqueue_scheduled_background_job(
+                    job_name="kairos_tick",
+                    job_kind=KAIROS_TICK_JOB_KIND,
+                    resume_key=KAIROS_TICK_RESUME_KEY,
+                    job_service=runtime.job_service,
+                    observe=runtime.observe,
+                )
+                shutdown = asyncio.Event()
+                loop = asyncio.get_running_loop()
+
+                async def stop_after_job() -> None:
+                    deadline = loop.time() + 1.0
+                    while loop.time() < deadline:
+                        rows = runtime.job_service.list(kinds=(KAIROS_TICK_JOB_KIND,), limit=10)
+                        if rows and rows[0].status == "completed":
+                            shutdown.set()
+                            return
+                        await asyncio.sleep(0.01)
+                    shutdown.set()
+
+                await asyncio.gather(
+                    runtime.daemon.run_loop(shutdown, interval=0.01),
+                    stop_after_job(),
+                )
+
+                rows = runtime.job_service.list(kinds=(KAIROS_TICK_JOB_KIND,), limit=10)
+                self.assertEqual(rows[0].status, "completed")
+                self.assertEqual(rows[0].result["action"], "none")
+                self.assertEqual(rows[0].result["reason_preview"], "nothing urgent")
+                runtime.kairos.tick.assert_called_once_with()
 
     async def test_run_loop_processes_wiki_and_perf_jobs_outside_tick(self) -> None:
         def fake_anthropic(req: LLMRequest) -> LLMResponse:

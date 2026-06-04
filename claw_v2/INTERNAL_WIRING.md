@@ -76,8 +76,8 @@ invariants:
       - skill_expand -> scheduler.skill_expand  # PR1B-a, uses JobService + SkillExpandJobRunner
       - wiki_research -> scheduler.wiki_research  # PR1B-b, uses JobService + ScheduledBackgroundJobRunner
       - perf_optimizer -> scheduler.perf_optimizer  # PR1B-b, uses JobService + ScheduledBackgroundJobRunner
-    pending_migration:
-      - kairos_tick
+      - kairos_tick -> scheduler.kairos_tick  # PR1B-c, uses JobService + ScheduledBackgroundJobRunner
+    pending_migration: []
     why: CronScheduler.run_due() still invokes handlers synchronously. Any
          provider call, code generation, verifier, subprocess, or research
          workload left inline can freeze the daemon tick and delay heartbeat /
