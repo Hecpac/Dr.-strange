@@ -8,7 +8,13 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from claw_v2.cron import CronScheduler, ScheduledJob
-from claw_v2.daemon import ClawDaemon, TickResult
+from claw_v2.daemon import (
+    PENDING_VERIFICATION_RECONCILIATION_JOB_KIND,
+    PENDING_VERIFICATION_RECONCILIATION_RESUME_KEY,
+    ClawDaemon,
+    PendingVerificationReconciliationJobRunner,
+    TickResult,
+)
 from claw_v2.heartbeat import HeartbeatSnapshot
 from claw_v2.jobs import JobService
 from claw_v2.task_ledger import TaskLedger
@@ -30,49 +36,38 @@ class DaemonTickTests(unittest.TestCase):
         daemon = ClawDaemon(scheduler=scheduler, heartbeat=heartbeat, observe=observe)
         return daemon, heartbeat, observe
 
-    def test_tick_emits_pending_verification_reconciliation_dry_run(self) -> None:
-        # P1 Checkpoint A: the daemon must CALL the (already dry-run) reconciler
-        # so pending_verification_reconciliation telemetry is emitted. Before
-        # wiring there was no caller -> 0 events in production. Dry-run: the
-        # ledger is only read (.list), never transitioned.
-        from types import SimpleNamespace
+    def test_tick_enqueues_pending_verification_reconciliation_agent_job(self) -> None:
+        # PR 1A: daemon.tick() may enqueue reconciliation work, but must not run
+        # the reconciler or drain inside the daemon control path.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ledger = MagicMock()
+            ledger.mark_stale_running_lost.return_value = 0
+            jobs = JobService(Path(tmpdir) / "claw.db")
+            daemon, observe = self._make_daemon_with_ledger(ledger, job_service=jobs)
 
-        scheduler = CronScheduler()
-        heartbeat = MagicMock()
-        heartbeat.collect.return_value = HeartbeatSnapshot(
-            timestamp="2026-01-01T00:00:00",
-            pending_approvals=0,
-            pending_approval_ids=[],
-            agents={},
-            lane_metrics={},
-        )
-        observe = MagicMock()
-        ledger = MagicMock()
-        ledger.mark_stale_running_lost.return_value = 0
-        ledger.list.return_value = [
-            SimpleNamespace(
-                task_id="t1", channel="telegram", external_session_id="s",
-                session_id="tg-1", verification_status="needs_verification",
-                summary="ran cat", error="", completed_at=0.0,
-                artifacts={"evidence_manifest": {"tools_run": ["Read"]}},
-            ),
-            SimpleNamespace(
-                task_id="t2", channel="telegram", external_session_id="s",
-                session_id="tg-1", verification_status="needs_verification",
-                summary="wrote file", error="", completed_at=0.0,
-                artifacts={"evidence_manifest": {"tools_run": ["Write"]}},
-            ),
-        ]
-        daemon = ClawDaemon(scheduler=scheduler, heartbeat=heartbeat, observe=observe, task_ledger=ledger)
+            daemon.tick(now=1_000_000)
 
-        daemon.tick(now=1_000_000)
+            queued = jobs.list(kinds=(PENDING_VERIFICATION_RECONCILIATION_JOB_KIND,), limit=10)
+            self.assertEqual(len(queued), 1)
+            job = queued[0]
+            self.assertEqual(job.status, "queued")
+            self.assertEqual(job.kind, PENDING_VERIFICATION_RECONCILIATION_JOB_KIND)
+            self.assertEqual(job.resume_key, PENDING_VERIFICATION_RECONCILIATION_RESUME_KEY)
+            self.assertFalse(job.payload["drain_apply"])
+            ledger.list.assert_not_called()
+            ledger.mark_terminal.assert_not_called()
+            ledger.drain_reconcilable_unverified.assert_not_called()
 
-        emitted = [call.args[0] for call in observe.emit.call_args_list]
-        self.assertIn("pending_verification_reconciliation", emitted)
-        # RECONCILIATION_SCAN_LIMIT — the honest per-call cap (list clamps to 100).
-        ledger.list.assert_any_call(statuses=("completed_unverified",), limit=100)
-        # Dry-run guarantee: Checkpoint A must not transition any row.
-        ledger.mark_terminal.assert_not_called()
+            emitted = [call.args[0] for call in observe.emit.call_args_list]
+            self.assertIn("pending_verification_reconciliation_enqueued", emitted)
+            self.assertNotIn("pending_verification_reconciliation", emitted)
+            tick_payloads = [
+                c.kwargs["payload"]
+                for c in observe.emit.call_args_list
+                if c.args[0] == "daemon_tick"
+            ]
+            self.assertEqual(tick_payloads[0]["pending_verification_reconciliation_job_id"], job.job_id)
+            self.assertNotIn("pending_verification_unverified", tick_payloads[0])
 
     def _make_daemon_with_ledger(self, ledger: MagicMock, **kwargs) -> tuple[ClawDaemon, MagicMock]:
         scheduler = kwargs.pop("scheduler", CronScheduler())
@@ -91,38 +86,72 @@ class DaemonTickTests(unittest.TestCase):
         return daemon, observe
 
     def test_pending_verification_skip_within_interval_omits_field(self) -> None:
-        # A1: a skipped reconciler run (interval not elapsed) must NOT report
-        # pending_verification_unverified=0 as if it were a real backlog count.
-        from types import SimpleNamespace
+        # A skipped enqueue must not report pending_verification_unverified=0 as
+        # if it were a real backlog count.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ledger = MagicMock()
+            ledger.mark_stale_running_lost.return_value = 0
+            jobs = JobService(Path(tmpdir) / "claw.db")
+            daemon, observe = self._make_daemon_with_ledger(
+                ledger,
+                job_service=jobs,
+                pending_verification_interval=900,
+            )
+            daemon.tick(now=1_000_000)   # enqueue runs
+            daemon.tick(now=1_000_030)   # within interval -> skipped
 
+            queued = jobs.list(kinds=(PENDING_VERIFICATION_RECONCILIATION_JOB_KIND,), limit=10)
+            self.assertEqual(len(queued), 1)
+            enqueued = [
+                c for c in observe.emit.call_args_list
+                if c.args[0] == "pending_verification_reconciliation_enqueued"
+            ]
+            self.assertEqual(len(enqueued), 1)
+            tick_payloads = [
+                c.kwargs["payload"]
+                for c in observe.emit.call_args_list
+                if c.args[0] == "daemon_tick"
+            ]
+            self.assertEqual(len(tick_payloads), 2)
+            self.assertIn("pending_verification_reconciliation_job_id", tick_payloads[0])
+            self.assertNotIn("pending_verification_reconciliation_job_id", tick_payloads[1])
+            self.assertNotIn("pending_verification_unverified", tick_payloads[0])
+            self.assertNotIn("pending_verification_unverified", tick_payloads[1])
+
+    def test_resume_key_prevents_duplicate_active_reconciliation_jobs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ledger = MagicMock()
+            ledger.mark_stale_running_lost.return_value = 0
+            jobs = JobService(Path(tmpdir) / "claw.db")
+            daemon, observe = self._make_daemon_with_ledger(
+                ledger,
+                job_service=jobs,
+                pending_verification_interval=0,
+            )
+
+            daemon.tick(now=1_000_000)
+            daemon.tick(now=1_000_001)
+
+            queued = jobs.list(kinds=(PENDING_VERIFICATION_RECONCILIATION_JOB_KIND,), limit=10)
+            self.assertEqual(len(queued), 1)
+            enqueued_payloads = [
+                c.kwargs["payload"]
+                for c in observe.emit.call_args_list
+                if c.args[0] == "pending_verification_reconciliation_enqueued"
+            ]
+            self.assertEqual(len(enqueued_payloads), 2)
+            self.assertEqual(enqueued_payloads[0]["job_id"], queued[0].job_id)
+            self.assertEqual(enqueued_payloads[1]["job_id"], queued[0].job_id)
+
+    def test_reconciliation_enqueue_failure_does_not_crash_tick(self) -> None:
+        # A1: an enqueue exception must be contained — scheduler and the rest of
+        # the tick still run, and the ledger is not scanned inline.
         ledger = MagicMock()
         ledger.mark_stale_running_lost.return_value = 0
-        ledger.list.return_value = [
-            SimpleNamespace(
-                task_id="t1", channel="telegram", external_session_id="s",
-                session_id="tg-1", verification_status="needs_verification",
-                summary="x", error="", completed_at=0.0,
-                artifacts={"evidence_manifest": {"tools_run": ["Read"]}},
-            ),
-        ]
-        daemon, observe = self._make_daemon_with_ledger(ledger, pending_verification_interval=900)
-        daemon.tick(now=1_000_000)   # reconciler runs
-        daemon.tick(now=1_000_030)   # within interval -> skipped
-
-        recon = [c for c in observe.emit.call_args_list if c.args[0] == "pending_verification_reconciliation"]
-        self.assertEqual(len(recon), 1)  # only the first tick emitted it
-        tick_payloads = [c.kwargs["payload"] for c in observe.emit.call_args_list if c.args[0] == "daemon_tick"]
-        self.assertEqual(len(tick_payloads), 2)
-        self.assertIn("pending_verification_unverified", tick_payloads[0])      # ran
-        self.assertNotIn("pending_verification_unverified", tick_payloads[1])   # skipped -> omitted
-
-    def test_reconciler_failure_does_not_crash_tick(self) -> None:
-        # A1: a reconciler exception must be contained — scheduler and the rest of
-        # the tick still run, and no ledger transition occurs.
-        ledger = MagicMock()
-        ledger.mark_stale_running_lost.return_value = 0
-        ledger.list.side_effect = RuntimeError("boom")  # build_reconciliation_report raises
-        daemon, observe = self._make_daemon_with_ledger(ledger)
+        jobs = MagicMock()
+        jobs.list.return_value = []
+        jobs.enqueue.side_effect = RuntimeError("boom")
+        daemon, observe = self._make_daemon_with_ledger(ledger, job_service=jobs)
         probe = MagicMock()
         daemon.scheduler.register(ScheduledJob(name="probe", interval_seconds=60, handler=probe))
 
@@ -130,63 +159,247 @@ class DaemonTickTests(unittest.TestCase):
 
         self.assertIn("probe", result.executed_jobs)
         probe.assert_called_once()
+        ledger.list.assert_not_called()
         ledger.mark_terminal.assert_not_called()
-        recon = [c for c in observe.emit.call_args_list if c.args[0] == "pending_verification_reconciliation"]
-        self.assertEqual(recon, [])  # raised before the emit
+        errors = [
+            c for c in observe.emit.call_args_list
+            if c.args[0] == "pending_verification_reconciliation_enqueue_error"
+        ]
+        self.assertEqual(len(errors), 1)
 
     def test_drain_disabled_does_not_apply(self) -> None:
-        # D: flag OFF — the tick may emit telemetry but must NOT call the drain.
-        ledger = MagicMock()
-        ledger.mark_stale_running_lost.return_value = 0
-        ledger.list.return_value = []
-        daemon, _ = self._make_daemon_with_ledger(
-            ledger, pending_verification_drain_apply=False
-        )
-        daemon.tick(now=1_000_000)
-        ledger.drain_reconcilable_unverified.assert_not_called()
+        # D: flag OFF — the job emits telemetry but must NOT call the drain.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ledger = MagicMock()
+            ledger.mark_stale_running_lost.return_value = 0
+            ledger.list.return_value = []
+            jobs = JobService(Path(tmpdir) / "claw.db")
+            daemon, observe = self._make_daemon_with_ledger(
+                ledger,
+                job_service=jobs,
+                pending_verification_drain_apply=False,
+            )
+            daemon.tick(now=1_000_000)
+            runner = PendingVerificationReconciliationJobRunner(
+                job_service=jobs,
+                task_ledger=ledger,
+                observe=observe,
+            )
+
+            self.assertTrue(runner.run_once())
+
+            ledger.drain_reconcilable_unverified.assert_not_called()
+            job = jobs.list(kinds=(PENDING_VERIFICATION_RECONCILIATION_JOB_KIND,), limit=10)[0]
+            self.assertEqual(job.status, "completed")
+            self.assertFalse(job.result["drain_apply"])
 
     def test_drain_enabled_applies_with_caps(self) -> None:
-        # D: flag ON — the tick calls the drain with apply=True and the per-tick caps.
-        ledger = MagicMock()
-        ledger.mark_stale_running_lost.return_value = 0
-        ledger.list.return_value = []
-        daemon, _ = self._make_daemon_with_ledger(
-            ledger, pending_verification_drain_apply=True
-        )
-        daemon.tick(now=1_000_000)
-        ledger.drain_reconcilable_unverified.assert_called_once()
-        _, kwargs = ledger.drain_reconcilable_unverified.call_args
-        self.assertTrue(kwargs["apply"])
-        self.assertEqual(kwargs["max_apply"], 10)
-        self.assertEqual(kwargs["max_scan"], 500)
+        # D: flag ON — the job calls the drain with apply=True and daemon caps.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ledger = MagicMock()
+            ledger.mark_stale_running_lost.return_value = 0
+            ledger.list.return_value = []
+            ledger.drain_reconcilable_unverified.return_value = {"applied": 0}
+            jobs = JobService(Path(tmpdir) / "claw.db")
+            daemon, observe = self._make_daemon_with_ledger(
+                ledger,
+                job_service=jobs,
+                pending_verification_drain_apply=True,
+            )
+            daemon.tick(now=1_000_000)
+            runner = PendingVerificationReconciliationJobRunner(
+                job_service=jobs,
+                task_ledger=ledger,
+                observe=observe,
+            )
+
+            self.assertTrue(runner.run_once())
+
+            ledger.drain_reconcilable_unverified.assert_called_once()
+            _, kwargs = ledger.drain_reconcilable_unverified.call_args
+            self.assertTrue(kwargs["apply"])
+            self.assertEqual(kwargs["max_apply"], 10)
+            self.assertEqual(kwargs["max_scan"], 500)
+            job = jobs.list(kinds=(PENDING_VERIFICATION_RECONCILIATION_JOB_KIND,), limit=10)[0]
+            self.assertEqual(job.status, "completed")
+            self.assertEqual(job.result["drain_result"], {"applied": 0})
 
     def test_drain_failure_does_not_crash_tick(self) -> None:
-        # D: a drain exception must be contained — scheduler still runs.
-        ledger = MagicMock()
-        ledger.mark_stale_running_lost.return_value = 0
-        ledger.list.return_value = []
-        ledger.drain_reconcilable_unverified.side_effect = RuntimeError("boom")
-        daemon, _ = self._make_daemon_with_ledger(
-            ledger, pending_verification_drain_apply=True
-        )
-        probe = MagicMock()
-        daemon.scheduler.register(ScheduledJob(name="probe", interval_seconds=60, handler=probe))
-        result = daemon.tick(now=1_000_000)  # must not raise
-        self.assertIn("probe", result.executed_jobs)
-        probe.assert_called_once()
+        # D: a drain exception must be contained in the job result.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ledger = MagicMock()
+            ledger.mark_stale_running_lost.return_value = 0
+            ledger.list.return_value = []
+            ledger.drain_reconcilable_unverified.side_effect = RuntimeError("boom")
+            jobs = JobService(Path(tmpdir) / "claw.db")
+            daemon, observe = self._make_daemon_with_ledger(
+                ledger,
+                job_service=jobs,
+                pending_verification_drain_apply=True,
+            )
+            daemon.tick(now=1_000_000)
+            runner = PendingVerificationReconciliationJobRunner(
+                job_service=jobs,
+                task_ledger=ledger,
+                observe=observe,
+            )
+
+            self.assertTrue(runner.run_once())  # must not raise
+
+            job = jobs.list(kinds=(PENDING_VERIFICATION_RECONCILIATION_JOB_KIND,), limit=10)[0]
+            self.assertEqual(job.status, "completed")
+            self.assertEqual(job.result["drain_error"], "boom")
+
+    def test_stale_running_reconciliation_job_is_reclaimed_and_completed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ledger = MagicMock()
+            ledger.mark_stale_running_lost.return_value = 0
+            ledger.list.return_value = []
+            jobs = JobService(Path(tmpdir) / "claw.db")
+            daemon, observe = self._make_daemon_with_ledger(ledger, job_service=jobs)
+            now = time.time()
+            daemon.tick(now=now)
+            claimed_at = time.time() + 1
+            stuck = jobs.claim_next(
+                worker_id="dead-worker",
+                kinds=(PENDING_VERIFICATION_RECONCILIATION_JOB_KIND,),
+                now=claimed_at,
+            )
+            self.assertIsNotNone(stuck)
+
+            runner = PendingVerificationReconciliationJobRunner(
+                job_service=jobs,
+                task_ledger=ledger,
+                observe=observe,
+                job_timeout_seconds=1,
+            )
+            processed = runner.run_available(now=claimed_at + 2)
+
+            self.assertEqual(processed, 1)
+            job = jobs.get(stuck.job_id)
+            self.assertIsNotNone(job)
+            self.assertEqual(job.status, "completed")
+            self.assertEqual(job.attempts, 2)
+            ledger.list.assert_called_once_with(statuses=("completed_unverified",), limit=100)
+            timeout_events = [
+                c.kwargs["payload"]
+                for c in observe.emit.call_args_list
+                if c.args[0] == "daemon_reconciliation_job_timeout"
+            ]
+            self.assertEqual(timeout_events[0]["source"], "stale_running_reaper")
+            self.assertEqual(timeout_events[0]["job_id"], stuck.job_id)
+            event_names = [c.args[0] for c in observe.emit.call_args_list]
+            self.assertIn("daemon_reconciliation_job_started", event_names)
+            self.assertIn("daemon_reconciliation_job_completed", event_names)
+
+    def test_reconciliation_job_timeout_retries_and_emits_event(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ledger = MagicMock()
+            ledger.mark_stale_running_lost.return_value = 0
+            jobs = JobService(Path(tmpdir) / "claw.db")
+            daemon, observe = self._make_daemon_with_ledger(ledger, job_service=jobs)
+            daemon.tick(now=1_000_000)
+            runner = PendingVerificationReconciliationJobRunner(
+                job_service=jobs,
+                task_ledger=ledger,
+                observe=observe,
+                job_timeout_seconds=0.01,
+            )
+
+            def slow_execute(job):
+                time.sleep(0.05)
+                return {"unverified_count": 0, "overdue_count": 0, "drain_apply": False}
+
+            runner._execute = slow_execute
+            self.assertTrue(runner.run_once())
+            time.sleep(0.06)
+
+            job = jobs.list(kinds=(PENDING_VERIFICATION_RECONCILIATION_JOB_KIND,), limit=10)[0]
+            self.assertEqual(job.status, "retrying")
+            self.assertIn("timeout_seconds", job.error)
+            timeout_events = [
+                c.kwargs["payload"]
+                for c in observe.emit.call_args_list
+                if c.args[0] == "daemon_reconciliation_job_timeout"
+            ]
+            self.assertEqual(len(timeout_events), 1)
+            self.assertEqual(timeout_events[0]["job_id"], job.job_id)
+            self.assertEqual(timeout_events[0]["error_type"], "TimeoutError")
+            self.assertIn("error_preview", timeout_events[0])
+
+    def test_reconciliation_runner_respects_shutdown_before_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ledger = MagicMock()
+            ledger.mark_stale_running_lost.return_value = 0
+            jobs = JobService(Path(tmpdir) / "claw.db")
+            daemon, observe = self._make_daemon_with_ledger(ledger, job_service=jobs)
+            daemon.tick(now=1_000_000)
+            runner = PendingVerificationReconciliationJobRunner(
+                job_service=jobs,
+                task_ledger=ledger,
+                observe=observe,
+                should_stop=lambda: True,
+            )
+
+            self.assertEqual(runner.run_available(), 0)
+
+            job = jobs.list(kinds=(PENDING_VERIFICATION_RECONCILIATION_JOB_KIND,), limit=10)[0]
+            self.assertEqual(job.status, "queued")
+            ledger.list.assert_not_called()
 
     def test_drain_is_interval_gated_with_the_report(self) -> None:
-        # The live drain shares the pending-verification interval gate: a second
-        # tick within the interval must NOT drain again.
-        ledger = MagicMock()
-        ledger.mark_stale_running_lost.return_value = 0
-        ledger.list.return_value = []
-        daemon, _ = self._make_daemon_with_ledger(
-            ledger, pending_verification_drain_apply=True
-        )
-        daemon.tick(now=1_000_000)  # interval elapsed from 0 -> runs
-        daemon.tick(now=1_000_010)  # within the 15-min interval -> skipped
-        self.assertEqual(ledger.drain_reconcilable_unverified.call_count, 1)
+        # The live drain shares the pending-verification interval gate through
+        # enqueue: a second tick within the interval must NOT add a second job.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ledger = MagicMock()
+            ledger.mark_stale_running_lost.return_value = 0
+            ledger.list.return_value = []
+            jobs = JobService(Path(tmpdir) / "claw.db")
+            daemon, observe = self._make_daemon_with_ledger(
+                ledger,
+                job_service=jobs,
+                pending_verification_drain_apply=True,
+            )
+            daemon.tick(now=1_000_000)  # interval elapsed from 0 -> enqueues
+            daemon.tick(now=1_000_010)  # within the 15-min interval -> skipped
+            runner = PendingVerificationReconciliationJobRunner(
+                job_service=jobs,
+                task_ledger=ledger,
+                observe=observe,
+            )
+            runner.run_available(limit=10)
+
+            self.assertEqual(ledger.drain_reconcilable_unverified.call_count, 1)
+            jobs_for_kind = jobs.list(kinds=(PENDING_VERIFICATION_RECONCILIATION_JOB_KIND,), limit=10)
+            self.assertEqual(len(jobs_for_kind), 1)
+
+    def test_reconciliation_job_failure_retries_without_crashing_runner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ledger = MagicMock()
+            ledger.mark_stale_running_lost.return_value = 0
+            ledger.list.side_effect = RuntimeError("boom")
+            jobs = JobService(Path(tmpdir) / "claw.db")
+            daemon, observe = self._make_daemon_with_ledger(ledger, job_service=jobs)
+            daemon.tick(now=1_000_000)
+            runner = PendingVerificationReconciliationJobRunner(
+                job_service=jobs,
+                task_ledger=ledger,
+                observe=observe,
+                retry_delay_seconds=0,
+            )
+
+            self.assertTrue(runner.run_once())
+
+            job = jobs.list(kinds=(PENDING_VERIFICATION_RECONCILIATION_JOB_KIND,), limit=10)[0]
+            self.assertEqual(job.status, "retrying")
+            self.assertEqual(job.error, "boom")
+            probe = MagicMock()
+            daemon.scheduler.register(ScheduledJob(name="probe", interval_seconds=60, handler=probe))
+
+            result = daemon.tick(now=1_001_000)
+
+            self.assertIn("probe", result.executed_jobs)
+            probe.assert_called_once()
 
     def test_drain_flag_defaults_off_and_reads_env(self) -> None:
         # Default OFF; env opt-in flips it on.
@@ -372,6 +585,59 @@ class DaemonRunLoopTests(unittest.IsolatedAsyncioTestCase):
 
         event_names = [call.args[0] for call in observe.emit.call_args_list]
         self.assertIn("daemon_heartbeat", event_names)
+
+    async def test_run_loop_processes_pending_verification_job_outside_tick(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            scheduler = CronScheduler()
+            heartbeat = MagicMock()
+            heartbeat.collect.return_value = HeartbeatSnapshot(
+                timestamp="t",
+                pending_approvals=0,
+                pending_approval_ids=[],
+                agents={},
+                lane_metrics={},
+            )
+            observe = MagicMock()
+            ledger = MagicMock()
+            ledger.mark_stale_running_lost.return_value = 0
+            ledger.list.return_value = []
+            jobs = JobService(Path(tmpdir) / "claw.db")
+            daemon = ClawDaemon(
+                scheduler=scheduler,
+                heartbeat=heartbeat,
+                observe=observe,
+                task_ledger=ledger,
+                job_service=jobs,
+            )
+            shutdown = asyncio.Event()
+            loop = asyncio.get_running_loop()
+
+            async def stop_after_job() -> None:
+                deadline = loop.time() + 1.0
+                while loop.time() < deadline:
+                    rows = jobs.list(
+                        kinds=(PENDING_VERIFICATION_RECONCILIATION_JOB_KIND,),
+                        limit=10,
+                    )
+                    if rows and rows[0].status == "completed":
+                        shutdown.set()
+                        return
+                    await asyncio.sleep(0.01)
+                shutdown.set()
+
+            await asyncio.gather(
+                daemon.run_loop(shutdown, interval=0.01),
+                stop_after_job(),
+            )
+
+            rows = jobs.list(kinds=(PENDING_VERIFICATION_RECONCILIATION_JOB_KIND,), limit=10)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0].status, "completed")
+            ledger.list.assert_called_once_with(statuses=("completed_unverified",), limit=100)
+            emitted = [call.args[0] for call in observe.emit.call_args_list]
+            self.assertIn("pending_verification_reconciliation_enqueued", emitted)
+            self.assertIn("pending_verification_reconciliation", emitted)
+            self.assertIn("pending_verification_reconciliation_job_completed", emitted)
 
 
 if __name__ == "__main__":
