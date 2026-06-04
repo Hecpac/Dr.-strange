@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -177,6 +179,51 @@ class SkillRegistryTests(unittest.TestCase):
             self.assertEqual(denied[-1]["tag_count"], 1)
             self.assertNotIn("tags", denied[-1])
             self.assertRegex(denied[-1]["tag_sha256"][0], r"^[0-9a-f]{64}$")
+
+    def test_generate_skill_allows_benign_sensitive_substrings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = SkillRegistry(root=Path(tmp), router=self._safe_router())
+
+            result = registry.generate_skill(
+                task_description="create a tokenization helper for cookieless passwordless flows"
+            )
+
+            self.assertTrue(result["success"])
+            self.assertEqual(result["status"], "pending_review")
+
+    def test_concurrent_generate_skill_same_name_registers_once(self) -> None:
+        barrier = threading.Barrier(2)
+
+        class Router:
+            def ask(self, *args, **kwargs):
+                barrier.wait(timeout=5)
+                return SimpleNamespace(
+                    content="""{
+                        "name": "race_skill",
+                        "description": "race-safe skill",
+                        "function_name": "race_skill",
+                        "code": "def race_skill(x: int = 1):\\n    return {\\"result\\": x}"
+                    }"""
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = SkillRegistry(root=root, router=Router())
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [
+                    executor.submit(registry.generate_skill, task_description=f"create race skill {index}")
+                    for index in range(2)
+                ]
+                results = [future.result(timeout=10) for future in futures]
+
+            successes = [result for result in results if result["success"]]
+            failures = [result for result in results if not result["success"]]
+            self.assertEqual(len(successes), 1)
+            self.assertEqual(len(failures), 1)
+            self.assertIn("already exists", failures[0]["error"])
+            self.assertEqual(registry.list_skills()[0]["name"], "race_skill")
+            self.assertTrue((root / "race_skill.py").exists())
+            self.assertEqual(list(root.glob(".race_skill.*.tmp.py")), [])
 
     def test_generate_skill_blocks_path_traversal_name_without_writing(self) -> None:
         observe = _RecordingObserve()

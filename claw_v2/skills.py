@@ -13,6 +13,7 @@ import hashlib
 import json
 import logging
 import re
+import tempfile
 import textwrap
 import threading
 from dataclasses import dataclass, field
@@ -37,14 +38,14 @@ _SENSITIVE_TARGET_RE = re.compile(
     r"|ops[/\\]"
     r"|com\.pachano\.claw\.plist"
     r"|launchd"
-    r"|approval(?:s|[_ -]?token)?"
-    r"|api[_ -]?key"
-    r"|secret"
-    r"|token"
-    r"|cookie"
-    r"|password"
-    r"|credential"
-    r"|private[_ -]?key"
+    r"|\bapproval(?:s|[_ -]?token)?\b"
+    r"|\bapi[_ -]?key\b"
+    r"|\bsecrets?\b"
+    r"|\btokens?\b"
+    r"|\bcookies?\b"
+    r"|\bpasswords?\b"
+    r"|\bcredentials?\b"
+    r"|\bprivate[_ -]?key\b"
     r")"
 )
 _ALLOWED_IMPORTS = {
@@ -314,10 +315,12 @@ class SkillRegistry:
         self._registry_path().write_text(json.dumps(data, indent=2), encoding="utf-8")
 
     def list_skills(self) -> list[dict[str, Any]]:
+        with self._lock:
+            skills = list(self._registry.values())
         return [
             {"name": s.name, "description": s.description, "use_count": s.use_count,
              "status": s.status, "tags": s.tags}
-            for s in self._registry.values()
+            for s in skills
         ]
 
     def generate_skill(self, *, task_description: str, tags: list[str] | None = None) -> dict:
@@ -411,30 +414,54 @@ class SkillRegistry:
         if validation_error is not None:
             return {"success": False, "error": f"Unsafe skill rejected: {validation_error}"}
 
-        # Write skill file
+        # Write and test a unique temporary file before publishing it into the registry.
         skill_file = self.root / f"{name}.py"
-        skill_file.write_text(code, encoding="utf-8")
+        temp_skill_file: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                dir=self.root,
+                prefix=f".{name}.",
+                suffix=".tmp.py",
+                delete=False,
+            ) as handle:
+                handle.write(code)
+                temp_skill_file = Path(handle.name)
 
-        # Test it in sandbox
-        test_result = self._test_skill(skill_file, func_name)
-        if not test_result["passed"]:
-            skill_file.unlink(missing_ok=True)
-            return {"success": False, "error": f"Skill test failed: {test_result.get('error', 'unknown')}"}
+            test_result = self._test_skill(temp_skill_file, func_name)
+            if not test_result["passed"]:
+                temp_skill_file.unlink(missing_ok=True)
+                return {"success": False, "error": f"Skill test failed: {test_result.get('error', 'unknown')}"}
 
-        # Register
-        now = datetime.now(timezone.utc).isoformat()
-        with self._lock:
-            skill = Skill(
-                name=name,
-                description=description,
-                source_file=str(skill_file),
-                function_name=func_name,
-                created=now,
-                tags=tags,
-                status=generated_decision.resulting_status or _GENERATED_SKILL_STATUS,
-            )
-            self._registry[name] = skill
-            self._save_registry()
+            size_bytes = temp_skill_file.stat().st_size
+            sha256_hash = _sha256_file(temp_skill_file)
+
+            # Register and publish under lock so concurrent same-name generations cannot
+            # overwrite each other's tested source files.
+            now = datetime.now(timezone.utc).isoformat()
+            with self._lock:
+                if name in self._registry:
+                    temp_skill_file.unlink(missing_ok=True)
+                    return {"success": False, "error": f"Skill '{name}' already exists"}
+                if skill_file.exists():
+                    temp_skill_file.unlink(missing_ok=True)
+                    return {"success": False, "error": f"Skill source already exists: {skill_file.name}"}
+                temp_skill_file.rename(skill_file)
+                skill = Skill(
+                    name=name,
+                    description=description,
+                    source_file=str(skill_file),
+                    function_name=func_name,
+                    created=now,
+                    tags=tags,
+                    status=generated_decision.resulting_status or _GENERATED_SKILL_STATUS,
+                )
+                self._registry[name] = skill
+                self._save_registry()
+        finally:
+            if temp_skill_file is not None and temp_skill_file.exists():
+                temp_skill_file.unlink(missing_ok=True)
 
         self._emit_governance_event(
             "codeskill_governance_allowed",
@@ -445,8 +472,6 @@ class SkillRegistry:
             tags=tags,
         )
         logger.info("Skill generated and registered pending review: %s", name)
-        size_bytes = skill_file.stat().st_size
-        sha256_hash = _sha256_file(skill_file)
         return {
             "success": True,
             "name": name,
@@ -653,11 +678,13 @@ class SkillRegistry:
         return {"gaps_found": len(gaps), "skills_generated": generated, "skills_pending_review": pending_review}
 
     def stats(self) -> dict:
-        active = sum(1 for s in self._registry.values() if s.status == "active")
-        pending_review = sum(1 for s in self._registry.values() if s.status == _GENERATED_SKILL_STATUS)
-        total_uses = sum(s.use_count for s in self._registry.values())
+        with self._lock:
+            active = sum(1 for s in self._registry.values() if s.status == "active")
+            pending_review = sum(1 for s in self._registry.values() if s.status == _GENERATED_SKILL_STATUS)
+            total_uses = sum(s.use_count for s in self._registry.values())
+            total_skills = len(self._registry)
         return {
-            "total_skills": len(self._registry),
+            "total_skills": total_skills,
             "active": active,
             "pending_review": pending_review,
             "total_uses": total_uses,
