@@ -9,8 +9,11 @@ Skills are stored as individual .py files under ~/.claw/skills/ with metadata.
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import logging
+import re
+import tempfile
 import textwrap
 import threading
 from dataclasses import dataclass, field
@@ -25,6 +28,26 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_SKILLS_ROOT = Path.home() / ".claw" / "skills"
 _REGISTRY_FILE = "registry.json"
+_GENERATED_SKILL_STATUS = "pending_review"
+_ACTIVE_SKILL_STATUS = "active"
+_SKILL_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_SENSITIVE_TARGET_RE = re.compile(
+    r"(?i)(?:"
+    r"(?<![\w.-])(?:\.env|AGENTS\.md|BOOT_PROTOCOL\.md|SOUL\.md|IDENTITY\.md|USER\.md|MEMORY\.md|CLAUDE\.md|TOOLS\.md|HEARTBEAT\.md)(?![\w.-])"
+    r"|tool_policies\.json"
+    r"|ops[/\\]"
+    r"|com\.pachano\.claw\.plist"
+    r"|launchd"
+    r"|\bapproval(?:s|[_ -]?token)?\b"
+    r"|\bapi[_ -]?key\b"
+    r"|\bsecrets?\b"
+    r"|\btokens?\b"
+    r"|\bcookies?\b"
+    r"|\bpasswords?\b"
+    r"|\bcredentials?\b"
+    r"|\bprivate[_ -]?key\b"
+    r")"
+)
 _ALLOWED_IMPORTS = {
     "collections",
     "datetime",
@@ -160,16 +183,93 @@ class Skill:
     use_count: int = 0
     last_used: str | None = None
     tags: list[str] = field(default_factory=list)
-    status: str = "active"  # active, deprecated, failed
+    status: str = "active"  # active, pending_review, deprecated, failed
+
+
+@dataclass(frozen=True, slots=True)
+class CodeSkillGovernanceDecision:
+    allowed: bool
+    reason: str = "allowed"
+    requires_approval: bool = False
+    resulting_status: str | None = None
+
+
+class CodeSkillGovernancePolicy:
+    """Small fail-closed policy for generated executable CodeSkills."""
+
+    def check_generation_request(
+        self,
+        *,
+        task_description: str,
+        tags: list[str],
+    ) -> CodeSkillGovernanceDecision:
+        if _contains_sensitive_target(task_description) or _contains_sensitive_target(" ".join(tags)):
+            return CodeSkillGovernanceDecision(
+                allowed=False,
+                reason="sensitive_generation_target_requires_approval",
+                requires_approval=True,
+            )
+        return CodeSkillGovernanceDecision(
+            allowed=True,
+            reason="generated_skill_requires_review",
+            requires_approval=True,
+            resulting_status=_GENERATED_SKILL_STATUS,
+        )
+
+    def check_generated_skill(
+        self,
+        *,
+        name: str,
+        description: str,
+        function_name: str,
+        code: str,
+        tags: list[str],
+    ) -> CodeSkillGovernanceDecision:
+        if not _valid_skill_identifier(name):
+            return CodeSkillGovernanceDecision(allowed=False, reason="invalid_skill_name")
+        if not _valid_skill_identifier(function_name):
+            return CodeSkillGovernanceDecision(allowed=False, reason="invalid_function_name")
+        haystack = "\n".join([name, description, function_name, code, " ".join(tags)])
+        if _contains_sensitive_target(haystack):
+            return CodeSkillGovernanceDecision(
+                allowed=False,
+                reason="sensitive_generated_skill_requires_approval",
+                requires_approval=True,
+            )
+        return CodeSkillGovernanceDecision(
+            allowed=True,
+            reason="generated_skill_requires_review",
+            requires_approval=True,
+            resulting_status=_GENERATED_SKILL_STATUS,
+        )
+
+    def check_execute(self, *, skill: Skill) -> CodeSkillGovernanceDecision:
+        status = str(skill.status or "").strip().lower()
+        if status != _ACTIVE_SKILL_STATUS:
+            return CodeSkillGovernanceDecision(
+                allowed=False,
+                reason=f"skill_status_{status or 'unknown'}_not_executable",
+                requires_approval=(status == _GENERATED_SKILL_STATUS),
+            )
+        return CodeSkillGovernanceDecision(allowed=True, reason="active_skill_allowed")
 
 
 class SkillRegistry:
     """Manages dynamically generated skills."""
 
-    def __init__(self, *, router: LLMRouter | None = None, root: Path | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        router: LLMRouter | None = None,
+        root: Path | None = None,
+        observe: Any | None = None,
+        governance: CodeSkillGovernancePolicy | None = None,
+    ) -> None:
         self.router = router
         self.root = root or _DEFAULT_SKILLS_ROOT
         self.root.mkdir(parents=True, exist_ok=True)
+        self.observe = observe
+        self.governance = governance or CodeSkillGovernancePolicy()
         self._lock = threading.Lock()
         self._registry: dict[str, Skill] = {}
         self._load_registry()
@@ -215,14 +315,31 @@ class SkillRegistry:
         self._registry_path().write_text(json.dumps(data, indent=2), encoding="utf-8")
 
     def list_skills(self) -> list[dict[str, Any]]:
+        with self._lock:
+            skills = list(self._registry.values())
         return [
             {"name": s.name, "description": s.description, "use_count": s.use_count,
              "status": s.status, "tags": s.tags}
-            for s in self._registry.values()
+            for s in skills
         ]
 
     def generate_skill(self, *, task_description: str, tags: list[str] | None = None) -> dict:
         """Use LLM to generate a new skill, test it in sandbox, register if valid."""
+        tags = tags or []
+        request_decision = self.governance.check_generation_request(
+            task_description=task_description,
+            tags=tags,
+        )
+        if not request_decision.allowed:
+            self._emit_governance_event(
+                "codeskill_governance_denied",
+                action="generate",
+                decision=request_decision,
+                task_description=task_description,
+                tags=tags,
+            )
+            return _governance_denied_result(request_decision)
+
         if self.router is None:
             return {"success": False, "error": "No LLM router configured"}
 
@@ -276,36 +393,95 @@ class SkillRegistry:
         if name in self._registry:
             return {"success": False, "error": f"Skill '{name}' already exists"}
 
+        generated_decision = self.governance.check_generated_skill(
+            name=name,
+            description=description,
+            function_name=func_name,
+            code=code,
+            tags=tags,
+        )
+        if not generated_decision.allowed:
+            self._emit_governance_event(
+                "codeskill_governance_denied",
+                action="generate",
+                decision=generated_decision,
+                skill_name=name,
+                tags=tags,
+            )
+            return _governance_denied_result(generated_decision)
+
         validation_error = self._validate_skill_code(code, func_name)
         if validation_error is not None:
             return {"success": False, "error": f"Unsafe skill rejected: {validation_error}"}
 
-        # Write skill file
+        # Write and test a unique temporary file before publishing it into the registry.
         skill_file = self.root / f"{name}.py"
-        skill_file.write_text(code, encoding="utf-8")
+        temp_skill_file: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                dir=self.root,
+                prefix=f".{name}.",
+                suffix=".tmp.py",
+                delete=False,
+            ) as handle:
+                handle.write(code)
+                temp_skill_file = Path(handle.name)
 
-        # Test it in sandbox
-        test_result = self._test_skill(skill_file, func_name)
-        if not test_result["passed"]:
-            skill_file.unlink(missing_ok=True)
-            return {"success": False, "error": f"Skill test failed: {test_result.get('error', 'unknown')}"}
+            test_result = self._test_skill(temp_skill_file, func_name)
+            if not test_result["passed"]:
+                temp_skill_file.unlink(missing_ok=True)
+                return {"success": False, "error": f"Skill test failed: {test_result.get('error', 'unknown')}"}
 
-        # Register
-        now = datetime.now(timezone.utc).isoformat()
-        with self._lock:
-            skill = Skill(
-                name=name,
-                description=description,
-                source_file=str(skill_file),
-                function_name=func_name,
-                created=now,
-                tags=tags or [],
-            )
-            self._registry[name] = skill
-            self._save_registry()
+            size_bytes = temp_skill_file.stat().st_size
+            sha256_hash = _sha256_file(temp_skill_file)
 
-        logger.info("Skill generated and registered: %s", name)
-        return {"success": True, "name": name, "description": description}
+            # Register and publish under lock so concurrent same-name generations cannot
+            # overwrite each other's tested source files.
+            now = datetime.now(timezone.utc).isoformat()
+            with self._lock:
+                if name in self._registry:
+                    temp_skill_file.unlink(missing_ok=True)
+                    return {"success": False, "error": f"Skill '{name}' already exists"}
+                if skill_file.exists():
+                    temp_skill_file.unlink(missing_ok=True)
+                    return {"success": False, "error": f"Skill source already exists: {skill_file.name}"}
+                temp_skill_file.rename(skill_file)
+                skill = Skill(
+                    name=name,
+                    description=description,
+                    source_file=str(skill_file),
+                    function_name=func_name,
+                    created=now,
+                    tags=tags,
+                    status=generated_decision.resulting_status or _GENERATED_SKILL_STATUS,
+                )
+                self._registry[name] = skill
+                self._save_registry()
+        finally:
+            if temp_skill_file is not None and temp_skill_file.exists():
+                temp_skill_file.unlink(missing_ok=True)
+
+        self._emit_governance_event(
+            "codeskill_governance_allowed",
+            action="generate",
+            decision=generated_decision,
+            skill_name=name,
+            status=skill.status,
+            tags=tags,
+        )
+        logger.info("Skill generated and registered pending review: %s", name)
+        return {
+            "success": True,
+            "name": name,
+            "description": description,
+            "status": skill.status,
+            "requires_review": skill.status == _GENERATED_SKILL_STATUS,
+            "path": str(skill_file),
+            "size_bytes": size_bytes,
+            "sha256_hash": sha256_hash,
+        }
 
     def _test_skill(self, skill_file: Path, func_name: str) -> dict:
         """Execute the skill in a subprocess with restricted builtins/imports."""
@@ -326,8 +502,26 @@ class SkillRegistry:
     def execute_skill(self, name: str, **kwargs: Any) -> dict:
         """Execute a registered skill by name."""
         skill = self._registry.get(name)
-        if not skill or skill.status != "active":
+        if not skill:
+            decision = CodeSkillGovernanceDecision(allowed=False, reason="skill_not_found")
+            self._emit_governance_event(
+                "codeskill_governance_denied",
+                action="execute",
+                decision=decision,
+                skill_name=name,
+            )
             return {"success": False, "error": f"Skill '{name}' not found or inactive"}
+        execute_decision = self.governance.check_execute(skill=skill)
+        if not execute_decision.allowed:
+            self._emit_governance_event(
+                "codeskill_governance_denied",
+                action="execute",
+                decision=execute_decision,
+                skill_name=name,
+                status=skill.status,
+                tags=skill.tags,
+            )
+            return _governance_denied_result(execute_decision, skill_name=name)
         skill_path = Path(skill.source_file)
         if not skill_path.exists():
             return {"success": False, "error": f"Skill source missing: {skill.source_file}"}
@@ -336,6 +530,14 @@ class SkillRegistry:
             return {"success": False, "error": f"Skill validation failed: {validation_error}"}
 
         try:
+            self._emit_governance_event(
+                "codeskill_governance_allowed",
+                action="execute",
+                decision=execute_decision,
+                skill_name=name,
+                status=skill.status,
+                tags=skill.tags,
+            )
             result = self._run_skill_subprocess(skill_path, skill.function_name, kwargs)
             with self._lock:
                 skill.use_count += 1
@@ -462,6 +664,7 @@ class SkillRegistry:
         gap_result = self.discover_gaps()
         gaps = gap_result.get("gaps", [])
         generated = 0
+        pending_review = 0
         for gap in gaps[:max_new]:
             task = gap.get("task_description", gap.get("description", ""))
             if not task:
@@ -469,10 +672,91 @@ class SkillRegistry:
             result = self.generate_skill(task_description=task, tags=["auto-generated"])
             if result.get("success"):
                 generated += 1
+                if result.get("status") == _GENERATED_SKILL_STATUS:
+                    pending_review += 1
         logger.info("Skill auto_expand: gaps=%d generated=%d", len(gaps), generated)
-        return {"gaps_found": len(gaps), "skills_generated": generated}
+        return {"gaps_found": len(gaps), "skills_generated": generated, "skills_pending_review": pending_review}
 
     def stats(self) -> dict:
-        active = sum(1 for s in self._registry.values() if s.status == "active")
-        total_uses = sum(s.use_count for s in self._registry.values())
-        return {"total_skills": len(self._registry), "active": active, "total_uses": total_uses}
+        with self._lock:
+            active = sum(1 for s in self._registry.values() if s.status == "active")
+            pending_review = sum(1 for s in self._registry.values() if s.status == _GENERATED_SKILL_STATUS)
+            total_uses = sum(s.use_count for s in self._registry.values())
+            total_skills = len(self._registry)
+        return {
+            "total_skills": total_skills,
+            "active": active,
+            "pending_review": pending_review,
+            "total_uses": total_uses,
+        }
+
+    def _emit_governance_event(
+        self,
+        event_type: str,
+        *,
+        action: str,
+        decision: CodeSkillGovernanceDecision,
+        skill_name: str | None = None,
+        status: str | None = None,
+        tags: list[str] | None = None,
+        task_description: str | None = None,
+    ) -> None:
+        if self.observe is None:
+            return
+        payload: dict[str, Any] = {
+            "action": action,
+            "allowed": decision.allowed,
+            "reason": decision.reason,
+            "requires_approval": decision.requires_approval,
+        }
+        if skill_name:
+            payload["skill_name"] = skill_name
+        if status:
+            payload["status"] = status
+        if tags:
+            tag_values = [str(tag) for tag in tags[:20]]
+            payload["tag_count"] = len(tags)
+            payload["tag_sha256"] = [
+                hashlib.sha256(tag.encode("utf-8")).hexdigest()
+                for tag in tag_values
+            ]
+        if task_description is not None:
+            payload["task_length"] = len(task_description)
+            payload["task_sha256"] = hashlib.sha256(task_description.encode("utf-8")).hexdigest()
+        try:
+            self.observe.emit(event_type, payload=payload)
+        except Exception:
+            logger.debug("codeskill governance event emit failed", exc_info=True)
+
+
+def _valid_skill_identifier(value: str) -> bool:
+    return bool(_SKILL_NAME_RE.fullmatch(str(value or "")))
+
+
+def _contains_sensitive_target(value: str) -> bool:
+    return bool(_SENSITIVE_TARGET_RE.search(str(value or "")))
+
+
+def _governance_denied_result(
+    decision: CodeSkillGovernanceDecision,
+    *,
+    skill_name: str | None = None,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "success": False,
+        "blocked": True,
+        "reason": decision.reason,
+        "requires_approval": decision.requires_approval,
+        "error": f"CodeSkill governance denied: {decision.reason}",
+    }
+    if skill_name:
+        result["name"] = skill_name
+    return result
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
