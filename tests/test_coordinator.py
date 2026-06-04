@@ -98,6 +98,8 @@ class SynthesizeTests(unittest.TestCase):
         self.assertIn("Step 1", result)
         call_kwargs = router.ask.call_args
         self.assertEqual(call_kwargs.kwargs["lane"], "research")
+        self.assertEqual(call_kwargs.kwargs["role"], "coordinator_research")
+        self.assertEqual(call_kwargs.kwargs["timeout"], 90.0)
         self.assertIn("evidence_pack", call_kwargs.kwargs)
 
     def test_synthesis_distills_long_worker_summaries(self) -> None:
@@ -279,6 +281,10 @@ class WorkerTaskTests(unittest.TestCase):
         task = WorkerTask(name="t", instruction="do", lane="worker")
         self.assertEqual(task.lane, "worker")
 
+    def test_accepts_timeout_override(self) -> None:
+        task = WorkerTask(name="t", instruction="do", timeout_seconds=12.5)
+        self.assertEqual(task.timeout_seconds, 12.5)
+
 
 class AgentAwareTests(unittest.TestCase):
     def test_worker_task_accepts_assigned_agent(self) -> None:
@@ -312,6 +318,39 @@ class AgentAwareTests(unittest.TestCase):
         call_kwargs = router.ask.call_args
         self.assertNotIn("provider", call_kwargs.kwargs)
         self.assertNotIn("model", call_kwargs.kwargs)
+        self.assertEqual(call_kwargs.kwargs["role"], "coordinator_research")
+        self.assertEqual(call_kwargs.kwargs["timeout"], 90.0)
+
+    def test_execute_worker_propagates_timeout_by_lane(self) -> None:
+        svc, router, _, _ = _make_service()
+        router.ask.return_value = MagicMock(content="ok")
+
+        for lane, expected_role, expected_timeout in (
+            ("research", "coordinator_research", 90.0),
+            ("worker", "coordinator_worker", 120.0),
+            ("worker_heavy", "heavy_coding", 180.0),
+            ("verifier", "coordinator_verification", 60.0),
+        ):
+            with self.subTest(lane=lane):
+                router.ask.reset_mock()
+                svc._execute_worker(WorkerTask(name=f"t-{lane}", instruction="do", lane=lane))
+                call_kwargs = router.ask.call_args.kwargs
+                self.assertEqual(call_kwargs["role"], expected_role)
+                self.assertEqual(call_kwargs["timeout"], expected_timeout)
+
+    def test_execute_worker_uses_task_timeout_override(self) -> None:
+        svc, router, _, _ = _make_service()
+        router.ask.return_value = MagicMock(content="ok")
+        task = WorkerTask(name="t1", instruction="do something", timeout_seconds=12.0)
+        svc._execute_worker(task)
+        self.assertEqual(router.ask.call_args.kwargs["timeout"], 12.0)
+
+    def test_execute_worker_preserves_explicit_zero_timeout(self) -> None:
+        svc, router, _, _ = _make_service()
+        router.ask.return_value = MagicMock(content="ok")
+        task = WorkerTask(name="t1", instruction="do something", timeout_seconds=0.0)
+        svc._execute_worker(task)
+        self.assertEqual(router.ask.call_args.kwargs["timeout"], 0.0)
 
     def test_execute_worker_uses_lane_override_when_no_agent_assigned(self) -> None:
         svc, router, _, _ = _make_service()
@@ -333,6 +372,19 @@ class AgentAwareTests(unittest.TestCase):
         self.assertEqual(call_kwargs["provider"], "codex")
         self.assertEqual(call_kwargs["model"], "gpt-5.5")
         self.assertEqual(call_kwargs["effort"], "xhigh")
+
+    def test_synthesis_preserves_explicit_zero_timeout_override(self) -> None:
+        svc, router, *_ = _make_service()
+        router.ask.return_value = MagicMock(content="plan")
+        from claw_v2.coordinator import WorkerResult
+
+        svc._synthesize(
+            "objective",
+            [WorkerResult(task_name="r1", content="data", duration_seconds=0.1)],
+            lane_overrides={"research": {"timeout": 0.0}},
+        )
+
+        self.assertEqual(router.ask.call_args.kwargs["timeout"], 0.0)
 
     def test_synthesize_includes_agent_context(self) -> None:
         registry = {

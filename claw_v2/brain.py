@@ -1058,8 +1058,8 @@ class BrainService:
         create_approval: bool = True,
     ) -> CriticalActionVerification:
         evidence = _format_verifier_evidence(plan=plan, diff=diff, test_output=test_output)
-        primary_provider = self.router.config.provider_for_lane("verifier")
-        primary_model = self.router.config.model_for_lane("verifier")
+        primary_provider = self.router.config.provider_for_role("critical_verifier")
+        primary_model = self.router.config.model_for_role("critical_verifier")
         votes = [
             self._collect_verifier_vote(
                 evidence=evidence,
@@ -1168,6 +1168,8 @@ class BrainService:
                 lane="verifier",
                 provider=provider,
                 model=model,
+                role="critical_verifier",
+                timeout=self.router.config.timeout_for_role("critical_verifier"),
                 evidence_pack={**evidence, "verifier_role": role},
             )
         except Exception as exc:
@@ -1188,7 +1190,7 @@ class BrainService:
 
     def _secondary_verifier_provider(self, primary_provider: str) -> str | None:
         preferred_pair = {
-            "anthropic": "codex",
+            "anthropic": "openai",
             "codex": "anthropic",
             "openai": "anthropic",
         }

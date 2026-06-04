@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 
 from claw_v2.approval import ApprovalManager
 from claw_v2.llm import LLMRouter
+from claw_v2.provider_roles import router_timeout_for_role
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,8 @@ class PlanGate:
         response = self.router.ask(
             prompt,
             lane="verifier",
+            role="control_verifier",
+            timeout=router_timeout_for_role(self.router, "control_verifier", default=30.0),
             evidence_pack={"agent": agent_name, "experiment": experiment_number},
         )
         try:

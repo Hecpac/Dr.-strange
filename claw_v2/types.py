@@ -4,6 +4,19 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 Lane = Literal["brain", "worker", "worker_heavy", "verifier", "research", "judge"]
+ProviderRole = Literal[
+    "brain",
+    "worker",
+    "heavy_coding",
+    "research_synthesis",
+    "control_judge",
+    "control_verifier",
+    "critical_verifier",
+    "coordinator_worker",
+    "coordinator_research",
+    "coordinator_verification",
+    "coordinator_implementation",
+]
 ProviderName = Literal["anthropic", "openai", "google", "ollama", "codex"]
 AgentClass = Literal["researcher", "operator", "deployer"]
 SanitizerVerdict = Literal["clean", "malicious", "unsure"]

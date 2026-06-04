@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from claw_v2.skills import SkillRegistry
 
 from claw_v2.approval_gate import system_approval_mode
+from claw_v2.provider_roles import router_timeout_for_role
 from claw_v2.tool_policy import daemon_can_auto_approve
 from claw_v2.tracing import attach_trace, child_trace_context, new_trace_context
 
@@ -381,6 +382,8 @@ class KairosService:
             response = self.router.ask(
                 prompt,
                 lane="judge",
+                role="control_judge",
+                timeout=router_timeout_for_role(self.router, "control_judge", default=30.0),
                 evidence_pack=attach_trace({"kairos_context": context}, decision_trace),
             )
             return self._parse_decision(response.content)
@@ -507,7 +510,13 @@ class KairosService:
             f"Notification:\n{text[:1000]}"
         )
         try:
-            response = self.router.ask(prompt, lane="judge", evidence_pack={"kairos_notification": text})
+            response = self.router.ask(
+                prompt,
+                lane="judge",
+                role="control_judge",
+                timeout=router_timeout_for_role(self.router, "control_judge", default=30.0),
+                evidence_pack={"kairos_notification": text},
+            )
             raw = response.content.strip()
             start = raw.find("{")
             end = raw.rfind("}") + 1

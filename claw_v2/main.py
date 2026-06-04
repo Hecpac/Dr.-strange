@@ -651,6 +651,10 @@ def _setup_agent_services(
         orchestration_store=orchestration_store,
         worker_result_summary_chars=config.claw_worker_summary_limit,
         phase_input_summary_chars=config.claw_phase_input_limit,
+        default_worker_timeout_seconds=config.timeout_for_role("coordinator_worker"),
+        default_research_timeout_seconds=config.timeout_for_role("coordinator_research"),
+        default_verification_timeout_seconds=config.timeout_for_role("coordinator_verification"),
+        default_implementation_timeout_seconds=config.timeout_for_role("coordinator_implementation"),
     )
     task_board = TaskBoard(board_root=config.agent_state_root / "_board")
     registry_path = config.agent_state_root / "AGENTS.md"

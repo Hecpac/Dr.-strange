@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from claw_v2.types import Lane, LLMResponse
+from claw_v2.types import Lane, LLMResponse, ProviderRole
 
 
 class AdapterError(RuntimeError):
@@ -69,11 +69,26 @@ class LLMRequest:
     cwd: str | None = None
     cache_ttl: int | None = None
     thinking_tokens: int = 0
+    role: ProviderRole | None = None
 
     def validate(self) -> None:
         """Fail fast on malformed cross-provider requests before adapter calls."""
         if self.lane not in {"brain", "worker", "worker_heavy", "verifier", "research", "judge"}:
             raise ValueError(f"Invalid lane: {self.lane!r}")
+        if self.role is not None and self.role not in {
+            "brain",
+            "worker",
+            "heavy_coding",
+            "research_synthesis",
+            "control_judge",
+            "control_verifier",
+            "critical_verifier",
+            "coordinator_worker",
+            "coordinator_research",
+            "coordinator_verification",
+            "coordinator_implementation",
+        }:
+            raise ValueError(f"Invalid provider role: {self.role!r}")
         if not isinstance(self.provider, str) or not self.provider.strip():
             raise ValueError("LLM provider must be a non-empty string.")
         if not isinstance(self.model, str) or not self.model.strip():
