@@ -32,6 +32,13 @@ class TickResult:
     heartbeat: HeartbeatSnapshot
 
 
+@dataclass(slots=True)
+class BackgroundJobRunner:
+    name: str
+    handler: Callable[[], object]
+    interval: float = 60.0
+
+
 class ClawDaemon:
     def __init__(
         self,
@@ -67,6 +74,22 @@ class ClawDaemon:
         self.pending_verification_drain_apply = bool(pending_verification_drain_apply)
         self.pending_verification_drain_max_apply = pending_verification_drain_max_apply
         self.pending_verification_drain_max_scan = pending_verification_drain_max_scan
+        self._background_job_runners: list[BackgroundJobRunner] = []
+
+    def register_background_job_runner(
+        self,
+        *,
+        name: str,
+        handler: Callable[[], object],
+        interval: float = 60.0,
+    ) -> None:
+        self._background_job_runners.append(
+            BackgroundJobRunner(
+                name=name,
+                handler=handler,
+                interval=max(0.001, float(interval)),
+            )
+        )
 
     def tick(self, *, now: float | None = None) -> TickResult:
         trace = new_trace_context(artifact_id="daemon_tick")
@@ -224,6 +247,12 @@ class ClawDaemon:
                     )
                 )
             )
+        for runner in self._background_job_runners:
+            background_tasks.append(
+                asyncio.create_task(
+                    self._run_background_job_runner_loop(shutdown, runner=runner)
+                )
+            )
         try:
             while not shutdown.is_set():
                 try:
@@ -304,6 +333,27 @@ class ClawDaemon:
                     )
             try:
                 await asyncio.wait_for(shutdown.wait(), timeout=interval)
+            except asyncio.TimeoutError:
+                pass
+
+    async def _run_background_job_runner_loop(
+        self,
+        shutdown: asyncio.Event,
+        *,
+        runner: BackgroundJobRunner,
+    ) -> None:
+        while not shutdown.is_set():
+            try:
+                await asyncio.to_thread(runner.handler)
+            except Exception as exc:
+                logger.exception("daemon background job runner failed: %s", runner.name)
+                if self.observe is not None:
+                    self.observe.emit(
+                        "daemon_background_job_runner_error",
+                        payload={"runner": runner.name, "error": _safe_error_preview(exc)},
+                    )
+            try:
+                await asyncio.wait_for(shutdown.wait(), timeout=runner.interval)
             except asyncio.TimeoutError:
                 pass
 
