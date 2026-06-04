@@ -8,6 +8,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from claw_v2.prompt_manifest import (
+    PromptBlock,
+    PromptManifest,
+    PromptTrust,
+    make_prompt_block,
+    prompt_capsule_mode_from_env,
+)
 from claw_v2.redaction import redact_sensitive
 
 
@@ -16,6 +23,8 @@ _MAX_DAILY_CONTEXT_CHARS_PER_FILE = 12_000
 _MAX_STARTUP_CONTEXT_CHARS = 180_000
 _MAX_STARTUP_FIELD_CHARS = 420
 BOOT_CONTEXT_VERSION = "startup_context_v2"
+_CONTEXT_PREFIX = "# Agent Workspace Context\n\n"
+_CONTEXT_TRUNCATED_SUFFIX = "\n\n[... startup context truncated]"
 
 
 _DEFAULT_FILES: dict[str, str] = {
@@ -124,6 +133,19 @@ class ContextSourceStatus:
 
 
 @dataclass(slots=True)
+class _PromptSectionDraft:
+    block_id: str
+    title: str
+    source: str
+    trust: PromptTrust
+    priority: int
+    budget_chars: int
+    text: str
+    actual_chars: int
+    truncated: bool = False
+
+
+@dataclass(slots=True)
 class StartupContextReport:
     root: str
     channel: str
@@ -157,6 +179,7 @@ class StartupContextReport:
     session_state_count: int = 0
     learning_loaded: bool = False
     learning_count: int = 0
+    prompt_manifest: PromptManifest | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -192,6 +215,7 @@ class StartupContextReport:
             "session_state_count": self.session_state_count,
             "learning_loaded": self.learning_loaded,
             "learning_count": self.learning_count,
+            "prompt_manifest": self.prompt_manifest.to_dict() if self.prompt_manifest else None,
         }
 
 
@@ -264,6 +288,35 @@ class AgentWorkspace:
         stable_context_used: bool = False,
     ) -> tuple[str, StartupContextReport]:
         sections: list[str] = []
+        prompt_sections: list[_PromptSectionDraft] = []
+
+        def add_section(
+            section: str,
+            *,
+            block_id: str,
+            title: str,
+            source: str,
+            trust: PromptTrust,
+            priority: int,
+            budget_chars: int,
+            actual_chars: int | None = None,
+            truncated: bool = False,
+        ) -> None:
+            sections.append(section)
+            prompt_sections.append(
+                _PromptSectionDraft(
+                    block_id=block_id,
+                    title=title,
+                    source=source,
+                    trust=trust,
+                    priority=priority,
+                    budget_chars=budget_chars,
+                    text=section,
+                    actual_chars=len(section) if actual_chars is None else actual_chars,
+                    truncated=truncated,
+                )
+            )
+
         report = StartupContextReport(root=str(self.root), channel=channel)
         today = now or datetime.now().astimezone()
         report.workspace_root = str(self.root)
@@ -274,37 +327,51 @@ class AgentWorkspace:
         report.git_status_summary = _git_status_summary(self.root)
         report.git_dirty = bool(report.git_status_summary)
         report.stable_context_used = stable_context_used
-        sections.extend(
-            [
-                "# Startup Context",
-                f"boot_context_version={BOOT_CONTEXT_VERSION}",
-                "startup_context_used=true",
-                f"stable_context_used={str(stable_context_used).lower()}",
-                f"startup_date={today.strftime('%Y-%m-%d')}",
-                f"startup_weekday={today.strftime('%A')}",
-                f"startup_channel={channel}",
-                f"workspace_root={self.root}",
-                f"cwd={report.cwd}",
-                f"pid={report.pid}",
-                f"code_version={report.code_version or 'unknown'}",
-                f"git_dirty={str(report.git_dirty).lower()}",
-                f"git_status_entries={len(report.git_status_summary)}",
-                "boot_protocol_loaded=pending",
-                "boot_protocol_version=pending",
-                "memoria persistente=required",
-                "task_ledger=required",
-                "regla: no asumir API/Pro/modelo/canal sin verificar.",
-                "regla: separación persona/modelo/runtime; Dr. Strange es la persona, modelo/runtime/CLI/API/daemon son capas tecnicas.",
-                "regla: contexto interno != respuesta externa; reportar fuentes/estado sin imprimir contenido privado completo.",
-                "regla: Telegram es canal Telegram cuando current_channel=telegram; no describir Telegram como canal CLI salvo evidencia real de canal CLI.",
-            ]
+        add_section(
+            "\n".join(
+                [
+                    "# Startup Context",
+                    f"boot_context_version={BOOT_CONTEXT_VERSION}",
+                    "startup_context_used=true",
+                    f"stable_context_used={str(stable_context_used).lower()}",
+                    f"startup_date={today.strftime('%Y-%m-%d')}",
+                    f"startup_weekday={today.strftime('%A')}",
+                    f"startup_channel={channel}",
+                    f"workspace_root={self.root}",
+                    f"cwd={report.cwd}",
+                    f"pid={report.pid}",
+                    f"code_version={report.code_version or 'unknown'}",
+                    f"git_dirty={str(report.git_dirty).lower()}",
+                    f"git_status_entries={len(report.git_status_summary)}",
+                    "boot_protocol_loaded=pending",
+                    "boot_protocol_version=pending",
+                    "memoria persistente=required",
+                    "task_ledger=required",
+                    "regla: no asumir API/Pro/modelo/canal sin verificar.",
+                    "regla: separación persona/modelo/runtime; Dr. Strange es la persona, modelo/runtime/CLI/API/daemon son capas tecnicas.",
+                    "regla: contexto interno != respuesta externa; reportar fuentes/estado sin imprimir contenido privado completo.",
+                    "regla: Telegram es canal Telegram cuando current_channel=telegram; no describir Telegram como canal CLI salvo evidencia real de canal CLI.",
+                ]
+            ),
+            block_id="generated.startup_context",
+            title="Startup Context",
+            source="startup_context",
+            trust="generated",
+            priority=80,
+            budget_chars=4_000,
         )
         if report.git_status_summary:
-            sections.append(
+            add_section(
                 "## Git Worktree\n"
                 "git_dirty=true\n"
                 "git_status_sample:\n"
-                + "\n".join(f"- {item}" for item in report.git_status_summary)
+                + "\n".join(f"- {item}" for item in report.git_status_summary),
+                block_id="generated.git_worktree",
+                title="Git Worktree",
+                source="git_status",
+                trust="generated",
+                priority=60,
+                budget_chars=3_000,
             )
         for name in self.STABLE_CONTEXT_FILES:
             content, status = self._read_context_source(
@@ -324,27 +391,84 @@ class AgentWorkspace:
             if name == "BOOT_PROTOCOL.md":
                 report.boot_protocol_loaded = True
                 report.boot_protocol_version = _extract_boot_protocol_version(content)
-            sections.append(f"## {name}\n{content}")
+            section = f"## {name}\n{content}"
+            add_section(
+                section,
+                block_id=f"stable.{_prompt_block_slug(name)}",
+                title=name,
+                source=name,
+                trust=_stable_prompt_trust(name),
+                priority=_stable_prompt_priority(name),
+                budget_chars=_MAX_CONTEXT_CHARS_PER_FILE,
+                actual_chars=len(f"## {name}\n") + status.chars,
+                truncated=status.truncated,
+            )
 
         daily_sections = self._daily_memory_sections(report)
         if daily_sections:
-            sections.extend(daily_sections)
+            for section in daily_sections:
+                source = _section_source(section, default="memory/")
+                add_section(
+                    section,
+                    block_id=f"memory.{_prompt_block_slug(source)}",
+                    title=source,
+                    source=source,
+                    trust="memory",
+                    priority=45,
+                    budget_chars=_MAX_DAILY_CONTEXT_CHARS_PER_FILE,
+                )
 
         config_section = self._configuration_section(config, report)
         if config_section:
-            sections.append(config_section)
+            add_section(
+                config_section,
+                block_id="workspace.operational_configuration",
+                title="Verified Operational Configuration",
+                source="operational_config",
+                trust="workspace",
+                priority=65,
+                budget_chars=4_000,
+            )
 
         memory_sections = self._memory_sections(memory, report)
         if memory_sections:
-            sections.extend(memory_sections)
+            for section in memory_sections:
+                source = _section_source(section, default="sqlite.memory")
+                trust: PromptTrust = "session" if "Session State" in source else "memory"
+                add_section(
+                    section,
+                    block_id=f"{trust}.{_prompt_block_slug(source)}",
+                    title=source,
+                    source=source,
+                    trust=trust,
+                    priority=40 if trust == "memory" else 35,
+                    budget_chars=6_000,
+                )
 
         task_section = self._task_ledger_section(task_ledger, report)
         if task_section:
-            sections.append(task_section)
+            add_section(
+                task_section,
+                block_id="task_ledger.startup_snapshot",
+                title="Task Ledger Startup Snapshot",
+                source="task_ledger",
+                trust="task_ledger",
+                priority=50,
+                budget_chars=8_000,
+            )
 
         if not report.loaded_files and config is None and memory is None and task_ledger is None:
+            report.prompt_manifest = _build_prompt_manifest(
+                [],
+                context="",
+                context_before_total_truncation="",
+                context_truncated=False,
+                boot_protocol_loaded=report.boot_protocol_loaded,
+                boot_protocol_version=report.boot_protocol_version,
+            )
             return "", report
-        context = "# Agent Workspace Context\n\n" + "\n\n".join(sections) if sections else ""
+        context_before_total_truncation = _CONTEXT_PREFIX + "\n\n".join(sections) if sections else ""
+        context = context_before_total_truncation
         context = context.replace(
             "boot_protocol_loaded=pending",
             f"boot_protocol_loaded={str(report.boot_protocol_loaded).lower()}",
@@ -354,9 +478,17 @@ class AgentWorkspace:
             f"boot_protocol_version={report.boot_protocol_version or 'unknown'}",
         )
         if len(context) > _MAX_STARTUP_CONTEXT_CHARS:
-            context = context[:_MAX_STARTUP_CONTEXT_CHARS] + "\n\n[... startup context truncated]"
+            context = context[:_MAX_STARTUP_CONTEXT_CHARS] + _CONTEXT_TRUNCATED_SUFFIX
             report.context_truncated = True
         report.context_chars = len(context)
+        report.prompt_manifest = _build_prompt_manifest(
+            prompt_sections,
+            context=context,
+            context_before_total_truncation=context_before_total_truncation,
+            context_truncated=report.context_truncated,
+            boot_protocol_loaded=report.boot_protocol_loaded,
+            boot_protocol_version=report.boot_protocol_version,
+        )
         return context, report
 
     def system_prompt(self, fallback: str = "You are Dr. Strange, the autonomous personal agent for Hector Pachano.") -> str:
@@ -658,6 +790,109 @@ def _safe_startup_text(value: Any, *, limit: int = _MAX_STARTUP_FIELD_CHARS) -> 
     if len(text) > limit:
         return text[:limit].rstrip() + "...[truncated]"
     return text
+
+
+def _build_prompt_manifest(
+    drafts: list[_PromptSectionDraft],
+    *,
+    context: str,
+    context_before_total_truncation: str,
+    context_truncated: bool,
+    boot_protocol_loaded: bool,
+    boot_protocol_version: str,
+) -> PromptManifest:
+    replacements = {
+        "boot_protocol_loaded=pending": f"boot_protocol_loaded={str(boot_protocol_loaded).lower()}",
+        "boot_protocol_version=pending": f"boot_protocol_version={boot_protocol_version or 'unknown'}",
+    }
+    source_texts = [_apply_prompt_manifest_replacements(draft.text, replacements) for draft in drafts]
+    untruncated_context = _apply_prompt_manifest_replacements(context_before_total_truncation, replacements)
+    included_source_limit = (
+        min(len(untruncated_context), _MAX_STARTUP_CONTEXT_CHARS)
+        if context_truncated
+        else len(untruncated_context)
+    )
+
+    blocks: list[PromptBlock] = []
+    cursor = len(_CONTEXT_PREFIX) if source_texts else 0
+    for index, (draft, source_text) in enumerate(zip(drafts, source_texts)):
+        if index > 0:
+            cursor += len("\n\n")
+        start = cursor
+        end = start + len(source_text)
+        if start >= included_source_limit:
+            included_text = ""
+        else:
+            included_text = source_text[: max(0, min(end, included_source_limit) - start)]
+        actual_chars = draft.actual_chars
+        if draft.source == "startup_context":
+            actual_chars = len(source_text)
+        blocks.append(
+            make_prompt_block(
+                block_id=draft.block_id,
+                title=draft.title,
+                source=draft.source,
+                trust=draft.trust,
+                priority=draft.priority,
+                budget_chars=draft.budget_chars,
+                actual_chars=actual_chars,
+                source_text=source_text,
+                included_text=included_text,
+                source_truncated=draft.truncated,
+            )
+        )
+        cursor = end
+
+    return PromptManifest(
+        mode=prompt_capsule_mode_from_env(),
+        total_budget_chars=_MAX_STARTUP_CONTEXT_CHARS,
+        total_actual_chars=len(untruncated_context),
+        total_included_chars=len(context),
+        blocks=blocks,
+    )
+
+
+def _apply_prompt_manifest_replacements(text: str, replacements: dict[str, str]) -> str:
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    return text
+
+
+def _stable_prompt_trust(name: str) -> PromptTrust:
+    if name == "BOOT_PROTOCOL.md":
+        return "system"
+    if name == "USER.md":
+        return "user_profile"
+    if name == "MEMORY.md":
+        return "memory"
+    return "workspace"
+
+
+def _stable_prompt_priority(name: str) -> int:
+    high = {"BOOT_PROTOCOL.md", "IDENTITY.md", "SOUL.md", "USER.md", "AGENTS.md"}
+    medium = {"TOOLS.md", "BOOT.md", "HEARTBEAT.md"}
+    if name in high:
+        return 100
+    if name in medium:
+        return 65
+    if name == "MEMORY.md":
+        return 45
+    return 50
+
+
+def _section_source(section: str, *, default: str) -> str:
+    first = section.splitlines()[0].strip() if section else ""
+    if first.startswith("## "):
+        return first[3:].strip() or default
+    if first.startswith("# "):
+        return first[2:].strip() or default
+    return default
+
+
+def _prompt_block_slug(value: str) -> str:
+    slug = "".join(ch.lower() if ch.isalnum() else "_" for ch in value)
+    slug = "_".join(part for part in slug.split("_") if part)
+    return slug or "block"
 
 
 def _extract_boot_protocol_version(content: str) -> str:
