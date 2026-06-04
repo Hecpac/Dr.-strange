@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 from claw_v2.approval_gate import system_approval_mode
 from claw_v2.tool_policy import daemon_can_auto_approve
 from claw_v2.tracing import attach_trace, child_trace_context, new_trace_context
+from claw_v2.types import ProviderRole
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,19 @@ def _classify_decide_error(error_str: str) -> str:
     if "timed out" in lowered or "timeout" in lowered:
         return "timeout"
     return "general"
+
+
+def _router_timeout_for_role(router: Any, role: ProviderRole, *, default: float) -> float:
+    config = getattr(router, "config", None)
+    timeout_for_role = getattr(config, "timeout_for_role", None)
+    if callable(timeout_for_role):
+        try:
+            value = timeout_for_role(role)
+            if isinstance(value, (int, float)):
+                return float(value)
+        except Exception:
+            return default
+    return default
 
 
 class KairosService:
@@ -381,6 +395,8 @@ class KairosService:
             response = self.router.ask(
                 prompt,
                 lane="judge",
+                role="control_judge",
+                timeout=_router_timeout_for_role(self.router, "control_judge", default=30.0),
                 evidence_pack=attach_trace({"kairos_context": context}, decision_trace),
             )
             return self._parse_decision(response.content)
@@ -507,7 +523,13 @@ class KairosService:
             f"Notification:\n{text[:1000]}"
         )
         try:
-            response = self.router.ask(prompt, lane="judge", evidence_pack={"kairos_notification": text})
+            response = self.router.ask(
+                prompt,
+                lane="judge",
+                role="control_judge",
+                timeout=_router_timeout_for_role(self.router, "control_judge", default=30.0),
+                evidence_pack={"kairos_notification": text},
+            )
             raw = response.content.strip()
             start = raw.find("{")
             end = raw.rfind("}") + 1

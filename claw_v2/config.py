@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .types import Lane
+from .types import Lane, ProviderRole
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -84,6 +84,28 @@ _SUBSCRIPTION_BUDGET_FLOORS: dict[Lane, float] = {
     "research": 0.10,
     "judge": 0.05,
 }
+
+_PROVIDER_ROLE_TIMEOUT_DEFAULTS: dict[ProviderRole, float] = {
+    "brain": 300.0,
+    "worker": 120.0,
+    "heavy_coding": 180.0,
+    "research_synthesis": 90.0,
+    "control_judge": 30.0,
+    "control_verifier": 30.0,
+    "critical_verifier": 30.0,
+    "coordinator_worker": 120.0,
+    "coordinator_research": 90.0,
+    "coordinator_verification": 60.0,
+    "coordinator_implementation": 180.0,
+}
+_CONTROL_PATH_PROVIDER_ROLES: frozenset[ProviderRole] = frozenset(
+    {"control_judge", "control_verifier", "critical_verifier"}
+)
+_MAX_CONTROL_PATH_TIMEOUT_SECONDS = 30.0
+
+
+class ProviderRolePolicyError(ValueError):
+    """Raised when a provider role would violate runtime safety policy."""
 
 
 def _is_anthropic_model(model: str | None) -> bool:
@@ -420,6 +442,23 @@ class AppConfig:
     judge_thinking_tokens: int = 0
     claw_worker_summary_limit: int = 16_000
     claw_phase_input_limit: int = 48_000
+    control_judge_provider: str | None = None
+    control_judge_model: str | None = None
+    control_verifier_provider: str | None = None
+    control_verifier_model: str | None = None
+    critical_verifier_provider: str | None = None
+    critical_verifier_model: str | None = None
+    provider_timeout_brain_seconds: float = _PROVIDER_ROLE_TIMEOUT_DEFAULTS["brain"]
+    provider_timeout_worker_seconds: float = _PROVIDER_ROLE_TIMEOUT_DEFAULTS["worker"]
+    provider_timeout_heavy_coding_seconds: float = _PROVIDER_ROLE_TIMEOUT_DEFAULTS["heavy_coding"]
+    provider_timeout_research_synthesis_seconds: float = _PROVIDER_ROLE_TIMEOUT_DEFAULTS["research_synthesis"]
+    provider_timeout_control_judge_seconds: float = _PROVIDER_ROLE_TIMEOUT_DEFAULTS["control_judge"]
+    provider_timeout_control_verifier_seconds: float = _PROVIDER_ROLE_TIMEOUT_DEFAULTS["control_verifier"]
+    provider_timeout_critical_verifier_seconds: float = _PROVIDER_ROLE_TIMEOUT_DEFAULTS["critical_verifier"]
+    provider_timeout_coordinator_worker_seconds: float = _PROVIDER_ROLE_TIMEOUT_DEFAULTS["coordinator_worker"]
+    provider_timeout_coordinator_research_seconds: float = _PROVIDER_ROLE_TIMEOUT_DEFAULTS["coordinator_research"]
+    provider_timeout_coordinator_verification_seconds: float = _PROVIDER_ROLE_TIMEOUT_DEFAULTS["coordinator_verification"]
+    provider_timeout_coordinator_implementation_seconds: float = _PROVIDER_ROLE_TIMEOUT_DEFAULTS["coordinator_implementation"]
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -562,6 +601,23 @@ class AppConfig:
             telemetry_root=Path(os.getenv("TELEMETRY_ROOT", str(home / ".claw" / "telemetry"))),
             claw_worker_summary_limit=_env_int("CLAW_WORKER_SUMMARY_LIMIT", 16_000),
             claw_phase_input_limit=_env_int("CLAW_PHASE_INPUT_LIMIT", 48_000),
+            control_judge_provider=os.getenv("CLAW_CONTROL_JUDGE_PROVIDER") or os.getenv("CONTROL_JUDGE_PROVIDER"),
+            control_judge_model=os.getenv("CLAW_CONTROL_JUDGE_MODEL") or os.getenv("CONTROL_JUDGE_MODEL"),
+            control_verifier_provider=os.getenv("CLAW_CONTROL_VERIFIER_PROVIDER") or os.getenv("CONTROL_VERIFIER_PROVIDER"),
+            control_verifier_model=os.getenv("CLAW_CONTROL_VERIFIER_MODEL") or os.getenv("CONTROL_VERIFIER_MODEL"),
+            critical_verifier_provider=os.getenv("CLAW_CRITICAL_VERIFIER_PROVIDER") or os.getenv("CRITICAL_VERIFIER_PROVIDER"),
+            critical_verifier_model=os.getenv("CLAW_CRITICAL_VERIFIER_MODEL") or os.getenv("CRITICAL_VERIFIER_MODEL"),
+            provider_timeout_brain_seconds=_env_float("CLAW_PROVIDER_TIMEOUT_BRAIN_SECONDS", _PROVIDER_ROLE_TIMEOUT_DEFAULTS["brain"]),
+            provider_timeout_worker_seconds=_env_float("CLAW_PROVIDER_TIMEOUT_WORKER_SECONDS", _PROVIDER_ROLE_TIMEOUT_DEFAULTS["worker"]),
+            provider_timeout_heavy_coding_seconds=_env_float("CLAW_PROVIDER_TIMEOUT_HEAVY_CODING_SECONDS", _PROVIDER_ROLE_TIMEOUT_DEFAULTS["heavy_coding"]),
+            provider_timeout_research_synthesis_seconds=_env_float("CLAW_PROVIDER_TIMEOUT_RESEARCH_SYNTHESIS_SECONDS", _PROVIDER_ROLE_TIMEOUT_DEFAULTS["research_synthesis"]),
+            provider_timeout_control_judge_seconds=_env_float("CLAW_PROVIDER_TIMEOUT_CONTROL_JUDGE_SECONDS", _PROVIDER_ROLE_TIMEOUT_DEFAULTS["control_judge"]),
+            provider_timeout_control_verifier_seconds=_env_float("CLAW_PROVIDER_TIMEOUT_CONTROL_VERIFIER_SECONDS", _PROVIDER_ROLE_TIMEOUT_DEFAULTS["control_verifier"]),
+            provider_timeout_critical_verifier_seconds=_env_float("CLAW_PROVIDER_TIMEOUT_CRITICAL_VERIFIER_SECONDS", _PROVIDER_ROLE_TIMEOUT_DEFAULTS["critical_verifier"]),
+            provider_timeout_coordinator_worker_seconds=_env_float("CLAW_PROVIDER_TIMEOUT_COORDINATOR_WORKER_SECONDS", _PROVIDER_ROLE_TIMEOUT_DEFAULTS["coordinator_worker"]),
+            provider_timeout_coordinator_research_seconds=_env_float("CLAW_PROVIDER_TIMEOUT_COORDINATOR_RESEARCH_SECONDS", _PROVIDER_ROLE_TIMEOUT_DEFAULTS["coordinator_research"]),
+            provider_timeout_coordinator_verification_seconds=_env_float("CLAW_PROVIDER_TIMEOUT_COORDINATOR_VERIFICATION_SECONDS", _PROVIDER_ROLE_TIMEOUT_DEFAULTS["coordinator_verification"]),
+            provider_timeout_coordinator_implementation_seconds=_env_float("CLAW_PROVIDER_TIMEOUT_COORDINATOR_IMPLEMENTATION_SECONDS", _PROVIDER_ROLE_TIMEOUT_DEFAULTS["coordinator_implementation"]),
         )
 
     def ensure_directories(self) -> None:
@@ -594,6 +650,12 @@ class AppConfig:
                 raise ValueError(f"{field_name} must be one of {sorted(supported)}.")
         for lane in ("brain", "worker", "worker_heavy", "verifier", "research", "judge"):
             _validate_provider_model_pair(self.provider_for_lane(lane), self.model_for_lane(lane), lane=lane)
+        for role in _PROVIDER_ROLE_TIMEOUT_DEFAULTS:
+            timeout = self.timeout_for_role(role)
+            provider = self.provider_for_role(role)
+            model = self.model_for_role(role)
+            _validate_provider_model_pair(provider, model, lane=f"role:{role}")
+            self.validate_provider_role_policy(role, provider, timeout=timeout)
         if self.browse_backend not in supported_browse_backends:
             raise ValueError(f"browse_backend must be one of {sorted(supported_browse_backends)}.")
         if self.sandbox_capability_profile not in {"surgical", "engineer", "admin"}:
@@ -682,6 +744,22 @@ class AppConfig:
         }
         return mapping[lane]
 
+    def provider_for_role(self, role: ProviderRole) -> str:
+        mapping: dict[ProviderRole, str] = {
+            "brain": self.brain_provider,
+            "worker": self.worker_provider,
+            "heavy_coding": self.worker_heavy_provider,
+            "research_synthesis": self.research_provider or self.brain_provider,
+            "control_judge": self.control_judge_provider or self.brain_provider,
+            "control_verifier": self.control_verifier_provider or self.brain_provider,
+            "critical_verifier": self.critical_verifier_provider or self.brain_provider,
+            "coordinator_worker": self.worker_provider,
+            "coordinator_research": self.research_provider or self.brain_provider,
+            "coordinator_verification": self.verifier_provider or self.brain_provider,
+            "coordinator_implementation": self.worker_heavy_provider,
+        }
+        return mapping[role]
+
     def model_for_lane(self, lane: Lane) -> str:
         if lane == "brain":
             return self.brain_model
@@ -697,6 +775,28 @@ class AppConfig:
         if explicit:
             return explicit
         return self.advisory_model_for_provider(self.provider_for_lane(lane))
+
+    def model_for_role(self, role: ProviderRole) -> str:
+        if role == "brain":
+            return self.brain_model
+        if role == "worker":
+            return self.worker_model
+        if role in {"heavy_coding", "coordinator_implementation"}:
+            return self.worker_heavy_model
+        if role == "coordinator_worker":
+            return self.worker_model
+        provider = self.provider_for_role(role)
+        explicit = {
+            "research_synthesis": self.research_model,
+            "control_judge": self.control_judge_model,
+            "control_verifier": self.control_verifier_model,
+            "critical_verifier": self.critical_verifier_model,
+            "coordinator_research": self.research_model,
+            "coordinator_verification": self.verifier_model,
+        }.get(role)
+        if explicit:
+            return explicit
+        return self.advisory_model_for_provider(provider)
 
     def advisory_model_for_provider(self, provider: str) -> str:
         if provider == "anthropic":
@@ -730,6 +830,41 @@ class AppConfig:
             "judge": self.judge_thinking_tokens,
         }
         return max(0, int(mapping.get(lane, 0)))
+
+    def timeout_for_role(self, role: ProviderRole) -> float:
+        mapping: dict[ProviderRole, float] = {
+            "brain": self.provider_timeout_brain_seconds,
+            "worker": self.provider_timeout_worker_seconds,
+            "heavy_coding": self.provider_timeout_heavy_coding_seconds,
+            "research_synthesis": self.provider_timeout_research_synthesis_seconds,
+            "control_judge": self.provider_timeout_control_judge_seconds,
+            "control_verifier": self.provider_timeout_control_verifier_seconds,
+            "critical_verifier": self.provider_timeout_critical_verifier_seconds,
+            "coordinator_worker": self.provider_timeout_coordinator_worker_seconds,
+            "coordinator_research": self.provider_timeout_coordinator_research_seconds,
+            "coordinator_verification": self.provider_timeout_coordinator_verification_seconds,
+            "coordinator_implementation": self.provider_timeout_coordinator_implementation_seconds,
+        }
+        return float(mapping[role])
+
+    def validate_provider_role_policy(
+        self,
+        role: ProviderRole,
+        provider: str,
+        *,
+        timeout: float,
+    ) -> None:
+        if provider not in {"anthropic", "openai", "google", "ollama", "codex"}:
+            raise ProviderRolePolicyError(f"{role}: unsupported provider {provider!r}.")
+        if timeout <= 0:
+            raise ProviderRolePolicyError(f"{role}: timeout must be positive.")
+        if role in _CONTROL_PATH_PROVIDER_ROLES:
+            if provider == "codex":
+                raise ProviderRolePolicyError(f"{role}: codex is not allowed in the control path.")
+            if timeout > _MAX_CONTROL_PATH_TIMEOUT_SECONDS:
+                raise ProviderRolePolicyError(
+                    f"{role}: timeout must be <= {_MAX_CONTROL_PATH_TIMEOUT_SECONDS:.0f}s."
+                )
 
     def context_window_for_lane(self, lane: Lane) -> int:
         if lane == "brain":

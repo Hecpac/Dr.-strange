@@ -289,6 +289,45 @@ enforced_by:
   - CodexAdapter read-only sandbox for advisory lanes
 ```
 
+### provider roles + timeouts
+
+`lane` remains the capability/routing surface. `role` is the safety policy
+surface for specific call-sites. PR2 adds `ProviderRole` and role policy
+helpers in `AppConfig`:
+
+```yaml
+control_path_roles:
+  control_judge:
+    provider_default: brain_provider
+    timeout_seconds: 30
+    codex_allowed: false
+  control_verifier:
+    provider_default: brain_provider
+    timeout_seconds: 30
+    codex_allowed: false
+  critical_verifier:
+    provider_default: brain_provider
+    timeout_seconds: 30
+    codex_allowed: false
+
+async_roles:
+  heavy_coding:              { provider_default: worker_heavy_provider, timeout_seconds: 180 }
+  research_synthesis:        { provider_default: research_provider, timeout_seconds: 90 }
+  coordinator_worker:        { provider_default: worker_provider, timeout_seconds: 120 }
+  coordinator_research:      { provider_default: research_provider, timeout_seconds: 90 }
+  coordinator_verification:  { provider_default: verifier_provider_or_brain, timeout_seconds: 60 }
+```
+
+`LLMRouter.ask(..., role=..., timeout=...)` validates role/provider policy
+before adapter execution. Control roles fail fast if configured for Codex or
+if timeout exceeds 30s. Adapter timeout failures emit `llm_timeout` with
+`role`, `timeout_seconds`, `provider`, `error_type`, and a redacted preview.
+
+PR2 explicitly covers Kairos decision/notification checks, PlanGate
+verification, critical action verifier votes, and Coordinator worker,
+synthesis, and distillation calls. Other historical provider call-sites remain
+lane-governed unless they declare a role in a later PR.
+
 ### resilience
 
 - `ProviderCircuitBreaker` (`claw_v2/retry_policy.py`) opens per provider after
@@ -555,7 +594,7 @@ inside_block: system auto-approve gate
 ### 5.8 layer 8 — Kairos (proactive)
 
 `KairosService` (`claw_v2/kairos.py`). 30-min default tick, decides via
-`router.ask(lane="judge")`, executes one of 19 action handlers per tick
+`router.ask(lane="judge", role="control_judge", timeout<=30)`, executes one of 19 action handlers per tick
 (`notify_user`, `dispatch_to_agent`, `approve_pending`, `run_skill`,
 `wiki_*`, `site_monitor`, `auto_publish_social`, `auto_deploy`,
 `gmail_digest`, `generate_skill`, `nlm_wiki_sync`, `a2a_send`,
@@ -590,6 +629,10 @@ do_not:
   - change: Add fallback codex → anthropic
     why: Codex is ChatGPT subscription. Silent fallback hides provider switch.
     enforced_by: LLMRouter fallback config (claw_v2/llm.py)
+
+  - change: Route control_judge/control_verifier/critical_verifier through Codex or timeout >30s
+    why: Control-path provider calls must be bounded and must not block behind a heavy coding runtime.
+    enforced_by: AppConfig.validate_provider_role_policy + explicit LLMRouter role call-sites
 
   - change: Bypass approval_gate for tier 3 tools when autoexec_max_tier=3
     why: autoexec_max_tier is CEILING, not override.

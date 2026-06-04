@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from claw_v2.config import AppConfig
+from claw_v2.config import AppConfig, ProviderRolePolicyError
 from claw_v2.sandbox import SandboxPolicy, sandbox_hook
 
 
@@ -314,6 +314,36 @@ class AppConfigDefaultsTests(unittest.TestCase):
         self.assertEqual(config.model_for_lane("judge"), "claude-sonnet-4-6")
         self.assertEqual(config.provider_for_lane("worker_heavy"), "anthropic")
         self.assertEqual(config.model_for_lane("worker_heavy"), "claude-opus-4-7")
+
+    def test_provider_role_defaults_keep_codex_out_of_control_path(self) -> None:
+        previous_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.chdir(tmpdir)
+            try:
+                with patch.dict(os.environ, {}, clear=True):
+                    config = AppConfig.from_env()
+            finally:
+                os.chdir(previous_cwd)
+
+        self.assertEqual(config.provider_for_lane("judge"), "codex")
+        self.assertEqual(config.provider_for_role("control_judge"), "anthropic")
+        self.assertEqual(config.provider_for_role("control_verifier"), "anthropic")
+        self.assertEqual(config.provider_for_role("critical_verifier"), "anthropic")
+        self.assertEqual(config.provider_for_role("heavy_coding"), "codex")
+        self.assertEqual(config.timeout_for_role("control_judge"), 30.0)
+        self.assertEqual(config.timeout_for_role("coordinator_research"), 90.0)
+        self.assertEqual(config.timeout_for_role("coordinator_verification"), 60.0)
+        self.assertEqual(config.timeout_for_role("coordinator_implementation"), 180.0)
+
+    def test_control_role_policy_rejects_codex_and_slow_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from tests.helpers import make_config
+            config = make_config(Path(tmpdir))
+
+        with self.assertRaisesRegex(ProviderRolePolicyError, "codex"):
+            config.validate_provider_role_policy("control_judge", "codex", timeout=30.0)
+        with self.assertRaisesRegex(ProviderRolePolicyError, "<= 30s"):
+            config.validate_provider_role_policy("critical_verifier", "anthropic", timeout=31.0)
 
     def test_billing_modes_separate_subscription_from_api_costs(self) -> None:
         previous_cwd = Path.cwd()

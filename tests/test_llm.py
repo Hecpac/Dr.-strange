@@ -369,6 +369,79 @@ class LLMRouterTests(unittest.TestCase):
                 router.ask("do work", lane="brain", timeout=0)
             self.assertEqual(calls, 0)
 
+    def test_control_role_selects_policy_provider_and_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            config.judge_provider = "codex"
+            seen: dict[str, object] = {}
+
+            def responder(request: LLMRequest) -> LLMResponse:
+                seen["provider"] = request.provider
+                seen["role"] = request.role
+                seen["timeout"] = request.timeout
+                return echo_response("anthropic")(request)
+
+            router = LLMRouter(
+                config=config,
+                adapters={"anthropic": StaticAdapter("anthropic", tool_capable=True, responder=responder)},
+            )
+
+            response = router.ask(
+                "decide",
+                lane="judge",
+                role="control_judge",
+                evidence_pack={"context": "x"},
+            )
+
+            self.assertEqual(response.provider, "anthropic")
+            self.assertEqual(seen["provider"], "anthropic")
+            self.assertEqual(seen["role"], "control_judge")
+            self.assertEqual(seen["timeout"], 30.0)
+
+    def test_control_role_rejects_explicit_codex_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            router = LLMRouter(
+                config=config,
+                adapters={"codex": StaticAdapter("codex", tool_capable=True, responder=echo_response("codex"))},
+            )
+
+            with self.assertRaisesRegex(ValueError, "codex is not allowed"):
+                router.ask(
+                    "decide",
+                    lane="judge",
+                    role="control_judge",
+                    provider="codex",
+                    evidence_pack={"context": "x"},
+                )
+
+    def test_adapter_timeout_is_audited(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            audit_events: list[dict] = []
+
+            def timeout(_: LLMRequest) -> LLMResponse:
+                raise AdapterError("provider timed out after 30s")
+
+            router = LLMRouter(
+                config=config,
+                adapters={"anthropic": StaticAdapter("anthropic", tool_capable=True, responder=timeout)},
+                audit_sink=audit_events.append,
+            )
+
+            with self.assertRaises(AdapterError):
+                router.ask(
+                    "decide",
+                    lane="judge",
+                    role="control_judge",
+                    evidence_pack={"context": "x"},
+                )
+
+            timeout_events = [event for event in audit_events if event["action"] == "llm_timeout"]
+            self.assertEqual(len(timeout_events), 1)
+            self.assertEqual(timeout_events[0]["metadata"]["role"], "control_judge")
+            self.assertEqual(timeout_events[0]["metadata"]["timeout_seconds"], 30.0)
+
     def test_subscription_brain_budget_uses_lane_floor(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = make_config(Path(tmpdir))

@@ -11,6 +11,7 @@ from typing import Any
 from claw_v2.adapters.base import AdapterError
 from claw_v2.redaction import redact_text
 from claw_v2.tracing import attach_trace, child_trace_context, new_trace_context
+from claw_v2.types import ProviderRole
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ class WorkerTask:
     instruction: str
     lane: str = "research"
     assigned_agent: str | None = None
+    timeout_seconds: float | None = None
 
 
 @dataclass(slots=True)
@@ -75,6 +77,10 @@ class CoordinatorService:
         orchestration_store: Any | None = None,
         worker_result_summary_chars: int = DEFAULT_WORKER_RESULT_SUMMARY_CHARS,
         phase_input_summary_chars: int = DEFAULT_PHASE_INPUT_SUMMARY_CHARS,
+        default_worker_timeout_seconds: float = 120.0,
+        default_research_timeout_seconds: float = 90.0,
+        default_verification_timeout_seconds: float = 60.0,
+        default_implementation_timeout_seconds: float = 180.0,
     ) -> None:
         self.router = router
         self.observe = observe
@@ -84,6 +90,10 @@ class CoordinatorService:
         self.orchestration_store = orchestration_store
         self.worker_result_summary_chars = max(1, int(worker_result_summary_chars))
         self.phase_input_summary_chars = max(1, int(phase_input_summary_chars))
+        self.default_worker_timeout_seconds = max(1.0, float(default_worker_timeout_seconds))
+        self.default_research_timeout_seconds = max(1.0, float(default_research_timeout_seconds))
+        self.default_verification_timeout_seconds = max(1.0, float(default_verification_timeout_seconds))
+        self.default_implementation_timeout_seconds = max(1.0, float(default_implementation_timeout_seconds))
 
     def run(
         self,
@@ -127,7 +137,11 @@ class CoordinatorService:
             )
             # Phase 1: Research
             self._orchestration_begin_phase(orchestration_run_id, "research", trace)
-            research_results = self._dispatch_parallel(research_tasks, trace, lane_overrides=lane_overrides)
+            research_results = self._dispatch_parallel(
+                self._with_phase_timeout(research_tasks, self.default_research_timeout_seconds),
+                trace,
+                lane_overrides=lane_overrides,
+            )
             result.phase_results["research"] = research_results
             self._write_scratch(scratch, "research", research_results)
             research_artifact_id = self._orchestration_record_phase_results(
@@ -210,7 +224,7 @@ class CoordinatorService:
             if implementation_tasks:
                 self._orchestration_begin_phase(orchestration_run_id, "implementation", trace)
                 impl_tasks = self._inject_context(
-                    implementation_tasks,
+                    self._with_phase_timeout(implementation_tasks, self.default_implementation_timeout_seconds),
                     objective=objective,
                     input_artifact_ref=synthesis_artifact_ref,
                     input_summary=synthesis_summary,
@@ -270,7 +284,7 @@ class CoordinatorService:
                         lane_overrides=lane_overrides,
                     )
                 verify_tasks = self._inject_context(
-                    verification_tasks,
+                    self._with_phase_timeout(verification_tasks, self.default_verification_timeout_seconds),
                     objective=objective,
                     input_artifact_ref=verification_input_ref,
                     input_summary=verification_input_summary,
@@ -409,6 +423,8 @@ class CoordinatorService:
         task_trace = child_trace_context(trace_context, artifact_id=task.name)
         kwargs: dict[str, Any] = {
             "lane": task.lane,
+            "role": self._role_for_worker_task(task),
+            "timeout": task.timeout_seconds or self._timeout_for_worker_task(task),
             "evidence_pack": attach_trace({"coordinator_task": task.name}, task_trace),
         }
         if task.assigned_agent and task.assigned_agent in self.agent_registry:
@@ -422,6 +438,8 @@ class CoordinatorService:
             kwargs["model"] = override.get("model")
             if override.get("effort"):
                 kwargs["effort"] = override.get("effort")
+            if override.get("timeout") is not None:
+                kwargs["timeout"] = float(override["timeout"])
         attempts = 2 if task.lane in self._RETRY_LANES else 1
         last_exc: Exception | None = None
         for attempt in range(1, attempts + 1):
@@ -523,6 +541,8 @@ class CoordinatorService:
                 provider=(lane_overrides or {}).get("research", {}).get("provider"),
                 model=(lane_overrides or {}).get("research", {}).get("model"),
                 effort=(lane_overrides or {}).get("research", {}).get("effort"),
+                role="coordinator_research",
+                timeout=float((lane_overrides or {}).get("research", {}).get("timeout") or self.default_research_timeout_seconds),
                 evidence_pack=attach_trace(
                     {"coordinator_phase": "synthesis", "objective": objective},
                     synthesis_trace,
@@ -563,9 +583,44 @@ class CoordinatorService:
                 ),
                 lane=t.lane,
                 assigned_agent=t.assigned_agent,
+                timeout_seconds=t.timeout_seconds,
             )
             for t in tasks
         ]
+
+    def _with_phase_timeout(self, tasks: list[WorkerTask], timeout_seconds: float) -> list[WorkerTask]:
+        return [
+            WorkerTask(
+                name=task.name,
+                instruction=task.instruction,
+                lane=task.lane,
+                assigned_agent=task.assigned_agent,
+                timeout_seconds=task.timeout_seconds if task.timeout_seconds is not None else timeout_seconds,
+            )
+            for task in tasks
+        ]
+
+    def _role_for_worker_task(self, task: WorkerTask) -> ProviderRole:
+        if task.lane == "worker_heavy":
+            return "heavy_coding"
+        if task.lane == "worker":
+            return "coordinator_worker"
+        if task.lane == "verifier":
+            return "coordinator_verification"
+        if task.lane == "research":
+            return "coordinator_research"
+        return "coordinator_worker"
+
+    def _timeout_for_worker_task(self, task: WorkerTask) -> float:
+        if task.lane == "worker_heavy":
+            return self.default_implementation_timeout_seconds
+        if task.lane == "worker":
+            return self.default_worker_timeout_seconds
+        if task.lane == "verifier":
+            return self.default_verification_timeout_seconds
+        if task.lane == "research":
+            return self.default_research_timeout_seconds
+        return self.default_worker_timeout_seconds
 
     def _phase_results_summary(
         self,
@@ -648,6 +703,8 @@ class CoordinatorService:
                 provider=(lane_overrides or {}).get("research", {}).get("provider"),
                 model=(lane_overrides or {}).get("research", {}).get("model"),
                 effort=(lane_overrides or {}).get("research", {}).get("effort"),
+                role="coordinator_research",
+                timeout=float((lane_overrides or {}).get("research", {}).get("timeout") or self.default_research_timeout_seconds),
                 evidence_pack=attach_trace(
                     {"coordinator_phase": "semantic_distillation", "limit": limit},
                     distill_trace,

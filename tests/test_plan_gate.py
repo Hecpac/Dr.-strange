@@ -15,6 +15,8 @@ class ProposeTests(unittest.TestCase):
         proposal = gate.propose("seo", 1, "Fix the SEO agent", trust_level=3)
         self.assertFalse(proposal.requires_approval)
         self.assertIsNone(proposal.approval_id)
+        self.assertEqual(router.ask.call_args.kwargs["role"], "control_verifier")
+        self.assertEqual(router.ask.call_args.kwargs["timeout"], 30.0)
 
     def test_low_trust_requires_approval(self) -> None:
         import tempfile

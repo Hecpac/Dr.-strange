@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 
 from claw_v2.approval import ApprovalManager
 from claw_v2.llm import LLMRouter
+from claw_v2.types import ProviderRole
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,8 @@ class PlanGate:
         response = self.router.ask(
             prompt,
             lane="verifier",
+            role="control_verifier",
+            timeout=_router_timeout_for_role(self.router, "control_verifier", default=30.0),
             evidence_pack={"agent": agent_name, "experiment": experiment_number},
         )
         try:
@@ -91,3 +94,16 @@ class PlanGate:
             return status == "approved"
         except FileNotFoundError:
             return False
+
+
+def _router_timeout_for_role(router: LLMRouter, role: ProviderRole, *, default: float) -> float:
+    config = getattr(router, "config", None)
+    timeout_for_role = getattr(config, "timeout_for_role", None)
+    if callable(timeout_for_role):
+        try:
+            value = timeout_for_role(role)
+            if isinstance(value, (int, float)):
+                return float(value)
+        except Exception:
+            return default
+    return default

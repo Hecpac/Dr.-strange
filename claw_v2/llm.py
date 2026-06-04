@@ -27,7 +27,7 @@ from claw_v2.config import AppConfig
 from claw_v2.redaction import redact_sensitive
 from claw_v2.retry_policy import ProviderCircuitBreaker
 from claw_v2.tracing import current_llm_trace, trace_metadata
-from claw_v2.types import Lane, LLMResponse
+from claw_v2.types import Lane, LLMResponse, ProviderRole
 
 
 class LLMRouter:
@@ -69,20 +69,25 @@ class LLMRouter:
         agents: dict | None = None,
         hooks: dict | None = None,
         cwd: str | None = None,
-        timeout: float = 300.0,
+        timeout: float | None = None,
         thinking_tokens: int | None = None,
+        role: ProviderRole | None = None,
     ) -> LLMResponse:
         self._validate_lane_input(lane, evidence_pack, allowed_tools, agents, hooks)
         configured_provider = self.config.provider_for_lane(lane)
-        selected_provider = provider or configured_provider
+        selected_provider = provider or (self.config.provider_for_role(role) if role else configured_provider)
         selected_model = (
             model
+            or (self.config.model_for_role(role) if role and provider is None else None)
             or (
                 self.config.advisory_model_for_provider(selected_provider)
                 if provider and selected_provider != configured_provider
                 else self.config.model_for_lane(lane)
             )
         )
+        selected_timeout = timeout if timeout is not None else self.config.timeout_for_role(role) if role else 300.0
+        if role is not None:
+            self.config.validate_provider_role_policy(role, selected_provider, timeout=selected_timeout)
         _validate_provider_model_pair(selected_provider, selected_model)
         selected_effort = effort or self.config.effort_for_lane(lane)
         selected_thinking = (
@@ -109,10 +114,11 @@ class LLMRouter:
             allowed_tools=allowed_tools,
             agents=agents,
             hooks=hooks,
-            timeout=timeout,
+            timeout=selected_timeout,
             cwd=cwd,
             cache_ttl=self.config.cache_prefix_ttl if self.config.cache_prefix_ttl > 0 else None,
             thinking_tokens=max(0, int(selected_thinking)),
+            role=role,
         )
         request.evidence_pack = {
             **(request.evidence_pack or {}),
@@ -175,6 +181,12 @@ class LLMRouter:
                     "session_id": _fallback_session_id(request, fallback_provider),
                 }
             )
+            if fallback_request.role is not None:
+                self.config.validate_provider_role_policy(
+                    fallback_request.role,
+                    fallback_request.provider,
+                    timeout=fallback_request.timeout,
+                )
             _validate_provider_model_pair(fallback_request.provider, fallback_request.model)
             fallback_request.validate()
             self._observation_before_llm_request(fallback_request)
@@ -242,6 +254,18 @@ class LLMRouter:
         try:
             response = adapter.complete(request)
         except AdapterError as exc:
+            if _is_timeout_error(exc):
+                self._audit_event(
+                    "llm_timeout",
+                    request=request,
+                    metadata={
+                        "provider": request.provider,
+                        "role": request.role,
+                        "timeout_seconds": request.timeout,
+                        "error_type": type(exc).__name__,
+                        "error_preview": redact_sensitive(str(exc))[:300],
+                    },
+                )
             transition = self.circuit_breaker.record_failure(request.provider, exc)
             if transition.status == "open" and transition.changed:
                 self._audit_event(
@@ -307,6 +331,8 @@ class LLMRouter:
                 "parent_span_id": trace.get("parent_span_id"),
                 "job_id": trace.get("job_id"),
                 "artifact_id": trace.get("artifact_id"),
+                "role": request.role if request is not None else None,
+                "timeout_seconds": request.timeout if request is not None else None,
             },
         }
         self.audit_sink(event)
@@ -348,6 +374,8 @@ class LLMRouter:
                 "parent_span_id": trace.get("parent_span_id"),
                 "job_id": trace.get("job_id"),
                 "artifact_id": trace.get("artifact_id"),
+                "role": request.role,
+                "timeout_seconds": request.timeout,
             },
         }
         self.audit_sink(event)
@@ -485,7 +513,13 @@ def _validate_provider_model_pair(provider: str, model: str) -> None:
         raise ValueError(f"Google provider cannot serve non-Gemini model {model!r}.")
 
 
-def _prompt_size_metadata(request: LLMRequest) -> dict[str, int | str | bool]:
+def _is_timeout_error(exc: AdapterError) -> bool:
+    reason = str(exc.metadata.get("reason") or "").lower() if isinstance(exc.metadata, dict) else ""
+    message = str(exc).lower()
+    return "timeout" in reason or "timed out" in message or "timeout" in message
+
+
+def _prompt_size_metadata(request: LLMRequest) -> dict[str, int | str | bool | float | None]:
     effective_input = build_effective_input(request)
     effective_system_prompt = build_effective_system_prompt(request)
     raw_evidence_chars = evidence_pack_serialized_chars(request.evidence_pack)
@@ -493,7 +527,9 @@ def _prompt_size_metadata(request: LLMRequest) -> dict[str, int | str | bool]:
     effective_system_chars = len(effective_system_prompt or "")
     return {
         "lane": request.lane,
+        "role": request.role,
         "provider": request.provider,
+        "timeout_seconds": request.timeout,
         "prompt_chars": _prompt_chars(request.prompt),
         "system_prompt_chars": len(request.system_prompt or ""),
         "evidence_pack_chars": raw_evidence_chars,

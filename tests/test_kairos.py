@@ -87,6 +87,8 @@ class DecideTests(unittest.TestCase):
         self.assertEqual(decision.action, "none")
         call_kwargs = router.ask.call_args.kwargs
         self.assertEqual(call_kwargs["lane"], "judge")
+        self.assertEqual(call_kwargs["role"], "control_judge")
+        self.assertEqual(call_kwargs["timeout"], 30.0)
         self.assertIn("evidence_pack", call_kwargs)
 
     def test_decide_prompt_includes_few_shot_examples_and_configured_sites(self) -> None:
@@ -475,6 +477,8 @@ class ExecuteActionTests(unittest.TestCase):
 
         svc._handle_notify_user(decision)
 
+        self.assertEqual(router.ask.call_args.kwargs["role"], "control_judge")
+        self.assertEqual(router.ask.call_args.kwargs["timeout"], 30.0)
         observe.emit.assert_any_call(
             "kairos_notify_suppressed",
             trace_id=None,
