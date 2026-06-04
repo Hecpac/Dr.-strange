@@ -233,6 +233,15 @@ def wiki_research_result_summary(result: object) -> dict[str, Any]:
     }
 
 
+def safe_non_negative_int(value: object, *, default: int) -> int:
+    if value is None:
+        return max(0, int(default))
+    try:
+        return max(0, int(value))
+    except (OverflowError, TypeError, ValueError):
+        return max(0, int(default))
+
+
 def _default_result_summary(result: object) -> dict[str, Any]:
     if not isinstance(result, dict):
         return {"ok": True}
@@ -259,7 +268,7 @@ def _safe_error_preview(exc: BaseException) -> str:
 def _safe_text_preview(value: str, *, limit: int) -> str:
     text = value.replace("\n", " ").strip()
     text = re.sub(
-        r"(?i)\b(api[_-]?key|token|password|secret|authorization|cookie)(\s*[=:]\s*)\S+",
+        r"(?i)\b(api[_-]?key|token|password|secret|authorization|cookie)(\s*[=:]\s*)(?:\"[^\"]*\"|'[^']*'|\S+)",
         r"\1\2REDACTED",
         text,
     )

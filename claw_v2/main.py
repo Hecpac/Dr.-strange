@@ -79,6 +79,7 @@ from claw_v2.scheduled_background_jobs import (
     WIKI_RESEARCH_RESUME_KEY,
     ScheduledBackgroundJobRunner,
     enqueue_scheduled_background_job,
+    safe_non_negative_int,
     wiki_research_result_summary,
 )
 from claw_v2.skill_expand_jobs import SkillExpandJobRunner, enqueue_skill_expand_job
@@ -1285,7 +1286,7 @@ def _setup_scheduler(
             job_kind=WIKI_RESEARCH_JOB_KIND,
             job_service=job_service,
             handler=lambda payload: wiki.auto_research(
-                max_topics=max(0, int(payload.get("max_topics", 3)))
+                max_topics=safe_non_negative_int(payload.get("max_topics"), default=3)
             ),
             observe=observe,
             worker_id="wiki-research-runner",

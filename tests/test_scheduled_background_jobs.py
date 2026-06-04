@@ -21,6 +21,7 @@ from claw_v2.scheduled_background_jobs import (
     WIKI_RESEARCH_RESUME_KEY,
     ScheduledBackgroundJobRunner,
     enqueue_scheduled_background_job,
+    safe_non_negative_int,
     wiki_research_result_summary,
 )
 
@@ -155,6 +156,13 @@ class ScheduledBackgroundJobTests(unittest.TestCase):
             self.assertIn("wiki_research_job_started", event_names)
             self.assertIn("wiki_research_job_completed", event_names)
 
+    def test_safe_non_negative_int_defaults_none_and_invalid_values(self) -> None:
+        self.assertEqual(safe_non_negative_int(None, default=3), 3)
+        self.assertEqual(safe_non_negative_int("not-an-int", default=3), 3)
+        self.assertEqual(safe_non_negative_int(float("inf"), default=3), 3)
+        self.assertEqual(safe_non_negative_int(-1, default=3), 0)
+        self.assertEqual(safe_non_negative_int("2", default=3), 2)
+
     def test_stale_running_perf_optimizer_job_is_reclaimed_and_completed(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             observe = MagicMock()
@@ -201,7 +209,7 @@ class ScheduledBackgroundJobTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             observe = MagicMock()
             jobs = JobService(Path(tmpdir) / "claw.db")
-            handler = MagicMock(side_effect=RuntimeError("boom token=sk-secret-value"))
+            handler = MagicMock(side_effect=RuntimeError('boom api_key = "secret with spaces"'))
             enqueue_scheduled_background_job(
                 job_name="wiki_research",
                 job_kind=WIKI_RESEARCH_JOB_KIND,
@@ -222,7 +230,7 @@ class ScheduledBackgroundJobTests(unittest.TestCase):
             job = jobs.list(kinds=(WIKI_RESEARCH_JOB_KIND,), limit=10)[0]
             self.assertEqual(job.status, "retrying")
             self.assertIn("REDACTED", job.error)
-            self.assertNotIn("sk-secret-value", job.error)
+            self.assertNotIn("secret with spaces", job.error)
             failed_events = [
                 call.kwargs["payload"]
                 for call in observe.emit.call_args_list
@@ -232,7 +240,7 @@ class ScheduledBackgroundJobTests(unittest.TestCase):
             self.assertEqual(failed_events[0]["job_id"], job.job_id)
             self.assertEqual(failed_events[0]["error_type"], "RuntimeError")
             self.assertIn("REDACTED", failed_events[0]["error_preview"])
-            self.assertNotIn("sk-secret-value", failed_events[0]["error_preview"])
+            self.assertNotIn("secret with spaces", failed_events[0]["error_preview"])
 
             scheduler = CronScheduler()
             probe = MagicMock()
@@ -425,7 +433,7 @@ class ScheduledBackgroundRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     resume_key=WIKI_RESEARCH_RESUME_KEY,
                     job_service=runtime.job_service,
                     observe=runtime.observe,
-                    payload={"max_topics": 1},
+                    payload={"max_topics": None},
                 )
                 enqueue_scheduled_background_job(
                     job_name="perf_optimizer",
@@ -464,7 +472,7 @@ class ScheduledBackgroundRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(wiki_rows[0].result["candidate_count"], 1)
                 self.assertNotIn("candidates", wiki_rows[0].result)
                 self.assertEqual(perf_rows[0].status, "completed")
-                runtime.bot.wiki.auto_research.assert_called_once_with(max_topics=1)
+                runtime.bot.wiki.auto_research.assert_called_once_with(max_topics=3)
                 runtime.auto_research.run_loop.assert_called_once_with(
                     "perf-optimizer",
                     max_experiments=3,
