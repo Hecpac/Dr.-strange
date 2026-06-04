@@ -186,6 +186,12 @@ class ApprovalManager:
 
     def approve_internal(self, approval_id: str) -> bool:
         def _do_approve(payload: dict) -> None:
+            # MED-2 / #13: single-use. Only a still-pending record may be
+            # auto-approved; a rejected/approved/expired/archived record must
+            # not be resurrected within the TTL window.
+            if payload.get("status") != "pending":
+                payload["_result"] = False
+                return
             created = payload.get("created_at", 0)
             if time.time() - created > APPROVAL_TTL_SECONDS:
                 payload["status"] = "expired"

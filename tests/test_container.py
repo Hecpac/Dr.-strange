@@ -4,7 +4,7 @@ import subprocess
 import unittest
 from unittest.mock import MagicMock, patch
 
-from claw_v2.container import ContainerPolicy, sandboxed_run, _docker_run
+from claw_v2.container import ContainerPolicy, docker_available, sandboxed_run, _docker_run
 
 
 class SandboxedRunTests(unittest.TestCase):
@@ -64,6 +64,59 @@ class DockerRunTests(unittest.TestCase):
         self.assertIn("--memory=256m", args)
         self.assertIn("python:3.12-slim", args)
         self.assertIn("pytest -x", args)
+
+    @patch("claw_v2.container.subprocess.run")
+    def test_docker_cpus_is_core_count_not_cpu_seconds(self, mock_run) -> None:
+        # #33: --cpus is a fractional core count; cpu_seconds is a CPU-time
+        # budget (RLIMIT_CPU). Mapping --cpus=cpu_seconds requested 120 cores.
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="ok", stderr="")
+        policy = ContainerPolicy(cpu_seconds=120, docker_image="python:3.12-slim")
+        _docker_run("pytest -x", cwd="/tmp/worktree", policy=policy)
+        args = mock_run.call_args[0][0]
+        self.assertNotIn("--cpus=120", args)
+        cpus = [a for a in args if isinstance(a, str) and a.startswith("--cpus=")]
+        self.assertTrue(cpus)
+        self.assertLessEqual(float(cpus[0].split("=", 1)[1]), 8.0)
+
+    @patch("claw_v2.container.docker_available", return_value=False)
+    @patch("claw_v2.container._docker_run")
+    @patch("claw_v2.container._limited_run")
+    def test_docker_ephemeral_falls_back_to_host_when_docker_unavailable(
+        self, mock_limited, mock_docker, _mock_avail
+    ) -> None:
+        # #15: honouring docker_ephemeral must not crash when docker is absent;
+        # degrade to host_sanitized with an observable event (no_silent_degrade).
+        mock_limited.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        observe = MagicMock()
+        policy = ContainerPolicy(isolation_mode="docker_ephemeral")
+        sandboxed_run("echo ok", cwd="/tmp", policy=policy, observe=observe)
+        mock_docker.assert_not_called()
+        mock_limited.assert_called_once()
+        emitted = [call.args[0] for call in observe.emit.call_args_list]
+        self.assertIn("runtime_isolation_degraded", emitted)
+
+
+class DockerAvailableTests(unittest.TestCase):
+    @patch("claw_v2.container.subprocess.run")
+    @patch("claw_v2.container.shutil.which", return_value="/usr/bin/docker")
+    def test_false_when_daemon_unresponsive(self, _which, mock_run) -> None:
+        # P2: the binary being present is not enough — the daemon must respond.
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="Cannot connect to the Docker daemon",
+        )
+        self.assertFalse(docker_available())
+
+    @patch("claw_v2.container.subprocess.run")
+    @patch("claw_v2.container.shutil.which", return_value="/usr/bin/docker")
+    def test_true_when_daemon_responds(self, _which, mock_run) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="27.0.0", stderr="",
+        )
+        self.assertTrue(docker_available())
+
+    @patch("claw_v2.container.shutil.which", return_value=None)
+    def test_false_when_binary_missing(self, _which) -> None:
+        self.assertFalse(docker_available())
 
 
 if __name__ == "__main__":

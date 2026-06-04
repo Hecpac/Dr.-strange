@@ -97,6 +97,36 @@ class OperationalAlertRouterTests(unittest.TestCase):
         self.assertIn("LLM provider circuit opened", notifications[0])
         self.assertIn("anthropic", notifications[0])
 
+    def test_alerts_when_token_window_breaker_degrades_autonomy(self) -> None:
+        # #3: trip_breaker emits autonomy_degraded_by_token_window on every trip
+        # (not behind the freeze `if changed` guard); the router must forward it
+        # so a long degradation isn't silent (no_silent_degrade).
+        notifications: list[str] = []
+        router = OperationalAlertRouter(observe=self.observe, notify=notifications.append)
+        router.install()
+
+        self.observe.emit(
+            "autonomy_degraded_by_token_window",
+            payload={"actor": "llm_router", "value": 4_410_000, "threshold": 1_000_000},
+        )
+
+        self.assertEqual(len(notifications), 1)
+        self.assertIn("Autonomy degraded", notifications[0])
+        self.assertIn("token window", notifications[0].lower())
+
+    def test_alerts_when_cost_breaker_degrades_autonomy(self) -> None:
+        notifications: list[str] = []
+        router = OperationalAlertRouter(observe=self.observe, notify=notifications.append)
+        router.install()
+
+        self.observe.emit(
+            "autonomy_degraded_by_cost_breaker",
+            payload={"actor": "llm_router", "value": 12.5, "threshold": 5.0},
+        )
+
+        self.assertEqual(len(notifications), 1)
+        self.assertIn("cost breaker", notifications[0].lower())
+
     def test_alerts_when_auto_research_pauses_after_provider_failure(self) -> None:
         notifications: list[str] = []
         router = OperationalAlertRouter(observe=self.observe, notify=notifications.append)

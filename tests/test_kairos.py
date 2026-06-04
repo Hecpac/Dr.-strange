@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import ANY, MagicMock, patch
 
+from claw_v2.approval import ApprovalManager
 from claw_v2.bus import AgentBus, _new_message
 from claw_v2.kairos import KairosService, TickDecision, KairosState, _classify_decide_error
 
@@ -410,28 +411,55 @@ class ExecuteActionTests(unittest.TestCase):
             payload={"agent": "rook", "skill": "health-audit", "lane": "worker", "result": "skill-output"},
         )
 
-    def test_approve_pending_uses_internal_approval_path(self) -> None:
-        approvals = MagicMock()
-        approvals.approve_internal.return_value = True
-        svc, _, _, observe = _make_service(approvals=approvals)
-        decision = TickDecision(
-            action="approve_pending",
-            reason="low risk",
-            detail=json.dumps({"approval_id": "abc123"}),
-        )
-        result = svc._execute(decision, budget=10.0)
-        self.assertEqual(result.error, "")
-        approvals.approve_internal.assert_called_once_with("abc123")
-        observe.emit.assert_any_call(
-            "kairos_auto_approved",
-            trace_id=ANY,
-            root_trace_id=ANY,
-            span_id=ANY,
-            parent_span_id=ANY,
-            job_id=None,
-            artifact_id="approve_pending",
-            payload={"approval_id": "abc123"},
-        )
+    def test_approve_pending_refuses_external_mutation(self) -> None:
+        # #4: Kairos must NOT auto-approve a pending record that exists to force
+        # a human decision (external mutation / not a daemon-allowlisted tool).
+        with tempfile.TemporaryDirectory() as tmp:
+            approvals = ApprovalManager(Path(tmp), "secret")
+            pending = approvals.create(
+                action="kairos:auto_publish_social",
+                summary="tweet",
+                metadata={"tweet": "x", "handle": "PachanoDesign"},
+            )
+            svc, _, _, _ = _make_service(approvals=approvals)
+            decision = TickDecision(
+                action="approve_pending",
+                reason="llm asked",
+                detail=json.dumps({"approval_id": pending.approval_id}),
+            )
+            result = svc._execute(decision, budget=10.0)
+            self.assertNotEqual(result.error, "")
+            self.assertEqual(approvals.status(pending.approval_id), "pending")
+
+    def test_approve_pending_allows_daemon_safe_tool(self) -> None:
+        # #4: the only safe auto-approve case — a pending record for a
+        # read-only daemon-allowlisted tool.
+        with tempfile.TemporaryDirectory() as tmp:
+            approvals = ApprovalManager(Path(tmp), "secret")
+            pending = approvals.create(
+                action="tool:memory.read",
+                summary="read memory",
+                metadata={"tool": "memory.read"},
+            )
+            svc, _, _, observe = _make_service(approvals=approvals)
+            decision = TickDecision(
+                action="approve_pending",
+                reason="safe",
+                detail=json.dumps({"approval_id": pending.approval_id}),
+            )
+            result = svc._execute(decision, budget=10.0)
+            self.assertEqual(result.error, "")
+            self.assertEqual(approvals.status(pending.approval_id), "approved")
+            observe.emit.assert_any_call(
+                "kairos_auto_approved",
+                trace_id=ANY,
+                root_trace_id=ANY,
+                span_id=ANY,
+                parent_span_id=ANY,
+                job_id=None,
+                artifact_id="approve_pending",
+                payload={"approval_id": pending.approval_id},
+            )
 
     def test_unknown_action_returns_error(self) -> None:
         svc, _, _, observe = _make_service(bus=MagicMock(), approvals=MagicMock())

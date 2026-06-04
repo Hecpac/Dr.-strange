@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from claw_v2.bot import BotService
+from claw_v2.bot_helpers import _sanitize_chat_response
 from claw_v2.observe import ObserveStream
 
 
@@ -145,6 +146,10 @@ class LocalChatAPI:
                 },
             )
             raise
+        # #24: sanitize at the web egress boundary so non-brain handler output
+        # (coordinated_task / owner_delegation / capability_route) gets the same
+        # redaction Telegram applies. Idempotent if the brain path already ran it.
+        reply = _sanitize_chat_response(reply)
         self._emit_chat_event(
             "web_chat_response_ready",
             {

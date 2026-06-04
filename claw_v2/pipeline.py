@@ -63,6 +63,7 @@ class PipelineService:
         learning: LearningLoop | None = None,
         clock: Callable[[], float] | None = None,
         enable_trivial_automerge: bool = False,
+        isolation_mode: str = "host_sanitized",
     ) -> None:
         self.linear = linear
         self.router = router
@@ -77,6 +78,7 @@ class PipelineService:
         self.learning = learning
         self.clock = clock or time.time
         self.enable_trivial_automerge = enable_trivial_automerge
+        self.isolation_mode = isolation_mode
         self._linear_poll_failures = 0
         self._linear_poll_backoff_until = 0.0
         cleanup_stale_worktrees(default_repo_root)
@@ -101,7 +103,7 @@ class PipelineService:
                 )
                 run.diff = _collect_diff(wt_path)
                 run.changed_files = _collect_changed_files(wt_path)
-                passed, output = _run_tests(wt_path)
+                passed, output = _run_tests(wt_path, isolation_mode=self.isolation_mode)
                 run.test_output = output
                 run.verification_complete = True
                 run.verification_passed = passed
@@ -232,43 +234,32 @@ class PipelineService:
         pr_number = getattr(pr_result, "number", None) or _parse_pr_number_from_url(pr_url)
         if pr_number is None:
             return run
-        self.pull_requests.merge_pull_request(pr_number)
-        run.status = "merged"
+        # #7: a trivial classification must NOT collapse the diff approval and
+        # the merge approval into one human action. complete_pipeline is reached
+        # only by /pipeline_approve (the DIFF gate); merging here would bypass
+        # the dedicated pipeline_merge gate. Stage a separate pipeline_merge
+        # approval and leave the run at pr_created — the human confirms the
+        # merge via /pipeline_merge_confirm (-> merge_and_close).
+        merge_approval = self.approvals.create(
+            action=f"pipeline_merge:{issue_id}",
+            summary=f"Trivial auto-merge candidate for {issue_id} (PR {pr_url})",
+            diff=run.diff or "",
+            risk_basis="trivial_automerge_requires_human_merge_confirmation",
+        )
+        run.approval_id = merge_approval.approval_id
+        run.approval_token = merge_approval.token
         self._save_run(run)
-        self.linear.update_status(issue_id, "Done")
-        self.linear.post_comment(issue_id, f"Trivial PR auto-merged by Claw pipeline.\n\nPR: {run.pr_url}")
-        run.status = "done"
-        self._save_run(run)
-        if self.learning:
-            self.learning.record(
-                task_type="pipeline",
-                task_id=issue_id,
-                description=f"Trivial auto-merge for PR {run.pr_url}",
-                approach=f"branch={run.branch_name}, categories={decision.classifier.get('categories', [])}",
-                outcome="success",
-                lesson="Trivial patch auto-merged after full verification passed.",
-            )
-        elif self.memory:
-            self.memory.store_task_outcome(
-                task_type="pipeline",
-                task_id=issue_id,
-                description=f"Trivial auto-merge for PR {run.pr_url}",
-                approach=f"branch={run.branch_name}, categories={decision.classifier.get('categories', [])}",
-                outcome="success",
-                lesson="Trivial patch auto-merged after full verification passed.",
-            )
         if self.observe:
             self.observe.emit(
-                "pipeline_trivial_automerge",
+                "pipeline_trivial_automerge_pending",
                 payload={
                     "issue": issue_id,
                     "pr_url": run.pr_url,
                     "pr_number": pr_number,
+                    "approval_id": merge_approval.approval_id,
                     "categories": decision.classifier.get("categories", []),
-                    "reasons": list(decision.reasons),
                 },
             )
-            self.observe.emit("pipeline_done", payload={"issue": issue_id, "pr_url": run.pr_url})
         return run
 
     def _record(self, issue: LinearIssue, run: PipelineRun, outcome: str) -> None:
@@ -562,12 +553,16 @@ def _paths_with_diff_headers(diff_text: str) -> set[str]:
     return paths
 
 
-def _run_tests(wt_path: Path, *, timeout: int = 300) -> tuple[bool, str]:
+def _run_tests(wt_path: Path, *, timeout: int = 300, isolation_mode: str = "host_sanitized") -> tuple[bool, str]:
     try:
         result = sandboxed_run(
             ["python", "-m", "pytest", "-x", "-q"],
             cwd=str(wt_path),
-            policy=ContainerPolicy(timeout_seconds=timeout, network_enabled=False),
+            policy=ContainerPolicy(
+                timeout_seconds=timeout,
+                network_enabled=False,
+                isolation_mode=isolation_mode,
+            ),
             shell=False,
         )
     except subprocess.TimeoutExpired:

@@ -179,6 +179,18 @@ diff --git a/package-lock.json b/package-lock.json
             after = path.read_text(encoding="utf-8")
             self.assertEqual(before, after)
 
+    def test_approve_internal_refuses_non_pending_single_use(self) -> None:
+        # #13 / MED-2 parity: approve_internal must respect single-use like
+        # approve()/_approve_human_without_token()/archive(). A rejected (or
+        # already-resolved) record must not be resurrected by a later internal
+        # auto-approve within the TTL window.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            m = ApprovalManager(Path(tmpdir), "secret")
+            p = m.create("deploy", "x")
+            m.reject(p.approval_id)
+            self.assertFalse(m.approve_internal(p.approval_id))
+            self.assertEqual(m.status(p.approval_id), "rejected")
+
     def test_approved_tool_invocation_allows_one_matching_tool_call(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = ApprovalManager(Path(tmpdir), "secret")

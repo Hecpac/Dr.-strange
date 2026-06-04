@@ -152,6 +152,41 @@ class ProcessIssueTests(unittest.TestCase):
         self.assertEqual(mock_run.call_args.kwargs["policy"].timeout_seconds, 17)
         self.assertFalse(mock_run.call_args.kwargs["shell"])
 
+    @patch("claw_v2.pipeline.sandboxed_run")
+    def test_run_tests_uses_configured_isolation_mode(self, mock_run) -> None:
+        # #15: the configured isolation mode must reach ContainerPolicy instead
+        # of silently defaulting to the weakest host_sanitized.
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="5 passed", stderr="",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _run_tests(Path(tmpdir), timeout=17, isolation_mode="docker_ephemeral")
+        self.assertEqual(mock_run.call_args.kwargs["policy"].isolation_mode, "docker_ephemeral")
+
+    def test_process_issue_threads_configured_isolation_mode(self) -> None:
+        # #15: the mode configured on PipelineService must reach _run_tests.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / ".git").mkdir()
+            linear = MagicMock(spec=LinearService)
+            linear.get_issue.return_value = _make_issue()
+            router = MagicMock()
+            router.ask.return_value = MagicMock(content="implemented the fix", cost_estimate=0.01)
+            approvals = ApprovalManager(root / "approvals", "secret")
+            svc = PipelineService(
+                linear=linear, router=router, approvals=approvals,
+                pull_requests=MagicMock(), observe=None,
+                default_repo_root=root, state_root=root / "pipeline",
+                isolation_mode="docker_ephemeral",
+            )
+            with patch("claw_v2.pipeline._run_tests", return_value=(True, "5 passed")) as mock_rt:
+                with patch("claw_v2.pipeline._create_branch"):
+                    with patch("claw_v2.pipeline._create_worktree", return_value=root / "wt"):
+                        with patch("claw_v2.pipeline._collect_diff", return_value="diff content"):
+                            with patch("claw_v2.pipeline._remove_worktree"):
+                                svc.process_issue("HEC-1")
+            self.assertEqual(mock_rt.call_args.kwargs.get("isolation_mode"), "docker_ephemeral")
+
     def test_process_issue_rejects_unsafe_branch_name(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -345,7 +380,7 @@ class CompletePipelineTests(unittest.TestCase):
             self.assertFalse(pr_svc.create_pull_request.call_args.kwargs["draft"])
             pr_svc.merge_pull_request.assert_not_called()
 
-    def test_trivial_automerge_enabled_merges_when_all_gates_pass(self) -> None:
+    def test_trivial_automerge_enabled_stages_merge_approval_not_immediate_merge(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             state_root = root / "pipeline"
@@ -393,18 +428,22 @@ class CompletePipelineTests(unittest.TestCase):
 
             result = svc.complete_pipeline("HEC-1")
 
-            self.assertEqual(result.status, "done")
-            self.assertFalse(pr_svc.create_pull_request.call_args.kwargs["draft"])
-            pr_svc.merge_pull_request.assert_called_once_with(7)
-            linear.update_status.assert_any_call("HEC-1", "Done")
+            # #7: a trivial classification stages a SEPARATE pipeline_merge
+            # approval; it must NOT merge to main off the diff approval alone.
+            self.assertEqual(result.status, "pr_created")
+            pr_svc.merge_pull_request.assert_not_called()
+            self.assertNotEqual(result.approval_id, pending.approval_id)
+            merge_payload = approvals.read(result.approval_id)
+            self.assertTrue(str(merge_payload.get("action", "")).startswith("pipeline_merge:"))
+            self.assertEqual(merge_payload.get("status"), "pending")
             observe.emit.assert_any_call(
-                "pipeline_trivial_automerge",
+                "pipeline_trivial_automerge_pending",
                 payload={
                     "issue": "HEC-1",
                     "pr_url": "https://github.com/owner/repo/pull/7",
                     "pr_number": 7,
+                    "approval_id": result.approval_id,
                     "categories": ["docs"],
-                    "reasons": [],
                 },
             )
 
