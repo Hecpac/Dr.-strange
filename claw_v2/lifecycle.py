@@ -16,6 +16,7 @@ from claw_v2.chat_api import LocalChatAPI
 from claw_v2.main import build_runtime, build_runtime_policy_engine
 from claw_v2.morning_brief import MorningBriefService, MorningBriefSettings
 from claw_v2.notebooklm import NotebookLMService
+from claw_v2.notebooklm_adapter import JacobNotebookLMCLIAdapter
 from claw_v2.observability_dashboard import ObservabilityDashboard
 from claw_v2.operational_alerts import install_operational_alerts
 from claw_v2.telegram import TelegramTransport
@@ -373,6 +374,16 @@ async def run() -> int:
                 lines.append(f"- {title} ({score:.2f}): {snippet}")
             return "\n".join(lines)
 
+        external_nlm_backend = None
+        if runtime.config.notebooklm_backend == "jacob":
+            external_nlm_backend = JacobNotebookLMCLIAdapter(
+                command=runtime.config.notebooklm_cli_path,
+                profile=runtime.config.notebooklm_cli_profile,
+                timeout_seconds=runtime.config.notebooklm_cli_timeout_seconds,
+                long_timeout_seconds=runtime.config.notebooklm_cli_long_timeout_seconds,
+                artifact_timeout_seconds=runtime.config.notebooklm_cli_long_timeout_seconds,
+            )
+
         nlm_service = NotebookLMService(
             notify=_nlm_notify,
             observe=runtime.observe,
@@ -380,6 +391,7 @@ async def run() -> int:
             research_fallback=_nlm_research_fallback,
             runtime_policy=build_runtime_policy_engine(runtime.config, runtime.approvals),
             policy_context="telegram",
+            external_backend=external_nlm_backend,
         )
         runtime.bot.notebooklm = nlm_service
 

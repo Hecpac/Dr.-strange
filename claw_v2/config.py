@@ -330,6 +330,13 @@ def _coerce_scheduled_sub_agents(raw: object) -> list[ScheduledSubAgentConfig]:
     return jobs
 
 
+def _normalize_notebooklm_backend(value: str | None) -> str:
+    normalized = str(value or "cdp").strip().lower()
+    if normalized in {"", "local"}:
+        return "cdp"
+    return normalized
+
+
 @dataclass(slots=True)
 class AppConfig:
     telegram_bot_token: str | None
@@ -415,6 +422,11 @@ class AppConfig:
     enable_trivial_automerge: bool
     chrome_cdp_enabled: bool
     claw_chrome_port: int
+    notebooklm_backend: str
+    notebooklm_cli_path: str
+    notebooklm_cli_profile: str | None
+    notebooklm_cli_timeout_seconds: float
+    notebooklm_cli_long_timeout_seconds: float
     computer_use_enabled: bool
     computer_display_width: int
     computer_display_height: int
@@ -582,6 +594,11 @@ class AppConfig:
             enable_trivial_automerge=_env_bool("CLAW_ENABLE_TRIVIAL_AUTOMERGE", _env_bool("ENABLE_TRIVIAL_AUTOMERGE", False)),
             chrome_cdp_enabled=_env_bool("CHROME_CDP_ENABLED", True),
             claw_chrome_port=_env_int("CLAW_CHROME_PORT", 9250),
+            notebooklm_backend=_normalize_notebooklm_backend(os.getenv("NOTEBOOKLM_BACKEND", "cdp")),
+            notebooklm_cli_path=os.getenv("NOTEBOOKLM_CLI_PATH") or shutil.which("nlm") or "nlm",
+            notebooklm_cli_profile=os.getenv("NOTEBOOKLM_CLI_PROFILE") or None,
+            notebooklm_cli_timeout_seconds=_env_float("NOTEBOOKLM_CLI_TIMEOUT_SECONDS", 120.0),
+            notebooklm_cli_long_timeout_seconds=_env_float("NOTEBOOKLM_CLI_LONG_TIMEOUT_SECONDS", 1200.0),
             computer_use_enabled=_env_bool("COMPUTER_USE_ENABLED", True),
             computer_display_width=_env_int("COMPUTER_DISPLAY_WIDTH", 1280),
             computer_display_height=_env_int("COMPUTER_DISPLAY_HEIGHT", 800),
@@ -686,6 +703,14 @@ class AppConfig:
             raise ValueError("token limit ratios must satisfy 0 < soft <= hard.")
         if self.command_isolation_mode not in {"host_sanitized", "docker_ephemeral"}:
             raise ValueError("command_isolation_mode must be one of: host_sanitized, docker_ephemeral.")
+        if self.notebooklm_backend not in {"cdp", "jacob"}:
+            raise ValueError("notebooklm_backend must be one of: cdp, jacob.")
+        if not self.notebooklm_cli_path:
+            raise ValueError("notebooklm_cli_path must not be empty.")
+        if self.notebooklm_cli_timeout_seconds <= 0:
+            raise ValueError("notebooklm_cli_timeout_seconds must be positive.")
+        if self.notebooklm_cli_long_timeout_seconds <= 0:
+            raise ValueError("notebooklm_cli_long_timeout_seconds must be positive.")
         if self.claw_worker_summary_limit <= 0:
             raise ValueError("claw_worker_summary_limit must be positive.")
         if self.claw_phase_input_limit <= 0:

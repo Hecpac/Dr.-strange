@@ -105,6 +105,7 @@ class NotebookLMService:
         research_fallback: ResearchFallback | None = None,
         runtime_policy: Any | None = None,
         policy_context: str = "telegram",
+        external_backend: Any | None = None,
     ) -> None:
         self._notify = notify or (lambda msg: None)
         self._observe = observe
@@ -112,6 +113,7 @@ class NotebookLMService:
         self._research_fallback = research_fallback
         self._runtime_policy = runtime_policy
         self._policy_context = policy_context
+        self._external_backend = external_backend
         self._running: dict[str, threading.Thread] = {}
         self._client_factory: Callable[[], Any] | None = None
         # Optional override for CDP-backed methods (used by tests). Defaults to
@@ -151,6 +153,11 @@ class NotebookLMService:
         state can exist on the host without being the intended runtime path.
         """
         return self._client_factory is not None
+
+    @property
+    def _use_external_backend(self) -> bool:
+        """True when an external backend is configured and SDK tests are not overriding it."""
+        return self._external_backend is not None and not self._use_sdk
 
     _ARTIFACT_LABELS = {
         "podcast": "podcast",
@@ -208,6 +215,11 @@ class NotebookLMService:
         # Prefer SDK when test factory is injected; otherwise scrape via CDP.
         if self._use_sdk:
             return self._run_async(self._async_list_notebooks())
+        if self._use_external_backend:
+            try:
+                return self._external_backend.list_notebooks()
+            except Exception as exc:
+                logger.warning("External NotebookLM list failed; falling back to CDP: %s", exc)
         try:
             return notebooklm_cdp.list_notebooks()
         except Exception as exc:
@@ -232,6 +244,11 @@ class NotebookLMService:
         # CDP-specific tests.
         if self._use_sdk:
             return self._run_async(self._async_create_notebook(title))
+        if self._use_external_backend:
+            try:
+                return self._external_backend.create_notebook(title)
+            except Exception as exc:
+                logger.warning("External NotebookLM create failed; falling back to CDP: %s", exc)
         cdp_fn = self._cdp_create_notebook_fn or notebooklm_cdp.create_notebook
         return cdp_fn(title)
 
@@ -247,6 +264,9 @@ class NotebookLMService:
             mutates_state=True,
             requires_network=True,
         )
+        if self._use_external_backend:
+            full_id = self._resolve_notebook_id(notebook_id)
+            return bool(self._external_backend.delete_notebook(full_id))
         return self._run_async(self._async_delete_notebook(notebook_id))
 
     async def _async_status(self, notebook_id: str) -> dict:
@@ -264,6 +284,9 @@ class NotebookLMService:
 
     def status(self, notebook_id: str) -> dict:
         self._enforce_policy("notebooklm.status", {"notebook_id": notebook_id}, mutates_state=False, requires_network=True)
+        if self._use_external_backend:
+            full_id = self._resolve_notebook_id(notebook_id)
+            return self._external_backend.status(full_id)
         return self._run_async(self._async_status(notebook_id))
 
     async def _async_resolve_notebook_id(self, partial_id: str) -> str:
@@ -294,6 +317,9 @@ class NotebookLMService:
             mutates_state=True,
             requires_network=True,
         )
+        if self._use_external_backend:
+            full_id = self._resolve_notebook_id(notebook_id)
+            return self._external_backend.add_sources(full_id, urls)
         return self._run_async(self._async_add_sources(notebook_id, urls))
 
     async def _async_add_text(self, notebook_id: str, title: str, content: str) -> dict:
@@ -309,6 +335,9 @@ class NotebookLMService:
             mutates_state=True,
             requires_network=True,
         )
+        if self._use_external_backend:
+            full_id = self._resolve_notebook_id(notebook_id)
+            return self._external_backend.add_text(full_id, title, content)
         return self._run_async(self._async_add_text(notebook_id, title, content))
 
     async def _async_chat(self, notebook_id: str, question: str) -> str:
@@ -324,9 +353,23 @@ class NotebookLMService:
             mutates_state=False,
             requires_network=True,
         )
+        if self._use_external_backend:
+            full_id = self._resolve_notebook_id(notebook_id)
+            return self._external_backend.chat(full_id, question)
         return self._run_async(self._async_chat(notebook_id, question))
 
     def _resolve_notebook_id(self, partial_id: str) -> str:
+        if self._use_external_backend:
+            notebooks = self.list_notebooks()
+            matches = [nb for nb in notebooks if str(nb.get("id", "")).startswith(partial_id)]
+            if len(matches) == 0:
+                raise ValueError(f"No notebook found matching '{partial_id}'")
+            if len(matches) > 1:
+                raise ValueError(
+                    f"Ambiguous ID '{partial_id}' matches {len(matches)} notebooks: "
+                    + ", ".join(str(m.get("id", ""))[:12] for m in matches)
+                )
+            return str(matches[0]["id"])
         return self._run_async(self._async_resolve_notebook_id(partial_id))
 
     def _emit(self, event_type: str, **payload: Any) -> None:
@@ -345,7 +388,8 @@ class NotebookLMService:
         # CDP mode skips SDK-only id resolution and title lookup. The handler
         # passes the full id from create_notebook, and the notify message uses
         # the id as a stand-in title.
-        cdp_mode = not self._use_sdk
+        external_mode = self._use_external_backend
+        cdp_mode = not self._use_sdk and not external_mode
         if cdp_mode:
             full_id = notebook_id
             title = notebook_id[:8]
@@ -363,6 +407,7 @@ class NotebookLMService:
                     "query": query,
                     "mode": mode,
                     "cdp_mode": cdp_mode,
+                    "external_backend": external_mode,
                 },
                 metadata={"notebook_title": title},
             )
@@ -393,6 +438,13 @@ class NotebookLMService:
                 if cdp_mode:
                     cdp_fn = self._cdp_research_fn or notebooklm_cdp.deep_research
                     result = cdp_fn(full_id, query)
+                elif external_mode:
+                    try:
+                        result = self._external_backend.deep_research(full_id, query, mode=mode)
+                    except Exception as exc:
+                        logger.warning("External NotebookLM research failed; falling back to CDP: %s", exc)
+                        cdp_fn = self._cdp_research_fn or notebooklm_cdp.deep_research
+                        result = cdp_fn(full_id, query)
                 else:
                     result = self._run_async(self._async_research(full_id, query, mode))
                 if result <= 0:
@@ -953,13 +1005,15 @@ class NotebookLMService:
             mutates_state=True,
             requires_network=True,
         )
-        cdp_mode = not self._use_sdk
+        external_mode = self._use_external_backend
+        cdp_mode = not self._use_sdk and not external_mode
         if cdp_mode:
             full_id = notebook_id
             title = notebook_id[:8]
         else:
             full_id = self._resolve_notebook_id(notebook_id)
-            self._ensure_artifact_supported(normalized_kind)
+            if not external_mode:
+                self._ensure_artifact_supported(normalized_kind)
             title = self._get_notebook_title(full_id)
         if full_id in self._running and self._running[full_id].is_alive():
             return f"Ya hay una operación en curso para este notebook ({full_id[:8]}...)."
@@ -971,6 +1025,7 @@ class NotebookLMService:
                     "notebook_id": full_id,
                     "artifact_kind": normalized_kind,
                     "cdp_mode": cdp_mode,
+                    "external_backend": external_mode,
                 },
                 metadata={"notebook_title": title},
             )
@@ -1000,6 +1055,13 @@ class NotebookLMService:
                 if cdp_mode:
                     cdp_fn = self._cdp_artifact_fn or notebooklm_cdp.generate_artifact
                     cdp_fn(full_id, normalized_kind)
+                elif external_mode:
+                    try:
+                        self._external_backend.generate_artifact(full_id, normalized_kind)
+                    except Exception as exc:
+                        logger.warning("External NotebookLM artifact failed; falling back to CDP: %s", exc)
+                        cdp_fn = self._cdp_artifact_fn or notebooklm_cdp.generate_artifact
+                        cdp_fn(full_id, normalized_kind)
                 else:
                     self._run_async(self._async_generate_artifact(full_id, normalized_kind))
                 if self._job_service is not None and job_id is not None:

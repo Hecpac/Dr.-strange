@@ -177,6 +177,52 @@ class AppConfigDefaultsTests(unittest.TestCase):
             finally:
                 os.chdir(previous_cwd)
 
+    def test_notebooklm_backend_defaults_to_cdp_and_accepts_jacob_adapter(self) -> None:
+        previous_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.chdir(tmpdir)
+            try:
+                with patch.dict(os.environ, {}, clear=True):
+                    config = AppConfig.from_env()
+                self.assertEqual(config.notebooklm_backend, "cdp")
+                self.assertEqual(config.notebooklm_cli_path, "nlm")
+
+                with patch.dict(
+                    os.environ,
+                    {
+                        "NOTEBOOKLM_BACKEND": "jacob",
+                        "NOTEBOOKLM_CLI_PATH": "/opt/bin/nlm",
+                        "NOTEBOOKLM_CLI_PROFILE": "work",
+                        "NOTEBOOKLM_CLI_TIMEOUT_SECONDS": "30",
+                        "NOTEBOOKLM_CLI_LONG_TIMEOUT_SECONDS": "900",
+                    },
+                    clear=True,
+                ):
+                    configured = AppConfig.from_env()
+                self.assertEqual(configured.notebooklm_backend, "jacob")
+                self.assertEqual(configured.notebooklm_cli_path, "/opt/bin/nlm")
+                self.assertEqual(configured.notebooklm_cli_profile, "work")
+                self.assertEqual(configured.notebooklm_cli_timeout_seconds, 30)
+                self.assertEqual(configured.notebooklm_cli_long_timeout_seconds, 900)
+
+                with patch.dict(os.environ, {"NOTEBOOKLM_BACKEND": "local"}, clear=True):
+                    local_alias = AppConfig.from_env()
+                self.assertEqual(local_alias.notebooklm_backend, "cdp")
+            finally:
+                os.chdir(previous_cwd)
+
+    def test_notebooklm_backend_validation(self) -> None:
+        previous_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.chdir(tmpdir)
+            try:
+                with patch.dict(os.environ, {"NOTEBOOKLM_BACKEND": "mcp"}, clear=True):
+                    config = AppConfig.from_env()
+                with self.assertRaises(ValueError):
+                    config.validate()
+            finally:
+                os.chdir(previous_cwd)
+
     def test_hardening_config_surface_validation(self) -> None:
         invalid_envs = (
             {"CLAW_TOKEN_WINDOW_SECONDS": "0"},
