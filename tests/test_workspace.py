@@ -7,6 +7,7 @@ import unittest
 from types import SimpleNamespace
 from pathlib import Path
 
+from claw_v2.memory import MemoryStore
 from claw_v2.redaction import redact_sensitive
 from claw_v2.workspace import AgentWorkspace
 
@@ -228,6 +229,90 @@ class AgentWorkspaceTests(unittest.TestCase):
             self.assertEqual(payload["context_chars_redacted"], len(context))
             self.assertTrue(payload["shadow_context_unchanged"])
             self.assertIn("block_count", payload)
+
+    def test_startup_memory_retention_filters_low_confidence_stale_and_secret_facts(self) -> None:
+        secret = "sk-" + "x" * 80
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workspace = AgentWorkspace(root)
+            workspace.ensure()
+            memory = MemoryStore(root / "data" / "claw.db")
+            memory.store_fact(
+                "profile.response_style",
+                "Prefiere respuestas concisas y directas.",
+                source="direct_user_correction",
+                source_trust="trusted",
+                confidence=0.95,
+            )
+            memory.store_fact(
+                "profile.low_signal_guess",
+                "Tal vez quiere reportes largos.",
+                source="dream",
+                source_trust="untrusted",
+                confidence=0.2,
+            )
+            memory.store_fact(
+                "profile.old_preference",
+                "Preferencia expirada.",
+                source="profile",
+                source_trust="trusted",
+                confidence=0.9,
+                valid_until="2020-01-01T00:00:00+00:00",
+            )
+            memory.store_fact(
+                "profile.api_key",
+                secret,
+                source="test",
+                source_trust="trusted",
+                confidence=0.99,
+            )
+
+            context, report = workspace.startup_context(memory=memory)
+
+            self.assertIn("Prefiere respuestas concisas y directas.", context)
+            self.assertIn("source=direct_user_correction trust=trusted confidence=0.95 freshness=current", context)
+            self.assertNotIn("Tal vez quiere reportes largos.", context)
+            self.assertNotIn("Preferencia expirada.", context)
+            self.assertNotIn(secret, context)
+            self.assertEqual(report.memory_retention_counts["always_in_prompt"], 1)
+            self.assertEqual(report.memory_retention_counts["retrieval_on_demand"], 2)
+            self.assertEqual(report.memory_retention_counts["never_in_prompt"], 1)
+            self.assertEqual(report.memory_retrieval_omitted_count, 2)
+            self.assertEqual(report.memory_never_prompt_count, 1)
+            serialized = json.dumps(report.to_dict())
+            self.assertNotIn(secret, serialized)
+
+    def test_startup_learning_facts_backfill_after_retention_filter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workspace = AgentWorkspace(root)
+            workspace.ensure()
+            memory = MemoryStore(root / "data" / "claw.db")
+            for index in range(5):
+                memory.store_fact(
+                    f"learning.filtered.{index}",
+                    "unsafe low confidence lesson",
+                    source="dream",
+                    source_trust="untrusted",
+                    confidence=0.99,
+                    entity_tags=("learning",),
+                    prompt_residency="retrieval_on_demand",
+                )
+            memory.store_fact(
+                "learning_loop_consolidated",
+                "Prefer explicit fallback messaging after browse failures.",
+                source="learning_loop",
+                source_trust="self",
+                confidence=0.7,
+                entity_tags=("learning", "consolidated"),
+            )
+
+            context, report = workspace.startup_context(memory=memory)
+
+            self.assertIn("# Lessons And Corrected Errors", context)
+            self.assertIn("Prefer explicit fallback messaging after browse failures.", context)
+            self.assertNotIn("unsafe low confidence lesson", context)
+            self.assertEqual(report.learning_count, 1)
 
 
 def _legacy_startup_context(root: Path, *, report, channel: str) -> str:
