@@ -75,8 +75,14 @@ from claw_v2.wiki import WikiService
 from claw_v2.scheduled_background_jobs import (
     A2A_PROCESS_INBOX_JOB_KIND,
     A2A_PROCESS_INBOX_RESUME_KEY,
+    AUTO_DREAM_JOB_KIND,
+    AUTO_DREAM_RESUME_KEY,
     KAIROS_TICK_JOB_KIND,
     KAIROS_TICK_RESUME_KEY,
+    LEARNING_CONSOLIDATE_JOB_KIND,
+    LEARNING_CONSOLIDATE_RESUME_KEY,
+    LEARNING_SOUL_SUGGESTIONS_JOB_KIND,
+    LEARNING_SOUL_SUGGESTIONS_RESUME_KEY,
     PERF_OPTIMIZER_JOB_KIND,
     PERF_OPTIMIZER_RESUME_KEY,
     PIPELINE_POLL_JOB_KIND,
@@ -1344,6 +1350,43 @@ def _setup_scheduler(
     scheduler.register(ScheduledJob(name="daily_metrics", interval_seconds=86400, handler=_daily_metrics_handler))
 
     dream = AutoDreamService(memory=memory, observe=observe, router=router)
+    if daemon is not None and job_service is not None:
+        auto_dream_runner = ScheduledBackgroundJobRunner(
+            job_name="auto_dream",
+            job_kind=AUTO_DREAM_JOB_KIND,
+            job_service=job_service,
+            handler=lambda _payload: dream.run(),
+            observe=observe,
+            worker_id="auto-dream-runner",
+        )
+        daemon.register_background_job_runner(
+            name="auto_dream",
+            handler=lambda: auto_dream_runner.run_available(limit=1),
+        )
+        learning_consolidate_runner = ScheduledBackgroundJobRunner(
+            job_name="learning_consolidate",
+            job_kind=LEARNING_CONSOLIDATE_JOB_KIND,
+            job_service=job_service,
+            handler=lambda _payload: learning.consolidate(),
+            observe=observe,
+            worker_id="learning-consolidate-runner",
+        )
+        daemon.register_background_job_runner(
+            name="learning_consolidate",
+            handler=lambda: learning_consolidate_runner.run_available(limit=1),
+        )
+        learning_soul_suggestions_runner = ScheduledBackgroundJobRunner(
+            job_name="learning_soul_suggestions",
+            job_kind=LEARNING_SOUL_SUGGESTIONS_JOB_KIND,
+            job_service=job_service,
+            handler=lambda _payload: learning.suggest_soul_updates(observe=observe, soul_text=system_prompt),
+            observe=observe,
+            worker_id="learning-soul-suggestions-runner",
+        )
+        daemon.register_background_job_runner(
+            name="learning_soul_suggestions",
+            handler=lambda: learning_soul_suggestions_runner.run_available(limit=1),
+        )
     scheduler.register(
         ScheduledJob(
             name="auto_dream",
@@ -1351,12 +1394,35 @@ def _setup_scheduler(
             handler=_wrap_job_handler(
                 name="auto_dream",
                 observe=observe,
-                handler=dream.run,
+                handler=lambda: enqueue_scheduled_background_job(
+                    job_name="auto_dream",
+                    job_kind=AUTO_DREAM_JOB_KIND,
+                    resume_key=AUTO_DREAM_RESUME_KEY,
+                    job_service=job_service,
+                    observe=observe,
+                ),
                 skip_if=_maintenance_skip,
             ),
         )
     )
-    scheduler.register(ScheduledJob(name="learning_consolidate", interval_seconds=86400, handler=learning.consolidate))
+    scheduler.register(
+        ScheduledJob(
+            name="learning_consolidate",
+            interval_seconds=86400,
+            handler=_wrap_job_handler(
+                name="learning_consolidate",
+                observe=observe,
+                handler=lambda: enqueue_scheduled_background_job(
+                    job_name="learning_consolidate",
+                    job_kind=LEARNING_CONSOLIDATE_JOB_KIND,
+                    resume_key=LEARNING_CONSOLIDATE_RESUME_KEY,
+                    job_service=job_service,
+                    observe=observe,
+                ),
+                skip_if=_maintenance_skip,
+            ),
+        )
+    )
     scheduler.register(
         ScheduledJob(
             name="learning_soul_suggestions",
@@ -1364,7 +1430,13 @@ def _setup_scheduler(
             handler=_wrap_job_handler(
                 name="learning_soul_suggestions",
                 observe=observe,
-                handler=lambda: learning.suggest_soul_updates(observe=observe, soul_text=system_prompt),
+                handler=lambda: enqueue_scheduled_background_job(
+                    job_name="learning_soul_suggestions",
+                    job_kind=LEARNING_SOUL_SUGGESTIONS_JOB_KIND,
+                    resume_key=LEARNING_SOUL_SUGGESTIONS_RESUME_KEY,
+                    job_service=job_service,
+                    observe=observe,
+                ),
                 skip_if=_maintenance_skip,
             ),
         )

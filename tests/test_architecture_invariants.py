@@ -12,7 +12,10 @@ from claw_v2.config import AppConfig, ProviderRolePolicyError
 from claw_v2.main import build_runtime, _sanitize_job_name
 from claw_v2.scheduled_background_jobs import (
     A2A_PROCESS_INBOX_JOB_KIND,
+    AUTO_DREAM_JOB_KIND,
     KAIROS_TICK_JOB_KIND,
+    LEARNING_CONSOLIDATE_JOB_KIND,
+    LEARNING_SOUL_SUGGESTIONS_JOB_KIND,
     PERF_OPTIMIZER_JOB_KIND,
     PIPELINE_POLL_JOB_KIND,
     PIPELINE_POLL_MERGES_JOB_KIND,
@@ -39,22 +42,19 @@ SLOW_SCHEDULER_AGENT_JOBS = {
     "pipeline_poll": PIPELINE_POLL_JOB_KIND,
     "pipeline_poll_merges": PIPELINE_POLL_MERGES_JOB_KIND,
     "a2a_process_inbox": A2A_PROCESS_INBOX_JOB_KIND,
+    "auto_dream": AUTO_DREAM_JOB_KIND,
+    "learning_consolidate": LEARNING_CONSOLIDATE_JOB_KIND,
+    "learning_soul_suggestions": LEARNING_SOUL_SUGGESTIONS_JOB_KIND,
 }
 
 # Jobs that still run heavy (provider/subprocess/codegen) work inline in
-# ``daemon.tick`` and are documented as NOT YET migrated off-tick. This set is
-# a deny-by-default exception list: it must only shrink. PR 1B-c migrated
-# self_improve + pipeline_poll; PR 1B-d migrated a2a + the scheduled sub-agent
-# jobs; auto_dream / learning_* are tracked for a later block. The backstop test
-# below fails if ANY job outside this set runs heavy work inline — including a
-# newly-added one.
-_PENDING_INLINE_MIGRATION = frozenset(
-    {
-        "auto_dream",
-        "learning_consolidate",
-        "learning_soul_suggestions",
-    }
-)
+# ``daemon.tick``. This deny-by-default exception list may only SHRINK. The
+# off-tick migration train emptied it: PR 1B-c (self_improve + pipeline_poll),
+# PR 1B-d (a2a + scheduled sub-agents), and the final leg (auto_dream +
+# learning_consolidate + learning_soul_suggestions). It is now empty — Core
+# Invariant 1 is fully closed, and the backstop below fails if ANY scheduler
+# job (including a newly-added one) runs heavy work inline in daemon.tick.
+_PENDING_INLINE_MIGRATION: frozenset[str] = frozenset()
 
 
 class _HeavyInlineCall(BaseException):
