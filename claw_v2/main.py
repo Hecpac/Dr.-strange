@@ -77,6 +77,12 @@ from claw_v2.scheduled_background_jobs import (
     KAIROS_TICK_RESUME_KEY,
     PERF_OPTIMIZER_JOB_KIND,
     PERF_OPTIMIZER_RESUME_KEY,
+    PIPELINE_POLL_JOB_KIND,
+    PIPELINE_POLL_MERGES_JOB_KIND,
+    PIPELINE_POLL_MERGES_RESUME_KEY,
+    PIPELINE_POLL_RESUME_KEY,
+    SELF_IMPROVE_JOB_KIND,
+    SELF_IMPROVE_RESUME_KEY,
     WIKI_RESEARCH_JOB_KIND,
     WIKI_RESEARCH_RESUME_KEY,
     WIKI_SCRAPE_JOB_KIND,
@@ -1242,6 +1248,18 @@ def _setup_scheduler(
             name="kairos_tick",
             handler=lambda: kairos_tick_runner.run_available(limit=1),
         )
+        self_improve_runner = ScheduledBackgroundJobRunner(
+            job_name="self_improve",
+            job_kind=SELF_IMPROVE_JOB_KIND,
+            job_service=job_service,
+            handler=lambda _payload: _self_improve_handler(),
+            observe=observe,
+            worker_id="self-improve-runner",
+        )
+        daemon.register_background_job_runner(
+            name="self_improve",
+            handler=lambda: self_improve_runner.run_available(limit=1),
+        )
 
     scheduler.register(ScheduledJob(name="heartbeat", interval_seconds=config.heartbeat_interval, handler=heartbeat.emit))
     scheduler.register(ScheduledJob(name="task_lifecycle_watchdog", interval_seconds=300, handler=_task_lifecycle_watchdog_handler))
@@ -1272,7 +1290,13 @@ def _setup_scheduler(
                 handler=_wrap_job_handler(
                     name="self_improve",
                     observe=observe,
-                    handler=_self_improve_handler,
+                    handler=lambda: enqueue_scheduled_background_job(
+                        job_name="self_improve",
+                        job_kind=SELF_IMPROVE_JOB_KIND,
+                        resume_key=SELF_IMPROVE_RESUME_KEY,
+                        job_service=job_service,
+                        observe=observe,
+                    ),
                     skip_if=_skip_maintenance_or("git", "pytest"),
                 ),
             )
@@ -1465,8 +1489,67 @@ def _setup_scheduler(
             ),
         )
     )
-    scheduler.register(ScheduledJob(name="pipeline_poll", interval_seconds=300, handler=pipeline.poll_actionable))
-    scheduler.register(ScheduledJob(name="pipeline_poll_merges", interval_seconds=300, handler=pipeline.poll_merges))
+    if daemon is not None and job_service is not None:
+        pipeline_poll_runner = ScheduledBackgroundJobRunner(
+            job_name="pipeline_poll",
+            job_kind=PIPELINE_POLL_JOB_KIND,
+            job_service=job_service,
+            handler=lambda _payload: pipeline.poll_actionable(),
+            observe=observe,
+            worker_id="pipeline-poll-runner",
+        )
+        daemon.register_background_job_runner(
+            name="pipeline_poll",
+            handler=lambda: pipeline_poll_runner.run_available(limit=1),
+        )
+        pipeline_poll_merges_runner = ScheduledBackgroundJobRunner(
+            job_name="pipeline_poll_merges",
+            job_kind=PIPELINE_POLL_MERGES_JOB_KIND,
+            job_service=job_service,
+            handler=lambda _payload: pipeline.poll_merges(),
+            observe=observe,
+            worker_id="pipeline-poll-merges-runner",
+        )
+        daemon.register_background_job_runner(
+            name="pipeline_poll_merges",
+            handler=lambda: pipeline_poll_merges_runner.run_available(limit=1),
+        )
+    scheduler.register(
+        ScheduledJob(
+            name="pipeline_poll",
+            interval_seconds=300,
+            handler=_wrap_job_handler(
+                name="pipeline_poll",
+                observe=observe,
+                handler=lambda: enqueue_scheduled_background_job(
+                    job_name="pipeline_poll",
+                    job_kind=PIPELINE_POLL_JOB_KIND,
+                    resume_key=PIPELINE_POLL_RESUME_KEY,
+                    job_service=job_service,
+                    observe=observe,
+                ),
+                skip_if=_skip_maintenance_or("git"),
+            ),
+        )
+    )
+    scheduler.register(
+        ScheduledJob(
+            name="pipeline_poll_merges",
+            interval_seconds=300,
+            handler=_wrap_job_handler(
+                name="pipeline_poll_merges",
+                observe=observe,
+                handler=lambda: enqueue_scheduled_background_job(
+                    job_name="pipeline_poll_merges",
+                    job_kind=PIPELINE_POLL_MERGES_JOB_KIND,
+                    resume_key=PIPELINE_POLL_MERGES_RESUME_KEY,
+                    job_service=job_service,
+                    observe=observe,
+                ),
+                skip_if=_skip_maintenance_or("git"),
+            ),
+        )
+    )
     _register_sub_agent_jobs(
         scheduler=scheduler,
         observe=observe,

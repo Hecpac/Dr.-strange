@@ -8,9 +8,9 @@
 ## meta
 
 ```yaml
-describes_commit: 3cca79f+pr1b-a-skill-expand-job
-doc_version: 2.1
-last_verified: 2026-06-04
+describes_commit: 883e41c+pr1b-c-self-improve-pipeline-off-tick
+doc_version: 2.2
+last_verified: 2026-06-05
 verification_method: manual + grep cross-check
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
@@ -78,11 +78,22 @@ invariants:
       - wiki_scrape -> scheduler.wiki_scrape  # PR6, uses JobService + ScheduledBackgroundJobRunner
       - perf_optimizer -> scheduler.perf_optimizer  # PR1B-b, uses JobService + ScheduledBackgroundJobRunner
       - kairos_tick -> scheduler.kairos_tick  # PR1B-c, uses JobService + ScheduledBackgroundJobRunner
-    pending_migration: []
+      - self_improve -> scheduler.self_improve  # PR1B-c, enqueue + ScheduledBackgroundJobRunner (was inline subprocess+pytest+Codex auto_research+git)
+      - pipeline_poll -> scheduler.pipeline_poll  # PR1B-c, enqueue + ScheduledBackgroundJobRunner (was raw ScheduledJob: git worktree+worker LLM+pytest+push, no skip gate)
+      - pipeline_poll_merges -> scheduler.pipeline_poll_merges  # PR1B-c, enqueue + ScheduledBackgroundJobRunner
+    pending_migration:  # INVARIANT 1 IS NOT YET FULLY CLOSED — these still run heavy work inline in daemon.tick
+      - a2a_process_inbox  # PR1B-d: router.ask(lane=worker) per inbox task, no skip gate
+      - scheduled sub-agent jobs  # PR1B-d: _register_sub_agent_jobs -> run_skill -> dispatch (provider) inline; default-on via _default_scheduled_sub_agents
+      - auto_dream  # later: router.ask(lane=research), inherits 300s default timeout
+      - learning_consolidate  # later: router.ask(lane=judge), no skip gate
+      - learning_soul_suggestions  # later: router.ask(lane=judge)
+    enforced_by: tests/test_architecture_invariants.py::test_no_default_on_scheduler_job_runs_heavy_work_inline_in_daemon_tick
+                 (deny-by-default sweep at production default; _PENDING_INLINE_MIGRATION must only shrink)
     why: CronScheduler.run_due() still invokes handlers synchronously. Any
          provider call, code generation, verifier, subprocess, or research
          workload left inline can freeze the daemon tick and delay heartbeat /
-         reconciliation observability.
+         reconciliation observability. Core Invariant 1 remains OPEN until the
+         pending_migration list above is empty.
 
   evidence_gate_meta_skip_sync_path:
     rule: The chain handle_text → _brain_text_response →
