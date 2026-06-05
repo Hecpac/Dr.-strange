@@ -1255,6 +1255,11 @@ def _setup_scheduler(
             handler=lambda _payload: _self_improve_handler(),
             observe=observe,
             worker_id="self-improve-runner",
+            # Honor the EVAL_ON_SELF_IMPROVE kill-switch on the runner too, not
+            # just the enqueue side: when disabled, do not claim/drain already
+            # queued scheduler.self_improve rows (matches the old inline behavior
+            # of simply not running self-improve when the flag is off).
+            should_stop=lambda: not config.eval_on_self_improve,
         )
         daemon.register_background_job_runner(
             name="self_improve",

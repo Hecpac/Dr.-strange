@@ -16,6 +16,7 @@ from claw_v2.scheduled_background_jobs import (
     PIPELINE_POLL_JOB_KIND,
     PIPELINE_POLL_MERGES_JOB_KIND,
     SELF_IMPROVE_JOB_KIND,
+    SELF_IMPROVE_RESUME_KEY,
     WIKI_RESEARCH_JOB_KIND,
     WIKI_SCRAPE_JOB_KIND,
 )
@@ -56,8 +57,8 @@ _PENDING_INLINE_MIGRATION = frozenset(
 
 class _HeavyInlineCall(BaseException):
     """Sentinel raised by a patched heavy chokepoint (provider LLM, self-improve
-    loop, self-improve pytest subprocess) when a scheduler handler invokes it
-    inline. Subclasses BaseException so daemon-style ``except Exception`` guards
+    loop, sub-agent dispatch, or any subprocess) when a scheduler handler invokes
+    it inline. Subclasses BaseException so daemon-style ``except Exception`` guards
     do not swallow it."""
 
 
@@ -68,8 +69,8 @@ class ArchitectureInvariantTests(unittest.TestCase):
         Builds the runtime at PRODUCTION DEFAULT (no EVAL_ON_SELF_IMPROVE
         override) and sweeps EVERY registered scheduler job, invoking each
         handler under sentinels on the heavy chokepoints (provider LLM via
-        ``router.ask``, the self-improve experiment loop, and the self-improve
-        pytest subprocess). A job that trips a sentinel ran heavy work inline
+        ``router.ask``, the self-improve experiment loop, sub-agent dispatch,
+        and any subprocess). A job that trips a sentinel ran heavy work inline
         in ``daemon.tick`` (``tick -> run_due -> job.handler()``). The only
         permitted offenders are those explicitly documented in
         ``_PENDING_INLINE_MIGRATION``; anything else — including a newly added
@@ -122,7 +123,7 @@ class ArchitectureInvariantTests(unittest.TestCase):
                             runtime.auto_research, "run_loop", side_effect=_HeavyInlineCall
                         ), patch.object(
                             runtime.sub_agents, "run_skill", side_effect=_HeavyInlineCall
-                        ), patch("claw_v2.main.subprocess.run", side_effect=_HeavyInlineCall):
+                        ), patch("subprocess.run", side_effect=_HeavyInlineCall):
                             try:
                                 job.handler()
                             except _HeavyInlineCall:
@@ -220,6 +221,53 @@ class ArchitectureInvariantTests(unittest.TestCase):
                     rows = runtime.job_service.list(kinds=(SELF_IMPROVE_JOB_KIND,), limit=10)
                     self.assertEqual(len(rows), 1)
                     self.assertEqual(rows[0].status, "queued")
+
+    def test_self_improve_runner_does_not_drain_queued_jobs_when_disabled(self) -> None:
+        """The EVAL_ON_SELF_IMPROVE kill-switch must apply to the durable runner,
+        not only the enqueue side: when disabled, an already-queued
+        scheduler.self_improve row (enqueued before the flag flipped, or a retry)
+        must remain unclaimed and no pytest/Codex/git work may run. Matches the
+        old inline behavior of simply not running self-improve when off."""
+
+        def fake_anthropic(req: LLMRequest) -> LLMResponse:
+            return LLMResponse(content="<response>ok</response>", lane=req.lane, provider="anthropic")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "PIPELINE_STATE_ROOT": str(root / "pipeline"),
+                "WORKER_PROVIDER": "anthropic",
+                "CLAW_AUTONOMOUS_MAINTENANCE": "true",
+                "CLAW_AUTONOMOUS_MAINTENANCE_ENABLED": "true",
+                "EVAL_ON_SELF_IMPROVE": "false",
+            }
+
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.auto_research.run_loop = MagicMock()
+
+                # A durable job left over from when the flag was on.
+                runtime.job_service.enqueue(
+                    kind=SELF_IMPROVE_JOB_KIND,
+                    payload={},
+                    resume_key=SELF_IMPROVE_RESUME_KEY,
+                    metadata={"source": "test"},
+                )
+
+                runners = {runner.name: runner for runner in runtime.daemon._background_job_runners}
+                self.assertIn("self_improve", runners)
+                with patch("subprocess.run", side_effect=AssertionError("self-improve must not run when disabled")):
+                    runners["self_improve"].handler()
+
+                rows = runtime.job_service.list(kinds=(SELF_IMPROVE_JOB_KIND,), limit=10)
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0].status, "queued", "disabled kill-switch must leave the job unclaimed")
+                runtime.auto_research.run_loop.assert_not_called()
 
     def test_pipeline_poll_jobs_are_migrated_off_tick_and_do_not_run_inline(self) -> None:
         def fake_anthropic(req: LLMRequest) -> LLMResponse:
