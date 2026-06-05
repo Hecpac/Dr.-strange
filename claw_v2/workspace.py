@@ -707,7 +707,7 @@ class AgentWorkspace:
             sections.append("\n".join(lines))
 
         try:
-            learning_facts = list(memory.get_learning_facts(limit=5))
+            learning_facts = list(memory.get_learning_facts(limit=50))
         except Exception as exc:
             report.attempted_sources.append(
                 ContextSourceStatus(
@@ -724,7 +724,7 @@ class AgentWorkspace:
                 (row, decision)
                 for row, decision in classified_learning_facts
                 if decision.residency == "always_in_prompt"
-            ]
+            ][:5]
         else:
             included_learning_facts = []
         if included_learning_facts:

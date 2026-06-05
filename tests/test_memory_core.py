@@ -204,6 +204,32 @@ class BuildContextTests(unittest.TestCase):
         self.assertEqual(uncertain["prompt_residency"], "retrieval_on_demand")
         self.assertEqual(uncertain["retention_reason"], "low_confidence")
 
+    def test_learning_rules_backfill_after_retention_filter(self) -> None:
+        for index in range(5):
+            self.store.store_fact(
+                f"learning.filtered.{index}",
+                "unsafe low confidence lesson",
+                source="dream",
+                source_trust="untrusted",
+                confidence=0.99,
+                entity_tags=("learning",),
+                prompt_residency="retrieval_on_demand",
+            )
+        self.store.store_fact(
+            "learning_loop_consolidated",
+            "Prefer explicit fallback messaging after browse failures.",
+            source="learning_loop",
+            source_trust="self",
+            confidence=0.7,
+            entity_tags=("learning", "consolidated"),
+        )
+
+        ctx = self.store.build_context("s1", message="hola", include_history=False)
+
+        self.assertIn("# Learning rules", ctx)
+        self.assertIn("Prefer explicit fallback messaging after browse failures.", ctx)
+        self.assertNotIn("unsafe low confidence lesson", ctx)
+
 
 class NormalizeTagsTests(unittest.TestCase):
     def test_snake_cases_and_lowercases(self) -> None:

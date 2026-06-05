@@ -1336,21 +1336,30 @@ class MemoryStore:
         if state_lines:
             sections.extend(["# Session state", *state_lines])
 
+        classified_facts = [
+            (row, classify_memory_fact(row))
+            for row in self.get_profile_facts()
+        ]
         facts = [
-            row for row in self.get_profile_facts()
-            if classify_memory_fact(row).residency == "always_in_prompt"
+            (row, decision)
+            for row, decision in classified_facts
+            if decision.residency == "always_in_prompt"
         ][:20]
         if facts:
             fact_lines = [
-                format_memory_fact_for_prompt(row, decision=classify_memory_fact(row), separator="=")
-                for row in facts
+                format_memory_fact_for_prompt(row, decision=decision, separator="=")
+                for row, decision in facts
             ]
             sections.extend(["# Profile facts", *fact_lines])
 
-        learning_facts = [
-            row for row in self.get_learning_facts(limit=5)
-            if classify_memory_fact(row).residency == "always_in_prompt"
+        classified_learning_facts = [
+            (row, classify_memory_fact(row))
+            for row in self.get_learning_facts(limit=50)
         ]
+        learning_facts = [
+            row for row, decision in classified_learning_facts
+            if decision.residency == "always_in_prompt"
+        ][:5]
         if learning_facts:
             learning_lines = [_format_untrusted_learning_fact(row) for row in learning_facts if row.get("value")]
             if learning_lines:

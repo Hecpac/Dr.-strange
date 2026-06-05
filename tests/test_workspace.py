@@ -282,6 +282,38 @@ class AgentWorkspaceTests(unittest.TestCase):
             serialized = json.dumps(report.to_dict())
             self.assertNotIn(secret, serialized)
 
+    def test_startup_learning_facts_backfill_after_retention_filter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workspace = AgentWorkspace(root)
+            workspace.ensure()
+            memory = MemoryStore(root / "data" / "claw.db")
+            for index in range(5):
+                memory.store_fact(
+                    f"learning.filtered.{index}",
+                    "unsafe low confidence lesson",
+                    source="dream",
+                    source_trust="untrusted",
+                    confidence=0.99,
+                    entity_tags=("learning",),
+                    prompt_residency="retrieval_on_demand",
+                )
+            memory.store_fact(
+                "learning_loop_consolidated",
+                "Prefer explicit fallback messaging after browse failures.",
+                source="learning_loop",
+                source_trust="self",
+                confidence=0.7,
+                entity_tags=("learning", "consolidated"),
+            )
+
+            context, report = workspace.startup_context(memory=memory)
+
+            self.assertIn("# Lessons And Corrected Errors", context)
+            self.assertIn("Prefer explicit fallback messaging after browse failures.", context)
+            self.assertNotIn("unsafe low confidence lesson", context)
+            self.assertEqual(report.learning_count, 1)
+
 
 def _legacy_startup_context(root: Path, *, report, channel: str) -> str:
     today = datetime_from_iso(report.timestamp)
