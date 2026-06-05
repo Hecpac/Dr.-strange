@@ -191,6 +191,21 @@ Tests:
 
 Objective: execute queued jobs outside daemon tick, using the existing `JobService.claim_next()` API.
 
+Implementation note, 2026-06-05:
+
+The generic synchronous `JobRunner.tick()` pseudocode below is retained only
+as historical design context. The implemented PR 1A/1B/PR 6 train landed
+focused `JobService` + background-runner slices instead.
+
+The pseudocode must not be read as a reliable hard-timeout mechanism: a
+synchronous executor running in the same thread cannot enforce timeout if the
+executor blocks before returning. Current landed behavior relies on moving slow
+scheduler/control-path work out of `daemon.tick()`, explicit provider timeouts,
+retry/reclaim semantics, and architecture invariant tests.
+
+Hard/preemptive in-process timeout remains out of scope for this train unless
+a later PR introduces process/thread isolation or cooperative cancellation.
+
 Implementation:
 
 - Add `claw_v2/job_runner.py`.
@@ -476,8 +491,23 @@ CREATE TABLE IF NOT EXISTS graph_projection_state (
 
 - For `observe_stream`, store last processed `id`.
 - Query `WHERE id > ? ORDER BY id ASC LIMIT ?`.
-- Do the same for task/outcome/fact sources where a stable watermark exists.
+- For task/outcome/fact sources, use a monotonic chronological field as the
+  primary watermark where one exists.
 - Never schedule full materialization inline.
+
+Watermark queries must use a monotonic chronological field, not string IDs.
+For tables with UUID/string identifiers such as `agent_tasks.task_id`,
+incremental materialization must use `updated_at` or `created_at` plus a stable
+tie-breaker, for example:
+
+```sql
+WHERE updated_at > :last_updated_at
+   OR (updated_at = :last_updated_at AND task_id > :last_task_id)
+ORDER BY updated_at, task_id
+```
+
+Do not use `task_id > :last_task_id` as the primary watermark because UUID
+ordering is lexicographic and not chronological.
 
 Tests:
 
