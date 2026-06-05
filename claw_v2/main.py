@@ -1505,6 +1505,16 @@ def build_runtime(
         channel="daemon",
     )
     observe.emit("agent_startup_context", payload=startup_context_report.to_dict())
+    if (
+        startup_context_report.prompt_manifest is not None
+        and startup_context_report.prompt_manifest.mode == "shadow"
+    ):
+        observe.emit(
+            "prompt_capsule_shadow_diff",
+            payload=startup_context_report.prompt_manifest.shadow_diff_payload(
+                context_truncated=startup_context_report.context_truncated,
+            ),
+        )
     cleared_provider_sessions = memory.clear_provider_sessions()
     observe.emit(
         "provider_sessions_cleared_for_startup_context",

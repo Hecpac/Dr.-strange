@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import tempfile
 import unittest
 from types import SimpleNamespace
 from pathlib import Path
 
+from claw_v2.redaction import redact_sensitive
 from claw_v2.workspace import AgentWorkspace
 
 
@@ -115,6 +117,11 @@ class AgentWorkspaceTests(unittest.TestCase):
             self.assertIn("BOOT_PROTOCOL.md", report.loaded_files)
             self.assertIn("2026-05-04.md", report.daily_memory_files)
             self.assertNotIn("corro en este CLI", context)
+            self.assertIsNotNone(report.prompt_manifest)
+            payload = report.to_dict()
+            self.assertIsNotNone(payload["prompt_manifest"])
+            self.assertEqual(payload["prompt_manifest"]["mode"], "shadow")
+            self.assertGreater(len(payload["prompt_manifest"]["blocks"]), 0)
 
     def test_startup_context_reports_dirty_git_worktree(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -146,6 +153,133 @@ class AgentWorkspaceTests(unittest.TestCase):
             self.assertFalse(report.boot_protocol_loaded)
             self.assertIn("BOOT_PROTOCOL.md", report.missing_files)
             self.assertTrue(any(source.name == "BOOT_PROTOCOL.md" and source.status == "missing" for source in report.attempted_sources))
+            self.assertIsNotNone(report.prompt_manifest)
+
+    def test_prompt_manifest_shadow_does_not_change_context_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workspace = AgentWorkspace(root)
+            workspace.ensure()
+            context, report = workspace.startup_context(channel="telegram")
+
+            expected = _legacy_startup_context(root, report=report, channel="telegram")
+
+            self.assertEqual(context, expected)
+            self.assertIn("# Startup Context\n\nboot_context_version=", context)
+            self.assertIsNotNone(report.prompt_manifest)
+            self.assertEqual(report.prompt_manifest.mode, "shadow")
+            self.assertEqual(report.prompt_manifest.total_included_chars, len(context))
+
+    def test_prompt_manifest_includes_stable_block_hash_trust_source_priority_and_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workspace = AgentWorkspace(root)
+            workspace.ensure()
+
+            _, report = workspace.startup_context()
+
+            self.assertIsNotNone(report.prompt_manifest)
+            blocks = {block.source: block for block in report.prompt_manifest.blocks}
+            boot = blocks["BOOT_PROTOCOL.md"]
+            self.assertEqual(boot.trust, "system")
+            self.assertEqual(boot.priority, 100)
+            self.assertEqual(boot.budget_chars, 30_000)
+            self.assertRegex(boot.sha256, r"^[0-9a-f]{64}$")
+            self.assertGreater(boot.actual_chars, 0)
+            self.assertGreater(boot.included_chars, 0)
+
+    def test_prompt_manifest_redacts_before_hashing_and_report_serialization(self) -> None:
+        secret = "sk-secret-value-12345678901234567890"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workspace = AgentWorkspace(root)
+            workspace.ensure()
+            (root / "MEMORY.md").write_text(
+                f"# MEMORY.md\n\napi_key={secret}\n",
+                encoding="utf-8",
+            )
+
+            context, report = workspace.startup_context()
+
+            self.assertIn(secret, context)
+            self.assertIsNotNone(report.prompt_manifest)
+            memory_block = next(block for block in report.prompt_manifest.blocks if block.source == "MEMORY.md")
+            self.assertTrue(memory_block.redacted)
+            self.assertEqual(memory_block.actual_chars, memory_block.included_chars)
+            self.assertEqual(report.prompt_manifest.total_included_chars, len(str(redact_sensitive(context, limit=0))))
+            self.assertLess(report.prompt_manifest.total_included_chars, len(context))
+            serialized = json.dumps(report.to_dict())
+            self.assertNotIn(secret, serialized)
+            self.assertNotIn("sk-secret-value", serialized)
+
+    def test_prompt_manifest_shadow_diff_payload_contains_metrics_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workspace = AgentWorkspace(root)
+            workspace.ensure()
+            context, report = workspace.startup_context()
+
+            self.assertIsNotNone(report.prompt_manifest)
+            payload = report.prompt_manifest.shadow_diff_payload(
+                context_truncated=report.context_truncated,
+            )
+
+            self.assertEqual(payload["mode"], "shadow")
+            self.assertEqual(payload["context_chars_redacted"], len(context))
+            self.assertTrue(payload["shadow_context_unchanged"])
+            self.assertIn("block_count", payload)
+
+
+def _legacy_startup_context(root: Path, *, report, channel: str) -> str:
+    today = datetime_from_iso(report.timestamp)
+    sections = [
+        "# Startup Context",
+        "boot_context_version=startup_context_v2",
+        "startup_context_used=true",
+        "stable_context_used=false",
+        f"startup_date={today.strftime('%Y-%m-%d')}",
+        f"startup_weekday={today.strftime('%A')}",
+        f"startup_channel={channel}",
+        f"workspace_root={root}",
+        f"cwd={report.cwd}",
+        f"pid={report.pid}",
+        f"code_version={report.code_version or 'unknown'}",
+        f"git_dirty={str(report.git_dirty).lower()}",
+        f"git_status_entries={len(report.git_status_summary)}",
+        f"boot_protocol_loaded={str(report.boot_protocol_loaded).lower()}",
+        f"boot_protocol_version={report.boot_protocol_version or 'unknown'}",
+        "memoria persistente=required",
+        "task_ledger=required",
+        "regla: no asumir API/Pro/modelo/canal sin verificar.",
+        "regla: separación persona/modelo/runtime; Dr. Strange es la persona, modelo/runtime/CLI/API/daemon son capas tecnicas.",
+        "regla: contexto interno != respuesta externa; reportar fuentes/estado sin imprimir contenido privado completo.",
+        "regla: Telegram es canal Telegram cuando current_channel=telegram; no describir Telegram como canal CLI salvo evidencia real de canal CLI.",
+    ]
+    for name in AgentWorkspace.STABLE_CONTEXT_FILES:
+        path = root / name
+        if not path.exists():
+            continue
+        content = path.read_text(encoding="utf-8").strip()
+        if len(content) > 30_000:
+            content = content[:30_000] + "\n\n[... truncated]"
+        if content:
+            sections.append(f"## {name}\n{content}")
+    memory_dir = root / "memory"
+    if memory_dir.exists():
+        files = sorted(memory_dir.glob("20??-??-??.md"), reverse=True)[:5]
+        if not files:
+            sections.append("# Daily Working Notes\nNo dated memory files found.")
+    sections.append("# Task Ledger Startup Snapshot\ntask_ledger=unavailable")
+    context = "# Agent Workspace Context\n\n" + "\n\n".join(sections)
+    if len(context) > 180_000:
+        context = context[:180_000] + "\n\n[... startup context truncated]"
+    return context
+
+
+def datetime_from_iso(value: str):
+    from datetime import datetime
+
+    return datetime.fromisoformat(value)
 
 class _FakeConfig:
     telegram_bot_token = "configured-token"
