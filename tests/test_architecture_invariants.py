@@ -81,16 +81,28 @@ class ArchitectureInvariantTests(unittest.TestCase):
                 self.assertGreaterEqual(runner_names, set(SLOW_SCHEDULER_AGENT_JOBS))
 
     def test_control_roles_are_bounded_and_never_resolve_to_codex(self) -> None:
-        config = AppConfig.from_env()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "HOME": str(Path.home()),
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "PIPELINE_STATE_ROOT": str(root / "pipeline"),
+            }
+            with patch.dict(os.environ, env, clear=True):
+                config = AppConfig.from_env()
 
-        for role in CONTROL_ROLES:
-            with self.subTest(role=role):
-                self.assertNotEqual(config.provider_for_role(role), "codex")
-                self.assertLessEqual(config.timeout_for_role(role), 30.0)
-                with self.assertRaises(ProviderRolePolicyError):
-                    config.validate_provider_role_policy(role, "codex", timeout=30.0)
-                with self.assertRaises(ProviderRolePolicyError):
-                    config.validate_provider_role_policy(role, "anthropic", timeout=30.001)
+            for role in CONTROL_ROLES:
+                with self.subTest(role=role):
+                    self.assertNotEqual(config.provider_for_role(role), "codex")
+                    self.assertLessEqual(config.timeout_for_role(role), 30.0)
+                    with self.assertRaises(ProviderRolePolicyError):
+                        config.validate_provider_role_policy(role, "codex", timeout=30.0)
+                    with self.assertRaises(ProviderRolePolicyError):
+                        config.validate_provider_role_policy(role, "anthropic", timeout=30.001)
 
     def test_control_router_calls_pass_explicit_bounded_timeouts(self) -> None:
         callsites = _control_router_ask_calls()
@@ -134,7 +146,7 @@ class ArchitectureInvariantTests(unittest.TestCase):
 
     def test_property_graph_materialize_is_not_registered_as_a_scheduled_full_scan(self) -> None:
         offenders: list[str] = []
-        for path in (REPO_ROOT / "claw_v2").glob("*.py"):
+        for path in _package_python_files():
             if path.name == "property_graph.py":
                 continue
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -172,7 +184,7 @@ class _ControlCallsite:
 
 def _control_router_ask_calls() -> list[_ControlCallsite]:
     callsites: list[_ControlCallsite] = []
-    for path in (REPO_ROOT / "claw_v2").glob("*.py"):
+    for path in _package_python_files():
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
@@ -193,6 +205,14 @@ def _control_router_ask_calls() -> list[_ControlCallsite]:
                 )
             )
     return callsites
+
+
+def _package_python_files() -> list[Path]:
+    return [
+        path
+        for path in (REPO_ROOT / "claw_v2").rglob("*.py")
+        if "__pycache__" not in path.parts
+    ]
 
 
 def _is_bounded_control_timeout(node: ast.AST | None, role: str) -> bool:
