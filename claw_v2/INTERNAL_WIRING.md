@@ -75,6 +75,7 @@ invariants:
     migrated:
       - skill_expand -> scheduler.skill_expand  # PR1B-a, uses JobService + SkillExpandJobRunner
       - wiki_research -> scheduler.wiki_research  # PR1B-b, uses JobService + ScheduledBackgroundJobRunner
+      - wiki_scrape -> scheduler.wiki_scrape  # PR6, uses JobService + ScheduledBackgroundJobRunner
       - perf_optimizer -> scheduler.perf_optimizer  # PR1B-b, uses JobService + ScheduledBackgroundJobRunner
       - kairos_tick -> scheduler.kairos_tick  # PR1B-c, uses JobService + ScheduledBackgroundJobRunner
     pending_migration: []
