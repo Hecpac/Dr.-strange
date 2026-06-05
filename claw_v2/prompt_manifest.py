@@ -66,10 +66,10 @@ class PromptManifest:
             "blocks": [block.to_dict() for block in self.blocks],
         }
 
-    def shadow_diff_payload(self, *, context_chars: int, context_truncated: bool) -> dict[str, Any]:
+    def shadow_diff_payload(self, *, context_truncated: bool) -> dict[str, Any]:
         return {
             "mode": self.mode,
-            "context_chars": context_chars,
+            "context_chars_redacted": self.total_included_chars,
             "context_truncated": context_truncated,
             "total_budget_chars": self.total_budget_chars,
             "total_actual_chars": self.total_actual_chars,
@@ -94,11 +94,11 @@ def make_prompt_block(
     trust: PromptTrust,
     priority: int,
     budget_chars: int,
-    actual_chars: int,
     source_text: str,
     included_text: str,
     source_truncated: bool = False,
 ) -> PromptBlock:
+    redacted_source = str(redact_sensitive(source_text, limit=0))
     redacted_included = str(redact_sensitive(included_text, limit=0))
     return PromptBlock(
         block_id=block_id,
@@ -107,9 +107,9 @@ def make_prompt_block(
         trust=trust,
         priority=priority,
         budget_chars=budget_chars,
-        actual_chars=actual_chars,
+        actual_chars=len(redacted_source),
         included_chars=len(redacted_included),
         sha256=hashlib.sha256(redacted_included.encode("utf-8")).hexdigest(),
         truncated=source_truncated or len(included_text) < len(source_text),
-        redacted=redacted_included != included_text,
+        redacted=redacted_source != source_text or redacted_included != included_text,
     )

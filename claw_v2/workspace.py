@@ -141,7 +141,6 @@ class _PromptSectionDraft:
     priority: int
     budget_chars: int
     text: str
-    actual_chars: int
     truncated: bool = False
 
 
@@ -299,7 +298,6 @@ class AgentWorkspace:
             trust: PromptTrust,
             priority: int,
             budget_chars: int,
-            actual_chars: int | None = None,
             truncated: bool = False,
         ) -> None:
             sections.append(section)
@@ -312,7 +310,6 @@ class AgentWorkspace:
                     priority=priority,
                     budget_chars=budget_chars,
                     text=section,
-                    actual_chars=len(section) if actual_chars is None else actual_chars,
                     truncated=truncated,
                 )
             )
@@ -327,38 +324,41 @@ class AgentWorkspace:
         report.git_status_summary = _git_status_summary(self.root)
         report.git_dirty = bool(report.git_status_summary)
         report.stable_context_used = stable_context_used
-        add_section(
-            "\n".join(
-                [
-                    "# Startup Context",
-                    f"boot_context_version={BOOT_CONTEXT_VERSION}",
-                    "startup_context_used=true",
-                    f"stable_context_used={str(stable_context_used).lower()}",
-                    f"startup_date={today.strftime('%Y-%m-%d')}",
-                    f"startup_weekday={today.strftime('%A')}",
-                    f"startup_channel={channel}",
-                    f"workspace_root={self.root}",
-                    f"cwd={report.cwd}",
-                    f"pid={report.pid}",
-                    f"code_version={report.code_version or 'unknown'}",
-                    f"git_dirty={str(report.git_dirty).lower()}",
-                    f"git_status_entries={len(report.git_status_summary)}",
-                    "boot_protocol_loaded=pending",
-                    "boot_protocol_version=pending",
-                    "memoria persistente=required",
-                    "task_ledger=required",
-                    "regla: no asumir API/Pro/modelo/canal sin verificar.",
-                    "regla: separación persona/modelo/runtime; Dr. Strange es la persona, modelo/runtime/CLI/API/daemon son capas tecnicas.",
-                    "regla: contexto interno != respuesta externa; reportar fuentes/estado sin imprimir contenido privado completo.",
-                    "regla: Telegram es canal Telegram cuando current_channel=telegram; no describir Telegram como canal CLI salvo evidencia real de canal CLI.",
-                ]
-            ),
-            block_id="generated.startup_context",
-            title="Startup Context",
-            source="startup_context",
-            trust="generated",
-            priority=80,
-            budget_chars=4_000,
+        startup_metadata_sections = [
+            "# Startup Context",
+            f"boot_context_version={BOOT_CONTEXT_VERSION}",
+            "startup_context_used=true",
+            f"stable_context_used={str(stable_context_used).lower()}",
+            f"startup_date={today.strftime('%Y-%m-%d')}",
+            f"startup_weekday={today.strftime('%A')}",
+            f"startup_channel={channel}",
+            f"workspace_root={self.root}",
+            f"cwd={report.cwd}",
+            f"pid={report.pid}",
+            f"code_version={report.code_version or 'unknown'}",
+            f"git_dirty={str(report.git_dirty).lower()}",
+            f"git_status_entries={len(report.git_status_summary)}",
+            "boot_protocol_loaded=pending",
+            "boot_protocol_version=pending",
+            "memoria persistente=required",
+            "task_ledger=required",
+            "regla: no asumir API/Pro/modelo/canal sin verificar.",
+            "regla: separación persona/modelo/runtime; Dr. Strange es la persona, modelo/runtime/CLI/API/daemon son capas tecnicas.",
+            "regla: contexto interno != respuesta externa; reportar fuentes/estado sin imprimir contenido privado completo.",
+            "regla: Telegram es canal Telegram cuando current_channel=telegram; no describir Telegram como canal CLI salvo evidencia real de canal CLI.",
+        ]
+        sections.extend(startup_metadata_sections)
+        startup_metadata_text = "\n\n".join(startup_metadata_sections)
+        prompt_sections.append(
+            _PromptSectionDraft(
+                block_id="generated.startup_context",
+                title="Startup Context",
+                source="startup_context",
+                trust="generated",
+                priority=80,
+                budget_chars=4_000,
+                text=startup_metadata_text,
+            )
         )
         if report.git_status_summary:
             add_section(
@@ -400,7 +400,6 @@ class AgentWorkspace:
                 trust=_stable_prompt_trust(name),
                 priority=_stable_prompt_priority(name),
                 budget_chars=_MAX_CONTEXT_CHARS_PER_FILE,
-                actual_chars=len(f"## {name}\n") + status.chars,
                 truncated=status.truncated,
             )
 
@@ -824,9 +823,6 @@ def _build_prompt_manifest(
             included_text = ""
         else:
             included_text = source_text[: max(0, min(end, included_source_limit) - start)]
-        actual_chars = draft.actual_chars
-        if draft.source == "startup_context":
-            actual_chars = len(source_text)
         blocks.append(
             make_prompt_block(
                 block_id=draft.block_id,
@@ -835,7 +831,6 @@ def _build_prompt_manifest(
                 trust=draft.trust,
                 priority=draft.priority,
                 budget_chars=draft.budget_chars,
-                actual_chars=actual_chars,
                 source_text=source_text,
                 included_text=included_text,
                 source_truncated=draft.truncated,
@@ -843,11 +838,13 @@ def _build_prompt_manifest(
         )
         cursor = end
 
+    redacted_untruncated_context = str(redact_sensitive(untruncated_context, limit=0))
+    redacted_context = str(redact_sensitive(context, limit=0))
     return PromptManifest(
         mode=prompt_capsule_mode_from_env(),
         total_budget_chars=_MAX_STARTUP_CONTEXT_CHARS,
-        total_actual_chars=len(untruncated_context),
-        total_included_chars=len(context),
+        total_actual_chars=len(redacted_untruncated_context),
+        total_included_chars=len(redacted_context),
         blocks=blocks,
     )
 

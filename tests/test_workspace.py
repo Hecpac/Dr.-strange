@@ -7,6 +7,7 @@ import unittest
 from types import SimpleNamespace
 from pathlib import Path
 
+from claw_v2.redaction import redact_sensitive
 from claw_v2.workspace import AgentWorkspace
 
 
@@ -164,6 +165,7 @@ class AgentWorkspaceTests(unittest.TestCase):
             expected = _legacy_startup_context(root, report=report, channel="telegram")
 
             self.assertEqual(context, expected)
+            self.assertIn("# Startup Context\n\nboot_context_version=", context)
             self.assertIsNotNone(report.prompt_manifest)
             self.assertEqual(report.prompt_manifest.mode, "shadow")
             self.assertEqual(report.prompt_manifest.total_included_chars, len(context))
@@ -203,6 +205,9 @@ class AgentWorkspaceTests(unittest.TestCase):
             self.assertIsNotNone(report.prompt_manifest)
             memory_block = next(block for block in report.prompt_manifest.blocks if block.source == "MEMORY.md")
             self.assertTrue(memory_block.redacted)
+            self.assertEqual(memory_block.actual_chars, memory_block.included_chars)
+            self.assertEqual(report.prompt_manifest.total_included_chars, len(str(redact_sensitive(context, limit=0))))
+            self.assertLess(report.prompt_manifest.total_included_chars, len(context))
             serialized = json.dumps(report.to_dict())
             self.assertNotIn(secret, serialized)
             self.assertNotIn("sk-secret-value", serialized)
@@ -216,12 +221,11 @@ class AgentWorkspaceTests(unittest.TestCase):
 
             self.assertIsNotNone(report.prompt_manifest)
             payload = report.prompt_manifest.shadow_diff_payload(
-                context_chars=report.context_chars,
                 context_truncated=report.context_truncated,
             )
 
             self.assertEqual(payload["mode"], "shadow")
-            self.assertEqual(payload["context_chars"], len(context))
+            self.assertEqual(payload["context_chars_redacted"], len(context))
             self.assertTrue(payload["shadow_context_unchanged"])
             self.assertIn("block_count", payload)
 
@@ -229,31 +233,27 @@ class AgentWorkspaceTests(unittest.TestCase):
 def _legacy_startup_context(root: Path, *, report, channel: str) -> str:
     today = datetime_from_iso(report.timestamp)
     sections = [
-        "\n".join(
-            [
-                "# Startup Context",
-                "boot_context_version=startup_context_v2",
-                "startup_context_used=true",
-                "stable_context_used=false",
-                f"startup_date={today.strftime('%Y-%m-%d')}",
-                f"startup_weekday={today.strftime('%A')}",
-                f"startup_channel={channel}",
-                f"workspace_root={root}",
-                f"cwd={report.cwd}",
-                f"pid={report.pid}",
-                f"code_version={report.code_version or 'unknown'}",
-                f"git_dirty={str(report.git_dirty).lower()}",
-                f"git_status_entries={len(report.git_status_summary)}",
-                f"boot_protocol_loaded={str(report.boot_protocol_loaded).lower()}",
-                f"boot_protocol_version={report.boot_protocol_version or 'unknown'}",
-                "memoria persistente=required",
-                "task_ledger=required",
-                "regla: no asumir API/Pro/modelo/canal sin verificar.",
-                "regla: separación persona/modelo/runtime; Dr. Strange es la persona, modelo/runtime/CLI/API/daemon son capas tecnicas.",
-                "regla: contexto interno != respuesta externa; reportar fuentes/estado sin imprimir contenido privado completo.",
-                "regla: Telegram es canal Telegram cuando current_channel=telegram; no describir Telegram como canal CLI salvo evidencia real de canal CLI.",
-            ]
-        )
+        "# Startup Context",
+        "boot_context_version=startup_context_v2",
+        "startup_context_used=true",
+        "stable_context_used=false",
+        f"startup_date={today.strftime('%Y-%m-%d')}",
+        f"startup_weekday={today.strftime('%A')}",
+        f"startup_channel={channel}",
+        f"workspace_root={root}",
+        f"cwd={report.cwd}",
+        f"pid={report.pid}",
+        f"code_version={report.code_version or 'unknown'}",
+        f"git_dirty={str(report.git_dirty).lower()}",
+        f"git_status_entries={len(report.git_status_summary)}",
+        f"boot_protocol_loaded={str(report.boot_protocol_loaded).lower()}",
+        f"boot_protocol_version={report.boot_protocol_version or 'unknown'}",
+        "memoria persistente=required",
+        "task_ledger=required",
+        "regla: no asumir API/Pro/modelo/canal sin verificar.",
+        "regla: separación persona/modelo/runtime; Dr. Strange es la persona, modelo/runtime/CLI/API/daemon son capas tecnicas.",
+        "regla: contexto interno != respuesta externa; reportar fuentes/estado sin imprimir contenido privado completo.",
+        "regla: Telegram es canal Telegram cuando current_channel=telegram; no describir Telegram como canal CLI salvo evidencia real de canal CLI.",
     ]
     for name in AgentWorkspace.STABLE_CONTEXT_FILES:
         path = root / name

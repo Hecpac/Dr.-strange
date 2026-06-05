@@ -1512,7 +1512,6 @@ def build_runtime(
         observe.emit(
             "prompt_capsule_shadow_diff",
             payload=startup_context_report.prompt_manifest.shadow_diff_payload(
-                context_chars=startup_context_report.context_chars,
                 context_truncated=startup_context_report.context_truncated,
             ),
         )
