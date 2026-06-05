@@ -8,8 +8,8 @@
 ## meta
 
 ```yaml
-describes_commit: 883e41c+pr1b-d-a2a-subagents-off-tick
-doc_version: 2.3
+describes_commit: 9a98873+invariant1-final-leg-dream-learning-off-tick
+doc_version: 2.4
 last_verified: 2026-06-05
 verification_method: manual + grep cross-check
 anchor_strategy: symbol_only  # path:symbol, no line numbers
@@ -83,17 +83,19 @@ invariants:
       - pipeline_poll_merges -> scheduler.pipeline_poll_merges  # PR1B-c, enqueue + ScheduledBackgroundJobRunner
       - a2a_process_inbox -> scheduler.a2a_process_inbox  # PR1B-d, enqueue + ScheduledBackgroundJobRunner, added _maintenance_skip kill-switch (was router.ask per inbox task inline, no skip gate)
       - scheduled sub-agent jobs -> scheduler.sub_agent  # PR1B-d, each job enqueues an {agent,skill,lane} payload (resume_key scheduler:sub_agent:<agent>:<skill>) to one shared off-tick runner; was run_skill->dispatch (provider) inline, default-on via _default_scheduled_sub_agents
-    pending_migration:  # INVARIANT 1 IS NOT YET FULLY CLOSED — these still run heavy work inline in daemon.tick
-      - auto_dream  # later: router.ask(lane=research), inherits 300s default timeout
-      - learning_consolidate  # later: router.ask(lane=judge), no skip gate
-      - learning_soul_suggestions  # later: router.ask(lane=judge)
+      - auto_dream -> scheduler.auto_dream  # final leg, enqueue + ScheduledBackgroundJobRunner (was dream.run router.ask(lane=research) inline, no explicit timeout)
+      - learning_consolidate -> scheduler.learning_consolidate  # final leg, enqueue + ScheduledBackgroundJobRunner, added _maintenance_skip kill-switch (was router.ask(lane=judge) inline, no skip gate)
+      - learning_soul_suggestions -> scheduler.learning_soul_suggestions  # final leg, enqueue + ScheduledBackgroundJobRunner (was router.ask(lane=judge) inline)
+    pending_migration: []  # CORE INVARIANT 1 CLOSED — no heavy scheduler handler runs inline in daemon.tick
     enforced_by: tests/test_architecture_invariants.py::test_no_default_on_scheduler_job_runs_heavy_work_inline_in_daemon_tick
-                 (deny-by-default sweep at production default; _PENDING_INLINE_MIGRATION must only shrink)
-    why: CronScheduler.run_due() still invokes handlers synchronously. Any
-         provider call, code generation, verifier, subprocess, or research
-         workload left inline can freeze the daemon tick and delay heartbeat /
-         reconciliation observability. Core Invariant 1 remains OPEN until the
-         pending_migration list above is empty.
+                 (deny-by-default sweep at production default; _PENDING_INLINE_MIGRATION is now empty and may only stay empty)
+    why: CronScheduler.run_due() invokes handlers synchronously. Any provider
+         call, code generation, verifier, subprocess, or research workload left
+         inline would freeze the daemon tick and delay heartbeat / reconciliation
+         observability. Core Invariant 1 is now CLOSED: every slow/provider/
+         subprocess/codegen scheduler job enqueues a durable agent_job and
+         executes in a ClawDaemon background runner off-tick. The backstop fails
+         if any future job re-introduces inline heavy work.
 
   evidence_gate_meta_skip_sync_path:
     rule: The chain handle_text → _brain_text_response →
