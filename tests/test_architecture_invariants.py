@@ -9,10 +9,14 @@ from unittest.mock import MagicMock, patch
 
 from claw_v2.adapters.base import LLMRequest, LLMResponse
 from claw_v2.config import AppConfig, ProviderRolePolicyError
-from claw_v2.main import build_runtime
+from claw_v2.main import build_runtime, _sanitize_job_name
 from claw_v2.scheduled_background_jobs import (
     KAIROS_TICK_JOB_KIND,
     PERF_OPTIMIZER_JOB_KIND,
+    PIPELINE_POLL_JOB_KIND,
+    PIPELINE_POLL_MERGES_JOB_KIND,
+    SELF_IMPROVE_JOB_KIND,
+    SELF_IMPROVE_RESUME_KEY,
     WIKI_RESEARCH_JOB_KIND,
     WIKI_SCRAPE_JOB_KIND,
 )
@@ -29,11 +33,202 @@ SLOW_SCHEDULER_AGENT_JOBS = {
     "wiki_scrape": WIKI_SCRAPE_JOB_KIND,
     "perf_optimizer": PERF_OPTIMIZER_JOB_KIND,
     "skill_expand": SKILL_EXPAND_JOB_KIND,
+    "self_improve": SELF_IMPROVE_JOB_KIND,
+    "pipeline_poll": PIPELINE_POLL_JOB_KIND,
+    "pipeline_poll_merges": PIPELINE_POLL_MERGES_JOB_KIND,
 }
+
+# Jobs that still run heavy (provider/subprocess/codegen) work inline in
+# ``daemon.tick`` and are documented as NOT YET migrated off-tick. This set is
+# a deny-by-default exception list: it must only shrink. PR 1B-d migrates the
+# a2a + scheduled sub-agent jobs (the latter added dynamically below, since
+# their job names carry config-derived hashes); auto_dream / learning_* are
+# tracked for a later block. The backstop test below fails if ANY job outside
+# this set runs heavy work inline — including a newly-added one.
+_PENDING_INLINE_MIGRATION = frozenset(
+    {
+        "a2a_process_inbox",
+        "auto_dream",
+        "learning_consolidate",
+        "learning_soul_suggestions",
+    }
+)
+
+
+class _HeavyInlineCall(BaseException):
+    """Sentinel raised by a patched heavy chokepoint (provider LLM, self-improve
+    loop, sub-agent dispatch, or any subprocess) when a scheduler handler invokes
+    it inline. Subclasses BaseException so daemon-style ``except Exception`` guards
+    do not swallow it."""
 
 
 class ArchitectureInvariantTests(unittest.TestCase):
-    def test_known_slow_scheduler_jobs_enqueue_agent_jobs_and_return_without_inline_work(self) -> None:
+    def test_no_default_on_scheduler_job_runs_heavy_work_inline_in_daemon_tick(self) -> None:
+        """Deny-by-default backstop for Core Invariant 1.
+
+        Builds the runtime at PRODUCTION DEFAULT (no EVAL_ON_SELF_IMPROVE
+        override) and sweeps EVERY registered scheduler job, invoking each
+        handler under sentinels on the heavy chokepoints (provider LLM via
+        ``router.ask``, the self-improve experiment loop, sub-agent dispatch,
+        and any subprocess). A job that trips a sentinel ran heavy work inline
+        in ``daemon.tick`` (``tick -> run_due -> job.handler()``). The only
+        permitted offenders are those explicitly documented in
+        ``_PENDING_INLINE_MIGRATION``; anything else — including a newly added
+        inline job — fails the test. This replaces the previous positive
+        5-job allowlist, which could not catch unlisted offenders and masked
+        self_improve by forcing EVAL_ON_SELF_IMPROVE=false.
+        """
+
+        def fake_anthropic(req: LLMRequest) -> LLMResponse:
+            return LLMResponse(content="<response>ok</response>", lane=req.lane, provider="anthropic")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "PIPELINE_STATE_ROOT": str(root / "pipeline"),
+                "WORKER_PROVIDER": "anthropic",
+                "CLAW_AUTONOMOUS_MAINTENANCE": "true",
+                "CLAW_AUTONOMOUS_MAINTENANCE_ENABLED": "true",
+                # Production default: self_improve IS enabled (not suppressed).
+                "EVAL_ON_SELF_IMPROVE": "true",
+            }
+
+            with patch.dict(os.environ, env, clear=False):
+                # Keep the "pytest" capability healthy so the self_improve skip
+                # gate does not fire; reset after build to drop the healthcheck
+                # call before the sweep. recompute_confidence is a slow *local*
+                # wiki maintenance pass (no provider/subprocess/codegen) — no-op
+                # it so the sweep is not dominated by ~17s of unrelated work.
+                with patch("claw_v2.main._resolve_pytest_command") as mock_resolve, patch(
+                    "claw_v2.wiki.WikiService.recompute_confidence", return_value=None
+                ):
+                    mock_resolve.return_value = (["true"], "true")
+                    runtime = build_runtime(anthropic_executor=fake_anthropic)
+                    mock_resolve.reset_mock()
+
+                    # Heavy chokepoints raise a BaseException sentinel so each
+                    # handler short-circuits at its FIRST heavy call. _HeavyInlineCall
+                    # subclasses BaseException, so _wrap_job_handler's
+                    # ``except Exception`` does not swallow it and it reaches us.
+                    heavy: set[str] = set()
+                    for job in runtime.scheduler.list_jobs():
+                        with patch.object(
+                            runtime.router, "ask", side_effect=_HeavyInlineCall
+                        ), patch.object(
+                            runtime.auto_research, "run_loop", side_effect=_HeavyInlineCall
+                        ), patch.object(
+                            runtime.sub_agents, "run_skill", side_effect=_HeavyInlineCall
+                        ), patch("subprocess.run", side_effect=_HeavyInlineCall):
+                            try:
+                                job.handler()
+                            except _HeavyInlineCall:
+                                heavy.add(job.name)
+                            except Exception:  # noqa: BLE001 - swallow like the daemon does
+                                pass
+
+                    # Scheduled sub-agent job names carry config-derived hashes;
+                    # derive them the same way main.py does and treat them as
+                    # documented pending-migration (PR 1B-d).
+                    sub_agent_jobs = {
+                        f"{_sanitize_job_name(j.agent)}_{_sanitize_job_name(j.skill)}"
+                        for j in runtime.config.scheduled_sub_agents
+                    }
+                    pending = _PENDING_INLINE_MIGRATION | sub_agent_jobs
+
+                    offenders = heavy - pending
+                    self.assertEqual(
+                        offenders,
+                        set(),
+                        "scheduler jobs run heavy work inline in daemon.tick and are not "
+                        f"documented as pending migration: {sorted(offenders)}",
+                    )
+                    for migrated in ("self_improve", "pipeline_poll", "pipeline_poll_merges"):
+                        self.assertNotIn(
+                            migrated,
+                            heavy,
+                            f"{migrated} must be migrated off-tick and not run heavy work inline",
+                        )
+
+                    # Positive side: every known slow job enqueues a durable
+                    # job and is wired as an off-tick background runner.
+                    scheduler_jobs = {job.name: job for job in runtime.scheduler.list_jobs()}
+                    runner_names = {runner.name for runner in runtime.daemon._background_job_runners}
+                    for job_name, job_kind in SLOW_SCHEDULER_AGENT_JOBS.items():
+                        with self.subTest(job_name=job_name):
+                            self.assertIn(job_name, scheduler_jobs)
+                            self.assertIn(job_name, runner_names)
+                            rows = runtime.job_service.list(kinds=(job_kind,), limit=10)
+                            self.assertEqual(len(rows), 1)
+                            self.assertEqual(rows[0].status, "queued")
+
+    def test_self_improve_is_migrated_off_tick_and_does_not_run_inline(self) -> None:
+        def fake_anthropic(req: LLMRequest) -> LLMResponse:
+            return LLMResponse(content="<response>ok</response>", lane=req.lane, provider="anthropic")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "PIPELINE_STATE_ROOT": str(root / "pipeline"),
+                "WORKER_PROVIDER": "anthropic",
+                "CLAW_AUTONOMOUS_MAINTENANCE": "true",
+                "CLAW_AUTONOMOUS_MAINTENANCE_ENABLED": "true",
+                # Production default: self_improve is enabled. The previous backstop
+                # forced EVAL_ON_SELF_IMPROVE=false, which hid the inline violation.
+                "EVAL_ON_SELF_IMPROVE": "true",
+            }
+
+            with patch.dict(os.environ, env, clear=False):
+                # _resolve_pytest_command is reached by the startup healthcheck
+                # AND by the *inline* self_improve handler. Returning a non-None
+                # pytest_path keeps the "pytest" capability healthy so the skip
+                # gate does not fire; reset_mock() after build isolates the
+                # handler's own call from the build-time healthcheck call.
+                with patch("claw_v2.main._resolve_pytest_command") as mock_resolve:
+                    mock_resolve.return_value = (["true"], "true")
+                    runtime = build_runtime(anthropic_executor=fake_anthropic)
+                    runtime.auto_research.run_loop = MagicMock()
+                    mock_resolve.reset_mock()
+
+                    jobs = {job.name: job for job in runtime.scheduler.list_jobs()}
+                    self.assertIn(
+                        "self_improve",
+                        jobs,
+                        "self_improve must be registered at production default (EVAL_ON_SELF_IMPROVE=true)",
+                    )
+
+                    jobs["self_improve"].handler()
+
+                    # The scheduler/control path must not run pytest or the
+                    # Codex-aware experiment loop inline.
+                    mock_resolve.assert_not_called()
+                    runtime.auto_research.run_loop.assert_not_called()
+
+                    # Heavy work must be wired as an off-tick durable runner...
+                    runner_names = {runner.name for runner in runtime.daemon._background_job_runners}
+                    self.assertIn("self_improve", runner_names)
+
+                    # ...and the scheduler handler must enqueue a durable job.
+                    rows = runtime.job_service.list(kinds=(SELF_IMPROVE_JOB_KIND,), limit=10)
+                    self.assertEqual(len(rows), 1)
+                    self.assertEqual(rows[0].status, "queued")
+
+    def test_self_improve_runner_does_not_drain_queued_jobs_when_disabled(self) -> None:
+        """The EVAL_ON_SELF_IMPROVE kill-switch must apply to the durable runner,
+        not only the enqueue side: when disabled, an already-queued
+        scheduler.self_improve row (enqueued before the flag flipped, or a retry)
+        must remain unclaimed and no pytest/Codex/git work may run. Matches the
+        old inline behavior of simply not running self-improve when off."""
+
         def fake_anthropic(req: LLMRequest) -> LLMResponse:
             return LLMResponse(content="<response>ok</response>", lane=req.lane, provider="anthropic")
 
@@ -54,31 +249,71 @@ class ArchitectureInvariantTests(unittest.TestCase):
 
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
-                runtime.kairos.tick = MagicMock()
-                runtime.bot.wiki.auto_research = MagicMock()
-                runtime.bot.wiki.auto_scrape_sources = MagicMock()
                 runtime.auto_research.run_loop = MagicMock()
-                runtime.skill_registry.auto_expand = MagicMock()
 
-                scheduler_jobs = {job.name: job for job in runtime.scheduler.list_jobs()}
-                for job_name in SLOW_SCHEDULER_AGENT_JOBS:
-                    self.assertIn(job_name, scheduler_jobs)
-                    scheduler_jobs[job_name].handler()
+                # A durable job left over from when the flag was on.
+                runtime.job_service.enqueue(
+                    kind=SELF_IMPROVE_JOB_KIND,
+                    payload={},
+                    resume_key=SELF_IMPROVE_RESUME_KEY,
+                    metadata={"source": "test"},
+                )
 
-                runtime.kairos.tick.assert_not_called()
-                runtime.bot.wiki.auto_research.assert_not_called()
-                runtime.bot.wiki.auto_scrape_sources.assert_not_called()
+                runners = {runner.name: runner for runner in runtime.daemon._background_job_runners}
+                self.assertIn("self_improve", runners)
+                with patch("subprocess.run", side_effect=AssertionError("self-improve must not run when disabled")):
+                    runners["self_improve"].handler()
+
+                rows = runtime.job_service.list(kinds=(SELF_IMPROVE_JOB_KIND,), limit=10)
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0].status, "queued", "disabled kill-switch must leave the job unclaimed")
                 runtime.auto_research.run_loop.assert_not_called()
-                runtime.skill_registry.auto_expand.assert_not_called()
 
-                for job_name, job_kind in SLOW_SCHEDULER_AGENT_JOBS.items():
-                    with self.subTest(job_name=job_name):
-                        rows = runtime.job_service.list(kinds=(job_kind,), limit=10)
-                        self.assertEqual(len(rows), 1)
-                        self.assertEqual(rows[0].status, "queued")
+    def test_pipeline_poll_jobs_are_migrated_off_tick_and_do_not_run_inline(self) -> None:
+        def fake_anthropic(req: LLMRequest) -> LLMResponse:
+            return LLMResponse(content="<response>ok</response>", lane=req.lane, provider="anthropic")
 
-                runner_names = {runner.name for runner in runtime.daemon._background_job_runners}
-                self.assertGreaterEqual(runner_names, set(SLOW_SCHEDULER_AGENT_JOBS))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "PIPELINE_STATE_ROOT": str(root / "pipeline"),
+                "WORKER_PROVIDER": "anthropic",
+                "CLAW_AUTONOMOUS_MAINTENANCE": "true",
+                "CLAW_AUTONOMOUS_MAINTENANCE_ENABLED": "true",
+            }
+
+            with patch.dict(os.environ, env, clear=False):
+                # Patch at class level BEFORE build so the (current) raw
+                # ``handler=pipeline.poll_actionable`` registration captures the
+                # sentinel; the migrated handler must never invoke them inline.
+                with patch("claw_v2.pipeline.PipelineService.poll_actionable") as mock_poll, patch(
+                    "claw_v2.pipeline.PipelineService.poll_merges"
+                ) as mock_merges:
+                    runtime = build_runtime(anthropic_executor=fake_anthropic)
+
+                    jobs = {job.name: job for job in runtime.scheduler.list_jobs()}
+                    for name in ("pipeline_poll", "pipeline_poll_merges"):
+                        self.assertIn(name, jobs)
+                        jobs[name].handler()
+
+                    # No git worktree / worker LLM / pytest / git push inline.
+                    mock_poll.assert_not_called()
+                    mock_merges.assert_not_called()
+
+                    runner_names = {runner.name for runner in runtime.daemon._background_job_runners}
+                    self.assertIn("pipeline_poll", runner_names)
+                    self.assertIn("pipeline_poll_merges", runner_names)
+
+                    for kind in (PIPELINE_POLL_JOB_KIND, PIPELINE_POLL_MERGES_JOB_KIND):
+                        with self.subTest(kind=kind):
+                            rows = runtime.job_service.list(kinds=(kind,), limit=10)
+                            self.assertEqual(len(rows), 1)
+                            self.assertEqual(rows[0].status, "queued")
 
     def test_control_roles_are_bounded_and_never_resolve_to_codex(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
