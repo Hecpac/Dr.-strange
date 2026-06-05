@@ -11,12 +11,14 @@ from claw_v2.adapters.base import LLMRequest, LLMResponse
 from claw_v2.config import AppConfig, ProviderRolePolicyError
 from claw_v2.main import build_runtime, _sanitize_job_name
 from claw_v2.scheduled_background_jobs import (
+    A2A_PROCESS_INBOX_JOB_KIND,
     KAIROS_TICK_JOB_KIND,
     PERF_OPTIMIZER_JOB_KIND,
     PIPELINE_POLL_JOB_KIND,
     PIPELINE_POLL_MERGES_JOB_KIND,
     SELF_IMPROVE_JOB_KIND,
     SELF_IMPROVE_RESUME_KEY,
+    SUB_AGENT_JOB_KIND,
     WIKI_RESEARCH_JOB_KIND,
     WIKI_SCRAPE_JOB_KIND,
 )
@@ -36,18 +38,18 @@ SLOW_SCHEDULER_AGENT_JOBS = {
     "self_improve": SELF_IMPROVE_JOB_KIND,
     "pipeline_poll": PIPELINE_POLL_JOB_KIND,
     "pipeline_poll_merges": PIPELINE_POLL_MERGES_JOB_KIND,
+    "a2a_process_inbox": A2A_PROCESS_INBOX_JOB_KIND,
 }
 
 # Jobs that still run heavy (provider/subprocess/codegen) work inline in
 # ``daemon.tick`` and are documented as NOT YET migrated off-tick. This set is
-# a deny-by-default exception list: it must only shrink. PR 1B-d migrates the
-# a2a + scheduled sub-agent jobs (the latter added dynamically below, since
-# their job names carry config-derived hashes); auto_dream / learning_* are
-# tracked for a later block. The backstop test below fails if ANY job outside
-# this set runs heavy work inline — including a newly-added one.
+# a deny-by-default exception list: it must only shrink. PR 1B-c migrated
+# self_improve + pipeline_poll; PR 1B-d migrated a2a + the scheduled sub-agent
+# jobs; auto_dream / learning_* are tracked for a later block. The backstop test
+# below fails if ANY job outside this set runs heavy work inline — including a
+# newly-added one.
 _PENDING_INLINE_MIGRATION = frozenset(
     {
-        "a2a_process_inbox",
         "auto_dream",
         "learning_consolidate",
         "learning_soul_suggestions",
@@ -131,16 +133,7 @@ class ArchitectureInvariantTests(unittest.TestCase):
                             except Exception:  # noqa: BLE001 - swallow like the daemon does
                                 pass
 
-                    # Scheduled sub-agent job names carry config-derived hashes;
-                    # derive them the same way main.py does and treat them as
-                    # documented pending-migration (PR 1B-d).
-                    sub_agent_jobs = {
-                        f"{_sanitize_job_name(j.agent)}_{_sanitize_job_name(j.skill)}"
-                        for j in runtime.config.scheduled_sub_agents
-                    }
-                    pending = _PENDING_INLINE_MIGRATION | sub_agent_jobs
-
-                    offenders = heavy - pending
+                    offenders = heavy - _PENDING_INLINE_MIGRATION
                     self.assertEqual(
                         offenders,
                         set(),
@@ -314,6 +307,91 @@ class ArchitectureInvariantTests(unittest.TestCase):
                             rows = runtime.job_service.list(kinds=(kind,), limit=10)
                             self.assertEqual(len(rows), 1)
                             self.assertEqual(rows[0].status, "queued")
+
+    def test_a2a_process_inbox_is_migrated_off_tick_and_does_not_dispatch_inline(self) -> None:
+        def fake_anthropic(req: LLMRequest) -> LLMResponse:
+            return LLMResponse(content="<response>ok</response>", lane=req.lane, provider="anthropic")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "PIPELINE_STATE_ROOT": str(root / "pipeline"),
+                "WORKER_PROVIDER": "anthropic",
+                "CLAW_AUTONOMOUS_MAINTENANCE": "true",
+                "CLAW_AUTONOMOUS_MAINTENANCE_ENABLED": "true",
+            }
+
+            with patch.dict(os.environ, env, clear=False):
+                # Patch at class level BEFORE build so the (current) inline
+                # ``handler=a2a.process_inbox`` registration captures the
+                # sentinel; the migrated handler must only enqueue.
+                with patch("claw_v2.a2a.A2AService.process_inbox") as mock_inbox:
+                    runtime = build_runtime(anthropic_executor=fake_anthropic)
+
+                    jobs = {job.name: job for job in runtime.scheduler.list_jobs()}
+                    self.assertIn("a2a_process_inbox", jobs)
+                    jobs["a2a_process_inbox"].handler()
+
+                    mock_inbox.assert_not_called()
+
+                    runner_names = {runner.name for runner in runtime.daemon._background_job_runners}
+                    self.assertIn("a2a_process_inbox", runner_names)
+
+                    rows = runtime.job_service.list(kinds=(A2A_PROCESS_INBOX_JOB_KIND,), limit=10)
+                    self.assertEqual(len(rows), 1)
+                    self.assertEqual(rows[0].status, "queued")
+
+    def test_scheduled_sub_agent_jobs_are_migrated_off_tick_and_do_not_dispatch_inline(self) -> None:
+        def fake_anthropic(req: LLMRequest) -> LLMResponse:
+            return LLMResponse(content="<response>ok</response>", lane=req.lane, provider="anthropic")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "PIPELINE_STATE_ROOT": str(root / "pipeline"),
+                "WORKER_PROVIDER": "anthropic",
+                "CLAW_AUTONOMOUS_MAINTENANCE": "true",
+                "CLAW_AUTONOMOUS_MAINTENANCE_ENABLED": "true",
+            }
+
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                # run_skill is the provider-dispatch chokepoint; the scheduler
+                # handler must enqueue instead of calling it inline.
+                runtime.sub_agents.run_skill = MagicMock()
+
+                sub_agent_names = {
+                    f"{_sanitize_job_name(j.agent)}_{_sanitize_job_name(j.skill)}"
+                    for j in runtime.config.scheduled_sub_agents
+                }
+                self.assertTrue(sub_agent_names, "default config must register scheduled sub-agent jobs")
+
+                jobs = {job.name: job for job in runtime.scheduler.list_jobs()}
+                for name in sub_agent_names:
+                    self.assertIn(name, jobs)
+                    jobs[name].handler()
+
+                runtime.sub_agents.run_skill.assert_not_called()
+
+                # All scheduled sub-agents share one off-tick runner...
+                runner_names = {runner.name for runner in runtime.daemon._background_job_runners}
+                self.assertIn("sub_agent", runner_names)
+
+                # ...and each enqueues its own durable job (deduped per agent/skill).
+                rows = runtime.job_service.list(kinds=(SUB_AGENT_JOB_KIND,), limit=50)
+                self.assertEqual(len(rows), len(sub_agent_names))
+                for row in rows:
+                    self.assertEqual(row.status, "queued")
 
     def test_control_roles_are_bounded_and_never_resolve_to_codex(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
