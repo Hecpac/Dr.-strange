@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -73,6 +74,89 @@ class TaskHandlerTests(unittest.TestCase):
             self.assertEqual(state["active_object"]["active_task"]["status"], "blocked")
             events = [event["event_type"] for event in observe.recent_events(limit=20)]
             self.assertIn("task_blocked_with_evidence", events)
+
+    def test_precheck_worktree_does_not_autostash_memory_only_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            subprocess.run(["git", "init", "-q", "-b", "main"], cwd=workspace, check=True)
+            subprocess.run(["git", "-C", str(workspace), "config", "user.email", "t@t"], check=True)
+            subprocess.run(["git", "-C", str(workspace), "config", "user.name", "t"], check=True)
+            (workspace / "MEMORY.md").write_text("# MEMORY.md\n\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(workspace), "add", "MEMORY.md"], check=True)
+            subprocess.run(["git", "-C", str(workspace), "commit", "-q", "-m", "init"], check=True)
+            (workspace / "MEMORY.md").write_text("# MEMORY.md\n\n- durable note\n", encoding="utf-8")
+            (workspace / "memory").mkdir()
+            (workspace / "memory" / "2026-06-04.md").write_text("# 2026-06-04\n", encoding="utf-8")
+            observe = ObserveStream(root / "observe.db")
+            memory = MemoryStore(root / "claw.db")
+            handler = TaskHandler(
+                observe=observe,
+                get_session_state=memory.get_session_state,
+                update_session_state=memory.update_session_state,
+                workspace_root=workspace,
+            )
+
+            handler._precheck_worktree(task_id="task-1", mode="coding")
+
+            stash_list = subprocess.run(
+                ["git", "-C", str(workspace), "stash", "list"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertNotIn("claw:autostash:task-1", stash_list.stdout)
+            self.assertIn("durable note", (workspace / "MEMORY.md").read_text(encoding="utf-8"))
+            self.assertTrue((workspace / "memory" / "2026-06-04.md").exists())
+            events = [event["event_type"] for event in observe.recent_events(limit=10)]
+            self.assertIn("worktree_autostash_skipped_protected_memory", events)
+
+    def test_precheck_worktree_stashes_code_but_preserves_memory_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            subprocess.run(["git", "init", "-q", "-b", "main"], cwd=workspace, check=True)
+            subprocess.run(["git", "-C", str(workspace), "config", "user.email", "t@t"], check=True)
+            subprocess.run(["git", "-C", str(workspace), "config", "user.name", "t"], check=True)
+            (workspace / "README.md").write_text("clean\n", encoding="utf-8")
+            (workspace / "MEMORY.md").write_text("# MEMORY.md\n\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(workspace), "add", "README.md", "MEMORY.md"], check=True)
+            subprocess.run(["git", "-C", str(workspace), "commit", "-q", "-m", "init"], check=True)
+            (workspace / "README.md").write_text("dirty code\n", encoding="utf-8")
+            (workspace / "MEMORY.md").write_text("# MEMORY.md\n\n- durable note\n", encoding="utf-8")
+            (workspace / "memory").mkdir()
+            (workspace / "memory" / "2026-06-04.md").write_text("# 2026-06-04\n", encoding="utf-8")
+            observe = ObserveStream(root / "observe.db")
+            memory = MemoryStore(root / "claw.db")
+            handler = TaskHandler(
+                observe=observe,
+                get_session_state=memory.get_session_state,
+                update_session_state=memory.update_session_state,
+                workspace_root=workspace,
+            )
+
+            handler._precheck_worktree(task_id="task-2", mode="coding")
+
+            stash_list = subprocess.run(
+                ["git", "-C", str(workspace), "stash", "list"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertIn("claw:autostash:task-2", stash_list.stdout)
+            self.assertEqual((workspace / "README.md").read_text(encoding="utf-8"), "clean\n")
+            self.assertIn("durable note", (workspace / "MEMORY.md").read_text(encoding="utf-8"))
+            self.assertTrue((workspace / "memory" / "2026-06-04.md").exists())
+            status = subprocess.run(
+                ["git", "-C", str(workspace), "status", "--porcelain"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertIn(" M MEMORY.md", status.stdout)
+            self.assertIn("?? memory/", status.stdout)
 
 
 if __name__ == "__main__":

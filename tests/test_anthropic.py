@@ -14,6 +14,7 @@ from claw_v2.adapters.anthropic import (
     create_claude_sdk_executor,
     _safe_runtime_policy_reason,
     _tool_input_evidence,
+    _tool_response_evidence,
 )
 from claw_v2.adapters.base import AdapterError, AdapterUnavailableError, LLMRequest
 from claw_v2.llm import LLMRouter
@@ -50,6 +51,23 @@ class AnthropicIntegrationTests(unittest.TestCase):
 
         self.assertNotIn("abcdefghijklmnopqrstuvwxyz123456", evidence["command"])
         self.assertIn("[REDACTED]", evidence["command"])
+
+    def test_tool_response_evidence_keeps_safe_bash_markers_without_raw_stdout(self) -> None:
+        evidence = _tool_response_evidence(
+            "Bash",
+            {
+                "returncode": 0,
+                "stdout": '{"ok": true, "message_id": 12715, "bytes": 123, "token": "secret"}\n',
+            },
+        )
+
+        self.assertEqual(evidence["returncode"], 0)
+        self.assertEqual(evidence["stdout_chars"], 67)
+        self.assertIn("stdout_sha256", evidence)
+        self.assertEqual(evidence["json_markers"], [{"ok": True, "bytes": 123, "message_id": 12715}])
+        serialized = str(evidence)
+        self.assertNotIn("secret", serialized)
+        self.assertNotIn("stdout", serialized.replace("stdout_chars", "").replace("stdout_sha256", ""))
 
     def test_runtime_policy_reason_hides_raw_whitelist_error(self) -> None:
         reason = _safe_runtime_policy_reason(

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import os
 import re
@@ -384,21 +386,28 @@ class ClaudeSDKExecutor:
         async def post_tool_use(input_data: dict[str, Any], tool_use_id: str | None, context: Any) -> dict[str, Any]:
             if self.observe is not None:
                 tool_name = str(input_data.get("tool_name") or "")
+                payload = {
+                    "tool_name": tool_name,
+                    "tool_use_id": tool_use_id,
+                    "session_id": input_data.get("session_id"),
+                    "tool_input": _tool_input_evidence(
+                        tool_name,
+                        input_data.get("tool_input"),
+                    ),
+                }
+                response_evidence = _tool_response_evidence(
+                    tool_name,
+                    input_data.get("tool_response"),
+                )
+                if response_evidence:
+                    payload["tool_response"] = response_evidence
                 self.observe.emit(
                     "sdk_post_tool_use",
                     lane=request.lane,
                     provider="anthropic",
                     model=request.model,
                     **trace_metadata(request.evidence_pack),
-                    payload={
-                        "tool_name": tool_name,
-                        "tool_use_id": tool_use_id,
-                        "session_id": input_data.get("session_id"),
-                        "tool_input": _tool_input_evidence(
-                            tool_name,
-                            input_data.get("tool_input"),
-                        ),
-                    },
+                    payload=payload,
                 )
             return {}
 
@@ -563,6 +572,90 @@ def _tool_input_evidence(tool_name: str, tool_input: Any) -> dict[str, str]:
         if value:
             evidence[key] = redact_text(str(value)[:1000], limit=0)
     return evidence
+
+
+def _tool_response_evidence(tool_name: str, tool_response: Any) -> dict[str, Any]:
+    if not isinstance(tool_response, dict):
+        return {}
+    evidence: dict[str, Any] = {}
+    if "is_error" in tool_response:
+        evidence["is_error"] = bool(tool_response.get("is_error"))
+    for key in ("exit_code", "returncode", "return_code", "rc"):
+        value = tool_response.get(key)
+        if value is None:
+            continue
+        evidence["returncode"] = _safe_int(value)
+        break
+    if tool_name != "Bash":
+        return evidence
+    stdout = _coerce_tool_response_text(tool_response.get("stdout") or tool_response.get("output"))
+    stderr = _coerce_tool_response_text(tool_response.get("stderr"))
+    if stdout:
+        evidence["stdout_chars"] = len(stdout)
+        evidence["stdout_sha256"] = hashlib.sha256(stdout.encode("utf-8")).hexdigest()
+        markers = _safe_json_markers_from_text(stdout)
+        if markers:
+            evidence["json_markers"] = markers[:5]
+    if stderr:
+        evidence["stderr_chars"] = len(stderr)
+        evidence["stderr_sha256"] = hashlib.sha256(stderr.encode("utf-8")).hexdigest()
+    return evidence
+
+
+def _safe_int(value: Any) -> int | str:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return str(value)[:40]
+
+
+def _coerce_tool_response_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                text = item.get("text")
+                if text:
+                    parts.append(str(text))
+            else:
+                text = getattr(item, "text", None)
+                if text:
+                    parts.append(str(text))
+        return "\n".join(parts)
+    return ""
+
+
+def _safe_json_markers_from_text(text: str) -> list[dict[str, Any]]:
+    markers: list[dict[str, Any]] = []
+    safe_keys = {
+        "ok",
+        "message_id",
+        "bytes",
+        "returncode",
+        "rc",
+        "status",
+        "width",
+        "height",
+        "duration",
+    }
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("{") or not stripped.endswith("}"):
+            continue
+        try:
+            payload = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        marker = {key: payload[key] for key in safe_keys if key in payload}
+        if marker:
+            markers.append(marker)
+    return markers
 
 
 def _load_sdk() -> Any:

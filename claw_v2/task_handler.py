@@ -1057,9 +1057,42 @@ class TaskHandler:
         dirty_lines = [line for line in status.stdout.splitlines() if line.strip()]
         if not dirty_lines:
             return
+        stashable_lines: list[str] = []
+        stashable_paths: list[str] = []
+        protected_memory_lines: list[str] = []
+        for line in dirty_lines:
+            status_path = self._status_path_from_porcelain(line)
+            if self._is_durable_memory_path(status_path):
+                protected_memory_lines.append(line)
+                continue
+            stashable_lines.append(line)
+            if status_path:
+                stashable_paths.append(status_path)
+        if not stashable_lines:
+            self._emit(
+                "worktree_autostash_skipped_protected_memory",
+                {
+                    "task_id": task_id,
+                    "files": protected_memory_lines[:50],
+                    "files_total": len(protected_memory_lines),
+                },
+            )
+            return
         try:
+            stash_cmd = [
+                "git",
+                "-C",
+                str(workspace),
+                "stash",
+                "push",
+                "-u",
+                "-m",
+                f"claw:autostash:{task_id}",
+            ]
+            if stashable_paths:
+                stash_cmd.extend(["--", *stashable_paths])
             stash = subprocess.run(
-                ["git", "-C", str(workspace), "stash", "push", "-u", "-m", f"claw:autostash:{task_id}"],
+                stash_cmd,
                 capture_output=True, text=True, timeout=15,
             )
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
@@ -1073,10 +1106,26 @@ class TaskHandler:
             {
                 "task_id": task_id,
                 "stash_label": f"claw:autostash:{task_id}",
-                "files": dirty_lines[:50],
-                "files_total": len(dirty_lines),
+                "files": stashable_lines[:50],
+                "files_total": len(stashable_lines),
+                "preserved_memory_files": protected_memory_lines[:50],
+                "preserved_memory_files_total": len(protected_memory_lines),
             },
         )
+
+    @staticmethod
+    def _status_path_from_porcelain(line: str) -> str:
+        path = line[3:].strip() if len(line) > 3 else ""
+        if " -> " in path:
+            path = path.rsplit(" -> ", 1)[-1].strip()
+        return path.strip('"')
+
+    @staticmethod
+    def _is_durable_memory_path(path: str) -> bool:
+        normalized = path.replace("\\", "/")
+        while normalized.startswith("./"):
+            normalized = normalized[2:]
+        return normalized == "MEMORY.md" or normalized.startswith("memory/")
 
     def wait_for_task(self, task_id: str, timeout: float = 5.0) -> bool:
         with self._task_lock:

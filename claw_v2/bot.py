@@ -4923,6 +4923,7 @@ class BotService:
             files_written,
             grep_patterns,
             glob_patterns,
+            output_summaries,
             first_error,
         ) = self._summarize_brain_tool_events(tool_events, tool_failure_events)
         # PR 0F: scrub secret-shaped tokens out of the user message
@@ -4969,7 +4970,7 @@ class BotService:
             "grep_patterns": grep_patterns[:20],
             "glob_patterns": glob_patterns[:20],
             "checks_run": [],
-            "outputs_summarized": "",
+            "outputs_summarized": "\n".join(output_summaries[:20]),
             "tool_event_count": len(tool_events),
             "tool_failure_count": len(tool_failure_events),
             "approval_event_count": len(approval_events),
@@ -5133,6 +5134,7 @@ class BotService:
                 objective=source_text,
                 files_written=sorted(files_written)[:50],
                 commands_run=commands_run[:20],
+                output_summaries=output_summaries[:20],
                 response_excerpt=str(getattr(response, "content", "") or ""),
                 lane_overrides=lane_overrides,
             )
@@ -5351,10 +5353,12 @@ class BotService:
         set[str],
         list[str],
         list[str],
+        list[str],
         str,
     ]:
         """Pull (tools_run, files_touched, commands_run, files_read,
-        files_written, grep_patterns, glob_patterns, first_error) from
+        files_written, grep_patterns, glob_patterns, output_summaries,
+        first_error) from
         observe rows. Payloads are JSON strings; we parse defensively and
         cap every captured string so secrets can't accidentally bloat the
         artifacts blob (the ledger also runs `redact_sensitive` on write).
@@ -5366,6 +5370,7 @@ class BotService:
         commands_run: list[str] = []
         grep_patterns: list[str] = []
         glob_patterns: list[str] = []
+        output_summaries: list[str] = []
         first_error = ""
         for ev in list(tool_events) + list(failure_events):
             raw_payload = ev.get("payload")
@@ -5409,6 +5414,14 @@ class BotService:
                     pattern = tool_input.get("pattern")
                     if pattern:
                         glob_patterns.append(str(pattern)[:200])
+            tool_response = payload.get("tool_response") or {}
+            if isinstance(tool_response, dict):
+                response_summary = BotService._summarize_tool_response_evidence(
+                    tool_name,
+                    tool_response,
+                )
+                if response_summary:
+                    output_summaries.append(response_summary)
             err = payload.get("error")
             if err and not first_error:
                 first_error = str(err)[:300]
@@ -5420,8 +5433,30 @@ class BotService:
             files_written,
             grep_patterns,
             glob_patterns,
+            output_summaries,
             first_error,
         )
+
+    @staticmethod
+    def _summarize_tool_response_evidence(tool_name: str, tool_response: dict[str, Any]) -> str:
+        parts = [str(tool_name or "unknown")[:60]]
+        if "returncode" in tool_response:
+            parts.append(f"returncode={tool_response.get('returncode')}")
+        if "is_error" in tool_response:
+            parts.append(f"is_error={bool(tool_response.get('is_error'))}")
+        markers = tool_response.get("json_markers")
+        if isinstance(markers, list) and markers:
+            safe_markers = []
+            for marker in markers[:3]:
+                if isinstance(marker, dict):
+                    safe_markers.append(marker)
+            if safe_markers:
+                parts.append(f"json_markers={json.dumps(safe_markers, sort_keys=True)}")
+        if "stdout_chars" in tool_response:
+            parts.append(f"stdout_chars={tool_response.get('stdout_chars')}")
+        if "stderr_chars" in tool_response:
+            parts.append(f"stderr_chars={tool_response.get('stderr_chars')}")
+        return "; ".join(parts)
 
     def _with_runtime_capability_context(self, prompt_text: str, *, runtime_channel: str | None = None) -> str:
         context = self._runtime_capability_context(runtime_channel=runtime_channel)

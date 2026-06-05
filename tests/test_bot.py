@@ -2742,6 +2742,7 @@ class BotTests(unittest.TestCase):
             _sub.run(["git", "-C", str(workspace), "config", "user.email", "t@t"], check=True)
             _sub.run(["git", "-C", str(workspace), "config", "user.name", "t"], check=True)
             (workspace / "README.md").write_text("hello\n")
+            (workspace / "MEMORY.md").write_text("# MEMORY.md\n\n", encoding="utf-8")
             _sub.run(["git", "-C", str(workspace), "add", "."], check=True)
             _sub.run(["git", "-C", str(workspace), "commit", "-q", "-m", "init"], check=True)
             (workspace / "README.md").write_text("hello dirty\n")

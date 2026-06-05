@@ -1696,6 +1696,7 @@ def verify_brain_tooluse(
     objective: str,
     files_written: list[str],
     commands_run: list[str],
+    output_summaries: list[str] | None = None,
     response_excerpt: str = "",
     lane_overrides: dict[str, dict[str, Any]] | None = None,
 ) -> str:
@@ -1709,6 +1710,8 @@ def verify_brain_tooluse(
         evidence_lines.append("Files written: " + ", ".join(files_written[:50]))
     if commands_run:
         evidence_lines.append("Commands run: " + " | ".join(commands_run[:20]))
+    if output_summaries:
+        evidence_lines.append("Tool output summaries: " + " | ".join(output_summaries[:20]))
     if response_excerpt:
         evidence_lines.append("Assistant claim: " + response_excerpt[:1000])
     evidence = "\n".join(evidence_lines) or "No artifacts captured."

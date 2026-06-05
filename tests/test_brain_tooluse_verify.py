@@ -140,3 +140,21 @@ def test_verify_task_is_verifier_lane_and_carries_artifacts():
     assert task.lane == "verifier"
     assert "claw_v2/bot.py" in task.instruction
     assert "pytest -q" in task.instruction
+
+
+def test_verify_task_carries_safe_tool_output_summaries():
+    coordinator = _FakeCoordinator(content="Verification Status: passed")
+
+    verify_brain_tooluse(
+        coordinator,
+        task_id="t",
+        objective="deliver video",
+        files_written=[],
+        commands_run=["node deliver.mjs"],
+        output_summaries=['Bash; returncode=0; json_markers=[{"message_id": 12715, "ok": true}]'],
+    )
+
+    task = coordinator.captured[0]
+    assert "Tool output summaries:" in task.instruction
+    assert "message_id" in task.instruction
+    assert "12715" in task.instruction

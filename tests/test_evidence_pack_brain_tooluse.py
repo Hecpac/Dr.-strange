@@ -258,6 +258,34 @@ class BrainToolUseEvidencePackTests(unittest.TestCase):
         self.assertIn("started_at", manifest)
         self.assertIn("completed_at", manifest)
 
+    def test_manifest_includes_safe_tool_output_summaries(self) -> None:
+        observe = _RecordingObserve()
+        observe.canned_trace_events = [
+            _tool_event(
+                "Bash",
+                tool_input={"command": "node deliver.mjs"},
+                tool_response={
+                    "returncode": 0,
+                    "stdout_chars": 64,
+                    "stdout_sha256": "a" * 64,
+                    "json_markers": [{"ok": True, "message_id": 12715, "bytes": 123}],
+                },
+            ),
+        ]
+        bot = _make_bot(observe, self.ledger)
+        bot._attach_brain_tool_use_ledger(
+            session_id="tg-test",
+            response=_StubResponse(artifacts={"trace_id": "trace-X"}),
+            source_text="revisa el estado",
+            runtime_channel="telegram",
+        )
+
+        task = self.ledger.list(limit=10)[0]
+        manifest = task.artifacts.get("evidence_manifest") or {}
+        self.assertIn("returncode=0", manifest["outputs_summarized"])
+        self.assertIn("message_id", manifest["outputs_summarized"])
+        self.assertIn("12715", manifest["outputs_summarized"])
+
     # --- B. completed without tools never marks passed (no row created) ----
 
     def test_b_text_only_brain_turn_does_not_create_row_and_cannot_pass(self) -> None:
