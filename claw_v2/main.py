@@ -73,6 +73,8 @@ from claw_v2.types import LLMResponse
 from claw_v2.workspace import AgentWorkspace
 from claw_v2.wiki import WikiService
 from claw_v2.scheduled_background_jobs import (
+    A2A_PROCESS_INBOX_JOB_KIND,
+    A2A_PROCESS_INBOX_RESUME_KEY,
     KAIROS_TICK_JOB_KIND,
     KAIROS_TICK_RESUME_KEY,
     PERF_OPTIMIZER_JOB_KIND,
@@ -83,6 +85,7 @@ from claw_v2.scheduled_background_jobs import (
     PIPELINE_POLL_RESUME_KEY,
     SELF_IMPROVE_JOB_KIND,
     SELF_IMPROVE_RESUME_KEY,
+    SUB_AGENT_JOB_KIND,
     WIKI_RESEARCH_JOB_KIND,
     WIKI_RESEARCH_RESUME_KEY,
     WIKI_SCRAPE_JOB_KIND,
@@ -943,10 +946,34 @@ def _register_sub_agent_jobs(
     sub_agents: SubAgentService,
     scheduled_jobs: list[ScheduledSubAgentConfig],
     skip_if: Callable[[], str | None] | None = None,
+    job_service: JobService | None = None,
+    daemon: ClawDaemon | None = None,
 ) -> None:
-    def _sub_agent_handler(agent: str, skill: str, lane: str) -> None:
+    def _sub_agent_handler(agent: str, skill: str, lane: str) -> dict[str, Any]:
         result = sub_agents.run_skill(agent, skill, lane=lane)
         observe.emit("sub_agent_skill", payload={"agent": agent, "skill": skill, "lane": lane, "result": result})
+        return {"agent": agent, "skill": skill, "lane": lane}
+
+    # All scheduled sub-agent skills share one durable job kind + off-tick
+    # runner; the per-job scheduler handler only enqueues a payload so the
+    # provider dispatch never runs inline in daemon.tick (Core Invariant 1).
+    if daemon is not None and job_service is not None:
+        sub_agent_runner = ScheduledBackgroundJobRunner(
+            job_name="sub_agent",
+            job_kind=SUB_AGENT_JOB_KIND,
+            job_service=job_service,
+            handler=lambda payload: _sub_agent_handler(
+                str(payload.get("agent", "")),
+                str(payload.get("skill", "")),
+                str(payload.get("lane", "worker")),
+            ),
+            observe=observe,
+            worker_id="sub-agent-runner",
+        )
+        daemon.register_background_job_runner(
+            name="sub_agent",
+            handler=lambda: sub_agent_runner.run_available(limit=1),
+        )
 
     for job in scheduled_jobs:
         job_name = f"{_sanitize_job_name(job.agent)}_{_sanitize_job_name(job.skill)}"
@@ -972,7 +999,14 @@ def _register_sub_agent_jobs(
                 handler=_wrap_job_handler(
                     name=job_name,
                     observe=observe,
-                    handler=lambda a=job.agent, s=job.skill, l=job.lane: _sub_agent_handler(a, s, l),
+                    handler=lambda a=job.agent, s=job.skill, l=job.lane, jn=job_name: enqueue_scheduled_background_job(
+                        job_name=jn,
+                        job_kind=SUB_AGENT_JOB_KIND,
+                        resume_key=f"scheduler:sub_agent:{a}:{s}",
+                        job_service=job_service,
+                        observe=observe,
+                        payload={"agent": a, "skill": s, "lane": l},
+                    ),
                     skip_if=_skip_reason,
                 ),
             )
@@ -1468,11 +1502,35 @@ def _setup_scheduler(
             ),
         )
     )
+    if daemon is not None and job_service is not None:
+        a2a_inbox_runner = ScheduledBackgroundJobRunner(
+            job_name="a2a_process_inbox",
+            job_kind=A2A_PROCESS_INBOX_JOB_KIND,
+            job_service=job_service,
+            handler=lambda _payload: a2a.process_inbox(),
+            observe=observe,
+            worker_id="a2a-inbox-runner",
+        )
+        daemon.register_background_job_runner(
+            name="a2a_process_inbox",
+            handler=lambda: a2a_inbox_runner.run_available(limit=1),
+        )
     scheduler.register(
         ScheduledJob(
             name="a2a_process_inbox",
             interval_seconds=600,
-            handler=_wrap_job_handler(name="a2a_process_inbox", observe=observe, handler=a2a.process_inbox),
+            handler=_wrap_job_handler(
+                name="a2a_process_inbox",
+                observe=observe,
+                handler=lambda: enqueue_scheduled_background_job(
+                    job_name="a2a_process_inbox",
+                    job_kind=A2A_PROCESS_INBOX_JOB_KIND,
+                    resume_key=A2A_PROCESS_INBOX_RESUME_KEY,
+                    job_service=job_service,
+                    observe=observe,
+                ),
+                skip_if=_maintenance_skip,
+            ),
         )
     )
 
@@ -1561,6 +1619,8 @@ def _setup_scheduler(
         sub_agents=sub_agents,
         scheduled_jobs=config.scheduled_sub_agents,
         skip_if=_maintenance_skip,
+        job_service=job_service,
+        daemon=daemon,
     )
     scheduler.register(
         ScheduledJob(

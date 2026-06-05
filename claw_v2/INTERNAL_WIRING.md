@@ -8,8 +8,8 @@
 ## meta
 
 ```yaml
-describes_commit: 883e41c+pr1b-c-self-improve-pipeline-off-tick
-doc_version: 2.2
+describes_commit: 883e41c+pr1b-d-a2a-subagents-off-tick
+doc_version: 2.3
 last_verified: 2026-06-05
 verification_method: manual + grep cross-check
 anchor_strategy: symbol_only  # path:symbol, no line numbers
@@ -81,9 +81,9 @@ invariants:
       - self_improve -> scheduler.self_improve  # PR1B-c, enqueue + ScheduledBackgroundJobRunner (was inline subprocess+pytest+Codex auto_research+git)
       - pipeline_poll -> scheduler.pipeline_poll  # PR1B-c, enqueue + ScheduledBackgroundJobRunner (was raw ScheduledJob: git worktree+worker LLM+pytest+push, no skip gate)
       - pipeline_poll_merges -> scheduler.pipeline_poll_merges  # PR1B-c, enqueue + ScheduledBackgroundJobRunner
+      - a2a_process_inbox -> scheduler.a2a_process_inbox  # PR1B-d, enqueue + ScheduledBackgroundJobRunner, added _maintenance_skip kill-switch (was router.ask per inbox task inline, no skip gate)
+      - scheduled sub-agent jobs -> scheduler.sub_agent  # PR1B-d, each job enqueues an {agent,skill,lane} payload (resume_key scheduler:sub_agent:<agent>:<skill>) to one shared off-tick runner; was run_skill->dispatch (provider) inline, default-on via _default_scheduled_sub_agents
     pending_migration:  # INVARIANT 1 IS NOT YET FULLY CLOSED — these still run heavy work inline in daemon.tick
-      - a2a_process_inbox  # PR1B-d: router.ask(lane=worker) per inbox task, no skip gate
-      - scheduled sub-agent jobs  # PR1B-d: _register_sub_agent_jobs -> run_skill -> dispatch (provider) inline; default-on via _default_scheduled_sub_agents
       - auto_dream  # later: router.ask(lane=research), inherits 300s default timeout
       - learning_consolidate  # later: router.ask(lane=judge), no skip gate
       - learning_soul_suggestions  # later: router.ask(lane=judge)
