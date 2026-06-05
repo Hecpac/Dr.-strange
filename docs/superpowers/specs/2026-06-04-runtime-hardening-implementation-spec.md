@@ -2,7 +2,7 @@
 
 date: 2026-06-04
 last_updated: 2026-06-05
-status: active - PR 0-4 and PR 6 complete; PR 5 gated; PR 7 next
+status: active - PR 0-4, 6, 7 complete; PR 5 gated; PR 8/9 pending; Core Invariant 1 off-tick migration completed via #73/#74 except auto_dream + learning_*
 author: Codex, reviewed against local main and GitHub PR state
 related:
   - docs/superpowers/specs/2026-05-15-dr-strange-wave-0-design.md
@@ -17,11 +17,14 @@ The first safety target is not memory optimization. The first target is preventi
 
 ## Implementation Status
 
-Updated on 2026-06-05 after merging PR #70.
+Updated on 2026-06-05 after merging PR #73 and PR #74 (scheduler off-tick completion train).
 
 Current main:
 
-- `origin/main` = `711ff7ea8a478642e1b084dcc5d4299c50612342`
+- `origin/main` = `e930b1f` (Merge PR #74).
+
+Base movement since this spec was first written, recorded so the hash jump is traceable:
+`711ff7e` (PR #70 merge, the last hash this spec tracked) → `c4271e1` (PR 7 memory/retention governor, landed) → `883e41c` (Jacob NotebookLM CLI adapter; non-hardening, audited benign) — `c4271e1` and `883e41c` were already on local `main` and were fast-forwarded to `origin/main` on 2026-06-05 — → `d993a10` (Merge PR #73) → `e930b1f` (Merge PR #74).
 
 Completed:
 
@@ -34,13 +37,15 @@ Completed:
 - PR 3: complete via #68.
 - PR 4: complete via #69.
 - PR 6: complete via #70, merge commit `711ff7ea8a478642e1b084dcc5d4299c50612342`.
+- PR 7 - Memory and retention governor: complete (landed as `c4271e1`; classifies memory rows by prompt residency, wired into startup + `build_context` with a retrieval path; tests green). This block was previously listed as "next" but had in fact already landed.
+- Core Invariant 1 off-tick completion: complete via #73 (merge `d993a10`) and #74 (merge `e930b1f`). #73 moved `self_improve` + `pipeline_poll`/`pipeline_poll_merges` off `daemon.tick()` and replaced the positive 5-job allowlist backstop with a deny-by-default sweep at production default (`tests/test_architecture_invariants.py::test_no_default_on_scheduler_job_runs_heavy_work_inline_in_daemon_tick`); the `self_improve` runner also honors `EVAL_ON_SELF_IMPROVE` so queued jobs are not drained when disabled. #74 moved `a2a_process_inbox` + the scheduled sub-agent jobs off-tick (shared `scheduler.sub_agent` kind + one background runner). NOTE: these two PRs reuse the "1B-c"/"1B-d" labels for the inline-blocking work and are distinct from the earlier `1B-c = #66` entry above — disambiguate by PR number (#73, #74).
 
 Pending / gated:
 
 - PR 5 - Prompt Capsule enforce: gated until 7 days of shadow telemetry or a representative replay suite proves no loss of required boot facts.
-- PR 7 - Memory and retention governor: next implementable block from current `main`.
-- PR 8 - Verification wiring hardening: pending.
+- PR 8 - Verification wiring hardening: pending (coding verification profiles `coding_patch`/`coding_bugfix` are defined but not wired to the autonomous coding completion path).
 - PR 9 - PropertyGraph lock and watermark: pending.
+- Core Invariant 1 residual: `auto_dream`, `learning_consolidate`, and `learning_soul_suggestions` still run provider/research work inline in `daemon.tick()`. They are documented in `claw_v2/INTERNAL_WIRING.md` under `pending_migration` and enforced shrink-only by the deny-by-default backstop, so the invariant cannot silently regress while this list is worked down.
 
 Implementation drift from the original plan:
 
