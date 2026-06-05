@@ -966,6 +966,14 @@ class ToolRegistry:
         def search_memory(args: dict) -> dict:
             if memory is None:
                 raise RuntimeError("memory-backed tool is unavailable")
+            safe_search = getattr(memory, "search_prompt_safe_facts", None)
+            if callable(safe_search):
+                return {
+                    "matches": safe_search(
+                        args.get("query", ""),
+                        limit=int(args.get("limit", 10)),
+                    )
+                }
             return {"matches": memory.search_facts(args.get("query", ""), limit=int(args.get("limit", 10)))}
 
         def external_stub(args: dict) -> dict:

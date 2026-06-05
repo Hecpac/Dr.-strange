@@ -74,9 +74,18 @@ class ToolRegistryTests(unittest.TestCase):
             workspace.mkdir()
             memory = MemoryStore(root / "memory.db")
             memory.store_fact("profile.name", "Hector", source="profile", source_trust="trusted")
+            memory.store_fact(
+                "profile.api_key",
+                "sk-" + "x" * 80,
+                source="test",
+                source_trust="trusted",
+                confidence=0.99,
+            )
             registry = ToolRegistry.default(workspace_root=workspace, memory=memory)
             result = registry.execute("SearchMemory", {"query": "Hector"}, agent_class="researcher")
             self.assertEqual(len(result["matches"]), 1)
+            secret_result = registry.execute("SearchMemory", {"query": "api_key"}, agent_class="researcher")
+            self.assertEqual(secret_result["matches"], [])
 
     def test_operator_cannot_use_web_tool(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -11,6 +11,11 @@ import threading
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from claw_v2.memory_retention import (
+    classify_memory_fact,
+    format_memory_fact_for_prompt,
+    normalize_prompt_residency,
+)
 from claw_v2.sqlite_runtime import connect_runtime_sqlite
 
 logger = logging.getLogger(__name__)
@@ -40,6 +45,8 @@ CREATE TABLE IF NOT EXISTS facts (
     valid_until TEXT,
     conflict_flag INTEGER NOT NULL DEFAULT 0,
     agent_name TEXT NOT NULL DEFAULT 'system',
+    prompt_residency TEXT CHECK(prompt_residency IN ('always_in_prompt', 'retrieval_on_demand', 'never_in_prompt') OR prompt_residency IS NULL),
+    retention_reason TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -306,6 +313,14 @@ _MIGRATION_ADD_AGENT_NAME = """
 ALTER TABLE facts ADD COLUMN agent_name TEXT NOT NULL DEFAULT 'system';
 """
 
+_MIGRATION_ADD_FACT_PROMPT_RESIDENCY = """
+ALTER TABLE facts ADD COLUMN prompt_residency TEXT CHECK(prompt_residency IN ('always_in_prompt', 'retrieval_on_demand', 'never_in_prompt') OR prompt_residency IS NULL);
+"""
+
+_MIGRATION_ADD_FACT_RETENTION_REASON = """
+ALTER TABLE facts ADD COLUMN retention_reason TEXT;
+"""
+
 _MIGRATION_ADD_OUTCOME_FEEDBACK = """
 ALTER TABLE task_outcomes ADD COLUMN feedback TEXT;
 """
@@ -564,6 +579,16 @@ class MemoryStore:
                 self._conn.commit()
             except sqlite3.OperationalError:
                 pass
+        for col, sql in [
+            ("prompt_residency", _MIGRATION_ADD_FACT_PROMPT_RESIDENCY),
+            ("retention_reason", _MIGRATION_ADD_FACT_RETENTION_REASON),
+        ]:
+            if col not in columns:
+                try:
+                    self._conn.execute(sql)
+                    self._conn.commit()
+                except sqlite3.OperationalError:
+                    pass
         cursor = self._conn.execute("PRAGMA table_info(task_outcomes)")
         outcome_cols = {row[1] for row in cursor.fetchall()}
         for col, sql in [
@@ -1072,13 +1097,19 @@ class MemoryStore:
         valid_from: str | None = None,
         valid_until: str | None = None,
         agent_name: str = "system",
+        prompt_residency: str | None = None,
+        retention_reason: str | None = None,
     ) -> None:
+        normalized_residency = normalize_prompt_residency(prompt_residency)
+        if prompt_residency is not None and normalized_residency is None:
+            raise ValueError(f"Invalid prompt_residency: {prompt_residency!r}")
         with self._lock:
             self._conn.execute(
                 """
                 INSERT INTO facts (
-                    key, value, source, source_trust, confidence, entity_tags, valid_from, valid_until, agent_name
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    key, value, source, source_trust, confidence, entity_tags, valid_from,
+                    valid_until, agent_name, prompt_residency, retention_reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     key,
@@ -1090,6 +1121,8 @@ class MemoryStore:
                     valid_from,
                     valid_until,
                     agent_name,
+                    normalized_residency,
+                    retention_reason,
                 ),
             )
             self._conn.commit()
@@ -1104,7 +1137,9 @@ class MemoryStore:
     def get_fact(self, key: str) -> dict | None:
         row = self._conn.execute(
             """
-            SELECT id, key, value, source, source_trust, confidence, entity_tags, agent_name, created_at
+            SELECT id, key, value, source, source_trust, confidence, entity_tags,
+                   valid_from, valid_until, agent_name, prompt_residency,
+                   retention_reason, created_at
             FROM facts
             WHERE key = ?
             ORDER BY id DESC
@@ -1140,7 +1175,9 @@ class MemoryStore:
             if agent_name:
                 rows = self._conn.execute(
                     """
-                    SELECT key, value, source, source_trust, confidence, entity_tags, agent_name
+                    SELECT id, key, value, source, source_trust, confidence, entity_tags,
+                           valid_from, valid_until, agent_name, prompt_residency,
+                           retention_reason, created_at
                     FROM facts
                     WHERE (key LIKE ? OR value LIKE ?) AND agent_name = ?
                     ORDER BY confidence DESC, id DESC
@@ -1151,7 +1188,9 @@ class MemoryStore:
             else:
                 rows = self._conn.execute(
                     """
-                    SELECT key, value, source, source_trust, confidence, entity_tags, agent_name
+                    SELECT id, key, value, source, source_trust, confidence, entity_tags,
+                           valid_from, valid_until, agent_name, prompt_residency,
+                           retention_reason, created_at
                     FROM facts
                     WHERE key LIKE ? OR value LIKE ?
                     ORDER BY confidence DESC, id DESC
@@ -1162,11 +1201,70 @@ class MemoryStore:
         return [dict(row) for row in rows]
 
     @_synchronized
+    def retrieve_omitted_facts(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        agent_name: str | None = None,
+    ) -> list[dict]:
+        candidates = self.search_facts(
+            query,
+            limit=max(int(limit) * 5, int(limit), 10),
+            agent_name=agent_name,
+        )
+        matches: list[dict] = []
+        for row in candidates:
+            decision = classify_memory_fact(row)
+            if decision.residency != "retrieval_on_demand":
+                continue
+            item = dict(row)
+            item["prompt_residency"] = decision.residency
+            item["retention_reason"] = decision.reason
+            item["freshness"] = decision.freshness
+            matches.append(item)
+            if len(matches) >= limit:
+                break
+        return matches
+
+    @_synchronized
+    def search_prompt_safe_facts(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        agent_name: str | None = None,
+        include_always: bool = True,
+    ) -> list[dict]:
+        candidates = self.search_facts(
+            query,
+            limit=max(int(limit) * 5, int(limit), 10),
+            agent_name=agent_name,
+        )
+        matches: list[dict] = []
+        for row in candidates:
+            decision = classify_memory_fact(row)
+            if decision.residency == "never_in_prompt":
+                continue
+            if not include_always and decision.residency == "always_in_prompt":
+                continue
+            item = dict(row)
+            item["prompt_residency"] = decision.residency
+            item["retention_reason"] = decision.reason
+            item["freshness"] = decision.freshness
+            matches.append(item)
+            if len(matches) >= limit:
+                break
+        return matches
+
+    @_synchronized
     def get_profile_facts(self) -> list[dict]:
         with self._lock:
             rows = self._conn.execute(
                 """
-                SELECT key, value, source_trust, confidence
+                SELECT id, key, value, source, source_trust, confidence, entity_tags,
+                       valid_from, valid_until, agent_name, prompt_residency,
+                       retention_reason, created_at
                 FROM facts
                 WHERE key LIKE 'profile.%'
                 ORDER BY confidence DESC, id DESC
@@ -1179,7 +1277,9 @@ class MemoryStore:
         with self._lock:
             rows = self._conn.execute(
                 """
-                SELECT key, value, source, source_trust, confidence
+                SELECT id, key, value, source, source_trust, confidence, entity_tags,
+                       valid_from, valid_until, agent_name, prompt_residency,
+                       retention_reason, created_at
                 FROM facts
                 WHERE key = 'learning_loop_consolidated' OR entity_tags LIKE '%"learning"%'
                 ORDER BY confidence DESC, id DESC
@@ -1236,12 +1336,21 @@ class MemoryStore:
         if state_lines:
             sections.extend(["# Session state", *state_lines])
 
-        facts = self.get_profile_facts()[:20]
+        facts = [
+            row for row in self.get_profile_facts()
+            if classify_memory_fact(row).residency == "always_in_prompt"
+        ][:20]
         if facts:
-            fact_lines = [f"{row['key']}={row['value']}" for row in facts]
+            fact_lines = [
+                format_memory_fact_for_prompt(row, decision=classify_memory_fact(row), separator="=")
+                for row in facts
+            ]
             sections.extend(["# Profile facts", *fact_lines])
 
-        learning_facts = self.get_learning_facts(limit=5)
+        learning_facts = [
+            row for row in self.get_learning_facts(limit=5)
+            if classify_memory_fact(row).residency == "always_in_prompt"
+        ]
         if learning_facts:
             learning_lines = [_format_untrusted_learning_fact(row) for row in learning_facts if row.get("value")]
             if learning_lines:

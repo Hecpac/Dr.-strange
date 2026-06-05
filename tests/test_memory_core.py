@@ -155,6 +155,55 @@ class BuildContextTests(unittest.TestCase):
         self.assertIn("rolling_summary=historial compactado persistente", ctx)
         self.assertIn("last_turn_summary=ultimo turno solamente", ctx)
 
+    def test_context_excludes_secret_profile_facts(self) -> None:
+        secret = "sk-" + "x" * 80
+        self.store.store_fact(
+            "profile.api_key",
+            secret,
+            source="test",
+            source_trust="trusted",
+            confidence=0.99,
+        )
+
+        ctx = self.store.build_context("s1", message="go", include_history=False)
+
+        self.assertNotIn(secret, ctx)
+        self.assertNotIn("profile.api_key", ctx)
+
+    def test_retrieve_omitted_facts_surfaces_low_confidence_without_never_prompt(self) -> None:
+        secret = "sk-" + "x" * 80
+        self.store.store_fact(
+            "profile.public_preference",
+            "Usar tono ejecutivo.",
+            source="direct_user_correction",
+            source_trust="trusted",
+            confidence=0.95,
+        )
+        self.store.store_fact(
+            "profile.uncertain_preference",
+            "Quizas quiere resúmenes larguísimos.",
+            source="dream",
+            source_trust="untrusted",
+            confidence=0.2,
+        )
+        self.store.store_fact(
+            "profile.api_key",
+            secret,
+            source="test",
+            source_trust="trusted",
+            confidence=0.99,
+        )
+
+        matches = self.store.retrieve_omitted_facts("preference", limit=10)
+
+        keys = {match["key"] for match in matches}
+        self.assertIn("profile.uncertain_preference", keys)
+        self.assertNotIn("profile.public_preference", keys)
+        self.assertNotIn("profile.api_key", keys)
+        uncertain = next(match for match in matches if match["key"] == "profile.uncertain_preference")
+        self.assertEqual(uncertain["prompt_residency"], "retrieval_on_demand")
+        self.assertEqual(uncertain["retention_reason"], "low_confidence")
+
 
 class NormalizeTagsTests(unittest.TestCase):
     def test_snake_cases_and_lowercases(self) -> None:
