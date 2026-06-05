@@ -22,6 +22,8 @@ from claw_v2.scheduled_background_jobs import (
     PERF_OPTIMIZER_RESUME_KEY,
     WIKI_RESEARCH_JOB_KIND,
     WIKI_RESEARCH_RESUME_KEY,
+    WIKI_SCRAPE_JOB_KIND,
+    WIKI_SCRAPE_RESUME_KEY,
     ScheduledBackgroundJobRunner,
     enqueue_scheduled_background_job,
     kairos_tick_result_summary,
@@ -111,22 +113,44 @@ class ScheduledBackgroundJobTests(unittest.TestCase):
                 resume_key=KAIROS_TICK_RESUME_KEY,
                 job_service=jobs,
             )
+            scrape_first = enqueue_scheduled_background_job(
+                job_name="wiki_scrape",
+                job_kind=WIKI_SCRAPE_JOB_KIND,
+                resume_key=WIKI_SCRAPE_RESUME_KEY,
+                job_service=jobs,
+            )
+            scrape_second = enqueue_scheduled_background_job(
+                job_name="wiki_scrape",
+                job_kind=WIKI_SCRAPE_JOB_KIND,
+                resume_key=WIKI_SCRAPE_RESUME_KEY,
+                job_service=jobs,
+            )
 
             self.assertEqual(wiki_first, wiki_second)
             self.assertEqual(perf_first, perf_second)
             self.assertEqual(kairos_first, kairos_second)
+            self.assertEqual(scrape_first, scrape_second)
             self.assertNotEqual(wiki_first, perf_first)
             self.assertNotEqual(wiki_first, kairos_first)
+            self.assertNotEqual(wiki_first, scrape_first)
             self.assertNotEqual(perf_first, kairos_first)
+            self.assertNotEqual(perf_first, scrape_first)
+            self.assertNotEqual(kairos_first, scrape_first)
             self.assertEqual(len(jobs.list(kinds=(WIKI_RESEARCH_JOB_KIND,), limit=10)), 1)
+            self.assertEqual(len(jobs.list(kinds=(WIKI_SCRAPE_JOB_KIND,), limit=10)), 1)
             self.assertEqual(len(jobs.list(kinds=(PERF_OPTIMIZER_JOB_KIND,), limit=10)), 1)
             self.assertEqual(len(jobs.list(kinds=(KAIROS_TICK_JOB_KIND,), limit=10)), 1)
             active = jobs.list(
                 statuses=("queued", "running", "retrying", "waiting_approval"),
-                kinds=(WIKI_RESEARCH_JOB_KIND, PERF_OPTIMIZER_JOB_KIND, KAIROS_TICK_JOB_KIND),
+                kinds=(
+                    WIKI_RESEARCH_JOB_KIND,
+                    WIKI_SCRAPE_JOB_KIND,
+                    PERF_OPTIMIZER_JOB_KIND,
+                    KAIROS_TICK_JOB_KIND,
+                ),
                 limit=10,
             )
-            self.assertEqual(len(active), 3)
+            self.assertEqual(len(active), 4)
 
     def test_wiki_research_runner_completes_with_bounded_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -464,6 +488,7 @@ class ScheduledBackgroundJobTests(unittest.TestCase):
     def test_runner_respects_shutdown_before_claim_for_each_kind(self) -> None:
         cases = (
             ("wiki_research", WIKI_RESEARCH_JOB_KIND, WIKI_RESEARCH_RESUME_KEY),
+            ("wiki_scrape", WIKI_SCRAPE_JOB_KIND, WIKI_SCRAPE_RESUME_KEY),
             ("perf_optimizer", PERF_OPTIMIZER_JOB_KIND, PERF_OPTIMIZER_RESUME_KEY),
             ("kairos_tick", KAIROS_TICK_JOB_KIND, KAIROS_TICK_RESUME_KEY),
         )
@@ -519,24 +544,32 @@ class ScheduledBackgroundRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 runtime.bot.wiki.auto_research = MagicMock(
                     return_value={"topics_researched": 1, "pages_written": 0, "candidates": []}
                 )
+                runtime.bot.wiki.auto_scrape_sources = MagicMock(
+                    return_value={"sources_scraped": 1, "pages_ingested": 0, "sources_skipped": 0}
+                )
                 runtime.auto_research.run_loop = MagicMock()
                 runtime.kairos.tick = MagicMock(return_value=TickDecision(action="none"))
                 jobs = {job.name: job for job in runtime.scheduler.list_jobs()}
 
                 jobs["kairos_tick"].handler()
                 jobs["wiki_research"].handler()
+                jobs["wiki_scrape"].handler()
                 jobs["perf_optimizer"].handler()
 
                 runtime.kairos.tick.assert_not_called()
                 runtime.bot.wiki.auto_research.assert_not_called()
+                runtime.bot.wiki.auto_scrape_sources.assert_not_called()
                 runtime.auto_research.run_loop.assert_not_called()
                 queued_kairos = runtime.job_service.list(kinds=(KAIROS_TICK_JOB_KIND,), limit=10)
                 queued_wiki = runtime.job_service.list(kinds=(WIKI_RESEARCH_JOB_KIND,), limit=10)
+                queued_scrape = runtime.job_service.list(kinds=(WIKI_SCRAPE_JOB_KIND,), limit=10)
                 queued_perf = runtime.job_service.list(kinds=(PERF_OPTIMIZER_JOB_KIND,), limit=10)
                 self.assertEqual(len(queued_kairos), 1)
                 self.assertEqual(queued_kairos[0].status, "queued")
                 self.assertEqual(len(queued_wiki), 1)
                 self.assertEqual(queued_wiki[0].status, "queued")
+                self.assertEqual(len(queued_scrape), 1)
+                self.assertEqual(queued_scrape[0].status, "queued")
                 self.assertEqual(len(queued_perf), 1)
                 self.assertEqual(queued_perf[0].status, "queued")
 
@@ -627,6 +660,9 @@ class ScheduledBackgroundRuntimeTests(unittest.IsolatedAsyncioTestCase):
                         "candidates": [{"topic": "raw candidate body"}],
                     }
                 )
+                runtime.bot.wiki.auto_scrape_sources = MagicMock(
+                    return_value={"sources_scraped": 1, "pages_ingested": 1, "sources_skipped": 0}
+                )
                 runtime.agent_store.state_path = MagicMock(
                     return_value=SimpleNamespace(exists=lambda: True)
                 )
@@ -648,6 +684,13 @@ class ScheduledBackgroundRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     payload={"max_topics": None},
                 )
                 enqueue_scheduled_background_job(
+                    job_name="wiki_scrape",
+                    job_kind=WIKI_SCRAPE_JOB_KIND,
+                    resume_key=WIKI_SCRAPE_RESUME_KEY,
+                    job_service=runtime.job_service,
+                    observe=runtime.observe,
+                )
+                enqueue_scheduled_background_job(
                     job_name="perf_optimizer",
                     job_kind=PERF_OPTIMIZER_JOB_KIND,
                     resume_key=PERF_OPTIMIZER_RESUME_KEY,
@@ -661,11 +704,14 @@ class ScheduledBackgroundRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     deadline = loop.time() + 1.0
                     while loop.time() < deadline:
                         wiki_rows = runtime.job_service.list(kinds=(WIKI_RESEARCH_JOB_KIND,), limit=10)
+                        scrape_rows = runtime.job_service.list(kinds=(WIKI_SCRAPE_JOB_KIND,), limit=10)
                         perf_rows = runtime.job_service.list(kinds=(PERF_OPTIMIZER_JOB_KIND,), limit=10)
                         if (
                             wiki_rows
+                            and scrape_rows
                             and perf_rows
                             and wiki_rows[0].status == "completed"
+                            and scrape_rows[0].status == "completed"
                             and perf_rows[0].status == "completed"
                         ):
                             shutdown.set()
@@ -679,12 +725,17 @@ class ScheduledBackgroundRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 )
 
                 wiki_rows = runtime.job_service.list(kinds=(WIKI_RESEARCH_JOB_KIND,), limit=10)
+                scrape_rows = runtime.job_service.list(kinds=(WIKI_SCRAPE_JOB_KIND,), limit=10)
                 perf_rows = runtime.job_service.list(kinds=(PERF_OPTIMIZER_JOB_KIND,), limit=10)
                 self.assertEqual(wiki_rows[0].status, "completed")
                 self.assertEqual(wiki_rows[0].result["candidate_count"], 1)
                 self.assertNotIn("candidates", wiki_rows[0].result)
+                self.assertEqual(scrape_rows[0].status, "completed")
+                self.assertEqual(scrape_rows[0].result["sources_scraped"], 1)
+                self.assertEqual(scrape_rows[0].result["pages_ingested"], 1)
                 self.assertEqual(perf_rows[0].status, "completed")
                 runtime.bot.wiki.auto_research.assert_called_once_with(max_topics=3)
+                runtime.bot.wiki.auto_scrape_sources.assert_called_once_with()
                 runtime.auto_research.run_loop.assert_called_once_with(
                     "perf-optimizer",
                     max_experiments=3,

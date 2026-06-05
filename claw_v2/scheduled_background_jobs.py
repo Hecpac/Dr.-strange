@@ -12,6 +12,8 @@ logger = logging.getLogger(__name__)
 
 WIKI_RESEARCH_JOB_KIND = "scheduler.wiki_research"
 WIKI_RESEARCH_RESUME_KEY = "scheduler:wiki_research"
+WIKI_SCRAPE_JOB_KIND = "scheduler.wiki_scrape"
+WIKI_SCRAPE_RESUME_KEY = "scheduler:wiki_scrape"
 PERF_OPTIMIZER_JOB_KIND = "scheduler.perf_optimizer"
 PERF_OPTIMIZER_RESUME_KEY = "scheduler:perf_optimizer"
 KAIROS_TICK_JOB_KIND = "scheduler.kairos_tick"

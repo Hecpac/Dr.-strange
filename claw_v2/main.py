@@ -79,6 +79,8 @@ from claw_v2.scheduled_background_jobs import (
     PERF_OPTIMIZER_RESUME_KEY,
     WIKI_RESEARCH_JOB_KIND,
     WIKI_RESEARCH_RESUME_KEY,
+    WIKI_SCRAPE_JOB_KIND,
+    WIKI_SCRAPE_RESUME_KEY,
     ScheduledBackgroundJobRunner,
     enqueue_scheduled_background_job,
     kairos_tick_result_summary,
@@ -1324,6 +1326,18 @@ def _setup_scheduler(
             name="wiki_research",
             handler=lambda: wiki_research_runner.run_available(limit=1),
         )
+        wiki_scrape_runner = ScheduledBackgroundJobRunner(
+            job_name="wiki_scrape",
+            job_kind=WIKI_SCRAPE_JOB_KIND,
+            job_service=job_service,
+            handler=lambda _payload: wiki.auto_scrape_sources(),
+            observe=observe,
+            worker_id="wiki-scrape-runner",
+        )
+        daemon.register_background_job_runner(
+            name="wiki_scrape",
+            handler=lambda: wiki_scrape_runner.run_available(limit=1),
+        )
         perf_optimizer_runner = ScheduledBackgroundJobRunner(
             job_name="perf_optimizer",
             job_kind=PERF_OPTIMIZER_JOB_KIND,
@@ -1384,7 +1398,16 @@ def _setup_scheduler(
             name="wiki_scrape",
             interval_seconds=43200,
             handler=_wrap_job_handler(
-                name="wiki_scrape", observe=observe, handler=wiki.auto_scrape_sources, skip_if=_maintenance_skip,
+                name="wiki_scrape",
+                observe=observe,
+                handler=lambda: enqueue_scheduled_background_job(
+                    job_name="wiki_scrape",
+                    job_kind=WIKI_SCRAPE_JOB_KIND,
+                    resume_key=WIKI_SCRAPE_RESUME_KEY,
+                    job_service=job_service,
+                    observe=observe,
+                ),
+                skip_if=_maintenance_skip,
             ),
         )
     )
