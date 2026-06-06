@@ -403,11 +403,14 @@ class BrowserUseModelTests(unittest.TestCase):
         self.assertEqual(self._capture_model(explicit="gpt-5.5"), "gpt-5.5")
 
 
-class ComputerHandlerModelTests(unittest.TestCase):
+class _ComputerHandlerConfigTest(unittest.TestCase):
     def _handler(self, config):
         from claw_v2.computer_handler import ComputerHandler
 
         return ComputerHandler(config=config)
+
+
+class ComputerHandlerModelTests(_ComputerHandlerConfigTest):
 
     def test_reads_config_model(self) -> None:
         import types
@@ -618,11 +621,7 @@ class ComputerHandlerSessionArtifactTests(unittest.TestCase):
         self.assertEqual(session.screenshot_path, "/tmp/img-A.png")
 
 
-class ComputerHandlerTimeoutTests(unittest.TestCase):
-    def _handler(self, config):
-        from claw_v2.computer_handler import ComputerHandler
-
-        return ComputerHandler(config=config)
+class ComputerHandlerTimeoutTests(_ComputerHandlerConfigTest):
 
     def test_timeout_defaults_to_constant_without_config(self) -> None:
         from claw_v2.computer_handler import BROWSER_USE_TIMEOUT_SECONDS
