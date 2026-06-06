@@ -8,7 +8,6 @@ import signal
 import subprocess
 import threading
 import time
-from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -52,7 +51,7 @@ from claw_v2.coordinator import CoordinatorService
 from claw_v2.content import ContentEngine
 from claw_v2.redaction import redact_sensitive
 from claw_v2.github import GitHubPullRequestService
-from claw_v2.heartbeat import HeartbeatService
+from claw_v2.heartbeat import HeartbeatService, HeartbeatSnapshot, _compute_health
 from claw_v2.idle_executor import IdleOwnershipExecutor
 from claw_v2.stop_notifier import StopNotifier
 from claw_v2.model_registry import (
@@ -3901,7 +3900,42 @@ class BotService:
         return self._help_response(parts[1])
 
     def _handle_status_command(self, context: CommandContext) -> str:
-        return json.dumps(asdict(self.heartbeat.collect()), indent=2, sort_keys=True)
+        return self._format_status_summary(self.heartbeat.collect())
+
+    @staticmethod
+    def _format_status_summary(snapshot: HeartbeatSnapshot) -> str:
+        agents = snapshot.agents or {}
+        active_agents = sum(1 for info in agents.values() if not info.get("paused"))
+        paused_agents = len(agents) - active_agents
+        warning_agents = [
+            f"{name}:{health}"
+            for name, info in sorted(agents.items())
+            if (health := _compute_health(info)) != "OK"
+        ]
+        metrics = snapshot.lane_metrics or {}
+        invocations = sum(int(item.get("invocations") or 0) for item in metrics.values())
+        degraded = sum(int(item.get("degraded_invocations") or 0) for item in metrics.values())
+        total_cost = sum(float(item.get("total_cost") or 0.0) for item in metrics.values())
+
+        lines = [
+            "Estoy vivo.",
+            f"Aprobaciones: {snapshot.pending_approvals} pendientes.",
+        ]
+        if warning_agents:
+            suffix = "" if len(warning_agents) <= 3 else f" (+{len(warning_agents) - 3})"
+            lines.append(
+                f"Agentes: {active_agents} activos, {paused_agents} pausados; "
+                f"alertas: {', '.join(warning_agents[:3])}{suffix}."
+            )
+        else:
+            lines.append(f"Agentes: {active_agents} activos, {paused_agents} pausados; alertas: ninguna.")
+        if invocations:
+            degraded_text = f", {degraded} degradadas" if degraded else ""
+            lines.append(f"Uso hoy: {invocations} llamadas, ${total_cost:.4f}{degraded_text}.")
+        else:
+            lines.append("Uso hoy: sin llamadas registradas.")
+        lines.append("Más detalle: `/approvals`, `/jobs`, `/tasks`, `/budget_status`.")
+        return "\n".join(lines)
 
     def _handle_restart_command(self, context: CommandContext) -> str:
         if self.observe is not None:
