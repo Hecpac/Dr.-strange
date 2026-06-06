@@ -8,8 +8,8 @@
 ## meta
 
 ```yaml
-describes_commit: fe99808+spec-002-self-improve-promotion-hotfix+spec-002-subprocess-bounded-pr-c
-doc_version: 2.12
+describes_commit: fe99808+spec-002-self-improve-promotion-hotfix+spec-002-subprocess-bounded-pr-c+spec-002-approval-manager-pr-d
+doc_version: 2.13
 last_verified: 2026-06-10
 verification_method: manual + pytest + AST sentinel cross-check
 anchor_strategy: symbol_only  # path:symbol, no line numbers
@@ -82,6 +82,7 @@ invariants:
       - pipeline_poll -> scheduler.pipeline_poll  # PR1B-c, enqueue + ScheduledBackgroundJobRunner (was raw ScheduledJob: git worktree+worker LLM+pytest+push, no skip gate)
       - pipeline_poll_merges -> scheduler.pipeline_poll_merges  # PR1B-c, enqueue + ScheduledBackgroundJobRunner
       - a2a_process_inbox -> scheduler.a2a_process_inbox  # PR1B-d, enqueue + ScheduledBackgroundJobRunner, added _maintenance_skip kill-switch (was router.ask per inbox task inline, no skip gate)
+      - approval_sweep -> scheduler.approval_sweep  # PR-D1, enqueue + ScheduledBackgroundJobRunner; ApprovalManager.expire_due never runs inline in daemon.tick
       - scheduled sub-agent jobs -> scheduler.sub_agent  # PR1B-d, each job enqueues an {agent,skill,lane} payload (resume_key scheduler:sub_agent:<agent>:<skill>) to one shared off-tick runner; was run_skill->dispatch (provider) inline, default-on via _default_scheduled_sub_agents
       - auto_dream -> scheduler.auto_dream  # final leg, enqueue + ScheduledBackgroundJobRunner (was dream.run router.ask(lane=research) inline, no explicit timeout)
       - learning_consolidate -> scheduler.learning_consolidate  # final leg, enqueue + ScheduledBackgroundJobRunner, added _maintenance_skip kill-switch (was router.ask(lane=judge) inline, no skip gate)
@@ -158,6 +159,29 @@ invariants:
          thread or leave descendant processes alive after timeout. PR-C keeps
          build_runtime and _is_git_repo synchronous, avoids a create_subprocess
          migration, and bounds the real blocking callsites instead.
+
+  approval_manager_single_source:
+    rule: ApprovalManager remains the only approval source of truth. Approval
+          hardening must extend the existing file-backed, HMAC-token,
+          fcntl-locked records in place; no SQLite approval table, ApprovalStore
+          adapter, or parallel channel may decide approval state.
+    states: [pending, approved, rejected, expired, archived]
+    chokepoints:
+      - approval.ApprovalManager.reject  # terminal states cannot be mutated to rejected
+      - approval.ApprovalManager.expire_due  # pending-only proactive expiry
+      - main._setup_core_state  # startup expiry sweep
+      - scheduler.approval_sweep -> ScheduledBackgroundJobRunner  # periodic off-tick sweep
+      - config.AppConfig.approval_ttl_seconds  # default APPROVAL_TTL_SECONDS=900, env override APPROVAL_TTL_SECONDS
+    action_hash_status: out_of_scope_until_execution_chokepoint_is_recabled
+    enforced_by:
+      - tests/test_approval.py::ApprovalManagerTests
+      - tests/test_approval_runtime_wiring.py
+      - tests/test_config.py::AppConfigDefaultsTests::test_approval_ttl_defaults_to_900_and_accepts_override
+      - tests/test_config.py::AppConfigDefaultsTests::test_approval_ttl_validation_rejects_non_positive_values
+      - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_no_default_on_scheduler_job_runs_heavy_work_inline_in_daemon_tick
+    why: Expired approvals were only discovered lazily during approval, and
+         reject() lacked terminal-state parity. Proactive expiry must not create
+         a second approval database or run inline in daemon.tick.
 
   evidence_gate_meta_skip_sync_path:
     rule: The chain handle_text → _brain_text_response →

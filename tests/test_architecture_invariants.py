@@ -13,6 +13,7 @@ from claw_v2.config import AppConfig, ProviderRolePolicyError
 from claw_v2.main import build_runtime, _is_git_repo, _sanitize_job_name
 from claw_v2.scheduled_background_jobs import (
     A2A_PROCESS_INBOX_JOB_KIND,
+    APPROVAL_SWEEP_JOB_KIND,
     AUTO_DREAM_JOB_KIND,
     KAIROS_TICK_JOB_KIND,
     LEARNING_CONSOLIDATE_JOB_KIND,
@@ -43,6 +44,7 @@ SLOW_SCHEDULER_AGENT_JOBS = {
     "pipeline_poll": PIPELINE_POLL_JOB_KIND,
     "pipeline_poll_merges": PIPELINE_POLL_MERGES_JOB_KIND,
     "a2a_process_inbox": A2A_PROCESS_INBOX_JOB_KIND,
+    "approval_sweep": APPROVAL_SWEEP_JOB_KIND,
     "auto_dream": AUTO_DREAM_JOB_KIND,
     "learning_consolidate": LEARNING_CONSOLIDATE_JOB_KIND,
     "learning_soul_suggestions": LEARNING_SOUL_SUGGESTIONS_JOB_KIND,

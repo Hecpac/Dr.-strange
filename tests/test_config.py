@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from claw_v2.approval import APPROVAL_TTL_SECONDS
 from claw_v2.config import AppConfig, ProviderRolePolicyError
 from claw_v2.sandbox import SandboxPolicy, sandbox_hook
 
@@ -138,6 +139,33 @@ class AppConfigDefaultsTests(unittest.TestCase):
                 with patch.dict(os.environ, {"BRAIN_TOOLUSE_VERIFY": "true"}, clear=True):
                     configured = AppConfig.from_env()
                 self.assertTrue(configured.brain_tooluse_verify)
+            finally:
+                os.chdir(previous_cwd)
+
+    def test_approval_ttl_defaults_to_900_and_accepts_override(self) -> None:
+        previous_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.chdir(tmpdir)
+            try:
+                with patch.dict(os.environ, {}, clear=True):
+                    config = AppConfig.from_env()
+                self.assertEqual(config.approval_ttl_seconds, APPROVAL_TTL_SECONDS)
+
+                with patch.dict(os.environ, {"APPROVAL_TTL_SECONDS": "120"}, clear=True):
+                    configured = AppConfig.from_env()
+                self.assertEqual(configured.approval_ttl_seconds, 120)
+            finally:
+                os.chdir(previous_cwd)
+
+    def test_approval_ttl_validation_rejects_non_positive_values(self) -> None:
+        previous_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.chdir(tmpdir)
+            try:
+                with patch.dict(os.environ, {"APPROVAL_TTL_SECONDS": "0"}, clear=True):
+                    config = AppConfig.from_env()
+                with self.assertRaises(ValueError):
+                    config.validate()
             finally:
                 os.chdir(previous_cwd)
 

@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from claw_v2.approval import APPROVAL_TTL_SECONDS
+
 from .types import Lane, ProviderRole
 
 
@@ -351,6 +353,7 @@ class AppConfig:
     claude_cli_path: str
     claude_auth_mode: str
     approval_secret: str
+    approval_ttl_seconds: int
     brain_provider: str
     brain_model: str
     worker_provider: str
@@ -512,6 +515,7 @@ class AppConfig:
             claude_cli_path=os.getenv("CLAUDE_CLI_PATH") or shutil.which("claude") or "claude",
             claude_auth_mode=os.getenv("CLAUDE_AUTH_MODE", "subscription"),
             approval_secret=os.getenv("APPROVAL_SECRET") or _load_or_create_approval_secret(),
+            approval_ttl_seconds=_env_int("APPROVAL_TTL_SECONDS", APPROVAL_TTL_SECONDS),
             brain_provider=os.getenv("BRAIN_PROVIDER", "anthropic"),
             brain_model=os.getenv("BRAIN_MODEL", "claude-opus-4-7"),
             worker_provider=worker_provider,
@@ -669,6 +673,8 @@ class AppConfig:
             raise ValueError("worker_heavy_provider must be 'anthropic', 'codex', or 'openai'.")
         if self.claude_auth_mode not in {"subscription", "api_key", "auto"}:
             raise ValueError("claude_auth_mode must be one of: subscription, api_key, auto.")
+        if self.approval_ttl_seconds <= 0:
+            raise ValueError("approval_ttl_seconds must be positive.")
         supported = {"anthropic", "openai", "google", "ollama", "codex"}
         supported_browse_backends = {"auto", "chrome_cdp", "playwright_local", "browserbase_cdp"}
         secondary = {

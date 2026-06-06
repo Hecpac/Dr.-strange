@@ -82,6 +82,8 @@ from claw_v2.wiki import WikiService
 from claw_v2.scheduled_background_jobs import (
     A2A_PROCESS_INBOX_JOB_KIND,
     A2A_PROCESS_INBOX_RESUME_KEY,
+    APPROVAL_SWEEP_JOB_KIND,
+    APPROVAL_SWEEP_RESUME_KEY,
     AUTO_DREAM_JOB_KIND,
     AUTO_DREAM_RESUME_KEY,
     KAIROS_TICK_JOB_KIND,
@@ -532,7 +534,13 @@ def _setup_core_state(config: AppConfig) -> tuple[MemoryStore, ObserveStream, Me
     memory = MemoryStore(config.db_path)
     observe = ObserveStream(config.db_path)
     metrics = MetricsTracker()
-    approvals = ApprovalManager(config.approvals_root, config.approval_secret)
+    approvals = ApprovalManager(
+        config.approvals_root,
+        config.approval_secret,
+        ttl_seconds=config.approval_ttl_seconds,
+        observe=observe,
+    )
+    approvals.expire_due()
     bus = AgentBus(config.agent_state_root / "_bus")
     agent_store = FileAgentStore(config.agent_state_root)
     return memory, observe, metrics, approvals, bus, agent_store
@@ -1383,6 +1391,21 @@ def _setup_scheduler(
             name="self_improve",
             handler=lambda: self_improve_runner.run_available(limit=1),
         )
+        approval_sweep_runner = ScheduledBackgroundJobRunner(
+            job_name="approval_sweep",
+            job_kind=APPROVAL_SWEEP_JOB_KIND,
+            job_service=job_service,
+            handler=lambda _payload: approvals.expire_due(),
+            observe=observe,
+            worker_id="approval-sweep-runner",
+            result_summary=lambda expired_count: {
+                "expired_count": safe_non_negative_int(expired_count, default=0)
+            },
+        )
+        daemon.register_background_job_runner(
+            name="approval_sweep",
+            handler=lambda: approval_sweep_runner.run_available(limit=1),
+        )
 
     scheduler.register(ScheduledJob(name="heartbeat", interval_seconds=config.heartbeat_interval, handler=heartbeat.emit))
     scheduler.register(ScheduledJob(name="task_lifecycle_watchdog", interval_seconds=300, handler=_task_lifecycle_watchdog_handler))
@@ -1401,6 +1424,24 @@ def _setup_scheduler(
                     observe=observe,
                 ),
                 skip_if=_maintenance_skip,
+            ),
+        )
+    )
+    scheduler.register(
+        ScheduledJob(
+            name="approval_sweep",
+            interval_seconds=300,
+            handler=_wrap_job_handler(
+                name="approval_sweep",
+                observe=observe,
+                handler=lambda: enqueue_scheduled_background_job(
+                    job_name="approval_sweep",
+                    job_kind=APPROVAL_SWEEP_JOB_KIND,
+                    resume_key=APPROVAL_SWEEP_RESUME_KEY,
+                    job_service=job_service,
+                    observe=observe,
+                    max_attempts=1,
+                ),
             ),
         )
     )

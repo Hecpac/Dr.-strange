@@ -4,6 +4,7 @@ import hashlib
 import re
 from pathlib import Path
 
+from claw_v2.approval import APPROVAL_TTL_SECONDS
 from claw_v2.config import AppConfig
 
 
@@ -21,6 +22,7 @@ def make_config(root: Path) -> AppConfig:
         claude_cli_path="claude",
         claude_auth_mode="subscription",
         approval_secret="test-secret",
+        approval_ttl_seconds=APPROVAL_TTL_SECONDS,
         brain_provider="anthropic",
         brain_model="claude-opus-4-7",
         worker_provider="anthropic",

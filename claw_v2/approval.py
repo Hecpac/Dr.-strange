@@ -9,15 +9,19 @@ import os
 import secrets
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 from claw_v2.approval_sensitivity import approval_metadata_for_change
+from claw_v2.redaction import redact_sensitive
 from claw_v2.turn_context import current_turn_id
 
 logger = logging.getLogger(__name__)
 
 APPROVAL_TTL_SECONDS = 900  # 15 minutes
+VALID_APPROVAL_STATES = frozenset({"pending", "approved", "rejected", "expired", "archived"})
+TERMINAL_APPROVAL_STATES = frozenset({"approved", "rejected", "expired", "archived"})
 
 _NON_SENSITIVE_CONFIRMATIONS = frozenset(
     {
@@ -70,10 +74,21 @@ class PendingApproval:
 
 
 class ApprovalManager:
-    def __init__(self, root: Path | str, secret: str) -> None:
+    def __init__(
+        self,
+        root: Path | str,
+        secret: str,
+        *,
+        ttl_seconds: int = APPROVAL_TTL_SECONDS,
+        observe: Any | None = None,
+    ) -> None:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.secret = secret.encode("utf-8")
+        if int(ttl_seconds) <= 0:
+            raise ValueError("approval ttl_seconds must be positive")
+        self.ttl_seconds = int(ttl_seconds)
+        self.observe = observe
 
     def create(
         self,
@@ -98,16 +113,17 @@ class ApprovalManager:
             diff=diff,
             paths=changed_paths,
         )
+        redacted_metadata = redact_sensitive(merged_metadata, limit=2000)
         active_turn_id = current_turn_id()
-        if active_turn_id and "turn_id" not in merged_metadata:
-            merged_metadata["turn_id"] = active_turn_id
+        if active_turn_id and "turn_id" not in redacted_metadata:
+            redacted_metadata["turn_id"] = active_turn_id
         if risk_basis is None:
             risk_basis = sensitivity.risk_basis
         payload = {
             "approval_id": approval_id,
             "action": action,
-            "summary": summary,
-            "metadata": merged_metadata,
+            "summary": redact_sensitive(summary, limit=2000),
+            "metadata": redacted_metadata,
             "token_hash": self._digest(token),
             "status": "pending",
             "created_at": time.time(),
@@ -118,16 +134,29 @@ class ApprovalManager:
             "resolved_by": None,
         }
         _atomic_write_json(self._path_for(approval_id), payload)
+        self._emit(
+            "approval_created",
+            {
+                "approval_id": approval_id,
+                "action": action,
+                "status": "pending",
+                "visible_to_user": payload["visible_to_user"],
+            },
+        )
         return PendingApproval(
             approval_id=approval_id,
             action=action,
-            summary=summary,
+            summary=str(payload["summary"]),
             token=token,
-            risk_code=merged_metadata.get("risk_code"),
-            required_confirmation=merged_metadata.get("required_confirmation"),
+            risk_code=redacted_metadata.get("risk_code") if isinstance(redacted_metadata, dict) else None,
+            required_confirmation=redacted_metadata.get("required_confirmation")
+            if isinstance(redacted_metadata, dict)
+            else None,
         )
 
     def approve(self, approval_id: str, token: str) -> bool:
+        now = time.time()
+
         def _do_approve(payload: dict) -> None:
             # MED-2: single-use. Only a still-pending approval can be resolved
             # here; once approved/rejected/expired/archived the record is
@@ -137,11 +166,11 @@ class ApprovalManager:
             if payload.get("status") != "pending":
                 payload["_result"] = False
                 return
-            created = payload.get("created_at", 0)
-            if time.time() - created > APPROVAL_TTL_SECONDS:
+            created = _coerce_timestamp(payload.get("created_at", 0))
+            if now - created > self.ttl_seconds:
                 payload["status"] = "expired"
                 payload["resolved_by"] = RESOLVED_BY_EXPIRED
-                payload["resolved_at"] = time.time()
+                payload["resolved_at"] = now
                 payload["_result"] = False
                 return
             required_confirmation = _required_confirmation(payload)
@@ -151,10 +180,12 @@ class ApprovalManager:
                 valid = hmac.compare_digest(payload["token_hash"], self._digest(token))
             payload["status"] = "approved" if valid else "rejected"
             payload["resolved_by"] = RESOLVED_BY_HUMAN
-            payload["resolved_at"] = time.time()
+            payload["resolved_at"] = now
             payload["_result"] = valid
         result = self._locked_update(approval_id, _do_approve)
-        return result.pop("_result", False)
+        approved = result.pop("_result", False)
+        self._emit_resolution_event(result, resolved_at=now)
+        return approved
 
     def approve_confirmation(self, approval_id: str, confirmation: str) -> bool:
         payload = self.read(approval_id)
@@ -168,26 +199,32 @@ class ApprovalManager:
         return self._approve_human_without_token(approval_id)
 
     def _approve_human_without_token(self, approval_id: str) -> bool:
+        now = time.time()
+
         def _do_approve(payload: dict) -> None:
             if payload.get("status") != "pending":
                 payload["_result"] = False
                 return
-            created = payload.get("created_at", 0)
-            if time.time() - created > APPROVAL_TTL_SECONDS:
+            created = _coerce_timestamp(payload.get("created_at", 0))
+            if now - created > self.ttl_seconds:
                 payload["status"] = "expired"
                 payload["resolved_by"] = RESOLVED_BY_EXPIRED
-                payload["resolved_at"] = time.time()
+                payload["resolved_at"] = now
                 payload["_result"] = False
                 return
             payload["status"] = "approved"
             payload["resolved_by"] = RESOLVED_BY_HUMAN
-            payload["resolved_at"] = time.time()
+            payload["resolved_at"] = now
             payload["_result"] = True
 
         result = self._locked_update(approval_id, _do_approve)
-        return result.pop("_result", False)
+        approved = result.pop("_result", False)
+        self._emit_resolution_event(result, resolved_at=now)
+        return approved
 
     def approve_internal(self, approval_id: str) -> bool:
+        now = time.time()
+
         def _do_approve(payload: dict) -> None:
             # MED-2 / #13: single-use. Only a still-pending record may be
             # auto-approved; a rejected/approved/expired/archived record must
@@ -195,28 +232,40 @@ class ApprovalManager:
             if payload.get("status") != "pending":
                 payload["_result"] = False
                 return
-            created = payload.get("created_at", 0)
-            if time.time() - created > APPROVAL_TTL_SECONDS:
+            created = _coerce_timestamp(payload.get("created_at", 0))
+            if now - created > self.ttl_seconds:
                 payload["status"] = "expired"
                 payload["resolved_by"] = RESOLVED_BY_EXPIRED
-                payload["resolved_at"] = time.time()
+                payload["resolved_at"] = now
                 payload["_result"] = False
                 return
             payload["status"] = "approved"
             payload["resolved_by"] = RESOLVED_BY_SYSTEM_AUTO
-            payload["resolved_at"] = time.time()
+            payload["resolved_at"] = now
             payload["_result"] = True
 
         result = self._locked_update(approval_id, _do_approve)
-        return result.pop("_result", False)
+        approved = result.pop("_result", False)
+        self._emit_resolution_event(result, resolved_at=now)
+        return approved
 
-    def reject(self, approval_id: str) -> None:
+    def reject(self, approval_id: str) -> bool:
+        now = time.time()
+
         def _do_reject(payload: dict) -> None:
+            if payload.get("status") in TERMINAL_APPROVAL_STATES:
+                payload["_result"] = False
+                return
             payload["status"] = "rejected"
             payload["resolved_by"] = RESOLVED_BY_HUMAN
-            payload["resolved_at"] = time.time()
+            payload["resolved_at"] = now
+            payload["_result"] = True
 
-        self._locked_update(approval_id, _do_reject)
+        result = self._locked_update(approval_id, _do_reject)
+        rejected = result.pop("_result", False)
+        if rejected:
+            self._emit("approval_rejected", _approval_event_payload(result))
+        return rejected
 
     def archive(self, approval_id: str, *, reason: str = "") -> bool:
         def _do_archive(payload: dict) -> None:
@@ -232,7 +281,52 @@ class ApprovalManager:
             payload["_result"] = True
 
         result = self._locked_update(approval_id, _do_archive)
-        return result.pop("_result", False)
+        archived = result.pop("_result", False)
+        if archived:
+            self._emit("approval_archived", _approval_event_payload(result))
+        return archived
+
+    def expire_due(self, now: datetime | float | int | None = None) -> int:
+        now_ts = _coerce_timestamp(now)
+        expired_count = 0
+        inspected_count = 0
+        skipped_count = 0
+        for path in sorted(self.root.glob("*.json")):
+            inspected_count += 1
+            approval_id = path.stem
+
+            def _expire_if_due(payload: dict) -> None:
+                if payload.get("status") != "pending":
+                    payload["_result"] = False
+                    return
+                created = _coerce_timestamp(payload.get("created_at", 0))
+                if now_ts - created <= self.ttl_seconds:
+                    payload["_result"] = False
+                    return
+                payload["status"] = "expired"
+                payload["resolved_by"] = RESOLVED_BY_EXPIRED
+                payload["resolved_at"] = now_ts
+                payload["_result"] = True
+
+            try:
+                result = self._locked_update(approval_id, _expire_if_due)
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError, ValueError):
+                skipped_count += 1
+                continue
+            expired = result.pop("_result", False)
+            if expired:
+                expired_count += 1
+                self._emit("approval_expired", _approval_event_payload(result))
+        self._emit(
+            "approval_sweep_completed",
+            {
+                "expired_count": expired_count,
+                "inspected_count": inspected_count,
+                "skipped_count": skipped_count,
+                "ttl_seconds": self.ttl_seconds,
+            },
+        )
+        return expired_count
 
     def _locked_update(self, approval_id: str, modifier: object) -> dict:
         path = self._path_for(approval_id)
@@ -326,6 +420,26 @@ class ApprovalManager:
     def _digest(self, token: str) -> str:
         return hmac.new(self.secret, token.encode("utf-8"), hashlib.sha256).hexdigest()
 
+    def _emit(self, event_type: str, payload: dict[str, Any]) -> None:
+        if self.observe is None:
+            return
+        try:
+            self.observe.emit(event_type, payload=redact_sensitive(payload, limit=2000))
+        except Exception:
+            pass
+
+    def _emit_resolution_event(self, payload: dict[str, Any], *, resolved_at: float) -> None:
+        if payload.get("resolved_at") != resolved_at:
+            return
+        event_by_status = {
+            "approved": "approval_approved",
+            "rejected": "approval_rejected",
+            "expired": "approval_expired",
+        }
+        event_type = event_by_status.get(str(payload.get("status")))
+        if event_type:
+            self._emit(event_type, _approval_event_payload(payload))
+
     @staticmethod
     def _read_locked_fd(fd: int) -> bytes:
         os.lseek(fd, 0, os.SEEK_SET)
@@ -370,3 +484,27 @@ def _required_confirmation(payload: dict) -> str | None:
 
 def _normalize_confirmation(value: str) -> str:
     return " ".join(str(value).strip().lower().split())
+
+
+def _coerce_timestamp(value: datetime | float | int | object | None) -> float:
+    if value is None:
+        return time.time()
+    if isinstance(value, datetime):
+        dt = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _approval_event_payload(payload: dict) -> dict[str, Any]:
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    return {
+        "approval_id": payload.get("approval_id"),
+        "action": payload.get("action"),
+        "status": payload.get("status"),
+        "resolved_by": payload.get("resolved_by"),
+        "visible_to_user": payload.get("visible_to_user", True),
+        "risk_code": metadata.get("risk_code") if isinstance(metadata, dict) else None,
+    }
