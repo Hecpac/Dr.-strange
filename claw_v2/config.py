@@ -431,6 +431,7 @@ class AppConfig:
     computer_auto_approve: bool
     computer_display_width: int
     computer_display_height: int
+    computer_browser_use_timeout_seconds: int
     ollama_host: str
     sensitive_urls: list[str]
     codex_cli_path: str
@@ -607,6 +608,10 @@ class AppConfig:
             computer_auto_approve=_env_bool("CLAW_COMPUTER_AUTO_APPROVE", False),
             computer_display_width=_env_int("COMPUTER_DISPLAY_WIDTH", 1280),
             computer_display_height=_env_int("COMPUTER_DISPLAY_HEIGHT", 800),
+            # browser_use drives an authenticated browser (e.g. ChatGPT image
+            # generation) one vision step at a time; the old hardcoded 180s
+            # caps long renders mid-task. Configurable, default 7 min.
+            computer_browser_use_timeout_seconds=_env_int("CLAW_BROWSER_USE_TIMEOUT", 420),
             ollama_host=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
             sensitive_urls=[u for u in os.getenv("SENSITIVE_URLS", "ads.google.com:polymarket.com:robinhood.com:binance.com:stripe.com:paypal.com").split(":") if u.strip()],
             codex_cli_path=os.getenv("CODEX_CLI_PATH") or shutil.which("codex") or "codex",
@@ -684,6 +689,8 @@ class AppConfig:
             raise ValueError("sandbox_capability_profile must be one of: surgical, engineer, admin.")
         if self.computer_use_backend not in {"openai", "codex"}:
             raise ValueError("computer_use_backend must be 'openai' or 'codex'.")
+        if self.computer_browser_use_timeout_seconds <= 0:
+            raise ValueError("computer_browser_use_timeout_seconds must be positive.")
         if not 0 <= self.morning_brief_hour <= 23:
             raise ValueError("morning_brief_hour must be between 0 and 23.")
         if not 0 <= self.evening_brief_hour <= 23:

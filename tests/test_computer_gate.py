@@ -271,7 +271,7 @@ class _StubBrowserUse:
         self.called = False
         self.instruction = ""
 
-    async def run_task(self, instruction: str) -> str:
+    async def run_task(self, instruction: str, **kwargs) -> str:
         self.called = True
         self.instruction = instruction
         return "browser task done"
