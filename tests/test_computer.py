@@ -347,6 +347,89 @@ class CodexComputerBackendTests(unittest.TestCase):
         self.assertEqual(calls, ["open Safari"])
 
 
+class BrowserUseModelTests(unittest.TestCase):
+    def _capture_model(self, explicit: str | None = None) -> str:
+        import asyncio
+        import sys
+        import types
+
+        from claw_v2.computer import BrowserUseService
+
+        captured: dict = {}
+
+        class FakeChatOpenAI:
+            def __init__(self, **kwargs):
+                captured["model"] = kwargs.get("model")
+
+        class FakeBrowserSession:
+            def __init__(self, **kwargs):
+                pass
+
+            async def stop(self):
+                pass
+
+        class FakeResult:
+            def final_result(self):
+                return "ok"
+
+            def last_action(self):
+                return None
+
+        class FakeAgent:
+            def __init__(self, **kwargs):
+                pass
+
+            async def run(self):
+                return FakeResult()
+
+        module = types.SimpleNamespace(
+            Agent=FakeAgent, BrowserSession=FakeBrowserSession, ChatOpenAI=FakeChatOpenAI
+        )
+        with patch.dict(sys.modules, {"browser_use": module}):
+            svc = BrowserUseService()
+            if explicit is None:
+                asyncio.run(svc.run_task("t"))
+            else:
+                asyncio.run(svc.run_task("t", model=explicit))
+        return captured["model"]
+
+    def test_default_model_updated_from_gpt4o(self) -> None:
+        from claw_v2.computer import DEFAULT_BROWSER_USE_MODEL
+
+        self.assertEqual(DEFAULT_BROWSER_USE_MODEL, "gpt-5.4")
+        self.assertEqual(self._capture_model(), "gpt-5.4")
+
+    def test_explicit_model_passed_through(self) -> None:
+        self.assertEqual(self._capture_model(explicit="gpt-5.5"), "gpt-5.5")
+
+
+class ComputerHandlerModelTests(unittest.TestCase):
+    def _handler(self, config):
+        from claw_v2.computer_handler import ComputerHandler
+
+        return ComputerHandler(config=config)
+
+    def test_reads_config_model(self) -> None:
+        import types
+
+        cfg = types.SimpleNamespace(computer_browser_use_model="gpt-5.5")
+        self.assertEqual(self._handler(cfg)._browser_use_model(), "gpt-5.5")
+
+    def test_falls_back_to_default_when_missing_or_blank(self) -> None:
+        import types
+
+        from claw_v2.computer import DEFAULT_BROWSER_USE_MODEL
+
+        self.assertEqual(self._handler(None)._browser_use_model(), DEFAULT_BROWSER_USE_MODEL)
+        self.assertEqual(
+            self._handler(types.SimpleNamespace())._browser_use_model(), DEFAULT_BROWSER_USE_MODEL
+        )
+        self.assertEqual(
+            self._handler(types.SimpleNamespace(computer_browser_use_model="  "))._browser_use_model(),
+            DEFAULT_BROWSER_USE_MODEL,
+        )
+
+
 class BrowserUseArtifactTests(unittest.TestCase):
     def _fakes(self, *, screenshot_raises: bool = False, final: str = "imagen creada"):
         import types

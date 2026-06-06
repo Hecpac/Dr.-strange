@@ -354,6 +354,12 @@ class ComputerHandler:
     def _auto_approve_enabled(self) -> bool:
         return bool(getattr(self.config, "computer_auto_approve", False))
 
+    def _browser_use_model(self) -> str:
+        from claw_v2.computer import DEFAULT_BROWSER_USE_MODEL
+
+        model = str(getattr(self.config, "computer_browser_use_model", "") or "").strip()
+        return model or DEFAULT_BROWSER_USE_MODEL
+
     def _browser_use_timeout(self) -> int:
         configured = getattr(self.config, "computer_browser_use_timeout_seconds", 0)
         try:
@@ -561,13 +567,16 @@ class ComputerHandler:
     def _run_browser_use_task(self, session: Any) -> str:
         import asyncio
 
+        model = self._browser_use_model()
         timeout = self._browser_use_timeout()
 
         async def _run() -> Any:
             try:
                 # run_task bounds only the agent work by `timeout`; the
                 # best-effort artifact capture runs afterwards on its own budget.
-                result = await self.browser_use.run_task(session.task, timeout=timeout)
+                result = await self.browser_use.run_task(
+                    session.task, model=model, timeout=timeout
+                )
             except asyncio.TimeoutError as exc:
                 raise RuntimeError(
                     "browser_use timed out after "

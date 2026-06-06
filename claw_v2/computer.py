@@ -503,6 +503,10 @@ class ComputerUseService:
         return self._build_call_output(action)
 
 
+# OpenAI vision model browser_use drives the page with. gpt-4o was outdated and
+# weak at grounding (more steps per task -> timeouts). Default to the repo's
+# current OpenAI API tier; override via CLAW_BROWSER_USE_MODEL.
+DEFAULT_BROWSER_USE_MODEL = "gpt-5.4"
 # Upper bound for the best-effort post-task screenshot so a hung capture can
 # never delay or fail an otherwise-completed browser task.
 _BROWSER_USE_CAPTURE_TIMEOUT_SECONDS = 30
@@ -543,7 +547,7 @@ class BrowserUseService:
         self,
         task: str,
         *,
-        model: str = "gpt-4o",
+        model: str = DEFAULT_BROWSER_USE_MODEL,
         max_actions_per_step: int = 5,
         use_vision: bool = True,
         save_conversation: str | None = None,
@@ -619,7 +623,7 @@ class BrowserUseService:
         url: str,
         prompt: str,
         *,
-        model: str = "gpt-4o",
+        model: str = DEFAULT_BROWSER_USE_MODEL,
     ) -> str:
         """Navigate to a URL and extract information using an LLM."""
         task = f"Go to {url} and extract the following: {prompt}"
