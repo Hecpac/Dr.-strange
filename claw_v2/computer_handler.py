@@ -569,6 +569,9 @@ class ComputerHandler:
 
         model = self._browser_use_model()
         timeout = self._browser_use_timeout()
+        timeout_message = (
+            f"browser_use timed out after {timeout}s while executing approved browser automation"
+        )
 
         async def _run() -> Any:
             try:
@@ -578,10 +581,7 @@ class ComputerHandler:
                     session.task, model=model, timeout=timeout
                 )
             except asyncio.TimeoutError as exc:
-                raise RuntimeError(
-                    "browser_use timed out after "
-                    f"{timeout}s while executing approved browser automation"
-                ) from exc
+                raise RuntimeError(timeout_message) from exc
             # Bind the artifact to THIS session inside the worker thread, where
             # the thread-local last_artifact_path was just set — avoids the
             # shared-state race across concurrent sessions.
@@ -601,10 +601,7 @@ class ComputerHandler:
                 return str(future.result(timeout=timeout + BROWSER_USE_TASK_GRACE_SECONDS))
             except concurrent.futures.TimeoutError as exc:
                 future.cancel()
-                raise RuntimeError(
-                    "browser_use timed out after "
-                    f"{timeout}s while executing approved browser automation"
-                ) from exc
+                raise RuntimeError(timeout_message) from exc
             finally:
                 pool.shutdown(wait=False, cancel_futures=True)
         return str(asyncio.run(_run()))
