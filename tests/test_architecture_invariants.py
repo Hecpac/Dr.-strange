@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import inspect
 import os
 import tempfile
 import unittest
@@ -9,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 from claw_v2.adapters.base import LLMRequest, LLMResponse
 from claw_v2.config import AppConfig, ProviderRolePolicyError
-from claw_v2.main import build_runtime, _sanitize_job_name
+from claw_v2.main import build_runtime, _is_git_repo, _sanitize_job_name
 from claw_v2.scheduled_background_jobs import (
     A2A_PROCESS_INBOX_JOB_KIND,
     AUTO_DREAM_JOB_KIND,
@@ -65,6 +66,24 @@ class _HeavyInlineCall(BaseException):
 
 
 class ArchitectureInvariantTests(unittest.TestCase):
+    def test_runtime_builder_and_git_probe_remain_sync(self) -> None:
+        self.assertFalse(inspect.iscoroutinefunction(build_runtime))
+        self.assertFalse(inspect.iscoroutinefunction(_is_git_repo))
+
+    def test_self_improve_promotion_actions_have_critical_floor(self) -> None:
+        from claw_v2.brain import _risk_floor_for_action
+
+        self.assertEqual(_risk_floor_for_action("promote"), "critical")
+        self.assertEqual(_risk_floor_for_action("promote_self-improve"), "critical")
+        self.assertEqual(_risk_floor_for_action("self_improve"), "critical")
+
+    def test_branch_promotion_executor_does_not_accept_live_head_state_flag(self) -> None:
+        from claw_v2.agents import GitBranchPromotionExecutor
+
+        source = inspect.getsource(GitBranchPromotionExecutor.__call__)
+        self.assertNotIn("allow_live_head_promotion", source)
+        self.assertIn("_commit_to_isolated_branch", source)
+
     def test_no_default_on_scheduler_job_runs_heavy_work_inline_in_daemon_tick(self) -> None:
         """Deny-by-default backstop for Core Invariant 1.
 

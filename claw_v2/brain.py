@@ -1895,6 +1895,8 @@ RISK_FLOORS: dict[str, str] = {
     "deploy_production": "critical",
     "deploy_prod": "critical",
     "pipeline_merge": "high",
+    "promote": "critical",
+    "self_improve": "critical",
     "git_push_main": "high",
     "git_force_push": "critical",
     "force_push": "critical",

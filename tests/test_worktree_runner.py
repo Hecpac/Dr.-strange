@@ -381,6 +381,63 @@ class WorktreeRunnerTests(unittest.TestCase):
             self.assertEqual(promoted, ["exp-2"])
             self.assertEqual(brain.calls[0]["action"], "promote_agent-b")
 
+    def test_worktree_runner_does_not_promote_without_critical_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo = root / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+            (repo / "README.md").write_text("hello\n", encoding="utf-8")
+            subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True, text=True)
+
+            class BlockingBrain:
+                def __init__(self) -> None:
+                    self.calls: list[dict] = []
+
+                def execute_critical_action(self, **kwargs) -> CriticalActionExecution:
+                    self.calls.append(kwargs)
+                    return CriticalActionExecution(
+                        action=kwargs["action"],
+                        status="awaiting_approval",
+                        executed=False,
+                        verification=CriticalActionVerification(
+                            recommendation="needs_approval",
+                            risk_level="critical",
+                            summary="critical promote gate",
+                            should_proceed=False,
+                            requires_human_approval=True,
+                        ),
+                    )
+
+            brain = BlockingBrain()
+            promoted: list[str] = []
+            runner = GitWorktreeExperimentRunner(
+                repo_root=repo,
+                worktree_root=root / "worktrees",
+                router=FakeRouter(),
+                brain=brain,
+                evaluator=lambda path, state, diff: ExperimentEvaluation(0.8, "improved", "0.8"),
+                promotion_executor=lambda path, state, diff: promoted.append(path.name) or {"promoted": True},
+            )
+            record = runner(
+                "self-improve",
+                1,
+                {
+                    "instruction": "Prepare promotion",
+                    "allowed_tools": ["Write"],
+                    "last_verified_state": {"metric": 0.3},
+                    "promote_on_improvement": True,
+                    "commit_on_promotion": True,
+                },
+            )
+
+            self.assertEqual(record.status, "awaiting_approval")
+            self.assertEqual(brain.calls[0]["action"], "promote_self-improve")
+            self.assertEqual(promoted, [])
+
     def test_worktree_runner_falls_back_to_snapshot_when_repo_has_no_head(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -605,6 +662,13 @@ class WorktreeRunnerTests(unittest.TestCase):
                 capture_output=True,
                 text=True,
             ).stdout.strip()
+            current_head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
 
             worktree = root / "worktree"
             worktree.mkdir()
@@ -644,6 +708,144 @@ class WorktreeRunnerTests(unittest.TestCase):
                     text=True,
                 ).stdout.strip(),
                 current_branch,
+            )
+            self.assertEqual(
+                subprocess.run(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=repo,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip(),
+                current_head,
+            )
+            self.assertEqual((repo / "tracked.txt").read_text(encoding="utf-8"), "base\n")
+            self.assertEqual(
+                subprocess.run(
+                    ["git", "show", f"{result.branch_name}:tracked.txt"],
+                    cwd=repo,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout,
+                "promoted\n",
+            )
+
+    def test_git_branch_promotion_defaults_to_isolated_branch_when_commit_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo = root / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+            (repo / "tracked.txt").write_text("base\n", encoding="utf-8")
+            subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True, text=True)
+            current_head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+            worktree = root / "worktree"
+            worktree.mkdir()
+            (worktree / "tracked.txt").write_text("promoted\n", encoding="utf-8")
+
+            result = GitBranchPromotionExecutor(repo)(
+                worktree,
+                {
+                    "name": "publisher",
+                    "commit_on_promotion": True,
+                    "_workspace_mode": "snapshot",
+                },
+                "MODIFIED tracked.txt",
+            )
+
+            self.assertTrue(result.commit_created)
+            self.assertTrue(result.branch_created)
+            self.assertIsNotNone(result.branch_name)
+            self.assertEqual(
+                subprocess.run(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=repo,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip(),
+                current_head,
+            )
+            self.assertEqual((repo / "tracked.txt").read_text(encoding="utf-8"), "base\n")
+            self.assertEqual(
+                subprocess.run(
+                    ["git", "show", f"{result.branch_name}:tracked.txt"],
+                    cwd=repo,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout,
+                "promoted\n",
+            )
+
+    def test_git_branch_promotion_ignores_live_head_state_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo = root / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+            (repo / "tracked.txt").write_text("base\n", encoding="utf-8")
+            subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True, text=True)
+            current_head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+            worktree = root / "worktree"
+            worktree.mkdir()
+            (worktree / "tracked.txt").write_text("promoted\n", encoding="utf-8")
+
+            result = GitBranchPromotionExecutor(repo)(
+                worktree,
+                {
+                    "name": "self-improve",
+                    "commit_on_promotion": True,
+                    "branch_on_promotion": False,
+                    "allow_live_head_promotion": True,
+                    "_workspace_mode": "snapshot",
+                },
+                "MODIFIED tracked.txt",
+            )
+
+            self.assertTrue(result.commit_created)
+            self.assertTrue(result.branch_created)
+            self.assertEqual(
+                subprocess.run(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=repo,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip(),
+                current_head,
+            )
+            self.assertEqual((repo / "tracked.txt").read_text(encoding="utf-8"), "base\n")
+            self.assertEqual(
+                subprocess.run(
+                    ["git", "show", f"{result.branch_name}:tracked.txt"],
+                    cwd=repo,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout,
+                "promoted\n",
             )
 
 

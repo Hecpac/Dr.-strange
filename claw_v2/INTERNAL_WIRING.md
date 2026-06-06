@@ -8,8 +8,8 @@
 ## meta
 
 ```yaml
-describes_commit: fe99808+audit-group6-crash-safe-migrations-send-retry-breaker-decay
-doc_version: 2.10
+describes_commit: fe99808+spec-002-self-improve-promotion-hotfix
+doc_version: 2.11
 last_verified: 2026-06-10
 verification_method: manual + grep cross-check
 anchor_strategy: symbol_only  # path:symbol, no line numbers
@@ -96,6 +96,24 @@ invariants:
          subprocess/codegen scheduler job enqueues a durable agent_job and
          executes in a ClawDaemon background runner off-tick. The backstop fails
          if any future job re-introduces inline heavy work.
+
+  self_improve_promotion_gate:
+    rule: self-improve promotion actions must pass through BrainService
+          critical-action verification and may not commit generated changes to
+          the live HEAD by default.
+    chokepoints:
+      - brain.RISK_FLOORS[promote] = critical
+      - brain.RISK_FLOORS[self_improve] = critical
+      - agents.GitWorktreeExperimentRunner -> brain.execute_critical_action(action=promote_<agent>)
+      - agents.GitBranchPromotionExecutor commits in an isolated detached worktree
+        and attaches a claw/<agent>/<sha> branch when commit_on_promotion is enabled.
+    enforced_by:
+      - tests/test_brain_verify.py::PolicyFloorTests
+      - tests/test_worktree_runner.py::WorktreeRunnerTests::test_worktree_runner_does_not_promote_without_critical_approval
+      - tests/test_worktree_runner.py::WorktreeRunnerTests::test_git_branch_promotion_defaults_to_isolated_branch_when_commit_enabled
+      - tests/test_worktree_runner.py::WorktreeRunnerTests::test_git_branch_promotion_ignores_live_head_state_flag
+      - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_self_improve_promotion_actions_have_critical_floor
+      - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_branch_promotion_executor_does_not_accept_live_head_state_flag
 
   evidence_gate_meta_skip_sync_path:
     rule: The chain handle_text → _brain_text_response →

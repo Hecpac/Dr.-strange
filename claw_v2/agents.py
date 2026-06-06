@@ -7,6 +7,7 @@ import logging
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -264,7 +265,7 @@ class AutoResearchAgentService:
             "last_action": "created",
             "promote_on_improvement": False,
             "commit_on_promotion": False,
-            "branch_on_promotion": False,
+            "branch_on_promotion": True,
             "trust_level": 1,
             "experiments_today": 0,
             "paused": False,
@@ -1198,9 +1199,37 @@ class GitBranchPromotionExecutor:
         self.commit_executor = commit_executor or GitCommitPromotionExecutor(self.repo_root)
 
     def __call__(self, worktree_path: Path, state: dict, diff: str) -> PromotionResult:
+        branch_on_promotion = bool(state.get("branch_on_promotion", True))
+        commit_on_promotion = bool(state.get("commit_on_promotion"))
+        if commit_on_promotion:
+            safe_state = {**state, "branch_on_promotion": True}
+            return self._commit_to_isolated_branch(worktree_path, safe_state, diff)
+
         result = self.commit_executor(worktree_path, state, diff)
-        if not state.get("branch_on_promotion"):
+        if not branch_on_promotion:
             return result
+        return self._attach_branch(result, state)
+
+    def _commit_to_isolated_branch(self, worktree_path: Path, state: dict, diff: str) -> PromotionResult:
+        with tempfile.TemporaryDirectory(prefix="claw-promotion-") as tmpdir:
+            isolated_worktree = Path(tmpdir) / "worktree"
+            self._git("worktree", "add", "--detach", str(isolated_worktree), "HEAD")
+            try:
+                isolated_executor = GitCommitPromotionExecutor(
+                    isolated_worktree,
+                    apply_executor=WorkspacePromotionExecutor(isolated_worktree),
+                )
+                result = isolated_executor(worktree_path, state, diff)
+                return self._attach_branch(result, state)
+            finally:
+                subprocess.run(
+                    ["git", "-C", str(self.repo_root), "worktree", "remove", "--force", str(isolated_worktree)],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+    def _attach_branch(self, result: PromotionResult, state: dict) -> PromotionResult:
         if not result.commit_sha:
             return result
 

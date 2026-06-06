@@ -360,6 +360,50 @@ class BrainVerificationTests(unittest.TestCase):
                 self.assertEqual(result.status, "executed")
                 self.assertEqual(executed, ["ok"])
 
+    def test_execute_critical_action_blocks_promote_even_when_verifier_approves_low(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "VERIFIER_PROVIDER": "openai",
+                "VERIFIER_MODEL": "gpt-5.4-mini",
+            }
+
+            def verifier_transport(request: LLMRequest) -> LLMResponse:
+                return LLMResponse(
+                    content=(
+                        '{"recommendation":"approve","risk_level":"low","summary":"Ready.",'
+                        '"reasons":["Safe"],"blockers":[],"missing_checks":[],"confidence":0.95}'
+                    ),
+                    lane="verifier",
+                    provider="openai",
+                    model=request.model,
+                )
+
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=self._fake_brain, openai_transport=verifier_transport)
+                executed: list[str] = []
+                result = runtime.brain.execute_critical_action(
+                    action="promote_self-improve",
+                    plan="Promote generated improvement",
+                    diff="diff --git a/claw_v2/brain.py b/claw_v2/brain.py",
+                    test_output="pytest passed",
+                    executor=lambda: executed.append("ran"),
+                )
+
+                self.assertFalse(result.executed)
+                self.assertEqual(result.status, "awaiting_approval")
+                self.assertEqual(result.verification.risk_level, "critical")
+                self.assertTrue(result.verification.requires_human_approval)
+                self.assertEqual(executed, [])
+                approval = runtime.approvals.read(result.verification.approval_id)
+                self.assertEqual(approval["action"], "promote_self-improve")
+                self.assertEqual(approval["metadata"]["risk_level"], "critical")
+
     def test_execute_critical_action_uses_autonomous_fast_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -965,6 +1009,23 @@ class PolicyFloorTests(unittest.TestCase):
         from claw_v2.brain import _apply_policy_floor
         result = _apply_policy_floor(self._make_parsed(), action="pipeline_merge:ISSUE-9")
         self.assertEqual(result["risk_level"], "high")
+        self.assertEqual(result["recommendation"], "needs_approval")
+
+    def test_floor_raises_promote_to_critical(self) -> None:
+        from claw_v2.brain import _apply_policy_floor, _risk_floor_for_action
+
+        self.assertEqual(_risk_floor_for_action("promote"), "critical")
+        self.assertEqual(_risk_floor_for_action("promote_self-improve"), "critical")
+        result = _apply_policy_floor(self._make_parsed(), action="promote_self-improve")
+        self.assertEqual(result["risk_level"], "critical")
+        self.assertEqual(result["recommendation"], "needs_approval")
+
+    def test_floor_raises_self_improve_to_critical(self) -> None:
+        from claw_v2.brain import _apply_policy_floor, _risk_floor_for_action
+
+        self.assertEqual(_risk_floor_for_action("self_improve"), "critical")
+        result = _apply_policy_floor(self._make_parsed(), action="self_improve")
+        self.assertEqual(result["risk_level"], "critical")
         self.assertEqual(result["recommendation"], "needs_approval")
 
     def test_floor_raises_force_push_to_critical(self) -> None:

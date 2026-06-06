@@ -44,6 +44,7 @@ class AgentServiceTests(unittest.TestCase):
             state = service.inspect("researcher-1")
             self.assertIn("WebSearch", state["allowed_tools"])
             self.assertNotIn("Write", state["allowed_tools"])
+            self.assertTrue(state["branch_on_promotion"])
             output = service.dispatch("researcher-1", "summarize current state")
             self.assertIn("anthropic:worker", output)
 

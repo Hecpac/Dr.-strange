@@ -1122,6 +1122,7 @@ def _setup_scheduler(
                 state={
                     "promote_on_improvement": True,
                     "commit_on_promotion": True,
+                    "branch_on_promotion": True,
                     "metric_command": f"PYTHONPATH=. {sys.executable} -m pytest tests/ -x -q --tb=no",
                 },
             )
