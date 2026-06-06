@@ -439,20 +439,16 @@ class BrowserUseArtifactTests(unittest.TestCase):
 
         events: dict = {}
 
-        class FakePage:
-            async def screenshot(self, path=None, full_page=False):
+        class FakeBrowserSession:
+            def __init__(self, **kwargs):
+                pass
+
+            async def take_screenshot(self, path=None, full_page=False):
                 if screenshot_raises:
                     raise RuntimeError("cdp screenshot boom")
                 Path(path).write_bytes(b"PNGDATA")
                 events["screenshot_path"] = path
                 return b"PNGDATA"
-
-        class FakeBrowserSession:
-            def __init__(self, **kwargs):
-                pass
-
-            async def get_current_page(self):
-                return FakePage()
 
             async def stop(self):
                 events["stopped"] = True
@@ -554,16 +550,12 @@ class BrowserUseArtifactTests(unittest.TestCase):
         import claw_v2.computer as computer_mod
         from claw_v2.computer import BrowserUseService
 
-        class FakePage:
-            async def screenshot(self, path=None, full_page=False):
-                await asyncio.sleep(1)  # exceeds the patched capture budget
-
         class FakeBrowserSession:
             def __init__(self, **kwargs):
                 pass
 
-            async def get_current_page(self):
-                return FakePage()
+            async def take_screenshot(self, path=None, full_page=False):
+                await asyncio.sleep(1)  # exceeds the patched capture budget
 
             async def stop(self):
                 pass
