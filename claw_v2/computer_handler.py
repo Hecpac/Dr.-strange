@@ -23,6 +23,9 @@ logger = logging.getLogger(__name__)
 
 _URL_RE = re.compile(r"https?://[^\s<>()\[\]\"']+")
 BROWSER_USE_TIMEOUT_SECONDS = 180
+# Extra wall-clock the worker-thread future is allowed beyond the agent timeout,
+# to cover the bounded post-task screenshot capture plus browser cleanup.
+BROWSER_USE_TASK_GRACE_SECONDS = 60
 
 
 def _error_message(exc: BaseException) -> str:
@@ -554,10 +557,8 @@ class ComputerHandler:
                 "instruction_hash": _instruction_hash(getattr(session, "task", "")),
             },
         )
-        result = self._run_browser_use_task(session.task)
-        artifact_path = getattr(self.browser_use, "last_artifact_path", None)
-        if artifact_path:
-            session.screenshot_path = artifact_path
+        result = self._run_browser_use_task(session)
+        artifact_path = getattr(session, "screenshot_path", None)
         session.pending_action = None
         session.status = "done"
         self._emit(
@@ -571,22 +572,26 @@ class ComputerHandler:
         )
         return result
 
-    def _run_browser_use_task(self, instruction: str) -> str:
+    def _run_browser_use_task(self, session: Any) -> str:
         import asyncio
 
         timeout = self._browser_use_timeout()
 
         async def _run() -> Any:
             try:
-                return await asyncio.wait_for(
-                    self.browser_use.run_task(instruction),
-                    timeout=timeout,
-                )
+                # run_task bounds only the agent work by `timeout`; the
+                # best-effort artifact capture runs afterwards on its own budget.
+                result = await self.browser_use.run_task(session.task, timeout=timeout)
             except asyncio.TimeoutError as exc:
                 raise RuntimeError(
                     "browser_use timed out after "
                     f"{timeout}s while executing approved browser automation"
                 ) from exc
+            # Bind the artifact to THIS session inside the worker thread, where
+            # the thread-local last_artifact_path was just set — avoids the
+            # shared-state race across concurrent sessions.
+            session.screenshot_path = getattr(self.browser_use, "last_artifact_path", None)
+            return result
 
         try:
             loop = asyncio.get_running_loop()
@@ -598,7 +603,7 @@ class ComputerHandler:
             pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
             future = pool.submit(lambda: asyncio.run(_run()))
             try:
-                return str(future.result(timeout=timeout + 10))
+                return str(future.result(timeout=timeout + BROWSER_USE_TASK_GRACE_SECONDS))
             except concurrent.futures.TimeoutError as exc:
                 future.cancel()
                 raise RuntimeError(

@@ -424,6 +424,116 @@ class BrowserUseArtifactTests(unittest.TestCase):
         self.assertEqual(result, "texto resultado")
         self.assertIsNone(svc.last_artifact_path)
 
+    def test_agent_timeout_raises(self) -> None:
+        import asyncio
+        import sys
+        import types
+
+        from claw_v2.computer import BrowserUseService
+
+        class FakeBrowserSession:
+            def __init__(self, **kwargs):
+                pass
+
+            async def stop(self):
+                pass
+
+        class FakeAgent:
+            def __init__(self, **kwargs):
+                pass
+
+            async def run(self):
+                await asyncio.sleep(1)
+                return None
+
+        class FakeChatOpenAI:
+            def __init__(self, **kwargs):
+                pass
+
+        module = types.SimpleNamespace(
+            Agent=FakeAgent, BrowserSession=FakeBrowserSession, ChatOpenAI=FakeChatOpenAI
+        )
+        with patch.dict(sys.modules, {"browser_use": module}):
+            svc = BrowserUseService()
+            with self.assertRaises(asyncio.TimeoutError):
+                asyncio.run(svc.run_task("t", timeout=0.05))
+
+    def test_slow_capture_does_not_fail_completed_task(self) -> None:
+        # A completed agent task near the timeout must not be turned into a
+        # failure by a slow/hung screenshot capture (Codex review).
+        import asyncio
+        import sys
+        import types
+
+        import claw_v2.computer as computer_mod
+        from claw_v2.computer import BrowserUseService
+
+        class FakePage:
+            async def screenshot(self, path=None, full_page=False):
+                await asyncio.sleep(1)  # exceeds the patched capture budget
+
+        class FakeBrowserSession:
+            def __init__(self, **kwargs):
+                pass
+
+            async def get_current_page(self):
+                return FakePage()
+
+            async def stop(self):
+                pass
+
+        class FakeResult:
+            def final_result(self):
+                return "completado"
+
+            def last_action(self):
+                return None
+
+        class FakeAgent:
+            def __init__(self, **kwargs):
+                pass
+
+            async def run(self):
+                return FakeResult()
+
+        class FakeChatOpenAI:
+            def __init__(self, **kwargs):
+                pass
+
+        module = types.SimpleNamespace(
+            Agent=FakeAgent, BrowserSession=FakeBrowserSession, ChatOpenAI=FakeChatOpenAI
+        )
+        with patch.object(computer_mod, "_BROWSER_USE_CAPTURE_TIMEOUT_SECONDS", 0.05):
+            with patch.dict(sys.modules, {"browser_use": module}):
+                svc = BrowserUseService()
+                result = asyncio.run(svc.run_task("t", timeout=5))
+        self.assertEqual(result, "completado")
+        self.assertIsNone(svc.last_artifact_path)
+
+
+class ComputerHandlerSessionArtifactTests(unittest.TestCase):
+    def test_run_browser_use_task_binds_artifact_to_session(self) -> None:
+        # The artifact is read from the session (set inside the worker thread),
+        # not from the shared service attribute — avoids the concurrent-session
+        # race (Gemini review).
+        import types
+
+        from claw_v2.computer_handler import ComputerHandler
+
+        class FakeBrowserUse:
+            def __init__(self):
+                self.last_artifact_path = None
+
+            async def run_task(self, task, **kwargs):
+                self.last_artifact_path = "/tmp/img-A.png"
+                return "ok"
+
+        handler = ComputerHandler(browser_use=FakeBrowserUse(), config=None)
+        session = types.SimpleNamespace(task="hola", screenshot_path=None)
+        result = handler._run_browser_use_task(session)
+        self.assertEqual(result, "ok")
+        self.assertEqual(session.screenshot_path, "/tmp/img-A.png")
+
 
 class ComputerHandlerTimeoutTests(unittest.TestCase):
     def _handler(self, config):

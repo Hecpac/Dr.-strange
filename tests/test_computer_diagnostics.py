@@ -86,7 +86,7 @@ class ComputerDiagnosticsTests(unittest.TestCase):
 
     def test_browser_use_timeout_emits_structured_diagnostics(self) -> None:
         class TimeoutBrowserUse:
-            async def run_task(self, _instruction: str) -> str:
+            async def run_task(self, _instruction: str, **kwargs) -> str:
                 raise asyncio.TimeoutError()
 
         with tempfile.TemporaryDirectory() as tmpdir:
