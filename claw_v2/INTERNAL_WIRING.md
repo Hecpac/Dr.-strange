@@ -115,6 +115,20 @@ invariants:
       - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_self_improve_promotion_actions_have_critical_floor
       - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_branch_promotion_executor_does_not_accept_live_head_state_flag
 
+  computer_use_import_safe:
+    rule: computer-use must be import-safe on headless hosts. Importing
+          claw_v2.computer or claw_v2.main must not import pyautogui, and the
+          runtime must not construct ComputerUseService when computer-use is
+          disabled.
+    chokepoints:
+      - computer._load_pyautogui is the only pyautogui import path.
+      - main._probe_pyautogui_display bounds pyautogui.size() with a sync-safe timeout.
+      - main._setup_operational_services constructs ComputerUseService only when
+        config.computer_use_enabled is true.
+    enforced_by:
+      - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_computer_module_does_not_import_pyautogui_at_module_scope
+      - tests/test_computer_import_safety.py
+
   evidence_gate_meta_skip_sync_path:
     rule: The chain handle_text → _brain_text_response →
           _prepare_visible_brain_content → _record_evidence_gate_explicit_blocker

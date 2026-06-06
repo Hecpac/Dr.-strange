@@ -428,6 +428,7 @@ class AppConfig:
     notebooklm_cli_timeout_seconds: float
     notebooklm_cli_long_timeout_seconds: float
     computer_use_enabled: bool
+    computer_use_required: bool
     computer_auto_approve: bool
     computer_display_width: int
     computer_display_height: int
@@ -603,6 +604,7 @@ class AppConfig:
             notebooklm_cli_timeout_seconds=_env_float("NOTEBOOKLM_CLI_TIMEOUT_SECONDS", 120.0),
             notebooklm_cli_long_timeout_seconds=_env_float("NOTEBOOKLM_CLI_LONG_TIMEOUT_SECONDS", 1200.0),
             computer_use_enabled=_env_bool("COMPUTER_USE_ENABLED", True),
+            computer_use_required=_env_bool("COMPUTER_USE_REQUIRED", False),
             # When true, browser_use_task and desktop/CDP actions auto-execute
             # without "te autorizo" EXCEPT for sensitive URLs (SENSITIVE_URLS),
             # destructive hotkeys, and CDP submit, which still require approval.

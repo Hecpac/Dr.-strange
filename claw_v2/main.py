@@ -39,7 +39,13 @@ from claw_v2.browser import DevBrowserService
 from claw_v2.checkpoint import CheckpointService
 from claw_v2.buddy import BuddyService
 from claw_v2.bus import AgentBus
-from claw_v2.computer import BrowserUseService, CodexComputerBackend, ComputerUseService
+from claw_v2.computer import (
+    BrowserUseService,
+    CodexComputerBackend,
+    ComputerUseService,
+    ComputerUseUnavailable,
+    _load_pyautogui,
+)
 from claw_v2.config import AppConfig, MonitoredSiteConfig, ScheduledSubAgentConfig
 from claw_v2.coordinator import CoordinatorService
 from claw_v2.cron import CronScheduler, ScheduledJob
@@ -290,15 +296,50 @@ def _find_local_chrome() -> str | None:
     return None
 
 
-def _probe_pyautogui_display() -> tuple[int, int]:
-    import pyautogui
+def _probe_pyautogui_display(*, timeout_s: float = 5.0) -> tuple[int, int]:
+    import queue
+    import threading
 
-    size = pyautogui.size()
-    return int(getattr(size, "width", 0)), int(getattr(size, "height", 0))
+    results: queue.Queue[tuple[bool, object]] = queue.Queue(maxsize=1)
+
+    def worker() -> None:
+        try:
+            pag = _load_pyautogui()
+            size = pag.size()
+            results.put((True, (int(getattr(size, "width", 0)), int(getattr(size, "height", 0)))))
+        except Exception as exc:
+            results.put((False, exc))
+
+    thread = threading.Thread(target=worker, name="computer-use-pyautogui-probe", daemon=True)
+    thread.start()
+    thread.join(timeout_s)
+    if thread.is_alive():
+        raise TimeoutError(f"pyautogui display probe timed out after {timeout_s:.1f}s")
+    ok, value = results.get_nowait()
+    if ok:
+        return value  # type: ignore[return-value]
+    raise value  # type: ignore[misc]
 
 
 def _run_startup_healthchecks(config: AppConfig, observe: ObserveStream) -> StartupHealthReport:
     report = StartupHealthReport()
+
+    def computer_required_failed(name: str, detail: str) -> None:
+        observe.emit(
+            "computer_use_required_failed",
+            payload={
+                "name": name,
+                "backend": config.computer_use_backend,
+                "detail": detail,
+            },
+        )
+        report.add_failed(name, detail, capability="computer_use")
+
+    def degrade_or_fail_computer(name: str, detail: str) -> None:
+        if config.computer_use_required:
+            computer_required_failed(name, detail)
+        else:
+            report.add_degraded(name, detail, capability="computer_use")
 
     for name, path in (
         ("workspace_root", config.workspace_root),
@@ -359,50 +400,84 @@ def _run_startup_healthchecks(config: AppConfig, observe: ObserveStream) -> Star
             f"configured: backend={config.computer_use_backend}",
             capability="computer_use",
         )
-        try:
-            display_width, display_height = _probe_pyautogui_display()
-        except Exception as exc:
-            report.add_degraded(
-                "computer_display",
-                f"pyautogui display probe failed: {exc}",
+        if config.computer_use_backend == "openai":
+            observe.emit(
+                "computer_use_probe_started",
+                payload={"backend": config.computer_use_backend},
             )
-        else:
-            if display_width <= 0 or display_height <= 0:
-                report.add_degraded(
-                    "computer_display",
-                    f"pyautogui reports unusable display size: {display_width}x{display_height}",
+            try:
+                display_width, display_height = _probe_pyautogui_display()
+            except ComputerUseUnavailable as exc:
+                detail = f"pyautogui import failed: {exc}"
+                observe.emit(
+                    "computer_use_import_failed",
+                    payload={"backend": config.computer_use_backend, "error": str(exc)[:200]},
                 )
+                degrade_or_fail_computer("computer_display", detail)
+            except Exception as exc:
+                degrade_or_fail_computer("computer_display", f"pyautogui display probe failed: {exc}")
             else:
-                report.add_ok("computer_display", f"{display_width}x{display_height}")
+                if display_width <= 0 or display_height <= 0:
+                    degrade_or_fail_computer(
+                        "computer_display",
+                        f"pyautogui reports unusable display size: {display_width}x{display_height}",
+                    )
+                else:
+                    report.add_ok("computer_display", f"{display_width}x{display_height}")
+                    observe.emit(
+                        "computer_use_available",
+                        payload={
+                            "backend": config.computer_use_backend,
+                            "display_width": display_width,
+                            "display_height": display_height,
+                        },
+                    )
     else:
-        report.add_degraded(
-            "computer_use",
-            "Computer Use está desactivado en la configuración",
-            capability="computer_use",
+        disabled_detail = "Computer Use está desactivado en la configuración"
+        observe.emit(
+            "computer_use_disabled",
+            payload={"required": config.computer_use_required},
         )
+        if config.computer_use_required:
+            computer_required_failed("computer_use", disabled_detail)
+        else:
+            report.add_degraded(
+                "computer_use",
+                disabled_detail,
+                capability="computer_use",
+            )
 
     if config.computer_use_backend == "codex":
         codex_path = shutil.which(config.codex_cli_path) if config.codex_cli_path else None
         if codex_path is None:
-            report.add_degraded(
-                "codex_cli",
-                f"Codex CLI no está disponible en '{config.codex_cli_path}'",
-                capability="computer_control",
-            )
+            detail = f"Codex CLI no está disponible en '{config.codex_cli_path}'"
+            if config.computer_use_enabled and config.computer_use_required:
+                computer_required_failed("codex_cli", detail)
+            else:
+                report.add_degraded(
+                    "codex_cli",
+                    detail,
+                    capability="computer_control",
+                )
         else:
             report.add_ok("codex_cli", codex_path, capability="computer_control")
     elif config.computer_use_backend == "openai":
         if config.computer_use_enabled and not config.openai_api_key:
-            report.add_degraded(
-                "openai_api_key",
-                "OPENAI_API_KEY no está configurado; el backend openai fallará al ejecutar acciones reales",
-            )
+            detail = "OPENAI_API_KEY no está configurado; el backend openai fallará al ejecutar acciones reales"
+            if config.computer_use_required:
+                computer_required_failed("openai_api_key", detail)
+            else:
+                report.add_degraded("openai_api_key", detail, capability="computer_use")
         if config.computer_use_enabled and not sys.modules.get("openai") and importlib.util.find_spec("openai") is None:
-            report.add_degraded(
-                "openai_sdk",
-                "OpenAI SDK no está instalado; el control de escritorio asistido quedará degradado",
-                capability="computer_control",
-            )
+            detail = "OpenAI SDK no está instalado; el control de escritorio asistido quedará degradado"
+            if config.computer_use_required:
+                computer_required_failed("openai_sdk", detail)
+            else:
+                report.add_degraded(
+                    "openai_sdk",
+                    detail,
+                    capability="computer_control",
+                )
         else:
             report.add_ok("computer_control", config.computer_use_backend, capability="computer_control")
     else:
@@ -812,7 +887,7 @@ def _setup_operational_services(
     kairos: KairosService,
     startup_health: StartupHealthReport,
     observation_window: ObservationWindowState | None,
-) -> tuple[ClawDaemon, BotService, PipelineService, DevBrowserService, BrowserUseService, ComputerUseService]:
+) -> tuple[ClawDaemon, BotService, PipelineService, DevBrowserService, BrowserUseService, ComputerUseService | None]:
     daemon = ClawDaemon(
         scheduler=CronScheduler(),
         heartbeat=heartbeat,
@@ -831,17 +906,19 @@ def _setup_operational_services(
         policy_context="telegram",
         default_cwd=config.workspace_root,
     )
-    codex_computer_backend: CodexComputerBackend | None = None
-    if config.computer_use_backend == "codex":
-        codex_computer_backend = CodexComputerBackend(
-            cli_path=config.codex_cli_path,
-            model=config.codex_model,
+    computer: ComputerUseService | None = None
+    if config.computer_use_enabled:
+        codex_computer_backend: CodexComputerBackend | None = None
+        if config.computer_use_backend == "codex":
+            codex_computer_backend = CodexComputerBackend(
+                cli_path=config.codex_cli_path,
+                model=config.codex_model,
+            )
+        computer = ComputerUseService(
+            display_width=config.computer_display_width,
+            display_height=config.computer_display_height,
+            codex_backend=codex_computer_backend,
         )
-    computer = ComputerUseService(
-        display_width=config.computer_display_width,
-        display_height=config.computer_display_height,
-        codex_backend=codex_computer_backend,
-    )
     browser_use = BrowserUseService(cdp_url=f"http://localhost:{config.claw_chrome_port}")
     from claw_v2.stop_notifier import build_stop_notifier
     stop_notifier = build_stop_notifier(config=config)

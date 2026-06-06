@@ -15,15 +15,30 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-import pyautogui
-
 logger = logging.getLogger(__name__)
 
-pyautogui.FAILSAFE = True
-pyautogui.PAUSE = 0.3
+pyautogui: Any | None = None
 
 LOCK_PATH = Path.home() / ".claw" / "computer_use.lock"
 TERMINAL_APPS = {"Terminal", "iTerm2", "Alacritty", "kitty", "Warp", "WezTerm"}
+
+
+class ComputerUseUnavailable(RuntimeError):
+    pass
+
+
+def _load_pyautogui() -> Any:
+    global pyautogui
+    if pyautogui is not None:
+        return pyautogui
+    try:
+        import pyautogui as imported_pyautogui
+    except Exception as exc:
+        raise ComputerUseUnavailable(str(exc)) from exc
+    imported_pyautogui.FAILSAFE = True
+    imported_pyautogui.PAUSE = 0.1
+    pyautogui = imported_pyautogui
+    return imported_pyautogui
 
 
 @dataclass
@@ -258,59 +273,60 @@ class ComputerUseService:
         action_type = action.get("action") or action.get("type", "")
         if action_type == "screenshot":
             return self.capture_screenshot()
+        pag = _load_pyautogui()
         # OpenAI format: click with button field
         if action_type == "click":
             x, y = self._scale_coords([action.get("x", 0), action.get("y", 0)])
             button = action.get("button", "left")
             if button == "right":
-                pyautogui.rightClick(x, y)
+                pag.rightClick(x, y)
             elif button == "middle":
-                pyautogui.middleClick(x, y)
+                pag.middleClick(x, y)
             else:
-                pyautogui.click(x, y)
+                pag.click(x, y)
         elif action_type == "double_click":
             coord = action.get("coordinate") or [action.get("x", 0), action.get("y", 0)]
             x, y = self._scale_coords(coord)
-            pyautogui.doubleClick(x, y)
+            pag.doubleClick(x, y)
         # Anthropic format: left_click with coordinate
         elif action_type == "left_click":
             x, y = self._scale_coords(action["coordinate"])
-            pyautogui.click(x, y)
+            pag.click(x, y)
         elif action_type == "right_click":
             x, y = self._scale_coords(action["coordinate"])
-            pyautogui.rightClick(x, y)
+            pag.rightClick(x, y)
         elif action_type == "middle_click":
             x, y = self._scale_coords(action["coordinate"])
-            pyautogui.middleClick(x, y)
+            pag.middleClick(x, y)
         elif action_type == "type":
-            pyautogui.typewrite(action.get("text", ""), interval=0.02)
+            pag.typewrite(action.get("text", ""), interval=0.02)
         elif action_type in ("key", "keypress"):
             keys = action.get("text") or action.get("keys", "")
             key_list = keys.split("+") if isinstance(keys, str) else keys
             if len(key_list) > 1:
-                pyautogui.hotkey(*key_list)
+                pag.hotkey(*key_list)
             else:
-                pyautogui.press(key_list[0])
+                pag.press(key_list[0])
         elif action_type in ("mouse_move", "move"):
             x, y = self._scale_coords(
                 action.get("coordinate") or [action.get("x", 0), action.get("y", 0)]
             )
-            pyautogui.moveTo(x, y)
+            pag.moveTo(x, y)
         elif action_type == "scroll":
             coord = action.get("coordinate") or [action.get("x", 0), action.get("y", 0)]
             x, y = self._scale_coords(coord)
-            pyautogui.moveTo(x, y)
+            pag.moveTo(x, y)
             direction = action.get("scroll_direction", action.get("direction", "down"))
             amount = action.get("scroll_amount", action.get("amount", 3))
             scroll_val = -amount if direction == "down" else amount
-            pyautogui.scroll(scroll_val)
+            pag.scroll(scroll_val)
         elif action_type in ("left_click_drag", "drag"):
             start = action.get("start_coordinate") or [action.get("start_x", 0), action.get("start_y", 0)]
             end = action.get("coordinate") or [action.get("x", 0), action.get("y", 0)]
             sx, sy = self._scale_coords(start)
             ex, ey = self._scale_coords(end)
-            pyautogui.moveTo(sx, sy)
-            pyautogui.drag(ex - sx, ey - sy)
+            pag.moveTo(sx, sy)
+            pag.drag(ex - sx, ey - sy)
         elif action_type == "wait":
             time.sleep(action.get("ms", 1000) / 1000.0)
             return None

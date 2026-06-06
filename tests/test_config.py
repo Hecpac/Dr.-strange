@@ -541,6 +541,7 @@ class CodexConfigTests(unittest.TestCase):
                 os.chdir(previous_cwd)
         self.assertEqual(config.codex_model, "codex-mini-latest")
         self.assertEqual(config.computer_use_backend, "openai")
+        self.assertFalse(config.computer_use_required)
 
     def test_computer_use_backend_codex_passes_validate(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

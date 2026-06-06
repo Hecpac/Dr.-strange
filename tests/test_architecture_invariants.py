@@ -84,6 +84,16 @@ class ArchitectureInvariantTests(unittest.TestCase):
         self.assertNotIn("allow_live_head_promotion", source)
         self.assertIn("_commit_to_isolated_branch", source)
 
+    def test_computer_module_does_not_import_pyautogui_at_module_scope(self) -> None:
+        tree = ast.parse((REPO_ROOT / "claw_v2" / "computer.py").read_text(encoding="utf-8"))
+        offenders: list[str] = []
+        for node in tree.body:
+            if isinstance(node, ast.Import):
+                offenders.extend(alias.name for alias in node.names if alias.name == "pyautogui")
+            elif isinstance(node, ast.ImportFrom) and node.module == "pyautogui":
+                offenders.append(node.module)
+        self.assertEqual(offenders, [])
+
     def test_no_default_on_scheduler_job_runs_heavy_work_inline_in_daemon_tick(self) -> None:
         """Deny-by-default backstop for Core Invariant 1.
 
