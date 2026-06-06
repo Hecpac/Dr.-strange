@@ -98,6 +98,25 @@ class ActionGateTests(unittest.TestCase):
         self.assertTrue(gate.is_sensitive_url("https://ROBINHOOD.com/account"))
         self.assertTrue(gate.is_sensitive_url("https://Robinhood.COM"))
 
+    # --- is_sensitive_text (free-text / browser_use task instructions) ---
+
+    def test_is_sensitive_text_matches_brand(self) -> None:
+        self.assertTrue(self.gate.is_sensitive_text("compra acciones en polymarket hoy"))
+        self.assertTrue(self.gate.is_sensitive_text("abre POLYMARKET.com/market"))
+
+    def test_is_sensitive_text_brand_is_whole_word(self) -> None:
+        # brand is "ads.google", so a bare "google" must not false-positive
+        self.assertFalse(self.gate.is_sensitive_text("busca recetas en google"))
+
+    def test_is_sensitive_text_none_and_empty(self) -> None:
+        self.assertFalse(self.gate.is_sensitive_text(None))
+        self.assertFalse(self.gate.is_sensitive_text(""))
+
+    def test_is_sensitive_text_no_substring_false_positive(self) -> None:
+        gate = ActionGate(sensitive_urls=["stripe.com"])
+        self.assertTrue(gate.is_sensitive_text("paga con stripe ahora"))
+        self.assertFalse(gate.is_sensitive_text("un traje a pinstripe"))
+
 
 class RiskLevelTests(unittest.TestCase):
     def setUp(self) -> None:

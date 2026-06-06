@@ -23,6 +23,9 @@ logger = logging.getLogger(__name__)
 
 _URL_RE = re.compile(r"https?://[^\s<>()\[\]\"']+")
 BROWSER_USE_TIMEOUT_SECONDS = 180
+# Extra wall-clock the worker-thread future is allowed beyond the agent timeout,
+# to cover the bounded post-task screenshot capture plus browser cleanup.
+BROWSER_USE_TASK_GRACE_SECONDS = 60
 
 
 def _error_message(exc: BaseException) -> str:
@@ -253,7 +256,7 @@ class ComputerHandler:
                     {
                         "session_id": session_id,
                         "backend": backend,
-                        "timeout_seconds": BROWSER_USE_TIMEOUT_SECONDS,
+                        "timeout_seconds": self._browser_use_timeout(),
                         "current_url": getattr(session, "current_url", None),
                         "instruction_hash": _instruction_hash(getattr(session, "task", "")),
                     },
@@ -357,10 +360,17 @@ class ComputerHandler:
         model = str(getattr(self.config, "computer_browser_use_model", "") or "").strip()
         return model or DEFAULT_BROWSER_USE_MODEL
 
+    def _browser_use_timeout(self) -> int:
+        configured = getattr(self.config, "computer_browser_use_timeout_seconds", 0)
+        try:
+            configured = int(configured)
+        except (TypeError, ValueError):
+            configured = 0
+        return configured if configured > 0 else BROWSER_USE_TIMEOUT_SECONDS
+
     def _browser_task_is_sensitive(self, task: str | None, current_url: str | None) -> bool:
         """Best-effort: a browser_use task is sensitive if it starts on a
-        sensitive URL or its instruction names a sensitive domain — by full
-        host (``stripe.com``) OR brand name (``stripe``, ``ads.google``).
+        sensitive URL or its instruction names a sensitive domain (by brand).
         Sensitive tasks keep the approval gate even when auto-approve is enabled.
 
         Note: browser_use runs an autonomous agent that can navigate elsewhere
@@ -368,20 +378,7 @@ class ComputerHandler:
         protection for a sensitive site still depends on it being in
         SENSITIVE_URLS (and, ideally, per-navigation gating in browser_use)."""
         gate = self._get_gate()
-        if gate.is_sensitive_url(current_url):
-            return True
-        text = (task or "").lower()
-        for pattern in gate.sensitive_urls:
-            host = pattern.lower()
-            if host in text:
-                return True
-            # Brand name without the final TLD label ("stripe.com" -> "stripe",
-            # "ads.google.com" -> "ads.google"), matched as a whole word so
-            # "pinstripe" / "google" do not false-positive.
-            brand = host.rsplit(".", 1)[0]
-            if brand and re.search(rf"\b{re.escape(brand)}\b", text):
-                return True
-        return False
+        return gate.is_sensitive_url(current_url) or gate.is_sensitive_text(task)
 
     def _get_gate(self) -> Any:
         if self.computer_gate is not None:
@@ -547,12 +544,13 @@ class ComputerHandler:
             "computer_browser_use_task_started",
             {
                 "backend": "browser_use",
-                "timeout_seconds": BROWSER_USE_TIMEOUT_SECONDS,
+                "timeout_seconds": self._browser_use_timeout(),
                 "current_url": getattr(session, "current_url", None),
                 "instruction_hash": _instruction_hash(getattr(session, "task", "")),
             },
         )
-        result = self._run_browser_use_task(session.task)
+        result = self._run_browser_use_task(session)
+        artifact_path = getattr(session, "screenshot_path", None)
         session.pending_action = None
         session.status = "done"
         self._emit(
@@ -560,27 +558,35 @@ class ComputerHandler:
             {
                 "backend": "browser_use",
                 "result_chars": len(str(result or "")),
+                "artifact_saved": bool(artifact_path),
                 "instruction_hash": _instruction_hash(getattr(session, "task", "")),
             },
         )
         return result
 
-    def _run_browser_use_task(self, instruction: str) -> str:
+    def _run_browser_use_task(self, session: Any) -> str:
         import asyncio
 
         model = self._browser_use_model()
+        timeout = self._browser_use_timeout()
 
         async def _run() -> Any:
             try:
-                return await asyncio.wait_for(
-                    self.browser_use.run_task(instruction, model=model),
-                    timeout=BROWSER_USE_TIMEOUT_SECONDS,
+                # run_task bounds only the agent work by `timeout`; the
+                # best-effort artifact capture runs afterwards on its own budget.
+                result = await self.browser_use.run_task(
+                    session.task, model=model, timeout=timeout
                 )
             except asyncio.TimeoutError as exc:
                 raise RuntimeError(
                     "browser_use timed out after "
-                    f"{BROWSER_USE_TIMEOUT_SECONDS}s while executing approved browser automation"
+                    f"{timeout}s while executing approved browser automation"
                 ) from exc
+            # Bind the artifact to THIS session inside the worker thread, where
+            # the thread-local last_artifact_path was just set — avoids the
+            # shared-state race across concurrent sessions.
+            session.screenshot_path = getattr(self.browser_use, "last_artifact_path", None)
+            return result
 
         try:
             loop = asyncio.get_running_loop()
@@ -592,12 +598,12 @@ class ComputerHandler:
             pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
             future = pool.submit(lambda: asyncio.run(_run()))
             try:
-                return str(future.result(timeout=BROWSER_USE_TIMEOUT_SECONDS + 10))
+                return str(future.result(timeout=timeout + BROWSER_USE_TASK_GRACE_SECONDS))
             except concurrent.futures.TimeoutError as exc:
                 future.cancel()
                 raise RuntimeError(
                     "browser_use timed out after "
-                    f"{BROWSER_USE_TIMEOUT_SECONDS}s while executing approved browser automation"
+                    f"{timeout}s while executing approved browser automation"
                 ) from exc
             finally:
                 pool.shutdown(wait=False, cancel_futures=True)

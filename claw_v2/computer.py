@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import fcntl
 import hashlib
@@ -506,6 +507,9 @@ class ComputerUseService:
 # weak at grounding (more steps per task -> timeouts). Default to the repo's
 # current OpenAI API tier; override via CLAW_BROWSER_USE_MODEL.
 DEFAULT_BROWSER_USE_MODEL = "gpt-5.4"
+# Upper bound for the best-effort post-task screenshot so a hung capture can
+# never delay or fail an otherwise-completed browser task.
+_BROWSER_USE_CAPTURE_TIMEOUT_SECONDS = 30
 
 
 class BrowserUseService:
@@ -523,6 +527,21 @@ class BrowserUseService:
     ) -> None:
         self.cdp_url = cdp_url
         self.headless = headless
+        # Path of the screenshot captured at the end of the most recent
+        # run_task, so the caller can surface a fresh artifact (e.g. the
+        # generated image) instead of a stale one. Thread-local because
+        # BrowserUseService is a shared singleton and concurrent sessions each
+        # run run_task in their own worker thread — a plain attribute would let
+        # one session read another session's screenshot.
+        self._artifact_local = threading.local()
+
+    @property
+    def last_artifact_path(self) -> str | None:
+        return getattr(self._artifact_local, "path", None)
+
+    @last_artifact_path.setter
+    def last_artifact_path(self, value: str | None) -> None:
+        self._artifact_local.path = value
 
     async def run_task(
         self,
@@ -532,10 +551,13 @@ class BrowserUseService:
         max_actions_per_step: int = 5,
         use_vision: bool = True,
         save_conversation: str | None = None,
+        artifact_dir: str | Path | None = None,
+        timeout: float | None = None,
     ) -> str:
         import os
         from browser_use import Agent, BrowserSession, ChatOpenAI
 
+        self.last_artifact_path = None
         browser = BrowserSession(
             cdp_url=self.cdp_url,
             headless=self.headless,
@@ -552,14 +574,49 @@ class BrowserUseService:
             use_vision=use_vision,
             save_conversation_path=save_conversation,
         )
+        artifact_path: Path | None = None
         try:
-            result = await agent.run()
+            # Only the agent work is bounded by the caller's timeout. The
+            # artifact capture runs AFTER, with its own budget, so a task that
+            # finishes near `timeout` is never turned into a timeout failure by
+            # the screenshot.
+            if timeout is not None:
+                result = await asyncio.wait_for(agent.run(), timeout=timeout)
+            else:
+                result = await agent.run()
+            artifact_path = await self._capture_page_artifact(browser, artifact_dir)
         finally:
             await browser.stop()
-        if result.final_result():
-            return result.final_result()
-        last = result.last_action()
-        return str(last) if last else "(no result)"
+        final = result.final_result()
+        if final:
+            text = final
+        else:
+            last = result.last_action()
+            text = str(last) if last else "(no result)"
+        if artifact_path is not None:
+            self.last_artifact_path = str(artifact_path)
+            return f"{text}\n\n[Captura guardada: {artifact_path}]"
+        return text
+
+    async def _capture_page_artifact(
+        self, browser: Any, artifact_dir: str | Path | None
+    ) -> Path | None:
+        """Best-effort screenshot of the active page after a task, saved as a
+        fresh PNG. Bounded by its own timeout and tolerant of any failure —
+        never aborts the task (returns None instead)."""
+        try:
+            page = await browser.get_current_page()
+            directory = Path(artifact_dir) if artifact_dir else (Path.home() / ".claw" / "images")
+            directory.mkdir(parents=True, exist_ok=True)
+            path = directory / f"browser_use_{int(time.time() * 1000)}.png"
+            await asyncio.wait_for(
+                page.screenshot(path=str(path), full_page=True),
+                timeout=_BROWSER_USE_CAPTURE_TIMEOUT_SECONDS,
+            )
+            return path
+        except Exception:
+            logger.warning("browser_use page artifact capture failed", exc_info=True)
+            return None
 
     async def extract(
         self,

@@ -101,6 +101,7 @@ def make_config(root: Path) -> AppConfig:
         computer_auto_approve=False,
         computer_display_width=1280,
         computer_display_height=800,
+        computer_browser_use_timeout_seconds=420,
         ollama_host="http://localhost:11434",
         sensitive_urls=["ads.google.com", "polymarket.com"],
         codex_cli_path="codex",
