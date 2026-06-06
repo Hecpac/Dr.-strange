@@ -4356,7 +4356,7 @@ class BotTests(unittest.TestCase):
                 self.instruction = ""
                 self.called = False
 
-            async def run_task(self, instruction: str) -> str:
+            async def run_task(self, instruction: str, **kwargs) -> str:
                 self.called = True
                 self.instruction = instruction
                 return "imagen solicitada en ChatGPT"
@@ -4411,7 +4411,7 @@ class BotTests(unittest.TestCase):
 
     def test_approved_browser_use_timeout_returns_actionable_error(self) -> None:
         class TimeoutBrowserUse:
-            async def run_task(self, instruction: str) -> str:
+            async def run_task(self, instruction: str, **kwargs) -> str:
                 raise asyncio.TimeoutError()
 
         with tempfile.TemporaryDirectory() as tmpdir:

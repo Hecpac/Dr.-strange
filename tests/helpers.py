@@ -106,6 +106,7 @@ def make_config(root: Path) -> AppConfig:
         codex_cli_path="codex",
         codex_model="codex-mini-latest",
         computer_use_backend="openai",
+        computer_browser_use_model="gpt-5.4",
         morning_brief_enabled=True,
         morning_brief_hour=5,
         morning_brief_timezone="America/Chicago",

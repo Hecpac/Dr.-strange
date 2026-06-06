@@ -351,6 +351,12 @@ class ComputerHandler:
     def _auto_approve_enabled(self) -> bool:
         return bool(getattr(self.config, "computer_auto_approve", False))
 
+    def _browser_use_model(self) -> str:
+        from claw_v2.computer import DEFAULT_BROWSER_USE_MODEL
+
+        model = str(getattr(self.config, "computer_browser_use_model", "") or "").strip()
+        return model or DEFAULT_BROWSER_USE_MODEL
+
     def _browser_task_is_sensitive(self, task: str | None, current_url: str | None) -> bool:
         """Best-effort: a browser_use task is sensitive if it starts on a
         sensitive URL or its instruction names a sensitive domain — by full
@@ -562,10 +568,12 @@ class ComputerHandler:
     def _run_browser_use_task(self, instruction: str) -> str:
         import asyncio
 
+        model = self._browser_use_model()
+
         async def _run() -> Any:
             try:
                 return await asyncio.wait_for(
-                    self.browser_use.run_task(instruction),
+                    self.browser_use.run_task(instruction, model=model),
                     timeout=BROWSER_USE_TIMEOUT_SECONDS,
                 )
             except asyncio.TimeoutError as exc:
