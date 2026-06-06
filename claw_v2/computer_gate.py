@@ -32,8 +32,13 @@ def verdict_for_risk(risk: RiskLevel) -> ActionVerdict:
 
 
 class ActionGate:
-    def __init__(self, sensitive_urls: list[str] | None = None) -> None:
+    def __init__(self, sensitive_urls: list[str] | None = None, *, auto_approve: bool = False) -> None:
         self.sensitive_urls = list(sensitive_urls or [])
+        # When True, LOW + MEDIUM actions auto-execute without approval; only
+        # HIGH risk (sensitive URLs, destructive hotkeys, CDP submit) still
+        # requires an explicit "te autorizo". Risk classification below is
+        # unchanged — only the verdict threshold moves.
+        self.auto_approve = bool(auto_approve)
 
     # -- Risk-level API (new, granular) ------------------------------------
 
@@ -88,6 +93,9 @@ class ActionGate:
 
     def classify_cdp_action(self, action: dict, *, url: str | None) -> ActionVerdict:
         risk = self.risk_cdp(action, url=url)
+        if self.auto_approve:
+            # Only HIGH (sensitive URL / submit) still needs approval.
+            return ActionVerdict.NEEDS_APPROVAL if risk is RiskLevel.HIGH else ActionVerdict.SAFE
         # Preserve original behavior: all CDP writes → NEEDS_APPROVAL
         if risk in (RiskLevel.MEDIUM, RiskLevel.HIGH):
             return ActionVerdict.NEEDS_APPROVAL
@@ -95,6 +103,10 @@ class ActionGate:
 
     def classify_desktop_action(self, action: dict, *, url: str | None) -> ActionVerdict:
         risk = self.risk_desktop(action, url=url)
+        if self.auto_approve:
+            # Only HIGH (sensitive URL / destructive hotkey / typing without a
+            # known context) still needs approval.
+            return ActionVerdict.NEEDS_APPROVAL if risk is RiskLevel.HIGH else ActionVerdict.SAFE
         # Desktop is conservative: only LOW is auto-approved.
         if risk is RiskLevel.LOW:
             return ActionVerdict.SAFE

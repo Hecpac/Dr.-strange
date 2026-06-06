@@ -348,13 +348,26 @@ class ComputerHandler:
         self._client = OpenAI(api_key=api_key)
         return self._client
 
+    def _auto_approve_enabled(self) -> bool:
+        return bool(getattr(self.config, "computer_auto_approve", False))
+
+    def _browser_task_is_sensitive(self, task: str | None, current_url: str | None) -> bool:
+        """Best-effort: a browser_use task is sensitive if it starts on a
+        sensitive URL or its instruction names a sensitive domain. Sensitive
+        tasks keep the approval gate even when auto-approve is enabled."""
+        gate = self._get_gate()
+        if gate.is_sensitive_url(current_url):
+            return True
+        text = (task or "").lower()
+        return any(pattern.lower() in text for pattern in gate.sensitive_urls)
+
     def _get_gate(self) -> Any:
         if self.computer_gate is not None:
             return self.computer_gate
         from claw_v2.computer_gate import ActionGate
 
         sensitive_urls = getattr(self.config, "sensitive_urls", []) if self.config is not None else []
-        self.computer_gate = ActionGate(sensitive_urls=sensitive_urls)
+        self.computer_gate = ActionGate(sensitive_urls=sensitive_urls, auto_approve=self._auto_approve_enabled())
         return self.computer_gate
 
     def abort_response(self, session_id: str) -> str:
@@ -478,6 +491,18 @@ class ComputerHandler:
             and pending.get("approved") is True
             and isinstance(pending.get("approval_id"), str)
         )
+        if not approved and self._auto_approve_enabled() and not self._browser_task_is_sensitive(
+            session.task, getattr(session, "current_url", None)
+        ):
+            approved = True
+            self._emit(
+                "computer_browser_use_auto_approved",
+                {
+                    "backend": "browser_use",
+                    "current_url": getattr(session, "current_url", None),
+                    "instruction_hash": _instruction_hash(getattr(session, "task", "")),
+                },
+            )
         if not approved:
             session.status = "awaiting_approval"
             session.pending_action = {
