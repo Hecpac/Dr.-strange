@@ -353,13 +353,29 @@ class ComputerHandler:
 
     def _browser_task_is_sensitive(self, task: str | None, current_url: str | None) -> bool:
         """Best-effort: a browser_use task is sensitive if it starts on a
-        sensitive URL or its instruction names a sensitive domain. Sensitive
-        tasks keep the approval gate even when auto-approve is enabled."""
+        sensitive URL or its instruction names a sensitive domain — by full
+        host (``stripe.com``) OR brand name (``stripe``, ``ads.google``).
+        Sensitive tasks keep the approval gate even when auto-approve is enabled.
+
+        Note: browser_use runs an autonomous agent that can navigate elsewhere
+        mid-task; this pre-check only sees the initial instruction/URL. Reliable
+        protection for a sensitive site still depends on it being in
+        SENSITIVE_URLS (and, ideally, per-navigation gating in browser_use)."""
         gate = self._get_gate()
         if gate.is_sensitive_url(current_url):
             return True
         text = (task or "").lower()
-        return any(pattern.lower() in text for pattern in gate.sensitive_urls)
+        for pattern in gate.sensitive_urls:
+            host = pattern.lower()
+            if host in text:
+                return True
+            # Brand name without the final TLD label ("stripe.com" -> "stripe",
+            # "ads.google.com" -> "ads.google"), matched as a whole word so
+            # "pinstripe" / "google" do not false-positive.
+            brand = host.rsplit(".", 1)[0]
+            if brand and re.search(rf"\b{re.escape(brand)}\b", text):
+                return True
+        return False
 
     def _get_gate(self) -> Any:
         if self.computer_gate is not None:

@@ -93,6 +93,11 @@ class ActionGateTests(unittest.TestCase):
     def test_none_url_is_not_sensitive(self) -> None:
         self.assertFalse(self.gate.is_sensitive_url(None))
 
+    def test_sensitive_url_match_is_case_insensitive(self) -> None:
+        gate = ActionGate(sensitive_urls=["robinhood.com"])
+        self.assertTrue(gate.is_sensitive_url("https://ROBINHOOD.com/account"))
+        self.assertTrue(gate.is_sensitive_url("https://Robinhood.COM"))
+
 
 class RiskLevelTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -302,6 +307,26 @@ class ComputerHandlerBrowserAutoApproveTests(unittest.TestCase):
         handler._run_browser_use_session(session)
         self.assertFalse(stub.called)
         self.assertEqual(session.status, "awaiting_approval")
+
+    def test_brand_name_without_tld_still_requires_approval(self) -> None:
+        # "Robinhood" (capitalized, no .com) must still be gated
+        stub = _StubBrowserUse()
+        handler = self._handler(auto_approve=True, stub=stub)
+        session = self._session("vende mis acciones en Robinhood ahora")
+        handler._run_browser_use_session(session)
+        self.assertFalse(stub.called)
+        self.assertEqual(session.status, "awaiting_approval")
+
+    def test_generic_substring_of_multilabel_brand_not_gated(self) -> None:
+        # ads.google.com is sensitive, but a task mentioning only "google"
+        # must NOT gate (brand match is "ads.google" as a whole word, not "google")
+        config = SimpleNamespace(computer_auto_approve=True, sensitive_urls=["ads.google.com"])
+        stub = _StubBrowserUse()
+        handler = ComputerHandler(browser_use=stub, config=config)
+        session = self._session("abre google y busca recetas de arepas")
+        handler._run_browser_use_session(session)
+        self.assertTrue(stub.called)
+        self.assertEqual(session.status, "done")
 
 
 import tempfile

@@ -115,7 +115,10 @@ class ActionGate:
     def is_sensitive_url(self, url: str | None) -> bool:
         if url is None:
             return False
+        # Case-insensitive: a mixed-case host (https://ROBINHOOD.com) must not
+        # bypass the gate.
+        url_lower = url.lower()
         for pattern in self.sensitive_urls:
-            if pattern in url:
+            if pattern.lower() in url_lower:
                 return True
         return False
