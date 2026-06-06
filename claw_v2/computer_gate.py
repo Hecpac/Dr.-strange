@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from enum import Enum
 
 
@@ -39,6 +40,15 @@ class ActionGate:
         # requires an explicit "te autorizo". Risk classification below is
         # unchanged — only the verdict threshold moves.
         self.auto_approve = bool(auto_approve)
+        # Precompute once (sensitive_urls is fixed at construction): lowercased
+        # hosts for URL substring matching, and a whole-word brand regex per
+        # host (host minus the final TLD label) for free-text matching.
+        self._sensitive_hosts_lower = [host.lower() for host in self.sensitive_urls]
+        self._sensitive_brand_res = [
+            re.compile(rf"\b{re.escape(brand)}\b")
+            for brand in (host.rsplit(".", 1)[0] for host in self._sensitive_hosts_lower)
+            if brand
+        ]
 
     # -- Risk-level API (new, granular) ------------------------------------
 
@@ -95,7 +105,7 @@ class ActionGate:
         risk = self.risk_cdp(action, url=url)
         if self.auto_approve:
             # Only HIGH (sensitive URL / submit) still needs approval.
-            return ActionVerdict.NEEDS_APPROVAL if risk is RiskLevel.HIGH else ActionVerdict.SAFE
+            return verdict_for_risk(risk)
         # Preserve original behavior: all CDP writes → NEEDS_APPROVAL
         if risk in (RiskLevel.MEDIUM, RiskLevel.HIGH):
             return ActionVerdict.NEEDS_APPROVAL
@@ -106,19 +116,25 @@ class ActionGate:
         if self.auto_approve:
             # Only HIGH (sensitive URL / destructive hotkey / typing without a
             # known context) still needs approval.
-            return ActionVerdict.NEEDS_APPROVAL if risk is RiskLevel.HIGH else ActionVerdict.SAFE
+            return verdict_for_risk(risk)
         # Desktop is conservative: only LOW is auto-approved.
         if risk is RiskLevel.LOW:
             return ActionVerdict.SAFE
         return ActionVerdict.NEEDS_APPROVAL
 
     def is_sensitive_url(self, url: str | None) -> bool:
-        if url is None:
-            return False
         # Case-insensitive: a mixed-case host (https://ROBINHOOD.com) must not
         # bypass the gate.
+        if url is None:
+            return False
         url_lower = url.lower()
-        for pattern in self.sensitive_urls:
-            if pattern.lower() in url_lower:
-                return True
-        return False
+        return any(host in url_lower for host in self._sensitive_hosts_lower)
+
+    def is_sensitive_text(self, text: str | None) -> bool:
+        """True if free text names a sensitive domain by brand (host minus the
+        final TLD label), matched as a whole word so "pinstripe" / "google" do
+        not false-positive. Used to gate browser_use tasks given as instructions."""
+        if not text:
+            return False
+        lowered = text.lower()
+        return any(pattern.search(lowered) for pattern in self._sensitive_brand_res)
