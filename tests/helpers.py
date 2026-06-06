@@ -98,6 +98,7 @@ def make_config(root: Path) -> AppConfig:
         notebooklm_cli_timeout_seconds=120.0,
         notebooklm_cli_long_timeout_seconds=1200.0,
         computer_use_enabled=False,
+        computer_auto_approve=False,
         computer_display_width=1280,
         computer_display_height=800,
         ollama_host="http://localhost:11434",
