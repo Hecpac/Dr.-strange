@@ -602,18 +602,21 @@ class BrowserUseService:
         self, browser: Any, artifact_dir: str | Path | None
     ) -> Path | None:
         """Best-effort screenshot of the active page after a task, saved as a
-        fresh PNG. Bounded by its own timeout and tolerant of any failure —
-        never aborts the task (returns None instead)."""
+        fresh PNG via CDP. Bounded by its own timeout and tolerant of any
+        failure — never aborts the task (returns None instead).
+
+        Uses BrowserSession.take_screenshot (CDP Page.captureScreenshot), which
+        works off the CDP session directly. The older get_current_page().screenshot()
+        path returns None for the page on current browser_use versions."""
         try:
-            page = await browser.get_current_page()
             directory = Path(artifact_dir) if artifact_dir else (Path.home() / ".claw" / "images")
             directory.mkdir(parents=True, exist_ok=True)
             path = directory / f"browser_use_{int(time.time() * 1000)}.png"
             await asyncio.wait_for(
-                page.screenshot(path=str(path), full_page=True),
+                browser.take_screenshot(path=str(path), full_page=True),
                 timeout=_BROWSER_USE_CAPTURE_TIMEOUT_SECONDS,
             )
-            return path
+            return path if path.exists() else None
         except Exception:
             logger.warning("browser_use page artifact capture failed", exc_info=True)
             return None
