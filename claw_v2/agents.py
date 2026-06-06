@@ -16,11 +16,13 @@ from typing import Any, Callable
 from claw_v2.adapters.base import AdapterError
 from claw_v2.brain import BrainService
 from claw_v2.llm import LLMRouter
+from claw_v2.subprocess_runner import run_subprocess_bounded
 from claw_v2.tools import default_allowed_tools_for, is_valid_agent_class
 from claw_v2.tracing import new_trace_context
 
 _UNSET = object()
 _ERROR_SNIPPET_CHARS = 500
+_GIT_TIMEOUT_SECONDS = 60
 
 logger = logging.getLogger(__name__)
 
@@ -903,24 +905,21 @@ class GitWorktreeExperimentRunner:
             # SIGKILLed/OOMed after `worktree add` but before `_remove_workspace`.
             # The directory may be gone from disk yet still listed in
             # .git/worktrees, which makes `worktree add` exit 128.
-            subprocess.run(
+            run_subprocess_bounded(
                 ["git", "-C", str(self.repo_root), "worktree", "remove", "--force", str(worktree_path)],
-                capture_output=True,
-                text=True,
                 check=False,
+                timeout_s=_GIT_TIMEOUT_SECONDS,
             )
-            subprocess.run(
+            run_subprocess_bounded(
                 ["git", "-C", str(self.repo_root), "worktree", "prune"],
-                capture_output=True,
-                text=True,
                 check=False,
+                timeout_s=_GIT_TIMEOUT_SECONDS,
             )
             try:
-                subprocess.run(
+                run_subprocess_bounded(
                     ["git", "-C", str(self.repo_root), "worktree", "add", "--detach", str(worktree_path), "HEAD"],
-                    capture_output=True,
-                    text=True,
                     check=True,
+                    timeout_s=_GIT_TIMEOUT_SECONDS,
                 )
             except subprocess.CalledProcessError as exc:
                 raise AdapterError(
@@ -937,11 +936,10 @@ class GitWorktreeExperimentRunner:
 
     def _remove_workspace(self, worktree_path: Path, workspace_mode: str) -> None:
         if workspace_mode == "git_worktree":
-            subprocess.run(
+            run_subprocess_bounded(
                 ["git", "-C", str(self.repo_root), "worktree", "remove", "--force", str(worktree_path)],
-                capture_output=True,
-                text=True,
                 check=False,
+                timeout_s=_GIT_TIMEOUT_SECONDS,
             )
         if worktree_path.exists():
             shutil.rmtree(worktree_path, ignore_errors=True)
@@ -963,11 +961,10 @@ class GitWorktreeExperimentRunner:
         return float(state.get("last_verified_state", {}).get("metric") or 0.0)
 
     def _has_head_commit(self) -> bool:
-        completed = subprocess.run(
+        completed = run_subprocess_bounded(
             ["git", "-C", str(self.repo_root), "rev-parse", "--verify", "HEAD"],
-            capture_output=True,
-            text=True,
             check=False,
+            timeout_s=15,
         )
         return completed.returncode == 0
 
@@ -998,11 +995,10 @@ class GitWorktreeExperimentRunner:
 
     @staticmethod
     def _git(repo_path: Path, *args: str) -> str:
-        completed = subprocess.run(
+        completed = run_subprocess_bounded(
             ["git", "-C", str(repo_path), *args],
-            capture_output=True,
-            text=True,
             check=True,
+            timeout_s=_GIT_TIMEOUT_SECONDS,
         )
         return completed.stdout
 
@@ -1093,11 +1089,10 @@ class WorkspacePromotionExecutor:
     @classmethod
     def build_manifest_from_git_status(cls, worktree_path: Path | str) -> PromotionManifest:
         worktree_path = Path(worktree_path)
-        completed = subprocess.run(
+        completed = run_subprocess_bounded(
             ["git", "-C", str(worktree_path), "status", "--porcelain", "--untracked-files=all", "--", "."],
-            capture_output=True,
-            text=True,
             check=True,
+            timeout_s=_GIT_TIMEOUT_SECONDS,
         )
         manifest = PromotionManifest()
         for raw_line in completed.stdout.splitlines():
@@ -1155,35 +1150,31 @@ class GitCommitPromotionExecutor:
         return f"chore(claw): promote {agent_name}"
 
     def _has_staged_changes(self, paths: list[str]) -> bool:
-        completed = subprocess.run(
+        completed = run_subprocess_bounded(
             ["git", "-C", str(self.repo_root), "diff", "--cached", "--quiet", "--", *paths],
-            capture_output=True,
-            text=True,
             check=False,
+            timeout_s=_GIT_TIMEOUT_SECONDS,
         )
         return completed.returncode == 1
 
     def _unstage(self, paths: list[str]) -> None:
-        completed = subprocess.run(
+        completed = run_subprocess_bounded(
             ["git", "-C", str(self.repo_root), "rev-parse", "--verify", "HEAD"],
-            capture_output=True,
-            text=True,
             check=False,
+            timeout_s=15,
         )
         if completed.returncode == 0:
-            subprocess.run(
+            run_subprocess_bounded(
                 ["git", "-C", str(self.repo_root), "reset", "--mixed", "HEAD", "--", *paths],
-                capture_output=True,
-                text=True,
                 check=False,
+                timeout_s=_GIT_TIMEOUT_SECONDS,
             )
 
     def _git(self, *args: str) -> str:
-        completed = subprocess.run(
+        completed = run_subprocess_bounded(
             ["git", "-C", str(self.repo_root), *args],
-            capture_output=True,
-            text=True,
             check=True,
+            timeout_s=_GIT_TIMEOUT_SECONDS,
         )
         return completed.stdout
 
@@ -1222,11 +1213,10 @@ class GitBranchPromotionExecutor:
                 result = isolated_executor(worktree_path, state, diff)
                 return self._attach_branch(result, state)
             finally:
-                subprocess.run(
+                run_subprocess_bounded(
                     ["git", "-C", str(self.repo_root), "worktree", "remove", "--force", str(isolated_worktree)],
-                    capture_output=True,
-                    text=True,
                     check=False,
+                    timeout_s=_GIT_TIMEOUT_SECONDS,
                 )
 
     def _attach_branch(self, result: PromotionResult, state: dict) -> PromotionResult:
@@ -1265,22 +1255,20 @@ class GitBranchPromotionExecutor:
             index += 1
 
     def _resolve_branch_sha(self, branch_name: str) -> str | None:
-        completed = subprocess.run(
+        completed = run_subprocess_bounded(
             ["git", "-C", str(self.repo_root), "rev-parse", "--verify", branch_name],
-            capture_output=True,
-            text=True,
             check=False,
+            timeout_s=15,
         )
         if completed.returncode != 0:
             return None
         return completed.stdout.strip()
 
     def _git(self, *args: str) -> str:
-        completed = subprocess.run(
+        completed = run_subprocess_bounded(
             ["git", "-C", str(self.repo_root), *args],
-            capture_output=True,
-            text=True,
             check=True,
+            timeout_s=_GIT_TIMEOUT_SECONDS,
         )
         return completed.stdout
 

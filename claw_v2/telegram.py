@@ -16,6 +16,8 @@ from typing import IO, Any, Callable
 from telegram import LinkPreviewOptions, Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 
+from claw_v2.subprocess_runner import run_subprocess_bounded_off_loop
+
 
 # --- P0 hotfix E: polling singleton lock keyed by token hash ---------------
 #
@@ -482,13 +484,13 @@ class TelegramTransport:
         if self._PID_FILE.exists():
             try:
                 old_pid = int(self._PID_FILE.read_text().strip())
-                import os, signal, subprocess
+                import os, signal
                 if old_pid != os.getpid():
-                    proc = subprocess.run(
+                    proc = await run_subprocess_bounded_off_loop(
                         ["ps", "-p", str(old_pid), "-o", "command="],
-                        capture_output=True,
-                        text=True,
                         check=False,
+                        timeout_s=5,
+                        kill_process_group=False,
                     )
                     if "claw_v2.main" in proc.stdout:
                         os.kill(old_pid, signal.SIGTERM)

@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: fe99808+spec-002-self-improve-promotion-hotfix
-doc_version: 2.11
+describes_commit: fe99808+spec-002-self-improve-promotion-hotfix+spec-002-subprocess-bounded-pr-c
+doc_version: 2.12
 last_verified: 2026-06-10
-verification_method: manual + grep cross-check
+verification_method: manual + pytest + AST sentinel cross-check
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -128,6 +128,36 @@ invariants:
     enforced_by:
       - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_computer_module_does_not_import_pyautogui_at_module_scope
       - tests/test_computer_import_safety.py
+
+  subprocess_bounded_execution:
+    rule: Runtime subprocess execution must be time-bounded. New synchronous
+          subprocess callers should use subprocess_runner.run_subprocess_bounded
+          unless they have a local, explicit timeout and a documented reason.
+          Async callers should use run_subprocess_bounded_off_loop rather than
+          adding create_subprocess_exec to scheduler/runtime paths.
+    chokepoints:
+      - subprocess_runner.run_subprocess_bounded  # timeout + process-group terminate/kill + bounded output + event arg redaction
+      - subprocess_runner.run_subprocess_bounded_off_loop  # asyncio.to_thread wrapper with cancellation signal for async callers
+      - main._self_improve_handler  # pytest verification now uses bounded runner
+      - agents.GitWorktreeExperimentRunner / GitBranchPromotionExecutor  # git ops now bounded
+      - pipeline git branch/worktree/diff/push helpers  # git ops now bounded
+      - telegram.TelegramTransport.start  # ps probe runs off-loop through bounded runner
+    legacy_async_subprocess_exec_allowlist:
+      - voice._transcribe_local
+      - voice.extract_audio
+      - voice._wav_to_ogg
+      - voice._mp3_to_ogg
+    enforced_by:
+      - tests/test_subprocess_runner.py
+      - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_subprocess_run_calls_in_runtime_code_have_timeouts
+      - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_runtime_code_does_not_introduce_async_subprocess_exec
+      - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_runtime_code_restricts_direct_subprocess_popen
+      - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_runtime_code_does_not_use_shell_true_or_os_system
+      - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_runtime_builder_and_git_probe_remain_sync
+    why: git, pytest, gh, keychain, and ps calls can otherwise pin a worker
+         thread or leave descendant processes alive after timeout. PR-C keeps
+         build_runtime and _is_git_repo synchronous, avoids a create_subprocess
+         migration, and bounds the real blocking callsites instead.
 
   evidence_gate_meta_skip_sync_path:
     rule: The chain handle_text → _brain_text_response →

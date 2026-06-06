@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
+
+from claw_v2.subprocess_runner import run_subprocess_bounded
 
 
 CommandRunner = Callable[[Sequence[str]], str]
@@ -102,11 +103,10 @@ class GitHubPullRequestService:
 
     @staticmethod
     def _run_command(command: Sequence[str]) -> str:
-        completed = subprocess.run(
+        completed = run_subprocess_bounded(
             list(command),
-            capture_output=True,
-            text=True,
             check=True,
+            timeout_s=300 if command and command[0] == "gh" else 60,
         )
         return completed.stdout.strip()
 

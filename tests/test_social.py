@@ -85,18 +85,18 @@ class SocialPublisherTests(unittest.TestCase):
 
 
 class KeychainTests(unittest.TestCase):
-    @patch("claw_v2.social.subprocess")
-    def test_load_credential_calls_security(self, mock_subprocess) -> None:
-        mock_subprocess.run.return_value = MagicMock(
+    @patch("claw_v2.social.run_subprocess_bounded")
+    def test_load_credential_calls_security(self, mock_run) -> None:
+        mock_run.return_value = MagicMock(
             returncode=0, stdout="secret-token\n",
         )
         result = _load_keychain_credential("com.test.claw.social.acct.x")
         self.assertEqual(result, "secret-token")
-        mock_subprocess.run.assert_called_once()
+        mock_run.assert_called_once()
 
-    @patch("claw_v2.social.subprocess")
-    def test_returns_none_when_not_found(self, mock_subprocess) -> None:
-        mock_subprocess.run.return_value = MagicMock(returncode=44, stdout="")
+    @patch("claw_v2.social.run_subprocess_bounded")
+    def test_returns_none_when_not_found(self, mock_run) -> None:
+        mock_run.return_value = MagicMock(returncode=44, stdout="")
         result = _load_keychain_credential("com.test.missing")
         self.assertIsNone(result)
 

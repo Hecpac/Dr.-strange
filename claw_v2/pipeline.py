@@ -17,9 +17,11 @@ from claw_v2.llm import LLMRouter
 from claw_v2.learning import LearningLoop
 from claw_v2.memory import MemoryStore
 from claw_v2.observe import ObserveStream
+from claw_v2.subprocess_runner import run_subprocess_bounded
 from claw_v2.trivial_patch import TrivialPatchClassifier
 
 TERMINAL_STATUSES = frozenset({"done", "failed"})
+_GIT_TIMEOUT_SECONDS = 60
 
 
 @dataclass(slots=True)
@@ -464,7 +466,11 @@ def _build_code_prompt(issue: LinearIssue, run: PipelineRun, *, past_lessons: st
 
 
 def _create_branch(repo: Path, branch: str) -> None:
-    subprocess.run(["git", "-C", str(repo), "branch", "--no-track", "--", branch, "HEAD"], capture_output=True, text=True, check=False)
+    run_subprocess_bounded(
+        ["git", "-C", str(repo), "branch", "--no-track", "--", branch, "HEAD"],
+        check=False,
+        timeout_s=_GIT_TIMEOUT_SECONDS,
+    )
 
 
 def cleanup_stale_worktrees(repo: Path) -> int:
@@ -474,39 +480,71 @@ def cleanup_stale_worktrees(repo: Path) -> int:
     cleaned = 0
     for child in wt_root.iterdir():
         if child.is_dir():
-            subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", str(child)], capture_output=True, text=True, check=False)
+            run_subprocess_bounded(
+                ["git", "-C", str(repo), "worktree", "remove", "--force", str(child)],
+                check=False,
+                timeout_s=_GIT_TIMEOUT_SECONDS,
+            )
             if child.exists():
                 shutil.rmtree(child, ignore_errors=True)
             cleaned += 1
-    subprocess.run(["git", "-C", str(repo), "worktree", "prune"], capture_output=True, text=True, check=False)
+    run_subprocess_bounded(
+        ["git", "-C", str(repo), "worktree", "prune"],
+        check=False,
+        timeout_s=_GIT_TIMEOUT_SECONDS,
+    )
     return cleaned
 
 
 def _create_worktree(repo: Path, branch: str) -> Path:
     wt_path = repo.parent / ".claw-worktrees" / branch.replace("/", "-")
     if wt_path.exists():
-        subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", str(wt_path)], capture_output=True, text=True, check=False)
+        run_subprocess_bounded(
+            ["git", "-C", str(repo), "worktree", "remove", "--force", str(wt_path)],
+            check=False,
+            timeout_s=_GIT_TIMEOUT_SECONDS,
+        )
         if wt_path.exists():
             shutil.rmtree(wt_path)
     wt_path.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "-C", str(repo), "worktree", "add", "--", str(wt_path), branch], capture_output=True, text=True, check=True)
+    run_subprocess_bounded(
+        ["git", "-C", str(repo), "worktree", "add", "--", str(wt_path), branch],
+        check=True,
+        timeout_s=_GIT_TIMEOUT_SECONDS,
+    )
     return wt_path
 
 
 def _remove_worktree(repo: Path, wt_path: Path) -> None:
-    subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", str(wt_path)], capture_output=True, text=True, check=False)
+    run_subprocess_bounded(
+        ["git", "-C", str(repo), "worktree", "remove", "--force", str(wt_path)],
+        check=False,
+        timeout_s=_GIT_TIMEOUT_SECONDS,
+    )
     if wt_path.exists():
         shutil.rmtree(wt_path, ignore_errors=True)
 
 
 def _collect_diff(wt_path: Path) -> str:
-    result = subprocess.run(["git", "-C", str(wt_path), "diff", "--", "."], capture_output=True, text=True, check=False)
-    status = subprocess.run(["git", "-C", str(wt_path), "status", "--porcelain"], capture_output=True, text=True, check=False)
+    result = run_subprocess_bounded(
+        ["git", "-C", str(wt_path), "diff", "--", "."],
+        check=False,
+        timeout_s=_GIT_TIMEOUT_SECONDS,
+    )
+    status = run_subprocess_bounded(
+        ["git", "-C", str(wt_path), "status", "--porcelain"],
+        check=False,
+        timeout_s=_GIT_TIMEOUT_SECONDS,
+    )
     return (result.stdout or "") + "\n" + (status.stdout or "")
 
 
 def _collect_changed_files(wt_path: Path) -> list[str]:
-    status = subprocess.run(["git", "-C", str(wt_path), "status", "--porcelain"], capture_output=True, text=True, check=False)
+    status = run_subprocess_bounded(
+        ["git", "-C", str(wt_path), "status", "--porcelain"],
+        check=False,
+        timeout_s=_GIT_TIMEOUT_SECONDS,
+    )
     files: list[str] = []
     for line in (status.stdout or "").splitlines():
         if not line.strip():
@@ -572,12 +610,24 @@ def _run_tests(wt_path: Path, *, timeout: int = 300, isolation_mode: str = "host
 
 
 def _commit_worktree(wt_path: Path, message: str) -> None:
-    subprocess.run(["git", "-C", str(wt_path), "add", "-A"], capture_output=True, text=True, check=True)
-    subprocess.run(["git", "-C", str(wt_path), "commit", "-m", message, "--allow-empty"], capture_output=True, text=True, check=False)
+    run_subprocess_bounded(
+        ["git", "-C", str(wt_path), "add", "-A"],
+        check=True,
+        timeout_s=_GIT_TIMEOUT_SECONDS,
+    )
+    run_subprocess_bounded(
+        ["git", "-C", str(wt_path), "commit", "-m", message, "--allow-empty"],
+        check=False,
+        timeout_s=_GIT_TIMEOUT_SECONDS,
+    )
 
 
 def _push_branch(repo: Path, branch: str) -> None:
-    subprocess.run(["git", "-C", str(repo), "push", "-u", "origin", "--", branch], capture_output=True, text=True, check=True)
+    run_subprocess_bounded(
+        ["git", "-C", str(repo), "push", "-u", "origin", "--", branch],
+        check=True,
+        timeout_s=300,
+    )
 
 
 def _parse_pr_number_from_url(url: str) -> int | None:

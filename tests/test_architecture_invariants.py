@@ -94,6 +94,130 @@ class ArchitectureInvariantTests(unittest.TestCase):
                 offenders.append(node.module)
         self.assertEqual(offenders, [])
 
+    def test_subprocess_run_calls_in_runtime_code_have_timeouts(self) -> None:
+        offenders: list[str] = []
+        for path in sorted((REPO_ROOT / "claw_v2").rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                is_subprocess_run = (
+                    isinstance(func, ast.Attribute)
+                    and func.attr == "run"
+                    and isinstance(func.value, ast.Name)
+                    and func.value.id == "subprocess"
+                )
+                if not is_subprocess_run:
+                    continue
+                kwargs = {keyword.arg for keyword in node.keywords if keyword.arg}
+                if "timeout" not in kwargs:
+                    offenders.append(f"{path.relative_to(REPO_ROOT)}:{node.lineno}")
+        self.assertEqual(offenders, [])
+
+    def test_runtime_code_does_not_introduce_async_subprocess_exec(self) -> None:
+        legacy_voice_subprocesses = {
+            ("claw_v2/voice.py", "_transcribe_local"),
+            ("claw_v2/voice.py", "extract_audio"),
+            ("claw_v2/voice.py", "_wav_to_ogg"),
+            ("claw_v2/voice.py", "_mp3_to_ogg"),
+        }
+        offenders: list[str] = []
+        for path in sorted((REPO_ROOT / "claw_v2").rglob("*.py")):
+            rel_path = str(path.relative_to(REPO_ROOT))
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for function in [
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+            ]:
+                for node in ast.walk(function):
+                    if not isinstance(node, ast.Call):
+                        continue
+                    func = node.func
+                    is_create_subprocess_exec = (
+                        isinstance(func, ast.Attribute)
+                        and func.attr == "create_subprocess_exec"
+                        and isinstance(func.value, ast.Name)
+                        and func.value.id == "asyncio"
+                    )
+                    if not is_create_subprocess_exec:
+                        continue
+                    if (rel_path, function.name) in legacy_voice_subprocesses:
+                        continue
+                    offenders.append(f"{rel_path}:{node.lineno}:{function.name}")
+            for node in tree.body:
+                if not isinstance(node, ast.Expr | ast.Assign | ast.AnnAssign):
+                    continue
+                for call in ast.walk(node):
+                    if not isinstance(call, ast.Call):
+                        continue
+                    func = call.func
+                    if (
+                        isinstance(func, ast.Attribute)
+                        and func.attr == "create_subprocess_exec"
+                        and isinstance(func.value, ast.Name)
+                        and func.value.id == "asyncio"
+                    ):
+                        offenders.append(f"{rel_path}:{call.lineno}:module")
+        self.assertEqual(offenders, [])
+
+    def test_runtime_code_restricts_direct_subprocess_popen(self) -> None:
+        allowed_popen_callers = {
+            ("claw_v2/chrome.py", "_spawn_chrome"),  # long-lived managed Chrome process
+            ("claw_v2/subprocess_runner.py", "run_subprocess_bounded"),
+            ("claw_v2/terminal_bridge.py", "run_session"),  # long-lived PTY session runner
+        }
+        offenders: list[str] = []
+        for path in sorted((REPO_ROOT / "claw_v2").rglob("*.py")):
+            rel_path = str(path.relative_to(REPO_ROOT))
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for function in [
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+            ]:
+                for node in ast.walk(function):
+                    if not isinstance(node, ast.Call):
+                        continue
+                    func = node.func
+                    is_popen = (
+                        isinstance(func, ast.Attribute)
+                        and func.attr == "Popen"
+                        and isinstance(func.value, ast.Name)
+                        and func.value.id == "subprocess"
+                    )
+                    if not is_popen:
+                        continue
+                    if (rel_path, function.name) in allowed_popen_callers:
+                        continue
+                    offenders.append(f"{rel_path}:{node.lineno}:{function.name}")
+        self.assertEqual(offenders, [])
+
+    def test_runtime_code_does_not_use_shell_true_or_os_system(self) -> None:
+        offenders: list[str] = []
+        for path in sorted((REPO_ROOT / "claw_v2").rglob("*.py")):
+            rel_path = str(path.relative_to(REPO_ROOT))
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                is_os_system = (
+                    isinstance(func, ast.Attribute)
+                    and func.attr == "system"
+                    and isinstance(func.value, ast.Name)
+                    and func.value.id == "os"
+                )
+                if is_os_system:
+                    offenders.append(f"{rel_path}:{node.lineno}:os.system")
+                for keyword in node.keywords:
+                    if keyword.arg != "shell":
+                        continue
+                    if isinstance(keyword.value, ast.Constant) and keyword.value.value is True:
+                        offenders.append(f"{rel_path}:{node.lineno}:shell=True")
+        self.assertEqual(offenders, [])
+
     def test_no_default_on_scheduler_job_runs_heavy_work_inline_in_daemon_tick(self) -> None:
         """Deny-by-default backstop for Core Invariant 1.
 

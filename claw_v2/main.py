@@ -71,6 +71,7 @@ from claw_v2.skills import SkillRegistry
 from claw_v2.social import SocialPublisher
 from claw_v2.content import ContentEngine
 from claw_v2.sandbox import SandboxPolicy
+from claw_v2.subprocess_runner import run_subprocess_bounded
 from claw_v2.runtime_policy import RuntimePolicyEngine
 from claw_v2.task_board import TaskBoard
 from claw_v2.task_ledger import TaskLedger
@@ -1165,13 +1166,12 @@ def _setup_scheduler(
             return
 
         try:
-            test_result = subprocess.run(
+            test_result = run_subprocess_bounded(
                 pytest_args,
-                capture_output=True,
-                text=True,
                 check=False,
                 cwd=str(repo_root),
-                timeout=config.self_improve_test_timeout_seconds,
+                timeout_s=config.self_improve_test_timeout_seconds,
+                observe=observe,
             )
         except subprocess.TimeoutExpired as exc:
             observe.emit(
