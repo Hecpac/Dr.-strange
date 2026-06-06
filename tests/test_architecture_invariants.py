@@ -86,6 +86,38 @@ class ArchitectureInvariantTests(unittest.TestCase):
         self.assertNotIn("allow_live_head_promotion", source)
         self.assertIn("_commit_to_isolated_branch", source)
 
+    def test_branch_promotion_executor_runs_diff_scoped_tooling_gate(self) -> None:
+        from claw_v2.agents import GitBranchPromotionExecutor
+
+        source = inspect.getsource(GitBranchPromotionExecutor.__call__)
+        self.assertIn("tooling_gate.evaluate", source)
+        self.assertIn("PromotionToolingError", source)
+
+    def test_promotion_sensitive_path_denylist_covers_runtime_chokepoints(self) -> None:
+        from claw_v2.agents import PROMOTION_SENSITIVE_PATH_PATTERNS
+
+        required = {
+            "claw_v2/brain.py",
+            "claw_v2/agents.py",
+            "claw_v2/approval.py",
+            "claw_v2/approval_gate.py",
+            "claw_v2/config.py",
+            "claw_v2/main.py",
+            "claw_v2/tools.py",
+            "claw_v2/scheduler*",
+            "claw_v2/scheduled_background_jobs.py",
+            "claw_v2/computer.py",
+            "claw_v2/memory*",
+            "claw_v2/secrets*",
+            "claw_v2/auth*",
+            "claw_v2/subprocess_runner.py",
+            "tests/test_architecture_invariants.py",
+            "claw_v2/INTERNAL_WIRING.md",
+            "CLAUDE.md",
+            "AGENTS.md",
+        }
+        self.assertTrue(required.issubset(set(PROMOTION_SENSITIVE_PATH_PATTERNS)))
+
     def test_computer_module_does_not_import_pyautogui_at_module_scope(self) -> None:
         tree = ast.parse((REPO_ROOT / "claw_v2" / "computer.py").read_text(encoding="utf-8"))
         offenders: list[str] = []

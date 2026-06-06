@@ -11,6 +11,9 @@ from claw_v2.agents import (
     GitBranchPromotionExecutor,
     GitCommitPromotionExecutor,
     GitWorktreeExperimentRunner,
+    PromotionManifest,
+    PromotionToolingError,
+    PromotionToolingGate,
     WorkspacePromotionExecutor,
 )
 from claw_v2.observe import ObserveStream
@@ -61,6 +64,20 @@ class FakeDockerSandbox:
 
     def is_available(self) -> bool:
         return self.available
+
+
+class FakePromotionCommandRunner:
+    def __init__(self, *, fail: dict[str, int] | None = None) -> None:
+        self.fail = fail or {}
+        self.calls: list[dict] = []
+
+    def __call__(self, args, **kwargs) -> subprocess.CompletedProcess[str]:
+        command = [str(arg) for arg in args]
+        self.calls.append({"args": command, **kwargs})
+        key = " ".join(command[:3])
+        full_key = " ".join(command)
+        returncode = self.fail.get(full_key, self.fail.get(key, 0))
+        return subprocess.CompletedProcess(command, returncode, "", "tool output" if returncode else "")
 
 
 class WorktreeRunnerTests(unittest.TestCase):
@@ -847,6 +864,224 @@ class WorktreeRunnerTests(unittest.TestCase):
                 ).stdout,
                 "promoted\n",
             )
+
+    def test_promotion_tooling_gate_runs_only_on_touched_python_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worktree = Path(tmpdir)
+            (worktree / "changed.py").write_text("print('ok')\n", encoding="utf-8")
+            (worktree / "untouched_bad.py").write_text("this is not python\n", encoding="utf-8")
+            runner = FakePromotionCommandRunner()
+            gate = PromotionToolingGate(command_runner=runner)
+
+            report = gate.evaluate(
+                worktree_path=worktree,
+                state={"name": "publisher", "_promotion_id": "promo-1"},
+                manifest=PromotionManifest(modified=["changed.py"]),
+                target_branch="claw/publisher/<commit_sha>",
+            )
+
+            self.assertEqual(report.decision, "passed")
+            commands = [call["args"] for call in runner.calls]
+            self.assertEqual(
+                commands,
+                [
+                    ["uvx", "ruff", "check", "changed.py"],
+                    ["uvx", "ruff", "format", "--check", "changed.py"],
+                    ["uvx", "mypy", "changed.py"],
+                ],
+            )
+            self.assertNotIn("untouched_bad.py", " ".join(" ".join(cmd) for cmd in commands))
+            self.assertTrue(all("." not in cmd for cmd in commands))
+
+    def test_promotion_tooling_gate_blocks_ruff_check_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worktree = Path(tmpdir)
+            (worktree / "changed.py").write_text("print('ok')\n", encoding="utf-8")
+            gate = PromotionToolingGate(
+                command_runner=FakePromotionCommandRunner(fail={"uvx ruff check": 1})
+            )
+
+            report = gate.evaluate(
+                worktree_path=worktree,
+                state={"name": "publisher", "_promotion_id": "promo-ruff"},
+                manifest=PromotionManifest(modified=["changed.py"]),
+                target_branch="claw/publisher/<commit_sha>",
+            )
+
+            self.assertEqual(report.decision, "failed")
+            self.assertEqual(report.reason, "ruff_check_failed")
+            self.assertEqual(report.ruff_check_status, "failed")
+            self.assertEqual(report.ruff_format_status, "skipped_after_ruff_check_failed")
+            self.assertEqual(report.mypy_status, "skipped_after_ruff_failed")
+
+    def test_promotion_tooling_gate_blocks_ruff_format_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worktree = Path(tmpdir)
+            (worktree / "changed.py").write_text("print('ok')\n", encoding="utf-8")
+            gate = PromotionToolingGate(
+                command_runner=FakePromotionCommandRunner(fail={"uvx ruff format": 1})
+            )
+
+            report = gate.evaluate(
+                worktree_path=worktree,
+                state={"name": "publisher", "_promotion_id": "promo-format"},
+                manifest=PromotionManifest(modified=["changed.py"]),
+                target_branch="claw/publisher/<commit_sha>",
+            )
+
+            self.assertEqual(report.decision, "failed")
+            self.assertEqual(report.reason, "ruff_format_failed")
+            self.assertEqual(report.ruff_check_status, "passed")
+            self.assertEqual(report.ruff_format_status, "failed")
+            self.assertEqual(report.mypy_status, "skipped_after_ruff_failed")
+
+    def test_promotion_tooling_gate_does_not_block_historical_baseline_ruff_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            baseline = root / "repo"
+            worktree = root / "worktree"
+            baseline.mkdir()
+            worktree.mkdir()
+            (baseline / "existing_bad.py").write_text("this is already bad\n", encoding="utf-8")
+            (worktree / "existing_bad.py").write_text("this is still bad\n", encoding="utf-8")
+            runner = FakePromotionCommandRunner(
+                fail={"uvx ruff check existing_bad.py": 1, "uvx ruff format --check existing_bad.py": 1}
+            )
+            gate = PromotionToolingGate(baseline_root=baseline, command_runner=runner)
+
+            report = gate.evaluate(
+                worktree_path=worktree,
+                state={"name": "publisher", "_promotion_id": "promo-baseline"},
+                manifest=PromotionManifest(modified=["existing_bad.py"]),
+                target_branch="claw/publisher/<commit_sha>",
+            )
+
+            self.assertEqual(report.decision, "passed")
+            self.assertEqual(report.ruff_check_status, "passed_with_baseline_violations")
+            self.assertEqual(report.ruff_format_status, "passed_with_baseline_violations")
+
+    def test_promotion_tooling_gate_blocks_new_file_ruff_failure_even_when_baseline_is_red(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            baseline = root / "repo"
+            worktree = root / "worktree"
+            baseline.mkdir()
+            worktree.mkdir()
+            (baseline / "existing_bad.py").write_text("this is already bad\n", encoding="utf-8")
+            (worktree / "existing_bad.py").write_text("this is still bad\n", encoding="utf-8")
+            (worktree / "new_bad.py").write_text("new bad\n", encoding="utf-8")
+            runner = FakePromotionCommandRunner(
+                fail={
+                    "uvx ruff check existing_bad.py": 1,
+                    "uvx ruff check new_bad.py": 1,
+                }
+            )
+            gate = PromotionToolingGate(baseline_root=baseline, command_runner=runner)
+
+            report = gate.evaluate(
+                worktree_path=worktree,
+                state={"name": "publisher", "_promotion_id": "promo-new-bad"},
+                manifest=PromotionManifest(modified=["existing_bad.py"], added=["new_bad.py"]),
+                target_branch="claw/publisher/<commit_sha>",
+            )
+
+            self.assertEqual(report.decision, "failed")
+            self.assertEqual(report.reason, "ruff_check_failed")
+            self.assertEqual(report.ruff_check_status, "failed")
+
+    def test_promotion_tooling_gate_mypy_failure_is_advisory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worktree = Path(tmpdir)
+            (worktree / "changed.py").write_text("print('ok')\n", encoding="utf-8")
+            gate = PromotionToolingGate(
+                command_runner=FakePromotionCommandRunner(fail={"uvx mypy changed.py": 1})
+            )
+
+            report = gate.evaluate(
+                worktree_path=worktree,
+                state={"name": "publisher", "_promotion_id": "promo-mypy"},
+                manifest=PromotionManifest(modified=["changed.py"]),
+                target_branch="claw/publisher/<commit_sha>",
+            )
+
+            self.assertEqual(report.decision, "passed")
+            self.assertEqual(report.reason, "passed")
+            self.assertEqual(report.mypy_status, "advisory_failed")
+
+    def test_promotion_tooling_gate_reports_sensitive_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worktree = Path(tmpdir)
+            sensitive = worktree / "claw_v2" / "brain.py"
+            sensitive.parent.mkdir()
+            sensitive.write_text("print('sensitive')\n", encoding="utf-8")
+            gate = PromotionToolingGate(command_runner=FakePromotionCommandRunner())
+
+            report = gate.evaluate(
+                worktree_path=worktree,
+                state={"name": "self-improve", "_promotion_id": "promo-sensitive"},
+                manifest=PromotionManifest(modified=["claw_v2/brain.py"]),
+                target_branch="claw/self-improve/<commit_sha>",
+            )
+
+            self.assertEqual(report.decision, "passed")
+            self.assertEqual(report.sensitive_files_touched, ["claw_v2/brain.py"])
+
+    def test_git_branch_promotion_blocks_ruff_failure_without_touching_live_head(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo = root / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+            (repo / "changed.py").write_text("print('base')\n", encoding="utf-8")
+            subprocess.run(["git", "add", "changed.py"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True, text=True)
+            current_head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+            worktree = root / "worktree"
+            worktree.mkdir()
+            (worktree / "changed.py").write_text("print('promoted')\n", encoding="utf-8")
+            gate = PromotionToolingGate(
+                command_runner=FakePromotionCommandRunner(fail={"uvx ruff check": 1})
+            )
+
+            with self.assertRaises(PromotionToolingError):
+                GitBranchPromotionExecutor(repo, tooling_gate=gate)(
+                    worktree,
+                    {
+                        "name": "publisher",
+                        "commit_on_promotion": True,
+                        "_workspace_mode": "snapshot",
+                    },
+                    "MODIFIED changed.py",
+                )
+
+            self.assertEqual(
+                subprocess.run(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=repo,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip(),
+                current_head,
+            )
+            self.assertEqual((repo / "changed.py").read_text(encoding="utf-8"), "print('base')\n")
+            branches = subprocess.run(
+                ["git", "branch", "--list", "claw/*"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+            self.assertEqual(branches.strip(), "")
 
 
 if __name__ == "__main__":

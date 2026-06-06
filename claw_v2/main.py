@@ -729,7 +729,7 @@ def _setup_agent_services(
             router=router,
             brain=brain,
             evaluator=wiki_quality_evaluator,
-            promotion_executor=GitBranchPromotionExecutor(config.workspace_root),
+            promotion_executor=GitBranchPromotionExecutor(config.workspace_root, observe=observe),
             observe=observe,
         )
 

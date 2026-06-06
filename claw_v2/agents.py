@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import filecmp
+import fnmatch
 import json
 import logging
 import re
@@ -113,6 +114,47 @@ class PromotionResult:
     commit_message: str | None = None
     branch_created: bool = False
     branch_name: str | None = None
+    promotion_report: dict[str, Any] | None = None
+
+
+@dataclass(slots=True)
+class PromotionToolingReport:
+    promotion_id: str
+    agent_name: str
+    source_worktree: str
+    target_branch: str | None
+    modified_files: list[str]
+    sensitive_files_touched: list[str]
+    ruff_check_status: str
+    ruff_format_status: str
+    mypy_status: str
+    pytest_status: str
+    decision: str
+    reason: str
+    duration_s: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "promotion_id": self.promotion_id,
+            "agent_name": self.agent_name,
+            "source_worktree": self.source_worktree,
+            "target_branch": self.target_branch,
+            "modified_files": list(self.modified_files),
+            "sensitive_files_touched": list(self.sensitive_files_touched),
+            "ruff_check_status": self.ruff_check_status,
+            "ruff_format_status": self.ruff_format_status,
+            "mypy_status": self.mypy_status,
+            "pytest_status": self.pytest_status,
+            "decision": self.decision,
+            "reason": self.reason,
+            "duration_s": self.duration_s,
+        }
+
+
+class PromotionToolingError(RuntimeError):
+    def __init__(self, report: PromotionToolingReport) -> None:
+        self.report = report
+        super().__init__(f"promotion tooling gate failed: {report.reason}")
 
 
 @dataclass(slots=True)
@@ -730,17 +772,36 @@ class GitWorktreeExperimentRunner:
                 and evaluation.metric_value > self._baseline(state)
             ):
                 promotion_state = {**state, "_workspace_mode": workspace_mode}
-                execution = self.brain.execute_critical_action(
-                    action=f"promote_{agent_name}",
-                    plan=response.content,
-                    diff=diff,
-                    test_output=evaluation.output,
-                    executor=lambda: self.promotion_executor(worktree_path, promotion_state, diff),
-                )
-                status = execution.status
-                promotion_result = execution.result
-                promotion_commit_sha = getattr(promotion_result, "commit_sha", None)
-                promotion_branch_name = getattr(promotion_result, "branch_name", None)
+                try:
+                    execution = self.brain.execute_critical_action(
+                        action=f"promote_{agent_name}",
+                        plan=response.content,
+                        diff=diff,
+                        test_output=evaluation.output,
+                        executor=lambda: self.promotion_executor(worktree_path, promotion_state, diff),
+                    )
+                except PromotionToolingError as exc:
+                    status = "promotion_blocked"
+                    self._emit_experiment_event(
+                        "worktree_experiment_promotion_blocked",
+                        trace=trace,
+                        payload={
+                            "session_id": session_id,
+                            "agent": agent_name,
+                            "experiment_number": experiment_number,
+                            "promotion_id": exc.report.promotion_id,
+                            "reason": exc.report.reason,
+                            "ruff_check_status": exc.report.ruff_check_status,
+                            "ruff_format_status": exc.report.ruff_format_status,
+                            "mypy_status": exc.report.mypy_status,
+                            "sensitive_files_touched": exc.report.sensitive_files_touched,
+                        },
+                    )
+                else:
+                    status = execution.status
+                    promotion_result = execution.result
+                    promotion_commit_sha = getattr(promotion_result, "commit_sha", None)
+                    promotion_branch_name = getattr(promotion_result, "branch_name", None)
 
             record = ExperimentRecord(
                 experiment_number=experiment_number,
@@ -1004,6 +1065,243 @@ class GitWorktreeExperimentRunner:
 
 
 IGNORED_WORKSPACE_NAMES = (".git", ".venv", "__pycache__", ".pytest_cache")
+PROMOTION_RUFF_TIMEOUT_SECONDS = 120
+PROMOTION_MYPY_TIMEOUT_SECONDS = 180
+PROMOTION_SENSITIVE_PATH_PATTERNS: tuple[str, ...] = (
+    "claw_v2/brain.py",
+    "claw_v2/agents.py",
+    "claw_v2/approval.py",
+    "claw_v2/approval_gate.py",
+    "claw_v2/config.py",
+    "claw_v2/main.py",
+    "claw_v2/tools.py",
+    "claw_v2/scheduler*",
+    "claw_v2/scheduled_background_jobs.py",
+    "claw_v2/computer.py",
+    "claw_v2/memory*",
+    "claw_v2/secrets*",
+    "claw_v2/auth*",
+    "claw_v2/subprocess_runner.py",
+    "tests/test_architecture_invariants.py",
+    "claw_v2/INTERNAL_WIRING.md",
+    "CLAUDE.md",
+    "AGENTS.md",
+)
+
+
+class PromotionToolingGate:
+    def __init__(
+        self,
+        *,
+        baseline_root: Path | str | None = None,
+        observe: Any | None = None,
+        command_runner: Callable[..., subprocess.CompletedProcess[str]] = run_subprocess_bounded,
+    ) -> None:
+        self.baseline_root = Path(baseline_root) if baseline_root is not None else None
+        self.observe = observe
+        self.command_runner = command_runner
+
+    def evaluate(
+        self,
+        *,
+        worktree_path: Path,
+        state: dict,
+        manifest: PromotionManifest,
+        target_branch: str | None,
+    ) -> PromotionToolingReport:
+        started_at = time.monotonic()
+        agent_name = str(state.get("name") or "agent").strip() or "agent"
+        promotion_id = str(state.get("_promotion_id") or f"{agent_name}:{int(time.time() * 1000)}")
+        modified_files = manifest.paths()
+        sensitive_files = self._sensitive_paths(modified_files)
+        python_files = self._python_files_for_tooling(worktree_path, manifest)
+
+        self._emit(
+            "promotion_gate_started",
+            {
+                "promotion_id": promotion_id,
+                "agent_name": agent_name,
+                "source_worktree": str(worktree_path),
+                "target_branch": target_branch,
+                "modified_files": modified_files,
+            },
+        )
+        if sensitive_files:
+            self._emit(
+                "promotion_sensitive_paths_detected",
+                {
+                    "promotion_id": promotion_id,
+                    "agent_name": agent_name,
+                    "sensitive_files_touched": sensitive_files,
+                    "requires_critical_approval": True,
+                },
+            )
+
+        ruff_check_status = self._run_ruff_check(worktree_path, python_files)
+        ruff_format_status = "skipped_after_ruff_check_failed"
+        mypy_status = "skipped_after_ruff_failed"
+        decision = "passed"
+        reason = "passed"
+
+        if ruff_check_status == "skipped_no_python_files":
+            ruff_format_status = "skipped_no_python_files"
+            mypy_status = "skipped_no_python_files"
+        elif ruff_check_status in {"passed", "passed_with_baseline_violations"}:
+            ruff_format_status = self._run_ruff_format_check(worktree_path, python_files)
+
+        if ruff_check_status not in {"passed", "passed_with_baseline_violations", "skipped_no_python_files"}:
+            decision = "failed"
+            reason = "ruff_check_failed"
+            self._emit(
+                "promotion_ruff_failed",
+                {
+                    "promotion_id": promotion_id,
+                    "agent_name": agent_name,
+                    "stage": "check",
+                    "status": ruff_check_status,
+                },
+            )
+        elif ruff_format_status not in {"passed", "passed_with_baseline_violations", "skipped_no_python_files"}:
+            decision = "failed"
+            reason = "ruff_format_failed"
+            self._emit(
+                "promotion_ruff_failed",
+                {
+                    "promotion_id": promotion_id,
+                    "agent_name": agent_name,
+                    "stage": "format",
+                    "status": ruff_format_status,
+                },
+            )
+        else:
+            mypy_status = self._run_mypy(worktree_path, python_files)
+            if mypy_status == "advisory_failed":
+                self._emit(
+                    "promotion_mypy_advisory_failed",
+                    {
+                        "promotion_id": promotion_id,
+                        "agent_name": agent_name,
+                        "status": mypy_status,
+                    },
+                )
+
+        report = PromotionToolingReport(
+            promotion_id=promotion_id,
+            agent_name=agent_name,
+            source_worktree=str(worktree_path),
+            target_branch=target_branch,
+            modified_files=modified_files,
+            sensitive_files_touched=sensitive_files,
+            ruff_check_status=ruff_check_status,
+            ruff_format_status=ruff_format_status,
+            mypy_status=mypy_status,
+            pytest_status="not_run",
+            decision=decision,
+            reason=reason,
+            duration_s=round(time.monotonic() - started_at, 3),
+        )
+        self._emit("promotion_report_created", report.to_dict())
+        self._emit(
+            "promotion_gate_passed" if decision == "passed" else "promotion_gate_failed",
+            report.to_dict(),
+        )
+        return report
+
+    def _run_ruff_check(self, worktree_path: Path, python_files: list[str]) -> str:
+        if not python_files:
+            return "skipped_no_python_files"
+        return self._run_required_command(
+            ["uvx", "ruff", "check"],
+            python_files,
+            cwd=worktree_path,
+            timeout_s=PROMOTION_RUFF_TIMEOUT_SECONDS,
+        )
+
+    def _run_ruff_format_check(self, worktree_path: Path, python_files: list[str]) -> str:
+        if not python_files:
+            return "skipped_no_python_files"
+        return self._run_required_command(
+            ["uvx", "ruff", "format", "--check"],
+            python_files,
+            cwd=worktree_path,
+            timeout_s=PROMOTION_RUFF_TIMEOUT_SECONDS,
+        )
+
+    def _run_mypy(self, worktree_path: Path, python_files: list[str]) -> str:
+        if not python_files:
+            return "skipped_no_python_files"
+        try:
+            completed = self.command_runner(
+                ["uvx", "mypy", *python_files],
+                cwd=worktree_path,
+                timeout_s=PROMOTION_MYPY_TIMEOUT_SECONDS,
+                max_output_chars=20_000,
+                check=False,
+            )
+        except FileNotFoundError:
+            return "advisory_missing"
+        except subprocess.TimeoutExpired:
+            return "advisory_failed"
+        return "passed" if completed.returncode == 0 else "advisory_failed"
+
+    def _run_required_command(self, args_prefix: list[str], files: list[str], *, cwd: Path, timeout_s: int) -> str:
+        status = "passed"
+        for relative_path in files:
+            file_status = self._run_command([*args_prefix, relative_path], cwd=cwd, timeout_s=timeout_s)
+            if file_status == "passed":
+                continue
+            if file_status == "failed" and self._baseline_has_same_failure(args_prefix, relative_path, timeout_s):
+                status = "passed_with_baseline_violations"
+                continue
+            return file_status
+        return status
+
+    def _baseline_has_same_failure(self, args_prefix: list[str], relative_path: str, timeout_s: int) -> bool:
+        if self.baseline_root is None:
+            return False
+        if not (self.baseline_root / relative_path).is_file():
+            return False
+        return self._run_command([*args_prefix, relative_path], cwd=self.baseline_root, timeout_s=timeout_s) == "failed"
+
+    def _run_command(self, args: list[str], *, cwd: Path, timeout_s: int) -> str:
+        try:
+            completed = self.command_runner(
+                args,
+                cwd=cwd,
+                timeout_s=timeout_s,
+                max_output_chars=20_000,
+                check=False,
+            )
+        except FileNotFoundError:
+            return "missing"
+        except subprocess.TimeoutExpired:
+            return "timeout"
+        return "passed" if completed.returncode == 0 else "failed"
+
+    @staticmethod
+    def _python_files_for_tooling(worktree_path: Path, manifest: PromotionManifest) -> list[str]:
+        candidates = [*manifest.added, *manifest.modified]
+        return [
+            path
+            for path in candidates
+            if path.endswith(".py") and (worktree_path / path).is_file()
+        ]
+
+    @staticmethod
+    def _sensitive_paths(paths: list[str]) -> list[str]:
+        return [
+            path
+            for path in paths
+            if any(fnmatch.fnmatch(path, pattern) for pattern in PROMOTION_SENSITIVE_PATH_PATTERNS)
+        ]
+
+    def _emit(self, event_type: str, payload: dict[str, Any]) -> None:
+        if self.observe is None:
+            return
+        try:
+            self.observe.emit(event_type, payload=payload)
+        except Exception:
+            logger.exception("promotion tooling observe emit failed for %s", event_type)
 
 
 class WorkspacePromotionExecutor:
@@ -1011,7 +1309,7 @@ class WorkspacePromotionExecutor:
         self.repo_root = Path(repo_root)
 
     def __call__(self, worktree_path: Path, state: dict, diff: str) -> PromotionResult:
-        manifest = self._select_manifest(worktree_path, state, diff)
+        manifest = self.select_manifest(worktree_path, state, diff)
         applied_files = 0
         deleted_files = 0
 
@@ -1033,6 +1331,9 @@ class WorkspacePromotionExecutor:
             applied_files=applied_files,
             deleted_files=deleted_files,
         )
+
+    def select_manifest(self, worktree_path: Path, state: dict, diff: str) -> PromotionManifest:
+        return self._select_manifest(worktree_path, state, diff)
 
     def _select_manifest(self, worktree_path: Path, state: dict, diff: str) -> PromotionManifest:
         workspace_mode = state.get("_workspace_mode")
@@ -1185,21 +1486,43 @@ class GitBranchPromotionExecutor:
         repo_root: Path | str,
         *,
         commit_executor: GitCommitPromotionExecutor | None = None,
+        tooling_gate: PromotionToolingGate | None = None,
+        observe: Any | None = None,
     ) -> None:
         self.repo_root = Path(repo_root)
         self.commit_executor = commit_executor or GitCommitPromotionExecutor(self.repo_root)
+        self.tooling_gate = tooling_gate or PromotionToolingGate(baseline_root=self.repo_root, observe=observe)
 
     def __call__(self, worktree_path: Path, state: dict, diff: str) -> PromotionResult:
         branch_on_promotion = bool(state.get("branch_on_promotion", True))
         commit_on_promotion = bool(state.get("commit_on_promotion"))
+        target_branch = self._planned_branch_name(state)
+        manifest = WorkspacePromotionExecutor(self.repo_root).select_manifest(worktree_path, state, diff)
+        report = self.tooling_gate.evaluate(
+            worktree_path=worktree_path,
+            state=state,
+            manifest=manifest,
+            target_branch=target_branch,
+        )
+        if report.decision != "passed":
+            raise PromotionToolingError(report)
         if commit_on_promotion:
             safe_state = {**state, "branch_on_promotion": True}
-            return self._commit_to_isolated_branch(worktree_path, safe_state, diff)
+            result = self._commit_to_isolated_branch(worktree_path, safe_state, diff)
+            if result.branch_name:
+                report.target_branch = result.branch_name
+            result.promotion_report = report.to_dict()
+            return result
 
         result = self.commit_executor(worktree_path, state, diff)
+        result.promotion_report = report.to_dict()
         if not branch_on_promotion:
             return result
-        return self._attach_branch(result, state)
+        result = self._attach_branch(result, state)
+        if result.branch_name:
+            report.target_branch = result.branch_name
+            result.promotion_report = report.to_dict()
+        return result
 
     def _commit_to_isolated_branch(self, worktree_path: Path, state: dict, diff: str) -> PromotionResult:
         with tempfile.TemporaryDirectory(prefix="claw-promotion-") as tmpdir:
@@ -1242,6 +1565,16 @@ class GitBranchPromotionExecutor:
             return explicit
         agent_name = str(state.get("name") or "agent").strip() or "agent"
         return f"claw/{agent_name}/{commit_sha[:7]}"
+
+    def _planned_branch_name(self, state: dict) -> str | None:
+        if not bool(state.get("branch_on_promotion", True)) and not bool(state.get("commit_on_promotion")):
+            return None
+        explicit = str(state.get("promotion_branch_name") or "").strip()
+        if explicit:
+            _validate_branch_name(explicit)
+            return explicit
+        agent_name = str(state.get("name") or "agent").strip() or "agent"
+        return f"claw/{agent_name}/<commit_sha>"
 
     def _allocate_unique_branch_name(self, branch_name: str, commit_sha: str) -> str:
         candidate = f"{branch_name}-{commit_sha[:7]}"

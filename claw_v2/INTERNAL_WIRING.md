@@ -8,8 +8,8 @@
 ## meta
 
 ```yaml
-describes_commit: fe99808+spec-002-self-improve-promotion-hotfix+spec-002-subprocess-bounded-pr-c+spec-002-approval-manager-pr-d
-doc_version: 2.13
+describes_commit: fe99808+spec-002-self-improve-promotion-hotfix+spec-002-subprocess-bounded-pr-c+spec-002-approval-manager-pr-d+spec-002-promotion-tooling-phase-4
+doc_version: 2.14
 last_verified: 2026-06-10
 verification_method: manual + pytest + AST sentinel cross-check
 anchor_strategy: symbol_only  # path:symbol, no line numbers
@@ -101,20 +101,44 @@ invariants:
   self_improve_promotion_gate:
     rule: self-improve promotion actions must pass through BrainService
           critical-action verification and may not commit generated changes to
-          the live HEAD by default.
+          the live HEAD by default. Promotion must also pass diff-scoped
+          tooling checks; Ruff is required on touched Python files, Mypy is
+          advisory until the baseline is green, and sensitive paths are reported
+          explicitly under the same critical gate.
     chokepoints:
       - brain.RISK_FLOORS[promote] = critical
       - brain.RISK_FLOORS[self_improve] = critical
       - agents.GitWorktreeExperimentRunner -> brain.execute_critical_action(action=promote_<agent>)
+      - agents.PromotionToolingGate runs uvx ruff check and uvx ruff format --check
+        only on touched Python files from the promotion manifest. For existing
+        files, historical baseline Ruff failures do not block; new files or new
+        failures still fail the gate.
+      - agents.PromotionToolingGate runs uvx mypy only as advisory and never
+        blocks promotion on Mypy alone.
+      - agents.PROMOTION_SENSITIVE_PATH_PATTERNS lists runtime / approval /
+        scheduler / subprocess / architecture files that must be surfaced in
+        the promotion report.
       - agents.GitBranchPromotionExecutor commits in an isolated detached worktree
         and attaches a claw/<agent>/<sha> branch when commit_on_promotion is enabled.
+      - agents.GitBranchPromotionExecutor raises PromotionToolingError before
+        applying changes if required Ruff tooling fails.
     enforced_by:
       - tests/test_brain_verify.py::PolicyFloorTests
       - tests/test_worktree_runner.py::WorktreeRunnerTests::test_worktree_runner_does_not_promote_without_critical_approval
       - tests/test_worktree_runner.py::WorktreeRunnerTests::test_git_branch_promotion_defaults_to_isolated_branch_when_commit_enabled
       - tests/test_worktree_runner.py::WorktreeRunnerTests::test_git_branch_promotion_ignores_live_head_state_flag
+      - tests/test_worktree_runner.py::WorktreeRunnerTests::test_promotion_tooling_gate_runs_only_on_touched_python_files
+      - tests/test_worktree_runner.py::WorktreeRunnerTests::test_promotion_tooling_gate_blocks_ruff_check_failure
+      - tests/test_worktree_runner.py::WorktreeRunnerTests::test_promotion_tooling_gate_blocks_ruff_format_failure
+      - tests/test_worktree_runner.py::WorktreeRunnerTests::test_promotion_tooling_gate_does_not_block_historical_baseline_ruff_failure
+      - tests/test_worktree_runner.py::WorktreeRunnerTests::test_promotion_tooling_gate_blocks_new_file_ruff_failure_even_when_baseline_is_red
+      - tests/test_worktree_runner.py::WorktreeRunnerTests::test_promotion_tooling_gate_mypy_failure_is_advisory
+      - tests/test_worktree_runner.py::WorktreeRunnerTests::test_promotion_tooling_gate_reports_sensitive_paths
+      - tests/test_worktree_runner.py::WorktreeRunnerTests::test_git_branch_promotion_blocks_ruff_failure_without_touching_live_head
       - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_self_improve_promotion_actions_have_critical_floor
       - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_branch_promotion_executor_does_not_accept_live_head_state_flag
+      - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_branch_promotion_executor_runs_diff_scoped_tooling_gate
+      - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_promotion_sensitive_path_denylist_covers_runtime_chokepoints
 
   computer_use_import_safe:
     rule: computer-use must be import-safe on headless hosts. Importing
