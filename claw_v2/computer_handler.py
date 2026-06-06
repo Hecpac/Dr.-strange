@@ -253,7 +253,7 @@ class ComputerHandler:
                     {
                         "session_id": session_id,
                         "backend": backend,
-                        "timeout_seconds": BROWSER_USE_TIMEOUT_SECONDS,
+                        "timeout_seconds": self._browser_use_timeout(),
                         "current_url": getattr(session, "current_url", None),
                         "instruction_hash": _instruction_hash(getattr(session, "task", "")),
                     },
@@ -350,6 +350,14 @@ class ComputerHandler:
 
     def _auto_approve_enabled(self) -> bool:
         return bool(getattr(self.config, "computer_auto_approve", False))
+
+    def _browser_use_timeout(self) -> int:
+        configured = getattr(self.config, "computer_browser_use_timeout_seconds", 0)
+        try:
+            configured = int(configured)
+        except (TypeError, ValueError):
+            configured = 0
+        return configured if configured > 0 else BROWSER_USE_TIMEOUT_SECONDS
 
     def _browser_task_is_sensitive(self, task: str | None, current_url: str | None) -> bool:
         """Best-effort: a browser_use task is sensitive if it starts on a
@@ -541,12 +549,15 @@ class ComputerHandler:
             "computer_browser_use_task_started",
             {
                 "backend": "browser_use",
-                "timeout_seconds": BROWSER_USE_TIMEOUT_SECONDS,
+                "timeout_seconds": self._browser_use_timeout(),
                 "current_url": getattr(session, "current_url", None),
                 "instruction_hash": _instruction_hash(getattr(session, "task", "")),
             },
         )
         result = self._run_browser_use_task(session.task)
+        artifact_path = getattr(self.browser_use, "last_artifact_path", None)
+        if artifact_path:
+            session.screenshot_path = artifact_path
         session.pending_action = None
         session.status = "done"
         self._emit(
@@ -554,6 +565,7 @@ class ComputerHandler:
             {
                 "backend": "browser_use",
                 "result_chars": len(str(result or "")),
+                "artifact_saved": bool(artifact_path),
                 "instruction_hash": _instruction_hash(getattr(session, "task", "")),
             },
         )
@@ -562,16 +574,18 @@ class ComputerHandler:
     def _run_browser_use_task(self, instruction: str) -> str:
         import asyncio
 
+        timeout = self._browser_use_timeout()
+
         async def _run() -> Any:
             try:
                 return await asyncio.wait_for(
                     self.browser_use.run_task(instruction),
-                    timeout=BROWSER_USE_TIMEOUT_SECONDS,
+                    timeout=timeout,
                 )
             except asyncio.TimeoutError as exc:
                 raise RuntimeError(
                     "browser_use timed out after "
-                    f"{BROWSER_USE_TIMEOUT_SECONDS}s while executing approved browser automation"
+                    f"{timeout}s while executing approved browser automation"
                 ) from exc
 
         try:
@@ -584,12 +598,12 @@ class ComputerHandler:
             pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
             future = pool.submit(lambda: asyncio.run(_run()))
             try:
-                return str(future.result(timeout=BROWSER_USE_TIMEOUT_SECONDS + 10))
+                return str(future.result(timeout=timeout + 10))
             except concurrent.futures.TimeoutError as exc:
                 future.cancel()
                 raise RuntimeError(
                     "browser_use timed out after "
-                    f"{BROWSER_USE_TIMEOUT_SECONDS}s while executing approved browser automation"
+                    f"{timeout}s while executing approved browser automation"
                 ) from exc
             finally:
                 pool.shutdown(wait=False, cancel_futures=True)

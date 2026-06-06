@@ -624,5 +624,22 @@ class PerLaneThinkingAndEffortTests(unittest.TestCase):
         self.assertEqual(config.effort_for_lane("judge"), "medium")
 
 
+class BrowserUseTimeoutConfigTests(unittest.TestCase):
+    def test_default_and_env_override(self) -> None:
+        home = str(Path.home())
+        with patch.dict(os.environ, {"HOME": home}, clear=True):
+            config = AppConfig.from_env()
+        self.assertEqual(config.computer_browser_use_timeout_seconds, 420)
+        with patch.dict(os.environ, {"HOME": home, "CLAW_BROWSER_USE_TIMEOUT": "600"}, clear=True):
+            configured = AppConfig.from_env()
+        self.assertEqual(configured.computer_browser_use_timeout_seconds, 600)
+
+    def test_nonpositive_timeout_rejected(self) -> None:
+        home = str(Path.home())
+        with patch.dict(os.environ, {"HOME": home, "CLAW_BROWSER_USE_TIMEOUT": "0"}, clear=True):
+            with self.assertRaises(ValueError):
+                AppConfig.from_env().validate()
+
+
 if __name__ == "__main__":
     unittest.main()

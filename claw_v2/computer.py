@@ -517,6 +517,10 @@ class BrowserUseService:
     ) -> None:
         self.cdp_url = cdp_url
         self.headless = headless
+        # Path of the screenshot captured at the end of the most recent
+        # run_task, so the caller can surface a fresh artifact (e.g. the
+        # generated image) instead of a stale one.
+        self.last_artifact_path: str | None = None
 
     async def run_task(
         self,
@@ -526,10 +530,12 @@ class BrowserUseService:
         max_actions_per_step: int = 5,
         use_vision: bool = True,
         save_conversation: str | None = None,
+        artifact_dir: str | Path | None = None,
     ) -> str:
         import os
         from browser_use import Agent, BrowserSession, ChatOpenAI
 
+        self.last_artifact_path = None
         browser = BrowserSession(
             cdp_url=self.cdp_url,
             headless=self.headless,
@@ -546,14 +552,38 @@ class BrowserUseService:
             use_vision=use_vision,
             save_conversation_path=save_conversation,
         )
+        artifact_path: Path | None = None
         try:
             result = await agent.run()
+            artifact_path = await self._capture_page_artifact(browser, artifact_dir)
         finally:
             await browser.stop()
-        if result.final_result():
-            return result.final_result()
-        last = result.last_action()
-        return str(last) if last else "(no result)"
+        final = result.final_result()
+        if final:
+            text = final
+        else:
+            last = result.last_action()
+            text = str(last) if last else "(no result)"
+        if artifact_path is not None:
+            self.last_artifact_path = str(artifact_path)
+            return f"{text}\n\n[Captura guardada: {artifact_path}]"
+        return text
+
+    async def _capture_page_artifact(
+        self, browser: Any, artifact_dir: str | Path | None
+    ) -> Path | None:
+        """Best-effort screenshot of the active page after a task, saved as a
+        fresh PNG. Failure never aborts the task — returns None instead."""
+        try:
+            page = await browser.get_current_page()
+            directory = Path(artifact_dir) if artifact_dir else (Path.home() / ".claw" / "images")
+            directory.mkdir(parents=True, exist_ok=True)
+            path = directory / f"browser_use_{int(time.time() * 1000)}.png"
+            await page.screenshot(path=str(path), full_page=True)
+            return path
+        except Exception:
+            logger.warning("browser_use page artifact capture failed", exc_info=True)
+            return None
 
     async def extract(
         self,

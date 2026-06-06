@@ -347,5 +347,113 @@ class CodexComputerBackendTests(unittest.TestCase):
         self.assertEqual(calls, ["open Safari"])
 
 
+class BrowserUseArtifactTests(unittest.TestCase):
+    def _fakes(self, *, screenshot_raises: bool = False, final: str = "imagen creada"):
+        import types
+
+        events: dict = {}
+
+        class FakePage:
+            async def screenshot(self, path=None, full_page=False):
+                if screenshot_raises:
+                    raise RuntimeError("cdp screenshot boom")
+                Path(path).write_bytes(b"PNGDATA")
+                events["screenshot_path"] = path
+                return b"PNGDATA"
+
+        class FakeBrowserSession:
+            def __init__(self, **kwargs):
+                pass
+
+            async def get_current_page(self):
+                return FakePage()
+
+            async def stop(self):
+                events["stopped"] = True
+
+        class FakeResult:
+            def final_result(self):
+                return final
+
+            def last_action(self):
+                return None
+
+        class FakeAgent:
+            def __init__(self, **kwargs):
+                pass
+
+            async def run(self):
+                return FakeResult()
+
+        class FakeChatOpenAI:
+            def __init__(self, **kwargs):
+                pass
+
+        module = types.SimpleNamespace(
+            Agent=FakeAgent, BrowserSession=FakeBrowserSession, ChatOpenAI=FakeChatOpenAI
+        )
+        return module, events
+
+    def test_run_task_saves_screenshot_and_returns_path(self) -> None:
+        import asyncio
+        import sys
+        from claw_v2.computer import BrowserUseService
+
+        module, events = self._fakes()
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(sys.modules, {"browser_use": module}):
+                svc = BrowserUseService()
+                result = asyncio.run(svc.run_task("crea imagen", artifact_dir=tmp))
+            self.assertIn("imagen creada", result)
+            self.assertTrue(events.get("stopped"))
+            self.assertIsNotNone(svc.last_artifact_path)
+            saved = Path(svc.last_artifact_path)
+            self.assertTrue(saved.exists())
+            self.assertEqual(saved.parent, Path(tmp))
+            self.assertIn(str(saved), result)
+
+    def test_screenshot_failure_still_returns_text(self) -> None:
+        import asyncio
+        import sys
+        from claw_v2.computer import BrowserUseService
+
+        module, _ = self._fakes(screenshot_raises=True, final="texto resultado")
+        with patch.dict(sys.modules, {"browser_use": module}):
+            svc = BrowserUseService()
+            result = asyncio.run(svc.run_task("hola"))
+        self.assertEqual(result, "texto resultado")
+        self.assertIsNone(svc.last_artifact_path)
+
+
+class ComputerHandlerTimeoutTests(unittest.TestCase):
+    def _handler(self, config):
+        from claw_v2.computer_handler import ComputerHandler
+
+        return ComputerHandler(config=config)
+
+    def test_timeout_defaults_to_constant_without_config(self) -> None:
+        from claw_v2.computer_handler import BROWSER_USE_TIMEOUT_SECONDS
+
+        self.assertEqual(self._handler(None)._browser_use_timeout(), BROWSER_USE_TIMEOUT_SECONDS)
+
+    def test_timeout_reads_config_value(self) -> None:
+        import types
+
+        cfg = types.SimpleNamespace(computer_browser_use_timeout_seconds=600)
+        self.assertEqual(self._handler(cfg)._browser_use_timeout(), 600)
+
+    def test_timeout_falls_back_when_missing_or_nonpositive(self) -> None:
+        import types
+
+        from claw_v2.computer_handler import BROWSER_USE_TIMEOUT_SECONDS
+
+        self.assertEqual(
+            self._handler(types.SimpleNamespace())._browser_use_timeout(),
+            BROWSER_USE_TIMEOUT_SECONDS,
+        )
+        cfg0 = types.SimpleNamespace(computer_browser_use_timeout_seconds=0)
+        self.assertEqual(self._handler(cfg0)._browser_use_timeout(), BROWSER_USE_TIMEOUT_SECONDS)
+
+
 if __name__ == "__main__":
     unittest.main()

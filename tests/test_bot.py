@@ -4423,6 +4423,7 @@ class BotTests(unittest.TestCase):
                 "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
                 "APPROVALS_ROOT": str(root / "approvals"),
                 "TELEGRAM_ALLOWED_USER_ID": "123",
+                "CLAW_BROWSER_USE_TIMEOUT": "180",
             }
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
