@@ -8,8 +8,8 @@
 ## meta
 
 ```yaml
-describes_commit: fe99808+audit-group6-crash-safe-migrations-send-retry-breaker-decay
-doc_version: 2.10
+describes_commit: 9f25174+audit-m3-m4-offloop-emits-nonblocking-checkpoint-backup
+doc_version: 2.11
 last_verified: 2026-06-10
 verification_method: manual + grep cross-check
 anchor_strategy: symbol_only  # path:symbol, no line numbers

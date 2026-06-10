@@ -49,12 +49,22 @@ class CheckpointService:
                 (ckpt_id, trigger_reason, session_id, consecutive_failures, str(file_path)),
             )
             self.memory._conn.commit()
-            target_conn: sqlite3.Connection | None = None
-            try:
-                target_conn = sqlite3.connect(file_path)
-                self.memory._conn.backup(target_conn, pages=100, sleep=0.001)
-            except Exception:
-                # Roll back the metadata row so the DB stays clean.
+        # Copy WITHOUT holding memory._lock and on a dedicated source
+        # connection: WAL gives it a consistent snapshot, and a single-pass
+        # backup leaves no between-step window for concurrent writers
+        # (observe/jobs/ledger) to trigger restarts. The previous incremental
+        # backup on the live connection held the memory lock for the whole
+        # copy and restarted on every external write — under load the hot
+        # path froze until "database is locked" surfaced to the user.
+        source_conn: sqlite3.Connection | None = None
+        target_conn: sqlite3.Connection | None = None
+        try:
+            source_conn = self._open_backup_source()
+            target_conn = sqlite3.connect(file_path)
+            source_conn.backup(target_conn)
+        except Exception:
+            # Roll back the metadata row so the DB stays clean.
+            with self.memory._lock:
                 try:
                     self.memory._conn.execute(
                         "DELETE FROM checkpoints WHERE ckpt_id = ?", (ckpt_id,),
@@ -65,20 +75,23 @@ class CheckpointService:
                         "Checkpoint rollback: DELETE failed for %s", ckpt_id,
                         exc_info=True,
                     )
-                if target_conn is not None:
+            if target_conn is not None:
+                try:
+                    target_conn.close()
+                except Exception:
+                    pass
+                target_conn = None
+            file_path.unlink(missing_ok=True)
+            raise
+        finally:
+            for conn in (source_conn, target_conn):
+                if conn is not None:
                     try:
-                        target_conn.close()
-                    except Exception:
-                        pass
-                file_path.unlink(missing_ok=True)
-                raise
-            finally:
-                if target_conn is not None:
-                    try:
-                        target_conn.close()
+                        conn.close()
                     except Exception:
                         pass
 
+        with self.memory._lock:
             # Ring rotation (unchanged from CP3)
             try:
                 rows_to_purge = self.memory._conn.execute(
@@ -109,6 +122,10 @@ class CheckpointService:
             except Exception:
                 logger.warning("Checkpoint rotation encountered an error", exc_info=True)
         return ckpt_id
+
+    def _open_backup_source(self) -> sqlite3.Connection:
+        """Dedicated read connection for backups (overridable in tests)."""
+        return sqlite3.connect(self.memory.db_path)
 
     def list(self) -> list[dict]:
         rows = self.memory._conn.execute(

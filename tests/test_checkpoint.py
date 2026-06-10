@@ -66,37 +66,46 @@ class CheckpointCreateTests(unittest.TestCase):
         finally:
             snap_conn.close()
 
-    def test_backup_invoked_with_expected_args(self) -> None:
+    def test_backup_runs_on_dedicated_connection_without_memory_lock(self) -> None:
+        # 2026-06-10 audit M4: the copy must not run on the live connection
+        # nor hold memory._lock (the hot path froze for the whole backup and
+        # external writes restarted it, surfacing "database is locked").
         captured = {}
-        real_conn = self.store._conn
+        real_open = self.service._open_backup_source
 
-        class ConnProxy:
-            def __init__(self, inner):
-                self._inner = inner
-            def backup(self, target, **kwargs):
-                captured["pages"] = kwargs.get("pages")
-                captured["sleep"] = kwargs.get("sleep")
-                return self._inner.backup(target, **kwargs)
-            def __getattr__(self, name):
-                return getattr(self._inner, name)
+        def tracking_open():
+            import threading
 
-        with patch.object(self.store, "_conn", ConnProxy(real_conn)):
+            probe_result = {}
+
+            def probe():
+                acquired = self.store._lock.acquire(blocking=False)
+                probe_result["free"] = acquired
+                if acquired:
+                    self.store._lock.release()
+
+            probe_thread = threading.Thread(target=probe)
+            probe_thread.start()
+            probe_thread.join()
+            captured["locked_during_backup"] = not probe_result["free"]
+            conn = real_open()
+            captured["dedicated"] = conn is not self.store._conn
+            return conn
+
+        with patch.object(self.service, "_open_backup_source", tracking_open):
             self.service.create(trigger_reason="test")
-        self.assertEqual(captured["pages"], 100)
-        self.assertEqual(captured["sleep"], 0.001)
+        self.assertFalse(captured["locked_during_backup"])
+        self.assertTrue(captured["dedicated"])
 
     def test_create_failure_cleans_up_file(self) -> None:
-        real_conn = self.store._conn
-
-        class FailingConnProxy:
-            def __init__(self, inner):
-                self._inner = inner
+        class FailingSource:
             def backup(self, target, **kwargs):
                 raise sqlite3.OperationalError("simulated failure")
-            def __getattr__(self, name):
-                return getattr(self._inner, name)
 
-        with patch.object(self.store, "_conn", FailingConnProxy(real_conn)):
+            def close(self) -> None:
+                pass
+
+        with patch.object(self.service, "_open_backup_source", lambda: FailingSource()):
             with self.assertRaises(sqlite3.OperationalError):
                 self.service.create(trigger_reason="test")
         self.assertEqual(list(self.snapshots_dir.glob("ckpt_*.db")), [])
