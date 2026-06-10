@@ -8,8 +8,8 @@
 ## meta
 
 ```yaml
-describes_commit: f5393af+audit-group4-routing-policy-fallthrough-dispatch-decisions
-doc_version: 2.8
+describes_commit: 23238b9+audit-group5-cost-breaker-enforced-openai-budget-metering
+doc_version: 2.9
 last_verified: 2026-06-10
 verification_method: manual + grep cross-check
 anchor_strategy: symbol_only  # path:symbol, no line numbers
@@ -265,7 +265,11 @@ Telegram → BotService.handle_text
    │   executed tools — replay would duplicate side effects; brain retries
    │   honor the same tools_executed_before_failure marker and queue a
    │   recovery job instead)
-   ├─ ObservationWindow gate (cost_per_hour, tool_calls_per_minute)
+   ├─ ObservationWindow gate (cost_per_hour blocks LLM calls and tier-2+
+   │   tools until the rolling hour decays — auto-clears like token_window;
+   │   manual freezes pause autoexec but keep LLM chat alive; subscription
+   │   providers (Max/Pro) feed notional costs that are ignored;
+   │   tool_calls_per_minute; token_window)
    ├─ post-hooks (sanitize)
    ↓
    Tool calls → ToolRegistry.execute
