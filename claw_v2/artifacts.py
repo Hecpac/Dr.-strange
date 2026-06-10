@@ -117,6 +117,6 @@ def append_lifecycle_artifacts(
 
 
 def planned_phases_for_mode(mode: str) -> list[str]:
-    if mode == "coding":
+    if mode in {"coding", "ops", "publish", "browse"}:
         return ["research", "synthesis", "implementation", "verification"]
     return ["research", "synthesis", "verification"]

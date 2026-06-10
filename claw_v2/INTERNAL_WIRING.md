@@ -8,8 +8,8 @@
 ## meta
 
 ```yaml
-describes_commit: fe99808+spec-002-self-improve-promotion-hotfix+spec-002-subprocess-bounded-pr-c+spec-002-approval-manager-pr-d+spec-002-promotion-tooling-phase-4
-doc_version: 2.14
+describes_commit: fe99808+spec-002-self-improve-promotion-hotfix+spec-002-subprocess-bounded-pr-c+spec-002-approval-manager-pr-d+spec-002-promotion-tooling-phase-4+brain-delegation-tool
+doc_version: 2.15
 last_verified: 2026-06-10
 verification_method: manual + pytest + AST sentinel cross-check
 anchor_strategy: symbol_only  # path:symbol, no line numbers
@@ -390,6 +390,13 @@ Telegram → BotService.handle_text
    ├─ sanitize_tool_output (anti prompt-injection)
    ↓
    Heavy tasks → TaskHandler.start_autonomous_task
+   ├─ entry A: brain calls mcp__claw__delegate_task (in-process SDK MCP
+   │   server, attached in _build_options only when lane=brain AND a
+   │   delegation_handler closure is on the LLMRequest; BotService injects
+   │   the factory into BrainService at __init__; ack returned to the turn,
+   │   result delivered later via autonomous_task_completed/_failed)
+   ├─ entry B: pre-brain coordinated_task handler (autonomy_mode=autonomous
+   │   + mode ∈ {coding, research} only)
    ├─ TaskLedger.create (SQLite ledger in data/claw.db)
    ├─ CoordinatorService — research → synthesis → impl → verify
    ├─ AgentLoop wrap (plan/exec/observe/verify/critique/replan)
@@ -563,6 +570,13 @@ in-code tuple — secret patterns stay code-owned, not config-owned, so a
 JSON edit cannot weaken the secret denylist. New tools or risk-level
 changes require a JSON edit + tests + INTERNAL_WIRING bump.
 
+Brain-lane SDK tool names (preset tools and in-process MCP tools alike) are
+enforced against these policies fail-closed in BOTH the PreToolUse hook and
+`can_use_tool` (`runtime_policy.enforce`; unknown name → RuntimePolicyViolation).
+`mcp__claw__delegate_task` (medium, not read_only, contexts `[brain]`) is the
+brain's delegation tool: `_context_candidates` maps only the brain lane onto
+the `brain` context, so coordinator workers cannot re-delegate recursively.
+
 ### output sanitization
 
 If `definition.ingests_external_content` is true, `sanitize_tool_output`
@@ -682,6 +696,15 @@ phases: [research, synthesis, implementation, verification]
 parallelism:
   max_workers: 4   # per CoordinatorService
   scope: across tasks; phases within a task are sequential.
+
+mode_phases:  # planned_phases_for_mode (artifacts.py) + _build_coordinator_tasks (bot_helpers.py)
+  coding|ops|publish|browse: [research, synthesis, implementation, verification]
+    # implementation worker: lane=worker (tool-capable claude_code preset),
+    # cwd=workspace_root; ops/publish/browse added 2026-06-10 — reachable
+    # ONLY via brain delegation (entry A in §2), the pre-brain gate stays
+    # {coding, research}.
+  research: [research, synthesis, verification]
+  other: [research, synthesis, verification]  # text-only fallback
 
 scratch_dir: ~/.claw/scratch/<task_id>/
   persists: research/*.json, synthesis.md, implementation/*.json, verification/*.json

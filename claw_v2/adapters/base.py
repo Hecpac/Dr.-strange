@@ -93,6 +93,10 @@ class LLMRequest:
     cache_ttl: int | None = None
     thinking_tokens: int = 0
     role: ProviderRole | None = None
+    # Plain closure only — the router fallback path rebuilds requests via
+    # asdict() (deepcopy); a bound method would deep-copy its instance and
+    # crash on non-copyable state like threading locks.
+    delegation_handler: Callable[[dict[str, Any]], dict[str, Any]] | None = None
 
     def validate(self) -> None:
         """Fail fast on malformed cross-provider requests before adapter calls."""
@@ -148,6 +152,8 @@ class LLMRequest:
             raise ValueError("LLM agents must be a dict when provided.")
         if self.hooks is not None and not isinstance(self.hooks, dict):
             raise ValueError("LLM hooks must be a dict when provided.")
+        if self.delegation_handler is not None and not callable(self.delegation_handler):
+            raise ValueError("LLM delegation_handler must be callable when provided.")
         if self.cwd is not None and not isinstance(self.cwd, str):
             raise ValueError("LLM cwd must be a string when provided.")
         if self.cache_ttl is not None:

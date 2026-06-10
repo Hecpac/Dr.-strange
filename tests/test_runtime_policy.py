@@ -43,6 +43,30 @@ class RuntimePolicyEngineTests(unittest.TestCase):
 
             self.assertIn("not declared", str(ctx.exception))
 
+    def test_delegate_task_policy_allows_brain_and_denies_worker_contexts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            engine = RuntimePolicyEngine(workspace_root=workspace, sandbox_policy=SandboxPolicy(workspace_root=workspace))
+
+            decision = engine.enforce(
+                "mcp__claw__delegate_task",
+                {"objective": "Publica el grid", "mode": "publish"},
+                context="brain",
+            )
+            self.assertIsNotNone(decision)
+
+            for denied_context in ("worker", "worker_heavy", "telegram", "daemon"):
+                with self.assertRaises(PermissionError, msg=denied_context):
+                    engine.enforce(
+                        "mcp__claw__delegate_task",
+                        {"objective": "x"},
+                        context=denied_context,
+                    )
+
+            with self.assertRaises(PermissionError) as ctx:
+                engine.enforce("mcp__claw__other", {}, context="brain")
+            self.assertIn("not declared", str(ctx.exception))
+
     def test_secret_paths_are_blocked_for_any_disk_tool(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)

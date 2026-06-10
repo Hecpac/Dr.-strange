@@ -239,6 +239,13 @@ Success and approval invariants:
 - The verifier may increase risk; it may not lower deterministic policy floors.
 - When the task ledger says pending/missing_evidence/interrupted, explain that state honestly and offer the next safe resume step instead of claiming success."""
 
+DELEGATION_CONTRACT = """# Delegation contract
+For work that will not fit comfortably in this turn — GUI/computer-use automation, browser sessions, publishing flows, content-generation batches, or any multi-step job expected to run longer than a couple of minutes — call the `mcp__claw__delegate_task` tool instead of executing it inline:
+- Pass `objective` as one imperative, self-contained instruction (the task runs with no memory of this conversation), `mode` (`ops` for desktop/terminal automation, `publish` for social/content publishing, `browse` for web navigation, `coding`/`research` for those), and a one-line `reason`.
+- The tool returns an acknowledgement with the task id. Weave that ack into your <response> so the user knows the task is running and that the result will arrive when it finishes.
+- After delegating, do NOT also execute the work inline with Bash, and do not delegate the same objective twice in one conversation.
+- Keep quick reads, single commands, and short verifications inline — delegation is for long work, not for everything."""
+
 RUNTIME_OPERATIONS_CONTRACT = """# Runtime operations contract
 Claw runs as a single launchd service:
 - Label: com.pachano.claw
@@ -310,6 +317,9 @@ class BrainService:
     learning: LearningLoop | None = None
     checkpoint: "CheckpointService | None" = None
     wiki: object | None = None  # WikiService, injected after init
+    # Factory(session_id) -> plain closure for LLMRequest.delegation_handler;
+    # injected after init by BotService (same pattern as `wiki`).
+    delegation_handler_factory: Callable[[str], Callable[[dict[str, Any]], dict[str, Any]]] | None = None
     playbooks: PlaybookLoader = None  # type: ignore[assignment]
 
     _last_confidence: OrderedDict = field(default_factory=OrderedDict)  # session_id → float
@@ -441,6 +451,11 @@ class BrainService:
         # When resuming a provider session, skip message history — the SDK already has it.
         # Including both causes Claude to re-summarize the entire conversation each time.
         resuming = provider_session_id is not None
+        delegation_handler = (
+            self.delegation_handler_factory(session_id)
+            if self.delegation_handler_factory is not None
+            else None
+        )
         prompt = self._build_prompt(
             session_id=session_id,
             message=message,
@@ -479,7 +494,9 @@ class BrainService:
                     )
             response = self.router.ask(
                 prompt,
-                system_prompt=_brain_system_prompt(self.system_prompt),
+                system_prompt=_brain_system_prompt(
+                    self.system_prompt, include_delegation=delegation_handler is not None
+                ),
                 lane="brain",
                 provider=model_override.provider if model_override else None,
                 model=model_override.model if model_override else None,
@@ -488,6 +505,7 @@ class BrainService:
                 evidence_pack=attach_trace({"app_session_id": session_id}, trace),
                 max_budget=_resolve_max_budget(self.router),
                 timeout=300.0,
+                delegation_handler=delegation_handler,
             )
         except AdapterError as exc:
             executed_tools = tools_executed_before_failure(exc)
@@ -574,7 +592,9 @@ class BrainService:
                 try:
                     response = self.router.ask(
                         sanitized_prompt,
-                        system_prompt=_brain_system_prompt(self.system_prompt),
+                        system_prompt=_brain_system_prompt(
+                            self.system_prompt, include_delegation=delegation_handler is not None
+                        ),
                         lane="brain",
                         provider=model_override.provider if model_override else None,
                         model=model_override.model if model_override else None,
@@ -586,6 +606,7 @@ class BrainService:
                         ),
                         max_budget=_resolve_max_budget(self.router) * 0.75,
                         timeout=300.0,
+                        delegation_handler=delegation_handler,
                     )
                 except AdapterError as retry_exc:
                     if self.observe is not None:
@@ -667,7 +688,9 @@ class BrainService:
                 try:
                     response = self.router.ask(
                         prompt,
-                        system_prompt=_brain_system_prompt(self.system_prompt),
+                        system_prompt=_brain_system_prompt(
+                            self.system_prompt, include_delegation=delegation_handler is not None
+                        ),
                         lane="brain",
                         provider=model_override.provider if model_override else None,
                         model=model_override.model if model_override else None,
@@ -678,6 +701,7 @@ class BrainService:
                         # if the original turn already burned cycles before failing.
                         max_budget=_resolve_max_budget(self.router) * 0.75,
                         timeout=300.0,
+                        delegation_handler=delegation_handler,
                     )
                 except AdapterError as retry_exc:
                     response = self._queue_recovery_or_raise(
@@ -1545,7 +1569,8 @@ def _parse_verifier_payload(content: str) -> dict:
     }
 
 
-def _brain_system_prompt(system_prompt: str) -> str:
+def _brain_system_prompt(system_prompt: str, *, include_delegation: bool = False) -> str:
+    delegation_block = f"{DELEGATION_CONTRACT}\n\n" if include_delegation else ""
     return (
         f"{system_prompt.rstrip()}\n\n"
         f"{BRAIN_RESPONSE_CONTRACT}\n\n"
@@ -1553,6 +1578,7 @@ def _brain_system_prompt(system_prompt: str) -> str:
         f"{BRAIN_PUSHBACK_CONTRACT}\n\n"
         f"{SELF_HEALING_LOOP_CONTRACT}\n\n"
         f"{AUTONOMY_EXECUTION_CONTRACT}\n\n"
+        f"{delegation_block}"
         f"{RUNTIME_OPERATIONS_CONTRACT}\n\n"
         f"{CAPABILITY_DENIAL_CONTRACT}\n\n"
         f"{IDENTITY_ANCHOR}"

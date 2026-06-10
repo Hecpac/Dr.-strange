@@ -226,6 +226,81 @@ class TaskHandlerTests(unittest.TestCase):
             coordinator.release.set()
             self.assertTrue(handler.wait_for_task(first_task_id, timeout=2))
 
+    def test_start_autonomous_task_ops_mode_dispatches_implementation_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            memory = MemoryStore(root / "claw.db")
+            observe = ObserveStream(root / "observe.db")
+            ledger = TaskLedger(root / "claw.db", observe=observe)
+            jobs = JobService(root / "claw.db", observe=observe)
+            recorded: dict[str, object] = {}
+
+            class _RecordingCoordinator:
+                def run(
+                    self,
+                    task_id,
+                    objective,
+                    research_tasks,
+                    implementation_tasks=None,
+                    verification_tasks=None,
+                    lane_overrides=None,
+                ):
+                    recorded["implementation_tasks"] = implementation_tasks
+                    recorded["research_tasks"] = research_tasks
+                    return CoordinatorResult(
+                        task_id=task_id,
+                        phase_results={
+                            "verification": [
+                                WorkerResult(
+                                    task_name="verify_operation",
+                                    content="Verification Status: passed",
+                                    duration_seconds=0.1,
+                                )
+                            ]
+                        },
+                        synthesis="done",
+                    )
+
+            handler = TaskHandler(
+                coordinator=_RecordingCoordinator(),
+                observe=observe,
+                task_ledger=ledger,
+                job_service=jobs,
+                get_session_state=memory.get_session_state,
+                update_session_state=memory.update_session_state,
+                workspace_root=root,
+            )
+
+            ack = handler.start_autonomous_task(
+                "tg-1",
+                "Publica el hero del grid en la cuenta del estudio",
+                mode="ops",
+                source_text="Publica el hero del grid en la cuenta del estudio",
+                delegation_metadata={"origin": "brain_delegate_tool", "reason": "long job"},
+            )
+            self.assertIn("Tarea autónoma iniciada", ack)
+            task_id = ack.split("`", 2)[1]
+            self.assertTrue(handler.wait_for_task(task_id, timeout=2))
+
+            implementation = recorded["implementation_tasks"]
+            self.assertIsNotNone(implementation)
+            self.assertEqual(len(implementation), 1)
+            self.assertEqual(implementation[0].lane, "worker")
+            self.assertEqual(implementation[0].name, "execute_operation")
+
+            record = ledger.get(task_id)
+            self.assertIsNotNone(record)
+            assert record is not None
+            self.assertEqual(record.mode, "ops")
+
+            state = memory.get_session_state("tg-1")
+            active_task = state["active_object"]["active_task"]
+            self.assertEqual(
+                active_task["delegation_metadata"]["origin"], "brain_delegate_tool"
+            )
+            events = [event["event_type"] for event in observe.recent_events(limit=50)]
+            self.assertIn("autonomous_task_started", events)
+
 
 if __name__ == "__main__":
     unittest.main()

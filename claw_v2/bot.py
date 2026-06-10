@@ -971,6 +971,7 @@ class BotService:
             telemetry_root=getattr(config, "telemetry_root", None),
             max_autonomous_workers=getattr(config, "max_autonomous_workers", 4),
         )
+        brain.delegation_handler_factory = self._delegation_handler_for_session
         self._state_handler = StateHandler(
             brain_memory=brain.memory,
             task_handler=self._task_handler,
@@ -1794,6 +1795,50 @@ class BotService:
             content,
             compact=role == "assistant" and self._memory_compaction_enabled(),
         )
+
+    def _delegation_handler_for_session(
+        self, session_id: str
+    ) -> Callable[[dict[str, Any]], dict[str, Any]]:
+        """Factory for the brain's `delegate_task` tool handler.
+
+        Returns a plain closure (NOT a bound method): the router fallback path
+        rebuilds LLMRequest via asdict()/deepcopy, and deep-copying a bound
+        method would drag BotService (locks, sockets) with it.
+        """
+        task_handler = self._task_handler
+        observe = self.observe
+
+        def _handle(args: dict[str, Any]) -> dict[str, Any]:
+            objective = str(args.get("objective") or "").strip()
+            mode = args.get("mode")
+            if mode not in {"coding", "research", "ops", "publish", "browse"}:
+                mode = _infer_session_mode(objective)
+            if mode == "chat":
+                mode = "ops"
+            reason = str(args.get("reason") or "")[:300]
+            if observe is not None:
+                try:
+                    observe.emit(
+                        "brain_delegation_requested",
+                        payload={
+                            "session_id": session_id,
+                            "mode": mode,
+                            "reason": reason,
+                            "objective_preview": objective[:200],
+                        },
+                    )
+                except Exception:
+                    logger.debug("brain_delegation_requested emit failed", exc_info=True)
+            ack = task_handler.start_autonomous_task(
+                session_id,
+                objective,
+                mode=mode,
+                source_text=objective,
+                delegation_metadata={"origin": "brain_delegate_tool", "reason": reason},
+            )
+            return {"ok": True, "ack": ack, "mode": mode}
+
+        return _handle
 
     def _emit_internal_chat_suppressed(self, session_id: str, *, reason: str, original: str, sanitized: str) -> None:
         if self.observe is None:

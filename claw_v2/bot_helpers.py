@@ -1833,6 +1833,65 @@ def _build_coordinator_tasks(
         ]
         return research, implementation, verification
 
+    if mode in {"ops", "publish", "browse"}:
+        flavor = {
+            "ops": (
+                "Execute the operation with the workspace tools (shell scripts, local CLIs, "
+                "desktop/computer automation already available in the workspace)."
+            ),
+            "publish": (
+                "Prepare and publish the content using the local CLIs/automation already "
+                "available in the workspace. If an action is blocked behind a human approval "
+                "gate, report it as a blocker with evidence — never bypass the gate."
+            ),
+            "browse": (
+                "Drive the workspace browser/automation tooling to complete the navigation "
+                "or extraction described in the objective."
+            ),
+        }[mode]
+        research = [
+            WorkerTask(
+                name="scope_operation",
+                lane="research",
+                instruction=(
+                    "Identify the capabilities this operation needs (CLIs, browser sessions, "
+                    "credentials), the preconditions and risks, and the smallest viable "
+                    f"operational plan. Objective: {objective}"
+                ),
+            )
+        ]
+        implementation = [
+            WorkerTask(
+                name="execute_operation",
+                lane="worker",
+                instruction=(
+                    f"{flavor} "
+                    "Work in three explicit phases and emit each phase as its own labeled section in the response:\n"
+                    "1) `## Actions` — every command/automation step executed, one per line.\n"
+                    "2) `## Verify` — for each check that the operation took effect, "
+                    "list `check: <what>` and `result: ok|fail (<short reason>)`. If nothing was verified, "
+                    "say `none` and explain why.\n"
+                    "3) `## Evidence` — artifact paths the next phase can inspect (screenshots, logs, output files). "
+                    "If none, say `none`.\n"
+                    "Do NOT skip any of the three sections. If a phase fails, still emit the section and state the failure.\n"
+                    f"Objective: {objective}"
+                ),
+            )
+        ]
+        verification = [
+            WorkerTask(
+                name="verify_operation",
+                lane="verifier",
+                instruction=(
+                    "Verify the operation from the available evidence. "
+                    "Return a concise operational review and include a line `Verification Status: passed|pending|failed`. "
+                    "If more work is needed, include `Siguiente paso: ...`. "
+                    f"Objective: {objective}"
+                ),
+            )
+        ]
+        return research, implementation, verification
+
     research = [
         WorkerTask(
             name="gather_findings",

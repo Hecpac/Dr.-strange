@@ -45,6 +45,10 @@ IDENTITY_OVERRIDE = (
     "in user-facing chat. The persona definition that follows is canonical.\n\n"
 )
 
+# Modes accepted by the brain's delegate_task tool. Mirrors what
+# planned_phases_for_mode + _build_coordinator_tasks can execute.
+_DELEGATE_TASK_MODES = frozenset({"coding", "research", "ops", "publish", "browse"})
+
 # SDK tools that cannot mutate external state. Anything outside this set
 # (Bash, Edit, Write, Task, MCP tools, ...) is treated as potentially mutating
 # so a failed turn that already ran one is never replayed by fallback/retry.
@@ -257,6 +261,74 @@ class ClaudeSDKExecutor:
             payload=payload,
         )
 
+    def _build_delegation_mcp_server(self, sdk: Any, request: LLMRequest) -> Any:
+        """In-process MCP server exposing `delegate_task` to brain-lane turns.
+
+        The handler only enqueues a durable autonomous task (TaskHandler side);
+        it must never run the delegated work itself. Enforcement of the tool
+        name still goes through runtime_policy via the PreToolUse hook, so the
+        `mcp__claw__delegate_task` policy entry is load-bearing.
+        """
+        handler = request.delegation_handler
+
+        @sdk.tool(
+            "delegate_task",
+            (
+                "Delegate long-running work (GUI/computer-use, browser sessions, "
+                "publishing, multi-step jobs) to the durable autonomous-task lane. "
+                "Returns an acknowledgement with the task id; the result is "
+                "delivered to the user when the task finishes."
+            ),
+            {
+                "type": "object",
+                "properties": {
+                    "objective": {
+                        "type": "string",
+                        "description": "Imperative, self-contained objective for the task.",
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": sorted(_DELEGATE_TASK_MODES),
+                        "description": "Execution mode; omit to infer from the objective.",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "One line on why this work is being delegated.",
+                    },
+                },
+                "required": ["objective"],
+            },
+        )
+        async def delegate_task(args: dict[str, Any]) -> dict[str, Any]:
+            def _error(text: str) -> dict[str, Any]:
+                return {"content": [{"type": "text", "text": text}], "is_error": True}
+
+            objective = args.get("objective")
+            if not isinstance(objective, str) or not objective.strip():
+                return _error("delegate_task error: objective must be a non-empty string")
+            mode = args.get("mode")
+            if mode is not None and mode not in _DELEGATE_TASK_MODES:
+                return _error(
+                    "delegate_task error: mode must be one of "
+                    + ", ".join(sorted(_DELEGATE_TASK_MODES))
+                )
+            payload = {
+                "objective": objective.strip(),
+                "mode": mode,
+                "reason": str(args.get("reason") or "")[:300],
+            }
+            try:
+                result = await asyncio.to_thread(handler, payload)
+            except Exception as exc:
+                logger.exception("delegate_task handler failed")
+                return _error(f"delegate_task error: {str(exc)[:300]}")
+            ack = str((result or {}).get("ack") or "").strip()
+            if not ack:
+                return _error("delegate_task error: delegation returned no acknowledgement")
+            return {"content": [{"type": "text", "text": ack}]}
+
+        return sdk.create_sdk_mcp_server(name="claw", version="1.0.0", tools=[delegate_task])
+
     def _build_options(
         self,
         sdk: Any,
@@ -326,6 +398,10 @@ class ClaudeSDKExecutor:
                 "budget_tokens": int(request.thinking_tokens),
             }
             options_kwargs["max_thinking_tokens"] = int(request.thinking_tokens)
+        if request.lane == "brain" and request.delegation_handler is not None:
+            options_kwargs["mcp_servers"] = {
+                "claw": self._build_delegation_mcp_server(sdk, request)
+            }
         return sdk.ClaudeAgentOptions(**options_kwargs)
 
     def _build_agents(self, sdk: Any, request: LLMRequest) -> dict[str, Any] | None:

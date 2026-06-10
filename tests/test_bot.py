@@ -6425,6 +6425,62 @@ class BotTests(unittest.TestCase):
                 reply4 = runtime.bot.handle_text(user_id="123", session_id="s1", text="/voice invalid")
                 self.assertIn("inválida", reply4)
 
+    def test_brain_delegation_tool_path_creates_ledger_task_and_returns_ack(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+
+            def delegating_executor(request: LLMRequest) -> LLMResponse:
+                if request.lane == "brain" and request.delegation_handler is not None:
+                    result = request.delegation_handler(
+                        {
+                            "objective": "Publica el hero del grid en la cuenta del estudio",
+                            "mode": "ops",
+                            "reason": "trabajo largo de GUI",
+                        }
+                    )
+                    return LLMResponse(
+                        content=f"<response>{result['ack']}</response>",
+                        lane=request.lane,
+                        provider="anthropic",
+                        model=request.model,
+                    )
+                return LLMResponse(
+                    content="handled",
+                    lane=request.lane,
+                    provider="anthropic",
+                    model=request.model,
+                )
+
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=delegating_executor)
+
+                reply = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="Necesito que publiques el hero del grid en la cuenta del estudio",
+                )
+
+                self.assertIn("Tarea autónoma iniciada", reply)
+                state = runtime.brain.memory.get_session_state("s1")
+                active_task = state["active_object"]["active_task"]
+                self.assertEqual(
+                    active_task["delegation_metadata"]["origin"], "brain_delegate_tool"
+                )
+                task_id = active_task["task_id"]
+                runtime.bot._task_handler.wait_for_task(task_id, timeout=5)
+                record = runtime.bot.task_ledger.get(task_id)
+                self.assertIsNotNone(record)
+                assert record is not None
+                self.assertEqual(record.mode, "ops")
+
 
 if __name__ == "__main__":
     unittest.main()
