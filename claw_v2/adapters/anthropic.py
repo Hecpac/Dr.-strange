@@ -127,7 +127,8 @@ class ClaudeSDKExecutor:
         model_name = request.model
         query_session_id = request.session_id or "default"
 
-        try:
+        async def _consume_turn() -> None:
+            nonlocal result_text, result_session_id, total_cost, usage, model_name
             async with sdk.ClaudeSDKClient(options=options) as client:
                 if isinstance(effective_input, str):
                     await client.query(effective_input, session_id=query_session_id)
@@ -148,6 +149,19 @@ class ClaudeSDKExecutor:
                             if stderr_hint:
                                 detail = f"{detail} (stderr: {stderr_hint})"
                             raise AdapterError(detail)
+
+        try:
+            try:
+                # request.timeout was validated and policy-checked but never
+                # enforced here, so a hung provider call blocked the worker
+                # thread indefinitely. reason="timeout" feeds the router's
+                # llm_timeout audit and the provider circuit breaker.
+                await asyncio.wait_for(_consume_turn(), timeout=request.timeout)
+            except TimeoutError as timeout_exc:
+                raise AdapterError(
+                    f"Claude SDK execution timed out after {request.timeout:.0f}s",
+                    metadata={"reason": "timeout", "timeout_seconds": request.timeout},
+                ) from timeout_exc
         except Exception as exc:  # pragma: no cover - runtime integration path
             stderr_excerpt = " | ".join(stderr_lines[-5:]).strip()
             self._emit_runtime_error(

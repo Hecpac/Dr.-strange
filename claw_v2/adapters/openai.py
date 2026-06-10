@@ -81,6 +81,10 @@ class OpenAIAdapter(ProviderAdapter):
     def _complete_via_sdk(self, request: LLMRequest) -> LLMResponse:
         sdk = self._load_sdk()
         client = sdk.OpenAI(api_key=self._api_key) if self._api_key else sdk.OpenAI()
+        # Enforce the validated per-request timeout on every HTTP call
+        # (initial response and each tool-loop round); it was previously
+        # never passed to the client, so a hung call blocked indefinitely.
+        client = client.with_options(timeout=request.timeout)
         # Registry tools have no read-only marker here, so any executed tool
         # counts: a later failure must not be replayed by fallback/retry.
         executed_tools: list[str] = []

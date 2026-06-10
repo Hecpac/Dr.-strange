@@ -4,6 +4,7 @@ import fcntl
 import hashlib
 import hmac
 import json
+import logging
 import os
 import secrets
 import time
@@ -13,6 +14,8 @@ from typing import Iterable
 
 from claw_v2.approval_sensitivity import approval_metadata_for_change
 from claw_v2.turn_context import current_turn_id
+
+logger = logging.getLogger(__name__)
 
 APPROVAL_TTL_SECONDS = 900  # 15 minutes
 
@@ -114,7 +117,7 @@ class ApprovalManager:
             "visible_to_user": bool(visible_to_user),
             "resolved_by": None,
         }
-        self._path_for(approval_id).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        _atomic_write_json(self._path_for(approval_id), payload)
         return PendingApproval(
             approval_id=approval_id,
             action=action,
@@ -233,25 +236,34 @@ class ApprovalManager:
 
     def _locked_update(self, approval_id: str, modifier: object) -> dict:
         path = self._path_for(approval_id)
-        fd = os.open(str(path), os.O_RDWR)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
-            raw = self._read_locked_fd(fd)
-            payload = json.loads(raw.decode("utf-8"))
-            modifier(payload)  # type: ignore[operator]
-            # ``_result`` is a return side-channel, not record state — strip it
-            # before persisting so a resolved record is content-immutable on
-            # replay (and re-attach it for the caller).
-            result = payload.pop("_result", False)
-            new_data = json.dumps(payload, indent=2).encode("utf-8")
-            os.lseek(fd, 0, os.SEEK_SET)
-            os.ftruncate(fd, 0)
-            os.write(fd, new_data)
-        finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            os.close(fd)
-        payload["_result"] = result
-        return payload
+        while True:
+            fd = os.open(str(path), os.O_RDWR)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                # Updates persist via atomic replace, so the path may point to
+                # a newer inode by the time the lock is acquired. Holding a
+                # lock on an orphaned inode would lose this update — reopen.
+                try:
+                    if os.fstat(fd).st_ino != os.stat(str(path)).st_ino:
+                        continue
+                except FileNotFoundError:
+                    continue
+                raw = self._read_locked_fd(fd)
+                payload = json.loads(raw.decode("utf-8"))
+                modifier(payload)  # type: ignore[operator]
+                # ``_result`` is a return side-channel, not record state — strip it
+                # before persisting so a resolved record is content-immutable on
+                # replay (and re-attach it for the caller).
+                result = payload.pop("_result", False)
+                # Crash-safe persist: an in-place truncate+write left
+                # permanently corrupt JSON if the process died mid-write,
+                # and one corrupt record breaks the whole approval inbox.
+                _atomic_write_json(path, payload)
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+            payload["_result"] = result
+            return payload
 
     def status(self, approval_id: str) -> str:
         return self.read(approval_id)["status"]
@@ -275,7 +287,13 @@ class ApprovalManager:
     def list_pending(self) -> list[dict]:
         pending: list[dict] = []
         for path in sorted(self.root.glob("*.json")):
-            payload = self.read(path.stem)
+            try:
+                payload = self.read(path.stem)
+            except (json.JSONDecodeError, OSError):
+                # One unreadable record must not break the whole inbox
+                # (listing, approving, and the ApprovalPending resume flow).
+                logger.warning("skipping unreadable approval record %s", path, exc_info=True)
+                continue
             if payload.get("status") == "pending":
                 pending.append(payload)
         return pending
@@ -304,6 +322,28 @@ class ApprovalManager:
                 break
             chunks.append(chunk)
         return b"".join(chunks)
+
+
+def _atomic_write_json(path: Path, payload: dict) -> None:
+    """Persist an approval record via unique tmp file + atomic rename.
+
+    Readers can never observe a partially written record, and a crash
+    mid-write leaves the previous version intact. Mode 0600 and a leading
+    dot keep tmp files out of the ``*.json`` listing glob.
+    """
+    data = json.dumps(payload, indent=2).encode("utf-8")
+    tmp = path.parent / f".{path.name}.{secrets.token_hex(4)}.tmp"
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(fd, data)
+        os.fsync(fd)
+    except BaseException:
+        os.close(fd)
+        tmp.unlink(missing_ok=True)
+        raise
+    else:
+        os.close(fd)
+    os.replace(tmp, path)
 
 
 def _required_confirmation(payload: dict) -> str | None:

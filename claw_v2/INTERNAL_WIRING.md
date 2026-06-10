@@ -8,8 +8,8 @@
 ## meta
 
 ```yaml
-describes_commit: 32585b1+audit-group1-replay-guard-verifier-failclosed-grant-matcher
-doc_version: 2.5
+describes_commit: 3a6465c+audit-group2-adapter-timeouts-wal-safe-restore-atomic-approvals
+doc_version: 2.6
 last_verified: 2026-06-10
 verification_method: manual + grep cross-check
 anchor_strategy: symbol_only  # path:symbol, no line numbers
@@ -342,6 +342,10 @@ async_roles:
 before adapter execution. Control roles fail fast if configured for Codex or
 if timeout exceeds 30s. Adapter timeout failures emit `llm_timeout` with
 `role`, `timeout_seconds`, `provider`, `error_type`, and a redacted preview.
+`request.timeout` is enforced at runtime by all three tool-capable adapters:
+Codex (subprocess timeout), Anthropic (`asyncio.wait_for` around the SDK
+turn, raising AdapterError reason=timeout), and OpenAI (per-HTTP-call
+`client.with_options(timeout=...)`).
 
 PR2 explicitly covers Kairos decision/notification checks, PlanGate
 verification, critical action verifier votes, and Coordinator worker,

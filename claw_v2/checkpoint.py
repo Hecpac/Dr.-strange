@@ -190,6 +190,11 @@ def apply_pending_restore_if_any(db_path: Path) -> str | None:
         finally:
             conn.close()
         return None
+    # A leftover -wal/-shm from the old database would be recovered on the
+    # next open and replay stale frames over the restored snapshot, silently
+    # corrupting it. Remove the sidecars before replacing the DB file.
+    for suffix in ("-wal", "-shm"):
+        Path(f"{db_path}{suffix}").unlink(missing_ok=True)
     shutil.copy(snapshot_path, db_path)
     conn = sqlite3.connect(db_path)
     try:

@@ -59,6 +59,9 @@ class SecondaryProviderAdapterTests(unittest.TestCase):
                 recorded["client_kwargs"] = kwargs
                 self.responses = SimpleNamespace(create=self.create)
 
+            def with_options(self, **kwargs):
+                return self
+
             def create(self, **kwargs):
                 recorded["request_kwargs"] = kwargs
                 return fake_response
@@ -86,6 +89,9 @@ class SecondaryProviderAdapterTests(unittest.TestCase):
         class FakeClient:
             def __init__(self, **kwargs):
                 self.responses = SimpleNamespace(create=self.create)
+
+            def with_options(self, **kwargs):
+                return self
 
             def create(self, **kwargs):
                 recorded["request_kwargs"] = kwargs
@@ -125,6 +131,9 @@ class SecondaryProviderAdapterTests(unittest.TestCase):
             def __init__(self, **kwargs):
                 self.responses = SimpleNamespace(create=self.create)
 
+            def with_options(self, **kwargs):
+                return self
+
             def create(self, **kwargs):
                 recorded["request_kwargs"] = kwargs
                 return fake_response
@@ -148,6 +157,9 @@ class SecondaryProviderAdapterTests(unittest.TestCase):
             def __init__(self, **kwargs):
                 self.responses = SimpleNamespace(create=self.create)
 
+            def with_options(self, **kwargs):
+                return self
+
             def create(self, **kwargs):
                 recorded["request_kwargs"] = kwargs
                 return fake_response
@@ -169,6 +181,9 @@ class SecondaryProviderAdapterTests(unittest.TestCase):
         class FakeClient:
             def __init__(self, **kwargs):
                 self.responses = SimpleNamespace(create=self.create)
+
+            def with_options(self, **kwargs):
+                return self
 
             def create(self, **kwargs):
                 recorded["calls"] = int(recorded["calls"]) + 1
@@ -198,6 +213,9 @@ class SecondaryProviderAdapterTests(unittest.TestCase):
             def __init__(self, **kwargs):
                 self.responses = SimpleNamespace(create=self.create)
 
+            def with_options(self, **kwargs):
+                return self
+
             def create(self, **kwargs):
                 recorded["calls"] += 1
                 raise FakeRateLimitError("rate limit exceeded")
@@ -218,6 +236,9 @@ class SecondaryProviderAdapterTests(unittest.TestCase):
         class FakeClient:
             def __init__(self, **kwargs):
                 self.responses = SimpleNamespace(create=self.create)
+
+            def with_options(self, **kwargs):
+                return self
 
             def create(self, **kwargs):
                 recorded["request_kwargs"] = kwargs
