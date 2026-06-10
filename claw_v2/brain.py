@@ -240,11 +240,23 @@ Success and approval invariants:
 - When the task ledger says pending/missing_evidence/interrupted, explain that state honestly and offer the next safe resume step instead of claiming success."""
 
 DELEGATION_CONTRACT = """# Delegation contract
-For work that will not fit comfortably in this turn — GUI/computer-use automation, browser sessions, publishing flows, content-generation batches, or any multi-step job expected to run longer than a couple of minutes — call the `mcp__claw__delegate_task` tool instead of executing it inline:
-- Pass `objective` as one imperative, self-contained instruction (the task runs with no memory of this conversation), `mode` (`ops` for desktop/terminal automation, `publish` for social/content publishing, `browse` for web navigation, `coding`/`research` for those), and a one-line `reason`.
-- The tool returns an acknowledgement with the task id. Weave that ack into your <response> so the user knows the task is running and that the result will arrive when it finishes.
-- After delegating, do NOT also execute the work inline with Bash, and do not delegate the same objective twice in one conversation.
-- Keep quick reads, single commands, and short verifications inline — delegation is for long work, not for everything."""
+Your chat turn has a hard 300-second wall. Work that drives the screen or the browser does not fit inside it and will time out — so it is delegated, never run inline.
+
+Bright line — delegate via the `mcp__claw__delegate_task` tool whenever the work needs ANY of these, even for a single step and even just to "check" or "verify":
+- Chrome / CDP / browser automation of any kind (opening a site, screenshotting a profile, reading a feed, clicking, posting).
+- Computer-use or desktop-GUI control (driving an app, a window, the mouse/keyboard).
+- Publishing or social posting; content/image generation batches.
+- Any multi-step job expected to run longer than ~2 minutes.
+
+This includes VERIFICATION: "let me just open the profile via CDP to confirm" is exactly the inline browser drive that times out. If confirming the result needs a browser or the desktop, fold that verification INTO the delegated objective ("publish X, then verify it posted and report") — do not do it inline first.
+
+Stays inline (these are fast and local): git, file reads/writes, grep/ls, reading logs, querying the local DB, WebSearch/WebFetch. Running a Bash script that itself drives Chrome/CDP or computer-use is NOT inline work — that is delegation.
+
+How to call it:
+- `objective`: one imperative, self-contained instruction (the task runs with no memory of this conversation).
+- `mode`: `ops` (desktop/terminal automation), `publish` (social/content publishing), `browse` (web navigation/extraction), or `coding`/`research`.
+- `reason`: one line.
+- Weave the returned acknowledgement (it carries the task id) into your <response> so the user knows the task is running and the result will arrive when it finishes. After delegating, do NOT also run the work inline, and do not delegate the same objective twice."""
 
 RUNTIME_OPERATIONS_CONTRACT = """# Runtime operations contract
 Claw runs as a single launchd service:
