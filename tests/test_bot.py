@@ -1056,7 +1056,10 @@ class BotTests(unittest.TestCase):
                 self.assertIn("pending_action_execution_started", events)
                 self.assertIn("pending_action_execution_completed", events)
 
-    def test_haz_la_prueba_without_pending_action_asks_for_precision(self) -> None:
+    def test_haz_la_prueba_without_pending_action_falls_through_to_brain(self) -> None:
+        # SOUL routing policy (2026-06-10 audit A5): proceed-class turns with
+        # nothing resolvable pre-brain reach the brain instead of bouncing a
+        # "¿Qué acción concreta...?" clarification.
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             env = {
@@ -1072,7 +1075,7 @@ class BotTests(unittest.TestCase):
 
                 reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="Haz la prueba")
 
-                self.assertIn("Qué acción concreta", reply)
+                self.assertEqual(reply, "handled")
 
     def test_telegram_update_request_starts_task_after_safe_preflight_when_task_intent_flag_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

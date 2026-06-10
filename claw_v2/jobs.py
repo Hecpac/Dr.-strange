@@ -488,6 +488,13 @@ class JobService:
         return self._row_to_record(row) if row is not None else None
 
     def _migrate_resume_key_uniqueness(self) -> None:
+        """Crash-safe resume-key migration (mirrors memory.py's pattern).
+
+        Handles steady, legacy (``resume_key TEXT UNIQUE`` table shape), and
+        orphan states (an ``agent_jobs_legacy_*`` table left by a crash
+        mid-migration — previously never drained, silently losing the whole
+        job queue). One BEGIN IMMEDIATE; counts verified before dropping.
+        """
         row = self._conn.execute(
             """
             SELECT sql
@@ -497,26 +504,43 @@ class JobService:
             """
         ).fetchone()
         table_sql = str(row["sql"] or "") if row is not None else ""
-        if "resume_key TEXT UNIQUE" not in table_sql:
+        needs_migration = "resume_key TEXT UNIQUE" in table_sql
+        orphan_row = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'agent_jobs_legacy_%' LIMIT 1"
+        ).fetchone()
+        orphan_table = str(orphan_row["name"]) if orphan_row is not None else None
+        if not needs_migration and orphan_table is None:
             return
-        legacy_table = f"agent_jobs_legacy_{uuid.uuid4().hex[:8]}"
-        self._conn.execute(f"ALTER TABLE agent_jobs RENAME TO {legacy_table}")
-        self._conn.executescript(JOBS_TABLE_SCHEMA)
-        self._conn.execute(
-            f"""
-            INSERT INTO agent_jobs (
-                job_id, kind, status, payload_json, checkpoint_json, result_json,
-                metadata_json, error, resume_key, attempts, max_attempts, worker_id,
-                next_run_at, created_at, started_at, completed_at, updated_at
-            )
-            SELECT
-                job_id, kind, status, payload_json, checkpoint_json, result_json,
-                metadata_json, error, resume_key, attempts, max_attempts, worker_id,
-                next_run_at, created_at, started_at, completed_at, updated_at
-            FROM {legacy_table}
-            """
+        columns = (
+            "job_id, kind, status, payload_json, checkpoint_json, result_json, "
+            "metadata_json, error, resume_key, attempts, max_attempts, worker_id, "
+            "next_run_at, created_at, started_at, completed_at, updated_at"
         )
-        self._conn.execute(f"DROP TABLE {legacy_table}")
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            legacy_table = orphan_table
+            if needs_migration:
+                legacy_table = f"agent_jobs_legacy_{uuid.uuid4().hex[:8]}"
+                self._conn.execute(f"ALTER TABLE agent_jobs RENAME TO {legacy_table}")
+            # executescript() force-commits the open transaction — run the
+            # schema statement by statement to stay inside BEGIN IMMEDIATE.
+            for statement in JOBS_TABLE_SCHEMA.split(";"):
+                if statement.strip():
+                    self._conn.execute(statement)
+            self._conn.execute(
+                f"INSERT OR IGNORE INTO agent_jobs ({columns}) SELECT {columns} FROM {legacy_table}"
+            )
+            new_count = int(self._conn.execute("SELECT COUNT(*) FROM agent_jobs").fetchone()[0])
+            old_count = int(self._conn.execute(f"SELECT COUNT(*) FROM {legacy_table}").fetchone()[0])
+            if new_count < old_count:
+                raise sqlite3.IntegrityError(
+                    f"agent_jobs migration copied {new_count} of {old_count} rows"
+                )
+            self._conn.execute(f"DROP TABLE {legacy_table}")
+            self._conn.execute("COMMIT")
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
 
     def _record_values(self, record: JobRecord) -> tuple[Any, ...]:
         return (

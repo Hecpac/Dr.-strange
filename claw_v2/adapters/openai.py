@@ -16,6 +16,7 @@ from claw_v2.adapters.base import (
     build_effective_input,
     build_effective_system_prompt,
     coerce_usage_dict,
+    record_tools_executed,
 )
 from claw_v2.approval_gate import ApprovalPending
 from claw_v2.pricing import estimate_cost_usd
@@ -80,6 +81,16 @@ class OpenAIAdapter(ProviderAdapter):
     def _complete_via_sdk(self, request: LLMRequest) -> LLMResponse:
         sdk = self._load_sdk()
         client = sdk.OpenAI(api_key=self._api_key) if self._api_key else sdk.OpenAI()
+        # Enforce the validated per-request timeout on every HTTP call
+        # (initial response and each tool-loop round); it was previously
+        # never passed to the client, so a hung call blocked indefinitely.
+        client = client.with_options(timeout=request.timeout)
+        # Registry tools have no read-only marker here, so any executed tool
+        # counts: a later failure must not be replayed by fallback/retry.
+        executed_tools: list[str] = []
+        # Usage is reported per HTTP response; collect every round so
+        # multi-round tool turns meter real spend, not just the last call.
+        usage_rounds: list[dict[str, Any]] = []
         try:
             kwargs: dict[str, Any] = dict(
                 model=request.model,
@@ -105,28 +116,44 @@ class OpenAIAdapter(ProviderAdapter):
                     kwargs["tools"] = schemas
 
             response = _create_response_with_retry(client, kwargs)
+            _record_round_usage(usage_rounds, response)
+            # Enforce the cap on the very first response too: advisory lanes
+            # and no-tool turns never enter the loop, so without this check an
+            # oversized billable response would be returned as successful.
+            _enforce_request_budget(request, usage_rounds)
 
             # Tool-calling loop
             if use_tools:
-                response = self._tool_loop(client, request, response)
+                response = self._tool_loop(client, request, response, executed_tools, usage_rounds)
 
         except ApprovalPending:
             # Tier 3 soft-block — propagate past the adapter boundary so the
             # bot can format /approve for Hector.
             raise
-        except AdapterError:
+        except AdapterError as exc:
+            record_tools_executed(exc, executed_tools)
             raise
         except Exception as exc:
             if _is_stream_idle_error(exc):
-                raise StreamInterruptedError(
+                error: AdapterError = StreamInterruptedError(
                     f"OpenAI stream interrupted: {exc}",
                     partial_output=_extract_partial_output(exc),
-                ) from exc
-            raise AdapterError(f"OpenAI Responses request failed: {exc}") from exc
+                )
+            else:
+                error = AdapterError(f"OpenAI Responses request failed: {exc}")
+            record_tools_executed(error, executed_tools)
+            raise error from exc
 
-        return self._build_response(response, request)
+        return self._build_response(response, request, usage_rounds)
 
-    def _tool_loop(self, client: Any, request: LLMRequest, response: Any) -> Any:
+    def _tool_loop(
+        self,
+        client: Any,
+        request: LLMRequest,
+        response: Any,
+        executed_tools: list[str] | None = None,
+        usage_rounds: list[dict[str, Any]] | None = None,
+    ) -> Any:
         """Execute function calls in a loop until the model stops calling tools."""
         for _ in range(_MAX_TOOL_ROUNDS):
             function_calls = [
@@ -145,6 +172,8 @@ class OpenAIAdapter(ProviderAdapter):
                 except (json.JSONDecodeError, TypeError):
                     arguments = {}
 
+                if executed_tools is not None and name:
+                    executed_tools.append(name)
                 try:
                     result = self._tool_executor(name, arguments)  # type: ignore[misc]
                     output = json.dumps(result, default=str)
@@ -170,22 +199,35 @@ class OpenAIAdapter(ProviderAdapter):
             if request.effort and _supports_reasoning(request.model):
                 kwargs["reasoning"] = {"effort": request.effort}
             response = _create_response_with_retry(client, kwargs)
+            if usage_rounds is not None:
+                _record_round_usage(usage_rounds, response)
+                # OpenAI is API-billed (subscriptions cover Claude/Codex, not
+                # this adapter): enforce the per-request cap the Claude SDK
+                # already honors, instead of looping up to 15 unmetered rounds.
+                _enforce_request_budget(request, usage_rounds)
 
         return response
 
-    def _build_response(self, response: Any, request: LLMRequest) -> LLMResponse:
-        usage = coerce_usage_dict(getattr(response, "usage", None))
-        estimate = estimate_cost_usd("openai", request.model, usage)
+    def _build_response(
+        self,
+        response: Any,
+        request: LLMRequest,
+        usage_rounds: list[dict[str, Any]] | None = None,
+    ) -> LLMResponse:
+        rounds = usage_rounds or [coerce_usage_dict(getattr(response, "usage", None))]
+        usage = _aggregate_usage(rounds)
+        first_estimate = estimate_cost_usd("openai", request.model, rounds[0])
+        total_cost, cost_unknown = _estimate_rounds_cost(request.model, rounds)
         return LLMResponse(
             content=(getattr(response, "output_text", None) or "").strip(),
             lane=request.lane,
             provider="openai",
             model=request.model,
             confidence=0.7 if getattr(response, "output_text", None) else 0.0,
-            cost_estimate=estimate.amount_usd,
-            cost_unknown=estimate.unknown,
-            cost_source=estimate.price_source,
-            cost_price_as_of=estimate.price_as_of,
+            cost_estimate=total_cost,
+            cost_unknown=cost_unknown,
+            cost_source=first_estimate.price_source,
+            cost_price_as_of=first_estimate.price_as_of,
             artifacts={
                 "response_id": getattr(response, "id", None),
                 "session_id": getattr(response, "id", None),
@@ -201,6 +243,51 @@ class OpenAIAdapter(ProviderAdapter):
             raise AdapterUnavailableError(
                 "openai is not installed. Install the 'openai' Python package to enable OpenAI provider support."
             ) from exc
+
+
+def _record_round_usage(usage_rounds: list[dict[str, Any]], response: Any) -> None:
+    usage = coerce_usage_dict(getattr(response, "usage", None))
+    if usage:
+        usage_rounds.append(usage)
+
+
+def _aggregate_usage(usage_rounds: list[dict[str, Any]]) -> dict[str, Any]:
+    if not usage_rounds:
+        return {}
+    if len(usage_rounds) == 1:
+        return usage_rounds[0]
+    total: dict[str, Any] = {}
+    for usage in usage_rounds:
+        for key, value in usage.items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                total[key] = total.get(key, 0) + value
+    total["rounds"] = len(usage_rounds)
+    return total
+
+
+def _enforce_request_budget(request: LLMRequest, usage_rounds: list[dict[str, Any]]) -> None:
+    if request.max_budget <= 0:
+        return
+    spent, spend_unknown = _estimate_rounds_cost(request.model, usage_rounds)
+    if not spend_unknown and spent > request.max_budget:
+        raise AdapterError(
+            f"OpenAI request exceeded max_budget: ${spent:.4f} > ${request.max_budget:.4f}",
+            metadata={"reason": "budget_exceeded", "cost_usd": round(spent, 6)},
+        )
+
+
+def _estimate_rounds_cost(model: str, usage_rounds: list[dict[str, Any]]) -> tuple[float, bool]:
+    """Sum the per-round cost estimates. unknown=True when any metered round
+    could not be priced (the router then emits cost_metering_unknown)."""
+    total = 0.0
+    unknown = not usage_rounds
+    for usage in usage_rounds:
+        estimate = estimate_cost_usd("openai", model, usage)
+        if estimate.unknown:
+            unknown = True
+            continue
+        total += estimate.amount_usd
+    return total, unknown
 
 
 _REASONING_MODELS = {"o3", "o3-mini", "o4-mini", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini"}

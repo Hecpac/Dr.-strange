@@ -85,13 +85,15 @@ class ContinuationResolverTests(unittest.TestCase):
         assert isinstance(shortcut, _BrainShortcut)
         self.assertIn("reiniciar daemon", shortcut.text)
 
-    def test_no_context_falls_back_to_question(self) -> None:
+    def test_no_context_falls_through_to_brain(self) -> None:
+        # SOUL routing policy (2026-06-10 audit A5): proceed-class turns the
+        # state handler cannot resolve fall through silently to the brain —
+        # no pre-brain clarification question.
         _memory, handler = self._handler()
 
         reply = handler.maybe_resolve_stateful_followup("Procede", session_id="s1")
 
-        self.assertIsInstance(reply, str)
-        self.assertIn("Qué acción concreta", reply)
+        self.assertIsNone(reply)
 
     def test_continuation_pattern_matches_variants(self) -> None:
         for word in (

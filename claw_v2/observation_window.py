@@ -148,10 +148,13 @@ class ObservationWindowState:
             now = self._clock()
             self._prune_locked(now)
             auto_cleared = self._clear_token_window_freeze_if_decayed_locked(now)
+            cost_cleared = self._clear_cost_freeze_if_decayed_locked(now)
             frozen = self._frozen
             freeze_reason = self._freeze_reason or "observation_window_frozen"
         if auto_cleared:
             self._emit("observation_window_freeze_auto_cleared", {"stale_reason": "circuit_breaker:token_window"})
+        if cost_cleared:
+            self._emit("observation_window_freeze_auto_cleared", {"stale_reason": "circuit_breaker:cost_per_hour"})
         if frozen:
             if _allows_read_only_during_freeze(freeze_reason) and tier <= LOCAL_READ_ONLY_TIER:
                 self._emit(
@@ -262,12 +265,15 @@ class ObservationWindowState:
         with self._lock:
             self._prune_locked(now)
             auto_cleared = self._clear_token_window_freeze_if_decayed_locked(now)
+            cost_cleared = self._clear_cost_freeze_if_decayed_locked(now)
             frozen = self._frozen
             freeze_reason = self._freeze_reason or "observation_window_frozen"
             totals = self._token_window_totals_locked()
             compact_before_large_calls = totals["total_tokens"] >= self._token_soft_threshold()
         if auto_cleared:
             self._emit("observation_window_freeze_auto_cleared", {"stale_reason": "circuit_breaker:token_window"})
+        if cost_cleared:
+            self._emit("observation_window_freeze_auto_cleared", {"stale_reason": "circuit_breaker:cost_per_hour"})
         if frozen and freeze_reason == "circuit_breaker:token_window":
             payload = {
                 "lane": lane,
@@ -279,6 +285,22 @@ class ObservationWindowState:
             }
             self._emit("llm_blocked_by_token_window", payload)
             raise ObservationWindowBlocked("observation window frozen: circuit_breaker:token_window")
+        if frozen and freeze_reason == "circuit_breaker:cost_per_hour":
+            # autonomy_degraded_by_cost_breaker announces
+            # "llm_calls_until_window_decays" — enforce it (it previously only
+            # blocked tools, so LLM spend continued unbounded). Manual freezes
+            # intentionally keep LLM chat alive: /freeze pauses autoexec, not
+            # conversation. Subscription providers (Max/Pro) never feed this
+            # breaker: their notional costs are ignored upstream.
+            payload = {
+                "lane": lane,
+                "provider": provider,
+                "model": model,
+                "reason": freeze_reason,
+                "cost_per_hour_threshold": self.config.cost_per_hour_threshold,
+            }
+            self._emit("llm_blocked_by_cost_breaker", payload)
+            raise ObservationWindowBlocked("observation window frozen: circuit_breaker:cost_per_hour")
         if compact_before_large_calls:
             self._emit(
                 "token_window_compaction_recommended",
@@ -614,6 +636,28 @@ class ObservationWindowState:
         self._freeze_actor = "auto_clear_token_window"
         self._freeze_updated_at = now
         self._tripped_breakers.discard("token_window")
+        self._persist_state_locked()
+        return True
+
+    def _clear_cost_freeze_if_decayed_locked(self, now: float) -> bool:
+        """Mirror of the token-window decay for the cost breaker.
+
+        The cost breaker announces ``llm_calls_until_window_decays``; with
+        enforcement in before_llm_request the freeze must self-heal once the
+        rolling-hour cost drops back under the threshold (callers run
+        ``_prune_locked`` first), or the bot would stay mute until a manual
+        /unfreeze.
+        """
+        if self._freeze_reason != "circuit_breaker:cost_per_hour":
+            return False
+        cost_per_hour = sum(item_cost for _, item_cost in self._llm_costs)
+        if cost_per_hour > self.config.cost_per_hour_threshold:
+            return False
+        self._frozen = False
+        self._freeze_reason = ""
+        self._freeze_actor = "auto_clear_cost_per_hour"
+        self._freeze_updated_at = now
+        self._tripped_breakers.discard("cost_per_hour")
         self._persist_state_locked()
         return True
 

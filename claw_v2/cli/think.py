@@ -6,6 +6,8 @@ Subcommands:
   spending  Cost rollup today (lane, provider, model, agent).
   circuit   Observation window state (frozen, thresholds, rolling cost).
   replay    Reconstruct an agent session's reasoning chain.
+  failures  Aggregate failure events by tool + error (default:
+            sdk_post_tool_use_failure) with per-turn concentration.
 
 Bot does not have to be running. Reads the same SQLite the live bot writes to.
 """
@@ -180,6 +182,65 @@ def cmd_replay(args: argparse.Namespace, observe: ObserveStream) -> int:
     return 0
 
 
+def cmd_failures(args: argparse.Namespace, observe: ObserveStream) -> int:
+    with observe._lock:
+        totals = observe._conn.execute(
+            """
+            SELECT COUNT(*),
+                   COUNT(DISTINCT json_extract(payload, '$.turn_id')),
+                   MIN(timestamp),
+                   MAX(timestamp)
+            FROM observe_stream
+            WHERE event_type = ?
+            """,
+            (args.type,),
+        ).fetchone()
+        rows = observe._conn.execute(
+            """
+            SELECT COALESCE(json_extract(payload, '$.tool_name'), '?') AS tool,
+                   substr(COALESCE(json_extract(payload, '$.error'), '(sin error)'), 1, ?) AS error,
+                   COUNT(*) AS n
+            FROM observe_stream
+            WHERE event_type = ?
+            GROUP BY tool, error
+            ORDER BY n DESC
+            LIMIT ?
+            """,
+            (args.error_chars, args.type, args.limit),
+        ).fetchall()
+        daily = observe._conn.execute(
+            """
+            SELECT date(timestamp) AS d, COUNT(*) AS n
+            FROM observe_stream
+            WHERE event_type = ?
+            GROUP BY d
+            ORDER BY d DESC
+            LIMIT ?
+            """,
+            (args.type, args.days),
+        ).fetchall()
+    total, turns, first_ts, last_ts = totals
+    if not total:
+        print(f"Sin eventos {args.type!r} en esta DB.")
+        return 0
+    turns = turns or 0
+    print(f"Evento: {args.type}")
+    print(f"Total: {total}  |  turnos distintos: {turns}  |  rango: {first_ts} .. {last_ts}")
+    if turns:
+        ratio = total / turns
+        hint = "cascadas (cwd roto / retry loops)" if ratio > 3 else "fallos dispersos"
+        print(f"Concentración: {ratio:.1f} fallos/turno → {hint}")
+    print()
+    print(f"{'n':>5s}  {'tool':12s}  error")
+    for tool, error, n in rows:
+        print(f"{n:>5d}  {str(tool):12s}  {str(error).replace(chr(10), ' ')}")
+    print()
+    print("Por día (recientes):")
+    for day, n in daily:
+        print(f"  {day}  {n}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="claw-think", description=__doc__.splitlines()[0] if __doc__ else "")
     parser.add_argument("--db", help="Override path to claw.db")
@@ -203,6 +264,12 @@ def main(argv: list[str] | None = None) -> int:
     p_replay.add_argument("--limit", type=int, default=200)
     p_replay.add_argument("--scan", type=int, default=2000, help="Recent events to scan for the session")
 
+    p_failures = sub.add_parser("failures", help="Aggregate failure events by tool + error")
+    p_failures.add_argument("--type", default="sdk_post_tool_use_failure", help="event_type to aggregate")
+    p_failures.add_argument("--limit", type=int, default=25, help="Top (tool, error) groups to show")
+    p_failures.add_argument("--days", type=int, default=14, help="Daily distribution window")
+    p_failures.add_argument("--error-chars", type=int, default=90, help="Error message truncation")
+
     args = parser.parse_args(argv)
     db_path = _resolve_db_path(args.db)
     observe = ObserveStream(db_path)
@@ -212,6 +279,7 @@ def main(argv: list[str] | None = None) -> int:
         "spending": cmd_spending,
         "circuit": cmd_circuit,
         "replay": cmd_replay,
+        "failures": cmd_failures,
     }
     return handlers[args.cmd](args, observe)
 

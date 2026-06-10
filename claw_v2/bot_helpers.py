@@ -1007,9 +1007,12 @@ _TELEGRAM_IMPERATIVE_RULES: tuple[dict[str, Any], ...] = (
     },
     {
         "intent": "task.continue_active_mission",
+        # Whole-message continuations only: an embedded verb ("el deploy
+        # sigue fallando", "continuamos mañana") is conversational and per
+        # SOUL routing policy belongs to the brain, not this router.
         "patterns": (
-            r"\b(?:continua|sigue|procede)\b",
-            r"\b(?:continue|proceed)\b",
+            r"^\s*(?:continua|sigue|procede)(?:\s+(?:por\s+favor|porfa|pues|ya))?[\s.!?…]*$",
+            r"^\s*(?:continue|proceed)(?:\s+please)?[\s.!?…]*$",
         ),
         "needs_context": True,
     },

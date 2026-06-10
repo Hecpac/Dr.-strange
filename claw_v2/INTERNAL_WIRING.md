@@ -8,9 +8,9 @@
 ## meta
 
 ```yaml
-describes_commit: 9a98873+invariant1-final-leg-dream-learning-off-tick
-doc_version: 2.4
-last_verified: 2026-06-05
+describes_commit: fe99808+audit-group6-crash-safe-migrations-send-retry-breaker-decay
+doc_version: 2.10
+last_verified: 2026-06-10
 verification_method: manual + grep cross-check
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
@@ -248,6 +248,9 @@ invariants:
 
 ```
 Telegram → BotService.handle_text
+   (transport: concurrent_updates with per-chat ordering via _chat_lock;
+    operator interrupt commands — /freeze, /approve, /approvals, /status,
+    /action_abort... — bypass the chat lock so a long turn cannot block them)
    ↓
    Layer 1: pre-brain dispatchers (15 handlers in chain — see §5.1)
    Layer 2: CapabilityRouter (intent → chat | runtime_handoff | skill)
@@ -257,8 +260,16 @@ Telegram → BotService.handle_text
    ├─ pre-hooks
    ├─ Adapter (Anthropic with session reuse for prefix cache)
    ├─ CircuitBreaker (opens per provider)
-   ├─ Fallback (anthropic ↔ openai; codex no fallback — explicit)
-   ├─ ObservationWindow gate (cost_per_hour, tool_calls_per_minute)
+   ├─ Fallback (anthropic ↔ openai; codex no fallback — explicit;
+   │   suppressed with llm_fallback_suppressed when the failed turn already
+   │   executed tools — replay would duplicate side effects; brain retries
+   │   honor the same tools_executed_before_failure marker and queue a
+   │   recovery job instead)
+   ├─ ObservationWindow gate (cost_per_hour blocks LLM calls and tier-2+
+   │   tools until the rolling hour decays — auto-clears like token_window;
+   │   manual freezes pause autoexec but keep LLM chat alive; subscription
+   │   providers (Max/Pro) feed notional costs that are ignored;
+   │   tool_calls_per_minute; token_window)
    ├─ post-hooks (sanitize)
    ↓
    Tool calls → ToolRegistry.execute
@@ -275,8 +286,12 @@ Telegram → BotService.handle_text
    ├─ SubAgentService (assigned_agent → SOUL.md)
    ├─ ApprovalGate (tier 3)
    ├─ Verifier votes → _aggregate_verifier_votes → recommendation + risk
+   │   (evidence beyond the advisory 12k-char rendering bound fails closed:
+   │    evidence_pack_truncated blocker forces the human gate)
    ↓
-   ObserveStream emits events at every layer (data/claw.db)
+   ObserveStream emits events at every layer (data/claw.db; turn_id
+   expression index serves turn receipts; scheduler job observe_prune
+   applies a 30-day retention in bounded hourly sweeps)
    ObservationWindowState gates / persists freeze state in
        data/observation_window.json (sibling of db_path).
 ```
@@ -336,6 +351,10 @@ async_roles:
 before adapter execution. Control roles fail fast if configured for Codex or
 if timeout exceeds 30s. Adapter timeout failures emit `llm_timeout` with
 `role`, `timeout_seconds`, `provider`, `error_type`, and a redacted preview.
+`request.timeout` is enforced at runtime by all three tool-capable adapters:
+Codex (subprocess timeout), Anthropic (`asyncio.wait_for` around the SDK
+turn, raising AdapterError reason=timeout), and OpenAI (per-HTTP-call
+`client.with_options(timeout=...)`).
 
 PR2 explicitly covers Kairos decision/notification checks, PlanGate
 verification, critical action verifier votes, and Coordinator worker,
@@ -463,40 +482,53 @@ human approval. Each member satisfies all four:
 
 ## 5. dispatch layers
 
-### 5.1 layer 1 — pre-brain dispatchers (15 handlers)
+### 5.1 layer 1 — pre-brain dispatchers
 
-`BotService.handle_text` (`claw_v2/bot.py`) tries 15 handlers in order.
+`BotService.handle_text` (`claw_v2/bot.py`) tries the handlers in order.
 Each emits `dispatch_decision`. Order matters; no test enforces it. The
-real call sites in `handle_text` (verified at HEAD `e218b07`):
+real call sites in `_handle_text_body` (verified 2026-06-10):
 
 | # | Handler symbol | Trigger / contract |
 |---|---|---|
-| 1 | `_handle_pending_computer_approval_response` | response to pending computer-use approval |
+| 0 | `_maybe_handle_brain_first_new_task` | semantic new_task + clear_goal → brain route |
+| 1 | `_handle_pending_computer_approval_response` | response to pending computer-use approval (exact/word-boundary grant matcher) |
 | 2 | `_maybe_handle_operational_alert` | "alertas operacionales" + parse |
 | 3 | `_maybe_handle_boot_context_status` | boot context queries |
 | 4 | `_maybe_handle_pending_tasks_query` | "tareas pendientes" / "pendientes" |
-| 5 | `_maybe_handle_actionable_task_request` | runtime=Telegram + state-derived objective |
-| 6 | `_maybe_handle_task_intent` | **gated OFF** by `CLAW_DISABLE_TASK_INTENT_ROUTER=1` (default) |
-| 7 | `_maybe_handle_operational_status` | operational status questions |
-| 8 | `_maybe_handle_change_status_question` | change-status questions |
-| 9 | `_maybe_handle_capability_route` | classify_autonomy_intent → CRITICAL_TASK_KINDS gate |
-| 10 | `_handle_pending_tool_approval_grant_response` | response to pending tool approval |
-| 11 | `_handle_autonomy_grant_response` | "tienes autonomía", "full autonomy" |
-| 12 | `_maybe_resolve_stateful_followup` | proceed-class continuation (state_handler) |
-| 13 | `_maybe_handle_shortcut` | URL extraction, chrome browse, link review |
-| 14 | `_nlm_handler.natural_language_response` | NotebookLM intent classifier |
-| 15 | `_task_handler.maybe_run_coordinated_task` | coordinated autonomous task |
+| 5 | `_maybe_handle_operational_failure_summary` | failure summary queries |
+| 6 | `_maybe_handle_operational_status` | operational status questions |
+| 7 | cleanup status / owner delegation / `_maybe_handle_telegram_imperative_request` | explicit operator imperatives; unresolved context → fallthrough_to_brain (never clarifies) |
+| 8 | `_maybe_handle_actionable_task_request` | runtime=Telegram + state-derived objective; unresolved follow-up → fallthrough |
+| 9 | `_maybe_handle_task_intent` | **gated OFF** by `CLAW_DISABLE_TASK_INTENT_ROUTER=1` (default) |
+| 10 | `_maybe_handle_change_status_question` | change-status questions |
+| 11 | meta introspection guard + `_maybe_handle_capability_route` | classify_autonomy_intent → CRITICAL_TASK_KINDS gate |
+| 12 | `_handle_pending_tool_approval_grant_response` | response to pending tool approval |
+| 13 | `_handle_autonomy_grant_response` | "tienes autonomía", "full autonomy" |
+| 14 | `_maybe_resolve_stateful_followup` | proceed-class continuation (state_handler); stale options / no pending context → fallthrough |
+| 15 | `_maybe_handle_shortcut` | URL extraction, chrome browse, link review |
+| 16 | `_nlm_handler.natural_language_response` | NotebookLM intent classifier |
+| 17 | `_task_handler.maybe_run_coordinated_task` | coordinated autonomous task |
 
 Then fallthrough to brain.
 
-**Known fragility**: handler #5 vs #6 overlap; #6 is gated OFF for that
+**Routing-policy conformance (2026-06-10 audit, group 4)**: pre-brain
+handlers never ask for clarification. When target/artifact/mission cannot
+be resolved from the literal text + session_state, they emit a
+fallthrough event and return None so the brain handles the turn. The
+`task.continue_active_mission` patterns are anchored to whole-message
+continuations ("Continúa", "procede por favor") — embedded verbs ("el
+deploy sigue fallando") never enter the imperative router.
+
+**Known fragility**: handler #8 vs #9 overlap; #9 is gated OFF for that
 reason (`tests/test_dispatch_routing.py:121` codifies the over-capture as
-xfail strict). The CRITICAL_TASK_KINDS list in #9 is hardcoded
+xfail strict). The CRITICAL_TASK_KINDS list in #11 is hardcoded
 (`{social_publish, pipeline_merge, deploy}`) — see TODO §7.
 
-**dispatch_decision payload**: `handler`, `route` (intercepted | fall_through),
-`reason`, `captured` (bool), `text_preview[:80]`, `text_len`, `session_id`.
-Does NOT yet include the exact regex/intent label that matched (see Wave 2).
+**dispatch_decision payload**: `handler`, `route` (intercepted |
+fall_through | brain_shortcut | explicit_command), `reason`, `captured`
+(bool), `text_preview[:80]`, `text_len`, `session_id`. `brain_shortcut`
+means the dispatcher only enriched the prompt and the brain handled the
+turn (`captured=false`).
 
 ### 5.2 layer 2 — CapabilityRouter
 
