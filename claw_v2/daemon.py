@@ -260,7 +260,11 @@ class ClawDaemon:
                 except Exception as exc:
                     if self.observe is not None:
                         trace = new_trace_context(artifact_id="daemon_tick")
-                        self.observe.emit(
+                        # A contended SQLite write here (synchronous INSERT +
+                        # COMMIT with a 15s busy_timeout) must not stall the
+                        # event loop — Telegram polling and replies share it.
+                        await asyncio.to_thread(
+                            self.observe.emit,
                             "daemon_tick_error",
                             trace_id=trace["trace_id"],
                             root_trace_id=trace["root_trace_id"],
@@ -289,7 +293,7 @@ class ClawDaemon:
         interval: float,
     ) -> None:
         while not shutdown.is_set():
-            self._emit_liveness_heartbeat()
+            await asyncio.to_thread(self._emit_liveness_heartbeat)
             try:
                 await asyncio.wait_for(shutdown.wait(), timeout=interval)
             except asyncio.TimeoutError:
@@ -327,7 +331,8 @@ class ClawDaemon:
             except Exception as exc:
                 logger.exception("pending verification reconciliation runner failed")
                 if self.observe is not None:
-                    self.observe.emit(
+                    await asyncio.to_thread(
+                        self.observe.emit,
                         "pending_verification_reconciliation_runner_error",
                         payload={"error": str(exc)},
                     )
@@ -348,7 +353,8 @@ class ClawDaemon:
             except Exception as exc:
                 logger.exception("daemon background job runner failed: %s", runner.name)
                 if self.observe is not None:
-                    self.observe.emit(
+                    await asyncio.to_thread(
+                        self.observe.emit,
                         "daemon_background_job_runner_error",
                         payload={"runner": runner.name, "error": _safe_error_preview(exc)},
                     )
