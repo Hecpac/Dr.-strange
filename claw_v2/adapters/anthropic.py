@@ -49,6 +49,60 @@ IDENTITY_OVERRIDE = (
 # planned_phases_for_mode + _build_coordinator_tasks can execute.
 _DELEGATE_TASK_MODES = frozenset({"coding", "research", "ops", "publish", "browse"})
 
+# Backstop for the delegation contract: high-confidence signals that a Bash
+# command is about to drive Chrome/CDP, a browser, or desktop computer-use.
+# Such work does not fit the brain turn's 300s wall and must be delegated.
+# Worker lanes (delegated coordinator tasks) are NOT gated by this.
+_INLINE_BROWSER_DRIVE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bpeekaboo\b", re.IGNORECASE),
+    re.compile(r"\bplaywright\b", re.IGNORECASE),
+    re.compile(r"\bselenium\b", re.IGNORECASE),
+    re.compile(r"\bchromedriver\b", re.IGNORECASE),
+    re.compile(r"\bcliclick\b", re.IGNORECASE),
+    re.compile(r"webSocketDebuggerUrl"),
+    re.compile(r"/json/(?:list|version)\b"),
+    re.compile(r":9(?:250|222)\b"),  # Chrome CDP debug ports used by the workspace
+    re.compile(r"\bcomputer[-_]use\b", re.IGNORECASE),
+)
+# Absolute python script paths inside a command; their contents are folded into
+# the scan so `python3 /path/_ig_publish.py` (CDP inside the script) is caught.
+_SCRIPT_PATH_RE = re.compile(r"(/[^\s'\"]+\.py)\b")
+_SCRIPT_SCAN_MAX_BYTES = 262_144
+
+
+def _read_bounded_script(path: str) -> str:
+    try:
+        p = Path(path)
+        if not p.is_file() or p.stat().st_size > _SCRIPT_SCAN_MAX_BYTES:
+            return ""
+        return p.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _inline_browser_drive_reason(tool_name: str, tool_input: dict[str, Any] | None) -> str | None:
+    """Return a deny reason if a Bash call would drive a browser/CDP/desktop.
+
+    Scans the command and, when it runs a local ``.py`` script, that script's
+    contents too. Conservative by design: only high-confidence markers, so a
+    miss is preferred over blocking a benign local command.
+    """
+    if tool_name != "Bash":
+        return None
+    command = str((tool_input or {}).get("command") or "")
+    if not command:
+        return None
+    haystacks = [command]
+    for match in _SCRIPT_PATH_RE.finditer(command):
+        content = _read_bounded_script(match.group(1))
+        if content:
+            haystacks.append(content)
+    blob = "\n".join(haystacks)
+    for pattern in _INLINE_BROWSER_DRIVE_PATTERNS:
+        if pattern.search(blob):
+            return "inline browser/CDP/computer-use drive in a chat turn"
+    return None
+
 # SDK tools that cannot mutate external state. Anything outside this set
 # (Bash, Edit, Write, Task, MCP tools, ...) is treated as potentially mutating
 # so a failed turn that already ran one is never replayed by fallback/retry.
@@ -475,6 +529,40 @@ class ClaudeSDKExecutor:
                 mutation_tracker.append(tool_name)
 
         async def pre_tool_use(input_data: dict[str, Any], tool_use_id: str | None, context: Any) -> dict[str, Any]:
+            if request.lane == "brain":
+                drive_reason = _inline_browser_drive_reason(
+                    str(input_data.get("tool_name", "")),
+                    input_data.get("tool_input", {}),
+                )
+                if drive_reason:
+                    nudge = (
+                        "Browser/CDP/computer-use cannot run inline in a chat turn (300s wall). "
+                        "Delegate it with the delegate_task tool (mode=ops/publish/browse) — fold any "
+                        "verification into the delegated objective — instead of running it here."
+                    )
+                    if self.observe is not None:
+                        try:
+                            self.observe.emit(
+                                "brain_inline_browser_drive_blocked",
+                                lane=request.lane,
+                                provider="anthropic",
+                                model=request.model,
+                                **trace_metadata(request.evidence_pack),
+                                payload={
+                                    "tool_name": str(input_data.get("tool_name", "")),
+                                    "reason": drive_reason,
+                                },
+                            )
+                        except Exception:
+                            logger.debug("brain_inline_browser_drive_blocked emit failed", exc_info=True)
+                    return {
+                        "systemMessage": f"Tool invocation blocked: {nudge}",
+                        "hookSpecificOutput": {
+                            "hookEventName": "PreToolUse",
+                            "permissionDecision": "deny",
+                            "permissionDecisionReason": nudge,
+                        },
+                    }
             try:
                 runtime_policy.enforce(
                     input_data.get("tool_name", ""),

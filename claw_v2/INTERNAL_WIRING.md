@@ -9,7 +9,7 @@
 
 ```yaml
 describes_commit: fe99808+spec-002-self-improve-promotion-hotfix+spec-002-subprocess-bounded-pr-c+spec-002-approval-manager-pr-d+spec-002-promotion-tooling-phase-4+brain-delegation-tool
-doc_version: 2.15
+doc_version: 2.16
 last_verified: 2026-06-10
 verification_method: manual + pytest + AST sentinel cross-check
 anchor_strategy: symbol_only  # path:symbol, no line numbers
@@ -576,6 +576,17 @@ enforced against these policies fail-closed in BOTH the PreToolUse hook and
 `mcp__claw__delegate_task` (medium, not read_only, contexts `[brain]`) is the
 brain's delegation tool: `_context_candidates` maps only the brain lane onto
 the `brain` context, so coordinator workers cannot re-delegate recursively.
+
+**Inline browser-drive backstop** (`_inline_browser_drive_reason`,
+`claw_v2/adapters/anthropic.py`): the PreToolUse hook denies — `brain` lane
+only — any Bash call that would drive Chrome/CDP, a browser, or desktop
+computer-use (high-confidence markers: peekaboo, playwright/selenium, Chrome
+debug ports `:9250/:9222`, `webSocketDebuggerUrl`, `/json/list`; it also reads
+a referenced local `.py` script's contents so `python3 _ig_publish.py` is
+caught). The deny nudges the model to `delegate_task` instead. This is the
+structural backstop to the prompt-level DELEGATION_CONTRACT: such work does not
+fit the brain turn's 300s wall. Worker/`worker_heavy` lanes are NOT gated —
+delegated coordinator work legitimately drives CDP.
 
 ### output sanitization
 

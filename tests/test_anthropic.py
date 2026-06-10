@@ -12,6 +12,7 @@ from claw_v2.adapters.anthropic import (
     IDENTITY_OVERRIDE,
     SILENCE_DIRECTIVE,
     create_claude_sdk_executor,
+    _inline_browser_drive_reason,
     _safe_runtime_policy_reason,
     _tool_input_evidence,
     _tool_response_evidence,
@@ -572,6 +573,50 @@ class DelegationMcpServerTests(unittest.IsolatedAsyncioTestCase):
             result = await delegate.handler({"objective": "do it"})
             self.assertTrue(result["is_error"])
             self.assertLess(len(result["content"][0]["text"]), 400)
+
+
+class InlineBrowserDriveGuardTests(unittest.TestCase):
+    """Backstop that keeps the brain from driving Chrome/CDP/desktop inline."""
+
+    def test_detects_direct_command_markers(self) -> None:
+        for command in (
+            "/opt/homebrew/bin/peekaboo image --app ChatGPT",
+            "curl -s http://localhost:9250/json/list",
+            "python3 -c \"import requests; requests.get('http://127.0.0.1:9222/json/version')\"",
+            "npx playwright open https://instagram.com",
+        ):
+            self.assertIsNotNone(
+                _inline_browser_drive_reason("Bash", {"command": command}), command
+            )
+
+    def test_detects_markers_inside_referenced_script(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            script = Path(tmpdir) / "_ig_publish.py"
+            script.write_text(
+                "import socket\nHOST, PORT = 'localhost', 9250\nWS = 'webSocketDebuggerUrl'\n",
+                encoding="utf-8",
+            )
+            reason = _inline_browser_drive_reason(
+                "Bash", {"command": f"/usr/bin/python3 {script}"}
+            )
+            self.assertIsNotNone(reason)
+
+    def test_ignores_benign_and_non_bash(self) -> None:
+        self.assertIsNone(_inline_browser_drive_reason("Bash", {"command": "git status"}))
+        self.assertIsNone(
+            _inline_browser_drive_reason("Bash", {"command": "grep -r TODO claw_v2/"})
+        )
+        self.assertIsNone(_inline_browser_drive_reason("Bash", {"command": ""}))
+        self.assertIsNone(
+            _inline_browser_drive_reason("Read", {"file_path": "/x/peekaboo.py"})
+        )
+
+    def test_missing_script_path_does_not_raise(self) -> None:
+        self.assertIsNone(
+            _inline_browser_drive_reason(
+                "Bash", {"command": "/usr/bin/python3 /nonexistent/run.py --flag"}
+            )
+        )
 
 
 if __name__ == "__main__":
