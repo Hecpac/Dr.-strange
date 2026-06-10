@@ -29,6 +29,8 @@ TOOLS_EXECUTED_METADATA_KEY = "tools_executed_before_failure"
 
 def record_tools_executed(exc: AdapterError, tools: list[str]) -> None:
     if tools:
+        if not isinstance(exc.metadata, dict):
+            exc.metadata = {}
         exc.metadata.setdefault(TOOLS_EXECUTED_METADATA_KEY, sorted(set(tools))[:20])
 
 

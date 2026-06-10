@@ -270,14 +270,27 @@ class ApprovalManager:
 
     def read(self, approval_id: str) -> dict:
         path = self._path_for(approval_id)
-        fd = os.open(str(path), os.O_RDONLY)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_SH)
-            raw = self._read_locked_fd(fd)
-        finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            os.close(fd)
+        while True:
+            fd = os.open(str(path), os.O_RDONLY)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_SH)
+                # Writers persist via atomic replace: if this fd points to an
+                # inode that was swapped out while we waited for the lock, the
+                # content is stale (e.g. still "pending" after a resolve) —
+                # reopen and read the current record instead.
+                try:
+                    if os.fstat(fd).st_ino != os.stat(str(path)).st_ino:
+                        continue
+                except FileNotFoundError:
+                    continue
+                raw = self._read_locked_fd(fd)
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+            break
         payload = json.loads(raw.decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError(f"approval record {approval_id} is not a JSON object")
         # Backwards-compat: approvals persisted before the semantic-fields
         # migration must still surface every axis to callers.
         for key, default in _SEMANTIC_DEFAULTS.items():
@@ -289,9 +302,10 @@ class ApprovalManager:
         for path in sorted(self.root.glob("*.json")):
             try:
                 payload = self.read(path.stem)
-            except (json.JSONDecodeError, OSError):
-                # One unreadable record must not break the whole inbox
-                # (listing, approving, and the ApprovalPending resume flow).
+            except (json.JSONDecodeError, ValueError, OSError):
+                # One unreadable record (truncated, or valid JSON that is not
+                # an object) must not break the whole inbox (listing,
+                # approving, and the ApprovalPending resume flow).
                 logger.warning("skipping unreadable approval record %s", path, exc_info=True)
                 continue
             if payload.get("status") == "pending":

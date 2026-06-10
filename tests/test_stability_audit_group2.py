@@ -66,6 +66,10 @@ class ApprovalAtomicWriteTests(unittest.TestCase):
     def test_corrupt_record_does_not_break_pending_inbox(self) -> None:
         pending = self.manager.create("deploy", "ship it")
         (self.root / "deadbeefdeadbeef.json").write_text("{truncated", encoding="utf-8")
+        # PR #83 review (gemini): valid JSON that is not an object must be
+        # skipped too, not raise AttributeError mid-listing.
+        (self.root / "cafecafecafecafe.json").write_text("null", encoding="utf-8")
+        (self.root / "beefbeefbeefbeef.json").write_text("[]", encoding="utf-8")
 
         listed = self.manager.list_pending()
 

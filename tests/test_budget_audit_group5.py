@@ -153,9 +153,10 @@ class OpenAIBudgetEnforcementTests(unittest.TestCase):
         )
 
     def test_tool_loop_aborts_when_max_budget_exceeded(self) -> None:
-        # Two expensive tool rounds; tiny cap -> abort with budget_exceeded
-        # and the executed tools recorded so fallback cannot replay them.
-        rounds = [_fake_round(calls=1), _fake_round(calls=1), _fake_round(calls=0)]
+        # Cheap first round, expensive follow-up; tiny cap -> abort with
+        # budget_exceeded after the tool ran, with the executed tools
+        # recorded so fallback cannot replay them.
+        rounds = [_fake_round(calls=1, usage_tokens=10), _fake_round(calls=1), _fake_round(calls=0)]
         client = _FakeToolClient(rounds)
         adapter = self._adapter()
         with patch.object(OpenAIAdapter, "_load_sdk", staticmethod(lambda: SimpleNamespace(OpenAI=lambda **kw: client))):
@@ -163,6 +164,17 @@ class OpenAIBudgetEnforcementTests(unittest.TestCase):
                 adapter.complete(_tool_request(max_budget=0.01))
         self.assertEqual(ctx.exception.metadata.get("reason"), "budget_exceeded")
         self.assertEqual(tools_executed_before_failure(ctx.exception), ["shell.run"])
+
+    def test_single_round_response_is_budget_checked(self) -> None:
+        # PR #83 review (codex P2): advisory/no-tool turns never enter the
+        # tool loop, so the first response must be budget-checked too.
+        rounds = [_fake_round(calls=0, usage_tokens=50_000_000)]
+        client = _FakeToolClient(rounds)
+        adapter = OpenAIAdapter(api_key="sk-test")
+        with patch.object(OpenAIAdapter, "_load_sdk", staticmethod(lambda: SimpleNamespace(OpenAI=lambda **kw: client))):
+            with self.assertRaises(AdapterError) as ctx:
+                adapter.complete(_tool_request(max_budget=0.01))
+        self.assertEqual(ctx.exception.metadata.get("reason"), "budget_exceeded")
 
     def test_multi_round_usage_and_cost_are_summed(self) -> None:
         rounds = [_fake_round(calls=1, usage_tokens=1000), _fake_round(calls=0, usage_tokens=1000)]

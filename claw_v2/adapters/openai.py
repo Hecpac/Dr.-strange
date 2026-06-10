@@ -117,6 +117,10 @@ class OpenAIAdapter(ProviderAdapter):
 
             response = _create_response_with_retry(client, kwargs)
             _record_round_usage(usage_rounds, response)
+            # Enforce the cap on the very first response too: advisory lanes
+            # and no-tool turns never enter the loop, so without this check an
+            # oversized billable response would be returned as successful.
+            _enforce_request_budget(request, usage_rounds)
 
             # Tool-calling loop
             if use_tools:
@@ -200,14 +204,7 @@ class OpenAIAdapter(ProviderAdapter):
                 # OpenAI is API-billed (subscriptions cover Claude/Codex, not
                 # this adapter): enforce the per-request cap the Claude SDK
                 # already honors, instead of looping up to 15 unmetered rounds.
-                if request.max_budget > 0:
-                    spent, spend_unknown = _estimate_rounds_cost(request.model, usage_rounds)
-                    if not spend_unknown and spent > request.max_budget:
-                        raise AdapterError(
-                            f"OpenAI request exceeded max_budget: "
-                            f"${spent:.4f} > ${request.max_budget:.4f}",
-                            metadata={"reason": "budget_exceeded", "cost_usd": round(spent, 6)},
-                        )
+                _enforce_request_budget(request, usage_rounds)
 
         return response
 
@@ -266,6 +263,17 @@ def _aggregate_usage(usage_rounds: list[dict[str, Any]]) -> dict[str, Any]:
                 total[key] = total.get(key, 0) + value
     total["rounds"] = len(usage_rounds)
     return total
+
+
+def _enforce_request_budget(request: LLMRequest, usage_rounds: list[dict[str, Any]]) -> None:
+    if request.max_budget <= 0:
+        return
+    spent, spend_unknown = _estimate_rounds_cost(request.model, usage_rounds)
+    if not spend_unknown and spent > request.max_budget:
+        raise AdapterError(
+            f"OpenAI request exceeded max_budget: ${spent:.4f} > ${request.max_budget:.4f}",
+            metadata={"reason": "budget_exceeded", "cost_usd": round(spent, 6)},
+        )
 
 
 def _estimate_rounds_cost(model: str, usage_rounds: list[dict[str, Any]]) -> tuple[float, bool]:
