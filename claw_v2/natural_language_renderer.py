@@ -10,6 +10,13 @@ RenderMode = Literal["normal", "debug", "audit"]
 
 _INTERNAL_LABEL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("approval_id", re.compile(r"\bapproval_id\b|Approval ID", re.IGNORECASE)),
+    (
+        "imperative_receipt",
+        re.compile(
+            r"^\s*(?:Intent|Target|Artifact|Estado|Task|Resultado|Capability faltante)\s*:",
+            re.IGNORECASE | re.MULTILINE,
+        ),
+    ),
     ("task.contextual_action", re.compile(r"\btask\.contextual_action\b", re.IGNORECASE)),
     ("needs_approval", re.compile(r"\bneeds_approval\b|\bpending_approval\b", re.IGNORECASE)),
     ("waiting_for_user_input", re.compile(r"\bwaiting_for_user_input\b", re.IGNORECASE)),
@@ -20,6 +27,10 @@ _INTERNAL_LABEL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 
 _LINE_DROP_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bapproval_id\b\s*[:=]", re.IGNORECASE),
+    re.compile(
+        r"^\s*(?:Intent|Target|Artifact|Estado|Task|Resultado|Capability faltante)\s*:",
+        re.IGNORECASE,
+    ),
     re.compile(r"\bApprove via\b|\bAbort via\b", re.IGNORECASE),
     re.compile(r"^\s*(?:Comando|Command)\s*:", re.IGNORECASE),
     re.compile(r"/(?:task_approve|task_abort|action_approve|action_abort|approve|approval_status)\b", re.IGNORECASE),

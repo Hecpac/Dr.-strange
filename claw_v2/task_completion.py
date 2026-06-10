@@ -20,6 +20,19 @@ COMPLETION_CANDIDATES = SUCCESS_STATUSES
 # itself is not a verifier pass. A row may close terminally only when the
 # manifest explicitly reports a passed result and has no blockers.
 NEEDS_VERIFICATION_STATUSES = {"needs_verification", "needs_verify"}
+SUCCESS_OUTCOMES = {
+    "ok",
+    "passed",
+    "verified",
+    "succeeded",
+    "success",
+    "completed",
+    "complete",
+    "done",
+    "delivered",
+}
+FAILED_OUTCOMES = {"failed", "failure", "error"}
+BLOCKED_OUTCOMES = {"blocked", "denied", "cancelled", "canceled"}
 
 
 _METADATA_KEYS = frozenset(
@@ -39,6 +52,10 @@ _METADATA_KEYS = frozenset(
         # placeholder manifest would short-circuit the false-success
         # guard.
         "evidence_manifest",
+        # outcome_manifest is validated explicitly. A placeholder manifest must
+        # not make a task look executed by falling through the generic artifact
+        # truthiness check.
+        "outcome_manifest",
     }
 )
 
@@ -49,6 +66,8 @@ def _has_evidence(record: dict[str, Any]) -> bool:
     if any(evidence.get(key) for key in evidence):
         return True
     if _has_brain_tooluse_evidence_manifest(record):
+        return True
+    if _has_outcome_manifest_evidence(record):
         return True
     for key, value in artifacts.items():
         if key in _METADATA_KEYS:
@@ -99,6 +118,136 @@ def _manifest_blockers(record: dict[str, Any]) -> list[Any]:
     return list(blockers) if isinstance(blockers, list) else []
 
 
+def _outcome_manifest(record: dict[str, Any]) -> dict[str, Any] | None:
+    manifest = record.get("outcome_manifest")
+    if isinstance(manifest, dict):
+        return manifest
+    artifacts = record.get("artifacts") or {}
+    if not isinstance(artifacts, dict):
+        return None
+    manifest = artifacts.get("outcome_manifest")
+    return manifest if isinstance(manifest, dict) else None
+
+
+def _as_list(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return list(value)
+    if isinstance(value, tuple):
+        return list(value)
+    return [value]
+
+
+def _outcome_blockers(manifest: dict[str, Any]) -> list[Any]:
+    return [item for item in _as_list(manifest.get("blockers")) if item]
+
+
+def _outcome_result(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _outcome_final_result(manifest: dict[str, Any]) -> str:
+    for key in ("final_outcome", "outcome", "result", "status"):
+        if key in manifest:
+            return _outcome_result(manifest.get(key))
+    return ""
+
+
+def _async_job_result(job: Any) -> str:
+    if isinstance(job, dict):
+        for key in ("final_outcome", "outcome", "result", "verification_status", "status", "state"):
+            if key in job:
+                return _outcome_result(job.get(key))
+        return ""
+    return _outcome_result(job)
+
+
+def _pending_outcome_async_jobs(manifest: dict[str, Any]) -> list[Any]:
+    pending = [item for item in _as_list(manifest.get("pending_async_jobs")) if item]
+    for job in _as_list(manifest.get("async_jobs")):
+        if not job:
+            continue
+        result = _async_job_result(job)
+        if result not in SUCCESS_OUTCOMES:
+            pending.append(job)
+    return pending
+
+
+def _outcome_manifest_has_passed_verification(manifest: dict[str, Any]) -> bool:
+    for item in _as_list(manifest.get("verifications")):
+        if isinstance(item, dict):
+            result = _outcome_result(item.get("result") or item.get("status"))
+        else:
+            result = _outcome_result(item)
+        if result in PASSED_VERIFICATION or result in SUCCESS_OUTCOMES:
+            return True
+    return False
+
+
+def _has_outcome_manifest_evidence(record: dict[str, Any]) -> bool:
+    manifest = _outcome_manifest(record)
+    if not manifest:
+        return False
+    if any(item for item in _as_list(manifest.get("deliveries"))):
+        return True
+    if any(item for item in _as_list(manifest.get("evidence_refs"))):
+        return True
+    if any(item for item in _as_list(manifest.get("evidence"))):
+        return True
+    if _outcome_manifest_has_passed_verification(manifest):
+        return True
+    return False
+
+
+def _validate_outcome_manifest(record: dict[str, Any]) -> CompletionDecision | None:
+    manifest = _outcome_manifest(record)
+    if not manifest:
+        return None
+
+    blockers = _outcome_blockers(manifest)
+    if blockers:
+        return CompletionDecision(
+            final_status="pending",
+            verification_status="blocked",
+            reason="outcome_manifest_has_blockers",
+            missing_evidence=["blocker_resolution"],
+        )
+
+    pending_async_jobs = _pending_outcome_async_jobs(manifest)
+    if pending_async_jobs:
+        return CompletionDecision(
+            final_status="pending",
+            verification_status="needs_verification",
+            reason="outcome_manifest_has_pending_async_jobs",
+            missing_evidence=["async_job_terminal_outcome"],
+        )
+
+    final_outcome = _outcome_final_result(manifest)
+    if final_outcome in FAILED_OUTCOMES:
+        return CompletionDecision(
+            final_status="pending",
+            verification_status="failed",
+            reason="outcome_manifest_not_successful",
+            missing_evidence=["successful_final_outcome"],
+        )
+    if final_outcome in BLOCKED_OUTCOMES:
+        return CompletionDecision(
+            final_status="pending",
+            verification_status="blocked",
+            reason="outcome_manifest_not_successful",
+            missing_evidence=["successful_final_outcome"],
+        )
+    if final_outcome not in SUCCESS_OUTCOMES:
+        return CompletionDecision(
+            final_status="pending",
+            verification_status="needs_verification",
+            reason="outcome_manifest_not_terminal",
+            missing_evidence=["terminal_outcome"],
+        )
+    return None
+
+
 def _looks_like_plan_only(summary: str) -> bool:
     if not summary:
         return False
@@ -112,6 +261,11 @@ def validate_completion(record: dict[str, Any]) -> CompletionDecision:
     summary = str(record.get("summary") or "")
     has_evidence = _has_evidence(record)
     has_brain_manifest = _has_brain_tooluse_evidence_manifest(record)
+
+    if status in SUCCESS_STATUSES:
+        outcome_decision = _validate_outcome_manifest(record)
+        if outcome_decision is not None:
+            return outcome_decision
 
     if status in SUCCESS_STATUSES and _looks_like_plan_only(summary) and not has_evidence:
         return CompletionDecision(

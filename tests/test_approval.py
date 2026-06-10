@@ -11,7 +11,12 @@ from pathlib import Path
 
 from claw_v2.approval import APPROVAL_TTL_SECONDS, ApprovalManager
 from claw_v2.approval_sensitivity import classify_sensitive_change
-from claw_v2.approval_gate import ApprovalPending, approved_tool_invocation, build_telegram_approval_gate
+from claw_v2.approval_gate import (
+    ApprovalPending,
+    approval_args_hash,
+    approved_tool_invocation,
+    build_telegram_approval_gate,
+)
 from claw_v2.tools import TIER_REQUIRES_APPROVAL, ToolDefinition
 
 
@@ -366,6 +371,27 @@ diff --git a/package-lock.json b/package-lock.json
                 gate(definition, {"prompt": "ok"})
                 with self.assertRaises(ApprovalPending):
                     gate(definition, {"prompt": "second"})
+
+    def test_approved_tool_invocation_requires_matching_args_hash_when_present(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = ApprovalManager(Path(tmpdir), "secret")
+            gate = build_telegram_approval_gate(manager)
+            definition = ToolDefinition(
+                name="GPTImage",
+                description="Generate an image",
+                allowed_agent_classes=("operator",),
+                handler=lambda args: {"ok": True},
+                tier=TIER_REQUIRES_APPROVAL,
+            )
+
+            with approved_tool_invocation(
+                tool="GPTImage",
+                approval_id="approval-1",
+                reason="test",
+                args_hash=approval_args_hash({"prompt": "original"}),
+            ):
+                with self.assertRaises(ApprovalPending):
+                    gate(definition, {"prompt": "changed"})
 
     def test_telegram_gate_logs_notifier_exception(self) -> None:
         """C4: notifier failure must be visible (logger.exception)."""

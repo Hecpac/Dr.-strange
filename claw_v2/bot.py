@@ -65,6 +65,7 @@ from claw_v2.pipeline import PipelineService
 from claw_v2.social import SocialPublisher
 from claw_v2.bot_helpers import *  # noqa: F403
 from claw_v2.bot_helpers import _is_secret_shaped_token, verify_brain_tooluse  # explicit: private helper + B1 verifier seam
+from claw_v2.turn_context import current_turn_id, turn_id_context
 from claw_v2.turn_receipt import emit_turn_receipt
 
 if TYPE_CHECKING:
@@ -143,6 +144,31 @@ _CHATGPT_INTERACTIVE_TOKENS = (
     "manda",
     "envia",
 )
+_CHATGPT_DIRECT_ACTION_TOKENS = _CHATGPT_OPEN_TOKENS + (
+    "pidele",
+    "pidelo",
+    "preguntale",
+    "dile a chatgpt",
+    "en chatgpt",
+    "usa chatgpt",
+    "use chatgpt",
+)
+_CHATGPT_COMPOUND_FALLTHROUGH_TOKENS = (
+    "verifica",
+    "valid",
+    "fuente primaria",
+    "fuentes primarias",
+    "cifras",
+    "websearch",
+    "ajusta los drafts",
+    "publica",
+)
+_CHATGPT_CONTEXTUAL_REFERENCE_RE = re.compile(
+    r"\b(?:haz|hace|crea|genera|regenera|arma)(?:lo|la|los|las)\b.*\bchat\s*gpt\b"
+    r"|\b(?:haz|hace|crea|genera|regenera|arma)(?:lo|la|los|las)\b.*\bchatgpt\b"
+    r"|\b(?:esto|eso|lo|la|esta|esa)\b.*\b(?:chat\s*gpt|chatgpt)\b",
+    re.IGNORECASE,
+)
 _CAPABILITY_DENIAL_TERMS = (
     "no puedo",
     "no tengo acceso",
@@ -176,13 +202,29 @@ _PRE_HOOK_BLOCK_RE = re.compile(
 def _looks_like_chatgpt_browser_request(normalized: str) -> bool:
     if not any(token in normalized for token in _CHATGPT_TARGET_TOKENS):
         return False
+    if _chatgpt_reference_should_fallthrough_to_brain(normalized):
+        return False
     return any(token in normalized for token in _CHATGPT_OPEN_TOKENS + _CHATGPT_INTERACTIVE_TOKENS)
 
 
 def _looks_like_chatgpt_interactive_request(normalized: str) -> bool:
     if not any(token in normalized for token in _CHATGPT_TARGET_TOKENS):
         return False
+    if _chatgpt_reference_should_fallthrough_to_brain(normalized):
+        return False
     return any(token in normalized for token in _CHATGPT_INTERACTIVE_TOKENS)
+
+
+def _chatgpt_reference_should_fallthrough_to_brain(normalized: str) -> bool:
+    if _CHATGPT_CONTEXTUAL_REFERENCE_RE.search(normalized):
+        return True
+    if re.search(r"\bchat\s*gpt(?:\s+image)?\s+o\s+nano\s+banana\b", normalized):
+        return True
+    if re.search(r"\bchatgpt(?:\s+image)?\s+o\s+nano\s+banana\b", normalized):
+        return True
+    if not any(token in normalized for token in _CHATGPT_COMPOUND_FALLTHROUGH_TOKENS):
+        return False
+    return not any(token in normalized for token in _CHATGPT_DIRECT_ACTION_TOKENS)
 
 
 def _chatgpt_browser_task_instruction(text: str) -> str:
@@ -927,6 +969,7 @@ class BotService:
             store_message=self._store_message_from_handler,
             workspace_root=getattr(config, "workspace_root", None),
             telemetry_root=getattr(config, "telemetry_root", None),
+            max_autonomous_workers=getattr(config, "max_autonomous_workers", 4),
         )
         self._state_handler = StateHandler(
             brain_memory=brain.memory,
@@ -3458,6 +3501,7 @@ class BotService:
                 telegram_imperative_response,
                 source="telegram_imperative",
             )
+            telegram_imperative_response = self._final_render(session_id, telegram_imperative_response)
             self._store_memory_turn(session_id, stripped, telegram_imperative_response, assistant_limit=3000)
             self._remember_assistant_turn_state(session_id, stripped, telegram_imperative_response)
             return telegram_imperative_response
@@ -4828,12 +4872,19 @@ class BotService:
         # outcome can be derived from the ledger's terminal state
         # (success / completed_unverified / failed) instead of being
         # hardcoded to "success" for every non-empty reply.
-        self._attach_brain_tool_use_ledger(
+        ledger_deferred = self._defer_brain_tool_use_ledger(
             session_id=session_id,
             response=response,
             source_text=source_text,
             runtime_channel=runtime_channel,
         )
+        if not ledger_deferred:
+            self._attach_brain_tool_use_ledger(
+                session_id=session_id,
+                response=response,
+                source_text=source_text,
+                runtime_channel=runtime_channel,
+            )
         contract_content = self._enforce_background_monitor_contract(
             session_id=session_id,
             user_text=source_text,
@@ -4846,7 +4897,9 @@ class BotService:
             except Exception:
                 logger.debug("background monitor contract memory replacement failed", exc_info=True)
             content = contract_content
-        brain_tool_use_record = self._lookup_recent_brain_tool_use_record(session_id)
+        brain_tool_use_record = (
+            None if ledger_deferred else self._lookup_recent_brain_tool_use_record(session_id)
+        )
         self._remember_assistant_turn_state(session_id, source_text, content)
         if content == "Recibido. ¿Qué quieres que haga con esto?":
             outcome = self._classify_brain_outcome_value(
@@ -4881,6 +4934,78 @@ class BotService:
                 predicted_confidence=self.brain._last_confidence.get(session_id) or None,
             )
         return content
+
+    def _defer_brain_tool_use_ledger(
+        self,
+        *,
+        session_id: str,
+        response: Any,
+        source_text: str,
+        runtime_channel: str | None,
+    ) -> bool:
+        channel = (runtime_channel or "").strip().lower()
+        if channel != "telegram":
+            return False
+        if os.getenv("CLAW_TELEGRAM_DEFER_BRAIN_TOOLUSE_LEDGER", "1") == "0":
+            return False
+        try:
+            artifacts = getattr(response, "artifacts", None) or {}
+        except Exception:
+            artifacts = {}
+        trace_id = str(artifacts.get("trace_id") or "")
+        if not trace_id:
+            return False
+
+        turn_id = current_turn_id()
+
+        def _run() -> None:
+            try:
+                if turn_id:
+                    with turn_id_context(turn_id):
+                        self._attach_brain_tool_use_ledger(
+                            session_id=session_id,
+                            response=response,
+                            source_text=source_text,
+                            runtime_channel=runtime_channel,
+                        )
+                else:
+                    self._attach_brain_tool_use_ledger(
+                        session_id=session_id,
+                        response=response,
+                        source_text=source_text,
+                        runtime_channel=runtime_channel,
+                    )
+            except Exception:
+                logger.exception("deferred brain tool-use ledger failed for %s", session_id)
+                observe = getattr(self, "observe", None)
+                if observe is not None:
+                    try:
+                        observe.emit(
+                            "brain_tooluse_ledger_deferred_failed",
+                            payload={"session_id": session_id, "trace_id": trace_id},
+                        )
+                    except Exception:
+                        logger.debug("brain_tooluse_ledger_deferred_failed emit failed", exc_info=True)
+
+        try:
+            threading.Thread(
+                target=_run,
+                name=f"brain-tooluse-ledger-{trace_id[:8]}",
+                daemon=True,
+            ).start()
+        except Exception:
+            logger.exception("could not defer brain tool-use ledger for %s", session_id)
+            return False
+        observe = getattr(self, "observe", None)
+        if observe is not None:
+            try:
+                observe.emit(
+                    "brain_tooluse_ledger_deferred",
+                    payload={"session_id": session_id, "trace_id": trace_id},
+                )
+            except Exception:
+                logger.debug("brain_tooluse_ledger_deferred emit failed", exc_info=True)
+        return True
 
     def _lookup_recent_brain_tool_use_record(self, session_id: str) -> Any:
         """P0-E: return the most recent brain-fallback ledger row for this
@@ -5118,9 +5243,41 @@ class BotService:
             "sensitive_redactions_applied": sensitive_redactions > 0,
             "verification_result": "unknown",
         }
+        outcome_manifest: dict[str, Any] = {
+            "version": 1,
+            "task_id": task_id,
+            "session_id": session_id,
+            "origin": "brain_fallback",
+            "channel": (runtime_channel or "").lower() or None,
+            "trace_id": trace_id,
+            "started_at": started_at_ts,
+            "final_outcome": "running",
+            "async_jobs": [],
+            "pending_async_jobs": [],
+            "deliveries": [],
+            "verifications": [],
+            "blockers": [],
+        }
+
+        def _finish_outcome(
+            final_outcome: str,
+            *,
+            blockers: list[str] | None = None,
+            verification_result: str | None = None,
+        ) -> None:
+            outcome_manifest["completed_at"] = time.time()
+            outcome_manifest["final_outcome"] = final_outcome
+            outcome_manifest["blockers"] = list(blockers or [])
+            outcome_manifest["pending_async_jobs"] = []
+            if verification_result:
+                outcome_manifest["verifications"] = [
+                    {"kind": "brain_tooluse_verifier", "result": verification_result}
+                ]
+
         requires_verified_completion = self._brain_tooluse_requires_verified_completion(source_summary)
         brain_artifacts = {
             "evidence_manifest": evidence_manifest,
+            "outcome_manifest": outcome_manifest,
             # Legacy top-level fields kept for backwards-compat with the
             # PR 0E tests and any downstream audit query that reads
             # artifacts.tools_run directly.
@@ -5179,7 +5336,13 @@ class BotService:
             if requires_verified_completion:
                 evidence_manifest["completed_at"] = time.time()
                 evidence_manifest["verification_result"] = "failed"
-                evidence_manifest["blockers"] = [first_error[:200] or "action tool execution failed"]
+                blockers = [first_error[:200] or "action tool execution failed"]
+                evidence_manifest["blockers"] = blockers
+                _finish_outcome(
+                    "failed",
+                    blockers=blockers,
+                    verification_result="failed",
+                )
                 self.task_ledger.mark_terminal(
                     task_id,
                     status="failed",
@@ -5205,7 +5368,9 @@ class BotService:
             if useful_result:
                 evidence_manifest["completed_at"] = time.time()
                 evidence_manifest["verification_result"] = "succeeded_with_warnings"
-                evidence_manifest["blockers"] = [first_error[:200] or "nonfatal tool failure"]
+                blockers = [first_error[:200] or "nonfatal tool failure"]
+                evidence_manifest["blockers"] = blockers
+                _finish_outcome("needs_verification", blockers=blockers)
                 self.task_ledger.mark_terminal(
                     task_id,
                     status="completed_unverified",
@@ -5229,7 +5394,9 @@ class BotService:
                 return
             evidence_manifest["completed_at"] = time.time()
             evidence_manifest["verification_result"] = "failed"
-            evidence_manifest["blockers"] = [first_error[:200] or "tool execution failed"]
+            blockers = [first_error[:200] or "tool execution failed"]
+            evidence_manifest["blockers"] = blockers
+            _finish_outcome("failed", blockers=blockers, verification_result="failed")
             self.task_ledger.mark_terminal(
                 task_id,
                 status="failed",
@@ -5281,6 +5448,7 @@ class BotService:
             if verdict == "passed":
                 evidence_manifest["completed_at"] = time.time()
                 evidence_manifest["verification_result"] = "passed"
+                _finish_outcome("passed", verification_result="passed")
                 self.task_ledger.mark_terminal(
                     task_id,
                     status="succeeded",
@@ -5304,6 +5472,7 @@ class BotService:
             if verdict == "failed":
                 evidence_manifest["completed_at"] = time.time()
                 evidence_manifest["verification_result"] = "failed"
+                _finish_outcome("failed", verification_result="failed")
                 self.task_ledger.mark_terminal(
                     task_id,
                     status="failed",
@@ -5336,7 +5505,9 @@ class BotService:
         if requires_verified_completion or performed_mutation:
             evidence_manifest["completed_at"] = time.time()
             evidence_manifest["verification_result"] = "blocked"
-            evidence_manifest["blockers"] = ["passed_verification_missing_for_action"]
+            blockers = ["passed_verification_missing_for_action"]
+            evidence_manifest["blockers"] = blockers
+            _finish_outcome("blocked", blockers=blockers, verification_result="blocked")
             self.task_ledger.mark_terminal(
                 task_id,
                 status="failed",
@@ -5363,6 +5534,7 @@ class BotService:
             return
         evidence_manifest["completed_at"] = time.time()
         evidence_manifest["verification_result"] = "needs_verification"
+        _finish_outcome("needs_verification")
         self.task_ledger.mark_terminal(
             task_id,
             status="completed_unverified",
@@ -5856,6 +6028,7 @@ class BotService:
             "approval_id": exc.approval_id,
             "tool": exc.tool,
             "summary": exc.summary,
+            "args_hash": exc.args_hash,
             "original_text": user_text,
             "created_at": time.time(),
         }
@@ -5887,6 +6060,7 @@ class BotService:
             return None
         approval_id = str(pending.get("approval_id") or "")
         tool = str(pending.get("tool") or "")
+        args_hash = str(pending.get("args_hash") or "") or None
         original_text = str(pending.get("original_text") or "").strip()
         if not approval_id or not tool or not original_text:
             return "Hay una aprobación pendiente, pero le falta contexto para reintentar. Reenvíame el objetivo concreto."
@@ -5919,6 +6093,7 @@ class BotService:
             tool=tool,
             approval_id=approval_id,
             reason="telegram_owner_followup",
+            args_hash=args_hash,
         ):
             result = self._brain_text_response(session_id, original_text, memory_text=original_text)
         return f"Aprobación registrada. Reintenté la acción original.\n\n{result}"
@@ -5930,7 +6105,16 @@ class BotService:
         *,
         semantic_turn: SemanticTurn | None = None,
     ) -> str | None:
-        if semantic_turn is not None and semantic_turn.intent == "new_task" and semantic_turn.clear_goal:
+        # A clear new task skips this handler — unless the text carries an
+        # explicit grant/reject verb: restating the task with "te autorizo"
+        # must resume the pending action, not start it over.
+        if (
+            semantic_turn is not None
+            and semantic_turn.intent == "new_task"
+            and semantic_turn.clear_goal
+            and not _looks_like_computer_approval_grant(text)
+            and not _looks_like_computer_approval_reject(text)
+        ):
             return None
         pending = self._latest_pending_computer_approval(session_id)
         if pending is None:
@@ -7288,11 +7472,9 @@ class BotService:
             kept = int(last_result.get("kept_count") or 0)
             failed = int(last_result.get("failed_count") or 0)
             status = str(last_result.get("status") or "unknown")
-            task_id = str(last_result.get("task_id") or "sin_task_id")
             return (
                 f"Sí. Última limpieza registrada: `{status}`.\n"
-                f"Archivadas: {archived}; conservadas: {kept}; fallidas: {failed}.\n"
-                f"Task: `{task_id}`."
+                f"Archivadas: {archived}; conservadas: {kept}; fallidas: {failed}."
             )
         try:
             approvals = self.approvals.list_pending() if self.approvals is not None else []
@@ -8047,12 +8229,15 @@ class BotService:
                     summary="Active mission continuation resolved but not auto-executed by UI router.",
                 )
                 self._emit_safe("telegram_imperative_routed", {"session_id": session_id, "intent": intent.intent, "task_id": task_id})
-                return (
-                    "Resolví la continuación de la misión activa.\n"
-                    f"Intent: `{intent.intent}`\n"
-                    f"Target: `{target}`\n"
-                    f"Task: `{task_id}`\n"
-                    "Estado: `partial_success` — falta una acción concreta o capacidad de ejecución."
+                return self._public_telegram_imperative_result(
+                    session_id=session_id,
+                    intent=intent,
+                    target=target,
+                    result_status="partial_success",
+                    handler_result=(
+                        "Tengo ubicada la misión activa, pero no ejecuté nada: "
+                        "falta una acción concreta que pueda hacer en la app."
+                    ),
                 )
         missing_capability = self._missing_ui_capability(intent)
         if missing_capability:
@@ -8078,15 +8263,18 @@ class BotService:
             )
             fallback = ""
             if intent.intent in {"ui.paste_text", "ui.set_instructions"}:
-                fallback = "\nFallback seguro: puedo preparar/copiar el texto, pero eso no equivale a pegarlo en la app."
-            return (
-                f"Resultado: `blocked_by_capability`\n"
-                f"Intent: `{intent.intent}`\n"
-                f"Target: `{target or 'desconocido'}`\n"
-                f"Artifact: `{artifact or 'desconocido'}`\n"
-                f"Capability faltante: `{missing_capability}`\n"
-                f"Task: `{task_id}`"
-                f"{fallback}"
+                artifact_label = "instrucciones" if intent.intent == "ui.set_instructions" else "prompt"
+                fallback = (
+                    f"\nFallback seguro: puedo preparar/copiar el {artifact_label}, "
+                    "pero eso no equivale a pegarlo en la app."
+                )
+            return self._public_telegram_imperative_result(
+                session_id=session_id,
+                intent=intent,
+                target=target,
+                result_status="blocked_by_capability",
+                capability=missing_capability,
+                handler_result=fallback.strip() or None,
             )
         execution_response = self._execute_telegram_imperative_via_computer(
             intent,
@@ -8112,12 +8300,12 @@ class BotService:
             "telegram_imperative_routed",
             {"session_id": session_id, "intent": intent.intent, "task_id": task_id},
         )
-        return (
-            f"Intent routed: `{intent.intent}`\n"
-            f"Target: `{target or 'desconocido'}`\n"
-            f"Artifact: `{artifact or 'desconocido'}`\n"
-            f"Estado: `partial_success`\n"
-            f"Task: `{task_id}`"
+        return self._public_telegram_imperative_result(
+            session_id=session_id,
+            intent=intent,
+            target=target,
+            result_status="partial_success",
+            handler_result="Tengo el objetivo ubicado, pero no ejecuté una acción local concreta.",
         )
 
     def _active_mission_context(self, state: dict[str, Any]) -> dict[str, Any] | None:
@@ -8372,12 +8560,7 @@ class BotService:
                     "capability": "approval_manager",
                 },
             )
-            return (
-                "Resultado: `blocked_by_capability`\n"
-                "Intent: `approvals.cleanup_stale_duplicates`\n"
-                "Capability faltante: `approval_manager`\n"
-                f"Task: `{task_id}`"
-            )
+            return "No puedo limpiar aprobaciones ahora porque el gestor de aprobaciones no está disponible."
         try:
             approvals = self.approvals.list_pending()
         except Exception as exc:
@@ -8395,12 +8578,7 @@ class BotService:
                 "telegram_imperative_execution_failed",
                 {"session_id": session_id, "intent": intent.intent, "task_id": task_id, "error": str(exc)[:240]},
             )
-            return (
-                "Resultado: `failed`\n"
-                "Intent: `approvals.cleanup_stale_duplicates`\n"
-                f"Error: {str(exc)[:240]}\n"
-                f"Task: `{task_id}`"
-            )
+            return f"No pude leer las aprobaciones pendientes: {str(exc)[:240]}"
         candidates = self._approval_cleanup_candidates(approvals)
         archived: list[tuple[str, str]] = []
         failed: list[tuple[str, str]] = []
@@ -8471,17 +8649,11 @@ class BotService:
             self._emit_safe("telegram_imperative_routed", event_payload)
             self._emit_safe("approval_cleanup_executed", event_payload)
         response_lines = [
-            f"Intent: `{intent.intent}`",
-            f"Estado: `{result_status}`",
-            f"Archivadas: {len(archived)}",
-            f"Conservadas: {kept_count}",
-            f"Fallidas: {len(failed)}",
-            f"Task: `{task_id}`",
+            f"Listo. Archivé {len(archived)} aprobaciones stale/duplicadas.",
+            f"Conservadas: {kept_count}. Fallidas: {len(failed)}.",
         ]
-        if archived:
-            response_lines.append("IDs archivadas: " + ", ".join(approval_id for approval_id, _ in archived[:8]))
         if failed:
-            response_lines.append("Fallos: " + ", ".join(f"{approval_id or 'unknown'}:{reason}" for approval_id, reason in failed[:5]))
+            response_lines.append("Algunas no se pudieron archivar; dejé el detalle en el registro interno.")
         return "\n".join(response_lines)
 
     def _approval_cleanup_candidates(self, approvals: list[dict[str, Any]]) -> list[tuple[dict[str, Any], str]]:
@@ -8533,6 +8705,46 @@ class BotService:
                 "intent": "approvals.cleanup_stale_duplicates",
             },
         )
+
+    def _public_telegram_imperative_result(
+        self,
+        *,
+        session_id: str,
+        intent: TelegramImperativeIntent,
+        target: str | None,
+        result_status: str,
+        handler_result: str | None = None,
+        capability: str | None = None,
+    ) -> str:
+        detail = self._final_render(session_id, str(handler_result or "").strip()) if handler_result else ""
+        normalized_detail = _normalize_command_text(detail)
+        if result_status == "succeeded":
+            return detail or "Listo. Acción completada."
+        if result_status == "pending_approval":
+            if "necesito tu autorizacion" in normalized_detail:
+                return detail
+            return (
+                "Necesito tu autorización para continuar con esa acción de escritorio.\n"
+                "Responde `te autorizo` para ejecutarla o `aborta` para cancelarla."
+            )
+        if result_status == "blocked_by_capability":
+            label = self._public_ui_capability_label(capability)
+            target_text = target or "esa app"
+            suffix = f"\n{detail}" if detail else ""
+            return f"No puedo completar esa acción en {target_text} desde este runtime porque falta {label}.{suffix}"
+        if result_status == "failed":
+            return detail or "No pude completar esa acción."
+        return detail or "Tengo el objetivo ubicado, pero no ejecuté una acción local concreta."
+
+    @staticmethod
+    def _public_ui_capability_label(capability: str | None) -> str:
+        labels = {
+            "local_ui_write": "control local de apps",
+            "local_ui_read": "lectura local de pantalla",
+            "computer_control": "control de escritorio",
+            "approval_manager": "gestión de aprobaciones",
+        }
+        return labels.get(str(capability or ""), "una capacidad local requerida")
 
     def _execute_telegram_imperative_via_computer(
         self,
@@ -8631,18 +8843,14 @@ class BotService:
         else:
             self._emit_safe("telegram_imperative_executed", event_payload)
             self._emit_safe("telegram_imperative_routed", event_payload)
-        lines = [
-            f"Intent: `{intent.intent}`",
-            f"Target: `{target or 'desconocido'}`",
-            f"Estado: `{result_status}`",
-            f"Task: `{task_id}`",
-        ]
-        if approval_id:
-            lines.append(f"approval_id: `{approval_id}`")
-        if handler_result:
-            lines.append("")
-            lines.append(str(handler_result))
-        return "\n".join(lines)
+        return self._public_telegram_imperative_result(
+            session_id=session_id,
+            intent=intent,
+            target=target,
+            result_status=result_status,
+            handler_result=handler_result,
+            capability="computer_control" if result_status == "blocked_by_capability" else None,
+        )
 
     def _execute_local_paste_text_imperative(
         self,
@@ -8739,15 +8947,13 @@ class BotService:
         else:
             self._emit_safe("telegram_imperative_executed", event_payload)
             self._emit_safe("telegram_imperative_routed", event_payload)
-        return "\n".join(
-            [
-                f"Intent: `{intent.intent}`",
-                f"Target: `{target or 'desconocido'}`",
-                f"Estado: `{result_status}`",
-                f"Task: `{task_id}`",
-                "",
-                handler_result,
-            ]
+        return self._public_telegram_imperative_result(
+            session_id=session_id,
+            intent=intent,
+            target=target,
+            result_status=result_status,
+            handler_result=handler_result,
+            capability=execution_backend if result_status != "succeeded" else None,
         )
 
     def _execute_local_open_app_imperative(
@@ -8819,15 +9025,13 @@ class BotService:
         else:
             self._emit_safe("telegram_imperative_executed", event_payload)
             self._emit_safe("telegram_imperative_routed", event_payload)
-        return "\n".join(
-            [
-                f"Intent: `{intent.intent}`",
-                f"Target: `{target or 'desconocido'}`",
-                f"Estado: `{result_status}`",
-                f"Task: `{task_id}`",
-                "",
-                handler_result,
-            ]
+        return self._public_telegram_imperative_result(
+            session_id=session_id,
+            intent=intent,
+            target=target,
+            result_status=result_status,
+            handler_result=handler_result,
+            capability=execution_backend if result_status != "succeeded" else None,
         )
 
     @staticmethod
@@ -8914,6 +9118,7 @@ class BotService:
             normalized.startswith("computer use error")
             or normalized.startswith("computer screenshot error")
             or normalized.startswith("screenshot error")
+            or "sin un resultado verificable" in normalized
             or " timed out" in normalized
         ):
             return "failed"

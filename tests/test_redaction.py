@@ -19,6 +19,28 @@ class RedactSensitiveTests(unittest.TestCase):
         text = "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig"
         self.assertNotIn("eyJhbGciOiJIUzI1NiJ9", redact_sensitive(text))
 
+    def test_strips_standalone_jwt_token(self) -> None:
+        token = (
+            "eyJhbGciOiJIUzI1NiJ9."
+            "eyJpc3MiOiJ0ZXN0Iiwic3ViIjoiZmFrZSIsImV4cCI6MTIzNDU2Nzg5MH0."
+            "AbcDefGhIjKlMnOpQrStUvWxYz1234567890"
+        )
+        result = redact_sensitive(f"token {token}")
+        self.assertNotIn("eyJhbGciOiJIUzI1NiJ9", result)
+        self.assertNotIn("AbcDefGhIjKl", result)
+        self.assertIn("[REDACTED]", result)
+
+    def test_strips_partially_redacted_jwt_residue(self) -> None:
+        token = (
+            "eyJhbGciOiJIUzI1NiJ9."
+            "[REDACTED]."
+            "AbcDefGhIjKlMnOpQrStUvWxYz1234567890"
+        )
+        result = redact_sensitive(f"token {token}")
+        self.assertNotIn("eyJhbGciOiJIUzI1NiJ9", result)
+        self.assertNotIn("AbcDefGhIjKl", result)
+        self.assertIn("[REDACTED]", result)
+
     def test_strips_query_string_token(self) -> None:
         text = "https://example.com/form?token=secret-token-123456789&mode=cyber"
         result = redact_sensitive(text)

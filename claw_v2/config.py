@@ -450,6 +450,7 @@ class AppConfig:
     morning_brief_calendar_command: str | None
     evening_brief_enabled: bool
     evening_brief_hour: int
+    max_autonomous_workers: int
     telemetry_root: Path = field(default_factory=lambda: Path.home() / ".claw" / "telemetry")
     verifier_effort: str | None = None
     research_effort: str | None = None
@@ -633,6 +634,7 @@ class AppConfig:
             morning_brief_calendar_command=os.getenv("MORNING_BRIEF_CALENDAR_COMMAND") or None,
             evening_brief_enabled=_env_bool("EVENING_BRIEF_ENABLED", True),
             evening_brief_hour=_env_int("EVENING_BRIEF_HOUR", 21),
+            max_autonomous_workers=_env_int("CLAW_MAX_AUTONOMOUS_WORKERS", 4),
             telemetry_root=Path(os.getenv("TELEMETRY_ROOT", str(home / ".claw" / "telemetry"))),
             claw_worker_summary_limit=_env_int("CLAW_WORKER_SUMMARY_LIMIT", 16_000),
             claw_phase_input_limit=_env_int("CLAW_PHASE_INPUT_LIMIT", 48_000),
@@ -733,6 +735,8 @@ class AppConfig:
             raise ValueError("notebooklm_cli_timeout_seconds must be positive.")
         if self.notebooklm_cli_long_timeout_seconds <= 0:
             raise ValueError("notebooklm_cli_long_timeout_seconds must be positive.")
+        if self.max_autonomous_workers <= 0:
+            raise ValueError("max_autonomous_workers must be positive.")
         if self.claw_worker_summary_limit <= 0:
             raise ValueError("claw_worker_summary_limit must be positive.")
         if self.claw_phase_input_limit <= 0:

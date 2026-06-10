@@ -23,6 +23,32 @@ DESKTOP_NAV_KEYS = frozenset({
 })
 CDP_ALWAYS_APPROVE = frozenset({"submit"})
 CDP_WRITE_ACTIONS = frozenset({"click", "fill", "select", "check", "uncheck"})
+BROWSER_USE_READ_ACTIONS = frozenset(
+    {
+        "done",
+        "wait",
+        "screenshot",
+        "scroll",
+        "find_text",
+        "search_page",
+        "find_elements",
+        "dropdown_options",
+        "extract",
+        "read_file",
+        "read_long_content",
+    }
+)
+BROWSER_USE_NAV_ACTIONS = frozenset({"navigate", "search", "go_back", "switch", "close"})
+BROWSER_USE_HIGH_RISK_ACTIONS = frozenset(
+    {
+        "evaluate",
+        "upload_file",
+        "write_file",
+        "replace_file",
+        "save_as_pdf",
+    }
+)
+BROWSER_USE_WRITE_ACTIONS = frozenset({"click", "input", "send_keys", "select_dropdown"})
 
 
 def verdict_for_risk(risk: RiskLevel) -> ActionVerdict:
@@ -82,6 +108,36 @@ class ActionGate:
             return RiskLevel.HIGH
         return RiskLevel.LOW
 
+    def risk_browser_use_action(self, action_name: str, params: dict | None = None, *, url: str | None) -> RiskLevel:
+        """Classify a browser-use action into LOW / MEDIUM / HIGH risk.
+
+        browser_use exposes higher-level browser actions than the repo's CDP
+        bridge. This policy keeps read/navigation actions low unless they target
+        a sensitive domain, and gates writes/evaluation/uploads more tightly.
+        """
+        params = params or {}
+        action_name = str(action_name or "")
+        target_url = _string_value(params.get("url"))
+        if target_url and self.is_sensitive_url(target_url):
+            return RiskLevel.HIGH
+        if action_name == "search" and self.is_sensitive_text(_string_value(params.get("query"))):
+            return RiskLevel.HIGH
+        if action_name in BROWSER_USE_READ_ACTIONS:
+            return RiskLevel.LOW
+        if action_name in BROWSER_USE_HIGH_RISK_ACTIONS:
+            return RiskLevel.HIGH
+        if action_name in BROWSER_USE_NAV_ACTIONS:
+            return RiskLevel.HIGH if self.is_sensitive_url(url) else RiskLevel.LOW
+        if action_name in BROWSER_USE_WRITE_ACTIONS:
+            if self.is_sensitive_url(url):
+                return RiskLevel.HIGH
+            if action_name in {"input", "send_keys"} and url is None:
+                return RiskLevel.HIGH
+            return RiskLevel.MEDIUM
+        if self.is_sensitive_url(url):
+            return RiskLevel.HIGH
+        return RiskLevel.MEDIUM
+
     def _risk_key(self, action: dict, *, url: str | None) -> RiskLevel:
         """Risk classification for keyboard actions."""
         key_text = action.get("text", "")
@@ -138,3 +194,10 @@ class ActionGate:
             return False
         lowered = text.lower()
         return any(pattern.search(lowered) for pattern in self._sensitive_brand_res)
+
+
+def _string_value(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None

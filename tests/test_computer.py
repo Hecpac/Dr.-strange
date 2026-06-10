@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import tempfile
 import unittest
@@ -588,6 +589,116 @@ class BrowserUseArtifactTests(unittest.TestCase):
         self.assertEqual(result, "completado")
         self.assertIsNone(svc.last_artifact_path)
 
+    def test_run_task_passes_domain_policy_to_browser_session(self) -> None:
+        import asyncio
+        import sys
+        import types
+        from claw_v2.computer import BrowserUseService
+
+        created: dict = {}
+
+        class FakeBrowserSession:
+            def __init__(self, **kwargs):
+                created.update(kwargs)
+
+            async def stop(self):
+                pass
+
+        class FakeResult:
+            def final_result(self):
+                return "ok"
+
+            def last_action(self):
+                return None
+
+        class FakeAgent:
+            def __init__(self, **kwargs):
+                pass
+
+            async def run(self):
+                return FakeResult()
+
+        class FakeChatOpenAI:
+            def __init__(self, **kwargs):
+                pass
+
+        module = types.SimpleNamespace(
+            Agent=FakeAgent, BrowserSession=FakeBrowserSession, ChatOpenAI=FakeChatOpenAI
+        )
+        with patch.dict(sys.modules, {"browser_use": module}):
+            svc = BrowserUseService()
+            result = asyncio.run(
+                svc.run_task(
+                    "t",
+                    allowed_domains=["https://chatgpt.com/"],
+                    prohibited_domains=["https://stripe.com/dashboard"],
+                )
+            )
+        self.assertEqual(result, "ok")
+        self.assertEqual(created["allowed_domains"], ["chatgpt.com"])
+        self.assertEqual(created["prohibited_domains"], ["stripe.com"])
+
+
+class BrowserUseGuardTests(unittest.TestCase):
+    def test_guarded_tools_import_does_not_mutate_claw_model_env(self) -> None:
+        import os
+
+        from claw_v2.computer import BrowserUseService
+
+        keys = (
+            "BRAIN_MODEL",
+            "WORKER_MODEL",
+            "JUDGE_MODEL",
+            "CLAW_BUDGET_CAP_DAILY",
+            "TELEGRAM_BOT_TOKEN",
+            "OPENAI_API_KEY",
+            "GOOGLE_API_KEY",
+        )
+        original = {key: os.environ.get(key) for key in keys}
+        for key in keys:
+            os.environ.pop(key, None)
+        try:
+            BrowserUseService()._guarded_browser_tools(
+                action_gate=ActionGate(sensitive_urls=[]),
+                approved_domains=[],
+                allow_high_risk_actions=False,
+            )
+            self.assertEqual({key: os.environ.get(key) for key in keys}, {key: None for key in keys})
+        finally:
+            for key, value in original.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+    def test_guarded_tools_blocks_high_risk_sensitive_navigation_before_execution(self) -> None:
+        import asyncio
+
+        from claw_v2.computer import BrowserUsePolicyInterrupt, BrowserUseService
+
+        class FakeAction:
+            def model_dump(self, **kwargs):
+                return {"navigate": {"url": "https://robinhood.com/account"}}
+
+        class FakeBrowserSession:
+            async def get_current_page_url(self):
+                return "https://example.com"
+
+        svc = BrowserUseService()
+        gate = ActionGate(sensitive_urls=["robinhood.com"], auto_approve=True)
+        tools, state = svc._guarded_browser_tools(
+            action_gate=gate,
+            approved_domains=[],
+            allow_high_risk_actions=False,
+        )
+
+        result = asyncio.run(tools.act(action=FakeAction(), browser_session=FakeBrowserSession()))
+
+        self.assertIn("requires approval", result.error)
+        self.assertTrue(state["should_stop"])
+        self.assertIsInstance(state["interrupt"], BrowserUsePolicyInterrupt)
+        self.assertEqual(state["interrupt"].action_name, "navigate")
+
 
 class ComputerHandlerSessionArtifactTests(unittest.TestCase):
     def test_run_browser_use_task_binds_artifact_to_session(self) -> None:
@@ -611,6 +722,88 @@ class ComputerHandlerSessionArtifactTests(unittest.TestCase):
         result = handler._run_browser_use_task(session)
         self.assertEqual(result, "ok")
         self.assertEqual(session.screenshot_path, "/tmp/img-A.png")
+
+    def test_browser_use_policy_interrupt_becomes_pending_approval(self) -> None:
+        import types
+
+        from claw_v2.computer import BrowserUsePolicyInterrupt
+        from claw_v2.computer_handler import ComputerHandler
+
+        class FakeBrowserUse:
+            last_artifact_path = None
+
+            async def run_task(self, task, **kwargs):
+                raise BrowserUsePolicyInterrupt(
+                    action_name="navigate",
+                    params={"url": "https://robinhood.com/account"},
+                    url="https://example.com",
+                    risk="high",
+                    approved_domains=["robinhood.com"],
+                )
+
+        config = types.SimpleNamespace(computer_auto_approve=True, sensitive_urls=["robinhood.com"])
+        handler = ComputerHandler(browser_use=FakeBrowserUse(), config=config)
+        session = types.SimpleNamespace(
+            task="open a normal website then continue",
+            current_url="https://example.com",
+            status="running",
+            pending_action={"action": "browser_use_task", "backend": "browser_use", "task": "open"},
+        )
+
+        result = handler._run_browser_use_session(session)
+
+        self.assertIn("needs approval", result)
+        self.assertEqual(session.status, "awaiting_approval")
+        self.assertEqual(session.pending_action["interrupted_action"]["action"], "navigate")
+        self.assertEqual(session.pending_action["approved_domains"], ["robinhood.com"])
+
+    def test_resume_blocks_when_approval_screenshot_hash_changed(self) -> None:
+        import types
+
+        from claw_v2.approval import ApprovalManager
+        from claw_v2.computer_handler import ComputerHandler
+
+        class FakeComputer:
+            def capture_screenshot(self):
+                return {
+                    "data": base64.b64encode(b"after").decode("ascii"),
+                    "media_type": "image/png",
+                }
+
+            def run_agent_loop(self, **kwargs):
+                raise AssertionError("must not execute after changed screenshot")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            approvals = ApprovalManager(Path(tmpdir), "secret")
+            session = types.SimpleNamespace(
+                task="click",
+                current_url="https://example.com",
+                status="awaiting_approval",
+                pending_action={"action": "click", "x": 1, "y": 2},
+            )
+            scope = {
+                "backend": "openai",
+                "action_hash": hashlib.sha256(
+                    json.dumps(session.pending_action, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                ).hexdigest(),
+                "current_url": "https://example.com",
+                "url_origin": "https://example.com",
+                "screenshot_hash": hashlib.sha256(b"before").hexdigest(),
+                "approved_domains": [],
+            }
+            pending = approvals.create(
+                "click",
+                "click",
+                metadata={"kind": "computer_use", "session_id": "s1", "approval_scope": scope},
+            )
+            session.pending_action["approval_id"] = pending.approval_id
+            handler = ComputerHandler(computer=FakeComputer(), approvals=approvals, config=None)
+            handler._sessions["s1"] = session
+            approvals.approve(pending.approval_id, pending.token)
+
+            result = handler._resume_approved_computer_action(pending.approval_id)
+
+        self.assertIn("contexto de computer cambió", result)
 
 
 class ComputerHandlerTimeoutTests(_ComputerHandlerConfigTest):

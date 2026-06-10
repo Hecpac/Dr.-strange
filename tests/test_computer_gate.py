@@ -205,6 +205,26 @@ class RiskLevelTests(unittest.TestCase):
         risk = self.gate.risk_desktop({"action": "key", "text": "ctrl+a"}, url="https://ads.google.com")
         self.assertEqual(risk, RiskLevel.HIGH)
 
+    def test_browser_use_navigate_to_sensitive_is_high(self) -> None:
+        risk = self.gate.risk_browser_use_action(
+            "navigate",
+            {"url": "https://polymarket.com/market/1"},
+            url="https://example.com",
+        )
+        self.assertEqual(risk, RiskLevel.HIGH)
+
+    def test_browser_use_input_on_sensitive_url_is_high(self) -> None:
+        risk = self.gate.risk_browser_use_action(
+            "input",
+            {"index": 1, "text": "100"},
+            url="https://ads.google.com/campaigns",
+        )
+        self.assertEqual(risk, RiskLevel.HIGH)
+
+    def test_browser_use_read_action_is_low(self) -> None:
+        risk = self.gate.risk_browser_use_action("screenshot", {}, url="https://ads.google.com")
+        self.assertEqual(risk, RiskLevel.LOW)
+
 
 class ActionGateAutoApproveTests(unittest.TestCase):
     """auto_approve=True auto-approves LOW + MEDIUM actions but still gates HIGH
@@ -335,6 +355,7 @@ class ComputerHandlerBrowserAutoApproveTests(unittest.TestCase):
         handler._run_browser_use_session(session)
         self.assertFalse(stub.called)
         self.assertEqual(session.status, "awaiting_approval")
+        self.assertEqual(session.pending_action["approved_domains"], ["robinhood.com"])
 
     def test_generic_substring_of_multilabel_brand_not_gated(self) -> None:
         # ads.google.com is sensitive, but a task mentioning only "google"

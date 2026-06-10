@@ -109,6 +109,44 @@ class TaskLedgerTests(unittest.TestCase):
             self.assertEqual(events[0]["payload"]["task_id"], "task-fs")
             self.assertEqual(events[0]["payload"]["requested_status"], "succeeded")
 
+    def test_succeeded_with_pending_outcome_manifest_redirects_to_running(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "observe.db")
+            ledger = TaskLedger(Path(tmpdir) / "claw.db", observe=observe)
+            ledger.create(
+                task_id="task-pending-outcome",
+                session_id="s1",
+                objective="publish async artifact",
+                runtime="coordinator",
+                status="running",
+            )
+
+            result = ledger.mark_terminal(
+                "task-pending-outcome",
+                status="succeeded",
+                summary="Publish job created.",
+                verification_status="passed",
+                artifacts={
+                    "publish_job_id": "job-1",
+                    "outcome_manifest": {
+                        "version": 1,
+                        "final_outcome": "pending",
+                        "pending_async_jobs": [
+                            {"job_id": "job-1", "status": "running"},
+                        ],
+                        "blockers": [],
+                        "verifications": [{"kind": "handler", "result": "passed"}],
+                    },
+                },
+            )
+
+            self.assertEqual(result.status, "running")
+            self.assertEqual(result.verification_status, "needs_verification")
+            self.assertIn("outcome_manifest_has_pending_async_jobs", result.error)
+            events = [e for e in observe.recent_events(limit=20) if e["event_type"] == "task_false_success_prevented"]
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["payload"]["reason"], "outcome_manifest_has_pending_async_jobs")
+
     def test_succeeded_with_evidence_and_passed_verification_persists(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             ledger = TaskLedger(Path(tmpdir) / "claw.db")

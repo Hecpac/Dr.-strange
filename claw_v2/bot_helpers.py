@@ -374,6 +374,9 @@ _PROCEED_TOKENS = (
     "seguir",
     "dale",
     "hazlo",
+    "hazla",
+    "hazlos",
+    "hazlas",
     "haz la prueba",
     "haz prueba",
     "haz esa prueba",
@@ -387,10 +390,23 @@ _PROCEED_TOKENS = (
     "si",
     "sí",
     "yes",
+    "go",
     "asi",
     "vale",
     "avanza",
     "adelante",
+    "ya esta desbloqueada",
+    "ya esta desbloqueado",
+    "esta desbloqueada",
+    "esta desbloqueado",
+    "desbloqueada",
+    "desbloqueado",
+    "ya desbloquee",
+    "ya lo desbloquee",
+    "ya la desbloquee",
+    "ya entre al escritorio",
+    "ya esta en el escritorio",
+    "ya esta en escritorio",
 )
 _OPTION_ORDINALS = {
     "a": 1,
@@ -1012,6 +1028,7 @@ _TELEGRAM_IMPERATIVE_RULES: tuple[dict[str, Any], ...] = (
         # SOUL routing policy belongs to the brain, not this router.
         "patterns": (
             r"^\s*(?:continua|sigue|procede)(?:\s+(?:por\s+favor|porfa|pues|ya))?[\s.!?…]*$",
+            r"^\s*(?:dale|go)\s*[\s.!?…]*$",
             r"^\s*(?:continue|proceed)(?:\s+please)?[\s.!?…]*$",
         ),
         "needs_context": True,
@@ -1248,6 +1265,8 @@ def _looks_like_proceed_request(text: str) -> bool:
     if stripped in _PROCEED_TOKENS:
         return True
     if normalized in _PROCEED_TOKENS:
+        return True
+    if re.search(r"^(?:haz|hace|crea|genera|regenera|arma)(?:lo|la|los|las)\b", normalized):
         return True
     return any(
         " " in token and (
@@ -1602,6 +1621,16 @@ def _extract_pending_action_from_reply(text: str) -> str | None:
     for line in text.splitlines():
         normalized_line = re.sub(r"^\s*(?:[-*]\s*)+", "", line.strip())
         normalized_line = normalized_line.replace("**", "").replace("__", "")
+        unlock_match = re.match(
+            r"^\s*(?:apenas|cuando)\s+(?:la\s+)?"
+            r"(?:desbloquees|desbloquee|desbloquees\s+la\s+mac|sesion\s+este\s+activa|sesi[oó]n\s+est[eé]\s+activa|"
+            r"mac\s+est[eé]\s+desbloqueada|entres\s+al\s+escritorio|pase)\s*,?\s+"
+            r"(?:yo\s+)?(?:ejecuto|retomo|sigo|voy|manejo|hago)\s*(?:solo|todo|con\s+eso)?\s*:\s*(.+?)\s*$",
+            normalized_line,
+            re.IGNORECASE,
+        )
+        if unlock_match:
+            return unlock_match.group(1).strip()
         match = re.match(
             r"^\s*(?:siguiente paso|next step|pendiente|retomo la acci[oó]n)\s*:\s*(.+?)\s*$",
             normalized_line,

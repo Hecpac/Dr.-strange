@@ -73,6 +73,7 @@ from claw_v2.content import ContentEngine
 from claw_v2.sandbox import SandboxPolicy
 from claw_v2.subprocess_runner import run_subprocess_bounded
 from claw_v2.runtime_policy import RuntimePolicyEngine
+from claw_v2.sqlite_runtime import check_runtime_sqlite_health
 from claw_v2.task_board import TaskBoard
 from claw_v2.task_ledger import TaskLedger
 from claw_v2.terminal_bridge import TerminalBridgeService
@@ -470,7 +471,7 @@ def _run_startup_healthchecks(config: AppConfig, observe: ObserveStream) -> Star
             if config.computer_use_required:
                 computer_required_failed("openai_api_key", detail)
             else:
-                report.add_degraded("openai_api_key", detail, capability="computer_use")
+                report.add_degraded("openai_api_key", detail)
         if config.computer_use_enabled and not sys.modules.get("openai") and importlib.util.find_spec("openai") is None:
             detail = "OpenAI SDK no está instalado; el control de escritorio asistido quedará degradado"
             if config.computer_use_required:
@@ -1853,6 +1854,7 @@ def build_runtime(
     config = AppConfig.from_env()
     config.validate()
     config.ensure_directories()
+    check_runtime_sqlite_health(config.db_path, thorough=True)
 
     memory, observe, metrics, approvals, bus, agent_store = _setup_core_state(config)
     task_ledger = TaskLedger(config.db_path, observe=observe)

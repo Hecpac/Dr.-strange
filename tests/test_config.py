@@ -24,6 +24,22 @@ class AppConfigDefaultsTests(unittest.TestCase):
                 os.chdir(previous_cwd)
         self.assertEqual(config.workspace_root, Path(tmpdir).resolve())
 
+    def test_max_autonomous_workers_defaults_and_env_override(self) -> None:
+        home = str(Path.home())
+        with patch.dict(os.environ, {"HOME": home}, clear=True):
+            default_config = AppConfig.from_env()
+        self.assertEqual(default_config.max_autonomous_workers, 4)
+
+        with patch.dict(os.environ, {"HOME": home, "CLAW_MAX_AUTONOMOUS_WORKERS": "2"}, clear=True):
+            configured = AppConfig.from_env()
+            configured.validate()
+        self.assertEqual(configured.max_autonomous_workers, 2)
+
+        with patch.dict(os.environ, {"HOME": home, "CLAW_MAX_AUTONOMOUS_WORKERS": "0"}, clear=True):
+            invalid = AppConfig.from_env()
+            with self.assertRaises(ValueError):
+                invalid.validate()
+
     def test_default_allowed_read_paths_scoped_to_claw_not_home(self) -> None:
         # 2026-05-31 audit (H2): the default read-root is ~/.claw (+ /private/tmp),
         # NOT all of $HOME. Agent state under ~/.claw and the workspace stay

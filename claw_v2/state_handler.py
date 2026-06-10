@@ -442,6 +442,29 @@ class StateHandler:
                 },
             )
             return None
+        textual_option = self._select_textual_option(text, state)
+        if textual_option is not None:
+            selected_index, selected = textual_option
+            self._memory.update_session_state(
+                session_id,
+                pending_action=selected,
+            )
+            self._emit(
+                "last_options_textual_selected",
+                {
+                    "session_id": session_id,
+                    "option_index": selected_index,
+                    "option_preview": selected[:160],
+                    "user_text_preview": text[:80],
+                },
+            )
+            return _BrainShortcut(
+                text=(
+                    f"El usuario seleccionó una opción por texto.\n"
+                    f"Opción elegida ({selected_index}): {selected}"
+                ),
+                memory_text=text,
+            )
         if _looks_like_proceed_request(text):
             if state.get("verification_status") == "awaiting_approval":
                 pending_approvals = state.get("pending_approvals") or []
@@ -562,6 +585,33 @@ class StateHandler:
                     text=(
                         f"Continúa con este siguiente paso de la cola: {next_task['summary']}\n"
                         f"Mensaje de aprobación del usuario: {text}\n"
+                        f"Checkpoint actual: {checkpoint_text}"
+                    ),
+                    memory_text=text,
+                )
+            unlock_option = self._select_unlock_ready_option(text, state)
+            if unlock_option:
+                self._memory.update_session_state(session_id, pending_action=unlock_option)
+                checkpoint = state.get("last_checkpoint") or {}
+                checkpoint_text = json.dumps(checkpoint, ensure_ascii=True, sort_keys=True) if checkpoint else "{}"
+                self._emit(
+                    "continuation_resolved",
+                    {
+                        "session_id": session_id,
+                        "source": "last_options_unlock_ready",
+                        "proposal_preview": unlock_option[:160],
+                        "user_text_preview": text[:80],
+                    },
+                )
+                self._emit(
+                    "pending_action_execution_started",
+                    {"session_id": session_id, "pending_action_preview": unlock_option[:160]},
+                )
+                return _BrainShortcut(
+                    text=(
+                        f"Continúa con esta acción propuesta previamente: {unlock_option}\n"
+                        f"El usuario confirmó que la sesión/Mac ya está desbloqueada: {text}\n"
+                        f"Origen del contexto: last_options_unlock_ready\n"
                         f"Checkpoint actual: {checkpoint_text}"
                     ),
                     memory_text=text,
@@ -1131,6 +1181,18 @@ class StateHandler:
         r"¿\s*(?:sigo|contin[uú]o|procedo|avanzo|voy|arranco)\b[^\n?]{1,260}\?\s*$",
         re.IGNORECASE | re.MULTILINE,
     )
+    _PROPOSAL_INVITATION_RE = re.compile(
+        r"(?:^|[\n.!?]\s*)(?:dime|avisame|av[ií]same)\s+y\s+"
+        r"(?:lo|la|los|las|te\s+lo|te\s+la)?\s*"
+        r"(?:armo|preparo|hago|ejecuto|lanzo|arranco)\s*[\.\?!]*\s*$",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    _RECOMMENDED_ACTION_RE = re.compile(
+        r"(?:^|[\n.!?]\s*)"
+        r"(?:mi\s+voto|mi\s+recomendaci[oó]n|recomiendo|yo\s+har[ií]a|yo\s+ir[ií]a)"
+        r"\s*:\s*(?P<action>.+?)\s*$",
+        re.IGNORECASE,
+    )
 
     def _looks_like_proposal_question(self, text: str) -> bool:
         if not text:
@@ -1145,12 +1207,17 @@ class StateHandler:
             return True
         if self._CONTEXTUAL_PROPOSAL_QUESTION_RE.search(tail):
             return True
+        if self._PROPOSAL_INVITATION_RE.search(tail):
+            return True
+        if self._extract_recommended_action(text):
+            return True
         # Some proposals close with the question mid-paragraph; scan the
         # whole tail block too.
         tail_block = text[-500:]
         return bool(
             self._PROPOSAL_QUESTION_RE.search(tail_block)
             or self._CONTEXTUAL_PROPOSAL_QUESTION_RE.search(tail_block)
+            or self._PROPOSAL_INVITATION_RE.search(tail_block)
         )
 
     @staticmethod
@@ -1196,10 +1263,15 @@ class StateHandler:
         return None
 
     def _summarize_proposal(self, text: str) -> str:
+        recommended_action = self._extract_recommended_action(text)
+        if recommended_action:
+            compact = " ".join(recommended_action.split())
+            return compact[:317] + "..." if len(compact) > 320 else compact
         contextual_question = self._extract_contextual_proposal_question(text)
         # Strip the closing question, keep the substantive body.
         cleaned = self._PROPOSAL_QUESTION_RE.sub("", text).strip()
         cleaned = self._CONTEXTUAL_PROPOSAL_QUESTION_RE.sub("", cleaned).strip()
+        cleaned = self._PROPOSAL_INVITATION_RE.sub("", cleaned).strip()
         if not cleaned:
             cleaned = text.strip()
         # Collapse whitespace, cap length so it fits inside a brain hint.
@@ -1226,6 +1298,100 @@ class StateHandler:
             match = self._CONTEXTUAL_PROPOSAL_QUESTION_RE.search(candidate)
             if match:
                 return match.group(0)
+        return None
+
+    def _extract_recommended_action(self, text: str) -> str | None:
+        if not text:
+            return None
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        candidates = list(reversed(lines[-5:]))
+        candidates.append(text[-500:])
+        for candidate in candidates:
+            match = self._RECOMMENDED_ACTION_RE.search(candidate)
+            if not match:
+                continue
+            action = str(match.group("action") or "").strip(" \t\n\r.¿?¡!")
+            if len(action) >= 8:
+                return action
+        return None
+
+    @staticmethod
+    def _looks_like_unlock_ready_notice(text: str) -> bool:
+        normalized = _normalize_command_text(text).strip(" \t\n\r.,;:!?¿¡")
+        if not normalized:
+            return False
+        return bool(
+            re.search(
+                r"^(?:ya\s+)?(?:(?:esta|quedo)\s+)?(?:la\s+)?"
+                r"(?:(?:mac|sesion|sesi[oó]n|pantalla)\s+)?"
+                r"(?:desbloquead[ao]s?|en\s+(?:el\s+)?escritorio)\b",
+                normalized,
+            )
+            or re.search(
+                r"^(?:ya\s+)?(?:lo|la)?\s*desbloquee\b",
+                normalized,
+            )
+            or re.search(
+                r"^(?:ya\s+)?entre\s+al\s+escritorio\b",
+                normalized,
+            )
+        )
+
+    def _select_unlock_ready_option(self, text: str, state: dict[str, Any]) -> str | None:
+        if not self._looks_like_unlock_ready_notice(text):
+            return None
+        if not self._last_options_still_valid(state):
+            return None
+        options = state.get("last_options") or []
+        if not isinstance(options, list):
+            return None
+        for option in options:
+            option_text = str(option or "").strip()
+            normalized = _normalize_command_text(option_text)
+            if not option_text:
+                continue
+            if (
+                ("chatgpt" in normalized or "chat gpt" in normalized)
+                and (
+                    "desbloque" in normalized
+                    or "escritorio" in normalized
+                    or "sesion" in normalized
+                )
+                and "nano banana" not in normalized
+                and "gemini" not in normalized
+            ):
+                return option_text
+        return None
+
+    def _select_textual_option(self, text: str, state: dict[str, Any]) -> tuple[int, str] | None:
+        if not self._last_options_still_valid(state):
+            return None
+        options = state.get("last_options") or []
+        if not isinstance(options, list):
+            return None
+        normalized_text = _normalize_command_text(text).strip(" \t\n\r.,;:!?¿¡\"'")
+        if len(normalized_text) < 6:
+            return None
+        candidates: list[tuple[int, str, str]] = []
+        for index, option in enumerate(options, start=1):
+            option_text = str(option or "").strip()
+            if not option_text:
+                continue
+            normalized_option = _normalize_command_text(option_text)
+            candidates.append((index, option_text, normalized_option))
+            if normalized_text in normalized_option:
+                return index, option_text
+        distinctive_markers = ("nano banana", "gemini", "chatgpt", "chat gpt")
+        for marker in distinctive_markers:
+            if marker not in normalized_text:
+                continue
+            matches = [
+                (index, option_text)
+                for index, option_text, normalized_option in candidates
+                if marker in normalized_option
+            ]
+            if len(matches) == 1:
+                return matches[0]
         return None
 
     def _ratio_context_from_state(self, state: dict[str, Any]) -> list[str]:

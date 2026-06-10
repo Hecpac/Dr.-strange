@@ -35,7 +35,13 @@ def _runtime_env(root: Path) -> dict[str, str]:
     }
 
 
-def _drive(bot, text: str, *, session_id: str = "tg-smoke") -> tuple[str | None, list[dict]]:
+def _drive(
+    bot,
+    text: str,
+    *,
+    session_id: str = "tg-smoke",
+    context_metadata: dict | None = None,
+) -> tuple[str | None, list[dict]]:
     traces: list[dict] = []
     real_emit = bot.observe.emit
 
@@ -50,6 +56,7 @@ def _drive(bot, text: str, *, session_id: str = "tg-smoke") -> tuple[str | None,
             session_id=session_id,
             text=text,
             runtime_channel="telegram",
+            context_metadata=context_metadata,
         )
     return response, traces
 
@@ -69,6 +76,9 @@ def test_semantic_classifier_recognizes_operational_tasks_and_option_picks() -> 
         "Crea un cuaderno y un podcasts sobre los agentes autonomos",
         "Crear el\nCuaderno",
         "Verifica que el daemon Levanto",
+        "Verifica las cifras,y el asset visual generalo con ChatGPT image o nano banana",
+        "Afínalo y que después cree las imágenes del grid",
+        "Refina el carrusel y genera los assets visuales",
         "Haz un barrido por X de las noticias",
         "Haz la auditoria de los MCps",
     ]
@@ -105,6 +115,10 @@ def test_semantic_classifier_recognizes_operational_tasks_and_option_picks() -> 
         "Listo loggeado",
         "Arranca con el plan",
         "Okay 1",
+        "Hazla Imagen en ChatGPT",
+        "Ármalo",
+        "Ya esta desbloqueada",
+        "Ya está desbloqueada",
     ]
     for text in contextual_action_samples:
         turn = classify_semantic_turn(text)
@@ -120,8 +134,11 @@ def test_semantic_classifier_recognizes_operational_tasks_and_option_picks() -> 
 
 def test_natural_language_renderer_hides_internal_labels_in_normal_mode() -> None:
     raw = (
+        "Intent: `ui.open_app`\n"
+        "Target: `Claude`\n"
         "approval_id: `abc123`\n"
         "Estado: `pending_approval`\n"
+        "Task: `tg-test:telegram-imperative:123`\n"
         "task.contextual_action\n"
         "waiting_for_user_input\n"
         "explicit_blocker\n"
@@ -132,6 +149,10 @@ def test_natural_language_renderer_hides_internal_labels_in_normal_mode() -> Non
     rendered = renderer.render(raw)
 
     assert "approval_id" not in rendered
+    assert "Intent:" not in rendered
+    assert "Target:" not in rendered
+    assert "Estado:" not in rendered
+    assert "Task:" not in rendered
     assert "pending_approval" not in rendered
     assert "task.contextual_action" not in rendered
     assert "waiting_for_user_input" not in rendered
@@ -230,3 +251,32 @@ def test_live_smoke_sequence_resolves_procede_continua_dale_without_generic_loop
             assert len(records) >= 1
             assert any(record.runtime == "brain_first" for record in records)
             assert not any(record.runtime == "telegram_preflight" for record in records)
+
+
+def test_reply_context_dime_y_lo_armo_resolves_armalo_without_generic_loop() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        with patch.dict(os.environ, _runtime_env(root), clear=False):
+            runtime = build_runtime(anthropic_executor=_fake_anthropic)
+            runtime.bot.coordinator = None
+            reply_text = (
+                "Si quieres, convierto el bloque \"skills are the prompts + loop engineering\" "
+                "en el primer post de tu cadena semanal. Dime y lo armo."
+            )
+
+            response, traces = _drive(
+                runtime.bot,
+                "Ármalo",
+                context_metadata={
+                    "reply_context": {
+                        "source": "telegram_reply",
+                        "text": reply_text,
+                    }
+                },
+            )
+
+            assert response
+            assert "qué acción concreta" not in response.lower()
+            assert traces[0]["semantic_intent"] == "continue_active_mission"
+            state = runtime.memory.get_session_state("tg-smoke")
+            assert "primer post de tu cadena semanal" in state["pending_action"]

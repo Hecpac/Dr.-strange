@@ -4412,6 +4412,97 @@ class BotTests(unittest.TestCase):
                 self.assertIn("https://chatgpt.com/", browser_use.instruction)
                 runtime.bot.computer.run_agent_loop.assert_not_called()
 
+    def test_compound_verification_and_image_request_does_not_shortcut_to_chatgpt(self) -> None:
+        class StubBrowserUse:
+            def __init__(self) -> None:
+                self.called = False
+
+            async def run_task(self, instruction: str, **kwargs) -> str:
+                self.called = True
+                return "browser task should not run"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                browser_use = StubBrowserUse()
+                runtime.bot.browser_use = browser_use
+                runtime.bot.computer = MagicMock()
+                runtime.bot.computer.codex_backend = object()
+
+                result = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="Verifica las cifras,y el asset visual generalo con ChatGPT image o nano banana",
+                    runtime_channel="telegram",
+                )
+
+                self.assertEqual(result, "handled")
+                self.assertFalse(browser_use.called)
+                runtime.bot.computer.run_agent_loop.assert_not_called()
+                event_types = [event["event_type"] for event in runtime.observe.recent_events(limit=20)]
+                self.assertNotIn("computer_session_started", event_types)
+
+    def test_contextual_chatgpt_image_request_resolves_to_brain_not_shortcut(self) -> None:
+        class StubBrowserUse:
+            def __init__(self) -> None:
+                self.called = False
+
+            async def run_task(self, instruction: str, **kwargs) -> str:
+                self.called = True
+                return "browser task should not run"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                browser_use = StubBrowserUse()
+                runtime.bot.browser_use = browser_use
+                runtime.bot.computer = MagicMock()
+                runtime.bot.computer.codex_backend = object()
+                runtime.memory.update_session_state(
+                    "s1",
+                    pending_action="Rehacer en ChatGPT la imagen del poster ya generado con nano banana",
+                    active_object={
+                        "pending_action_meta": {
+                            "created_at": time.time(),
+                            "source": "test",
+                            "ttl_seconds": 30 * 60,
+                            "topic": "imagen poster chatgpt",
+                        }
+                    },
+                )
+
+                result = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="Hazla Imagen en ChatGPT",
+                    runtime_channel="telegram",
+                )
+
+                self.assertEqual(result, "handled")
+                self.assertFalse(browser_use.called)
+                runtime.bot.computer.run_agent_loop.assert_not_called()
+                event_types = [event["event_type"] for event in runtime.observe.recent_events(limit=30)]
+                self.assertIn("pending_action_execution_started", event_types)
+                self.assertNotIn("computer_session_started", event_types)
+
     def test_approved_browser_use_timeout_returns_actionable_error(self) -> None:
         class TimeoutBrowserUse:
             async def run_task(self, instruction: str, **kwargs) -> str:
@@ -4459,6 +4550,59 @@ class BotTests(unittest.TestCase):
                 ]
                 self.assertTrue(error_events)
                 self.assertIn("browser_use timed out after 180s", error_events[0]["payload"]["error"])
+
+    def test_approved_browser_use_no_result_returns_natural_blocker(self) -> None:
+        class NoResultBrowserUse:
+            def __init__(self) -> None:
+                self.called = False
+
+            async def run_task(self, instruction: str, **kwargs) -> str:
+                self.called = True
+                return "(no result)"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                browser_use = NoResultBrowserUse()
+                runtime.bot.browser_use = browser_use
+                runtime.bot.computer = MagicMock()
+                runtime.bot.computer.codex_backend = object()
+                runtime.bot.computer.capture_screenshot.return_value = {
+                    "data": "iVBORw0KGgo=",
+                    "media_type": "image/png",
+                }
+                runtime.bot.computer_client_factory = lambda: object()
+
+                prompt = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="Abre ChatGPT y crea una imagen",
+                )
+                self.assertIn("Necesito tu autorización", prompt)
+
+                result = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="Te autorizo",
+                )
+
+                self.assertTrue(browser_use.called)
+                self.assertNotEqual(result, "(no result)")
+                self.assertNotIn("(no result)", result)
+                self.assertIn("sin un resultado verificable", result)
+                self.assertIn("No marco la acción como completada", result)
+                self.assertEqual(runtime.bot._classify_computer_handler_result(result), "failed")
+                event_types = [event["event_type"] for event in runtime.observe.recent_events(limit=10)]
+                self.assertIn("computer_browser_use_task_unverifiable_result", event_types)
 
     def test_brain_prompt_includes_runtime_capability_context(self) -> None:
         captured: dict[str, str] = {}

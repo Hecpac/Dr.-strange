@@ -47,6 +47,10 @@ def should_notify_task_ledger_terminal(payload: dict, notified_task_ids: set[str
         return False
     if status not in {"succeeded", "failed", "timed_out", "cancelled", "lost"}:
         return False
+    # Successful terminal ledger rows are bookkeeping. The normal turn handler
+    # or a dedicated domain delivery path must carry the user-facing result.
+    if status == "succeeded":
+        return False
     # Coordinator tasks emit richer autonomous_task_completed/failed events.
     # Stale/lost coordinator tasks are created by daemon reconciliation and
     # otherwise have no per-session completion event, so notify them here.
@@ -79,6 +83,22 @@ def format_task_ledger_terminal_message(payload: dict) -> str:
     if error and error != detail:
         lines.extend(["", f"Error: {_sanitize_public_notification_detail(error[:1200])}"])
     return "\n".join(lines)
+
+
+def format_autonomous_task_terminal_message(payload: dict, *, failed: bool = False) -> str:
+    response = str(payload.get("response") or "").strip()
+    error = str(payload.get("error") or "").strip()
+    summary = str(payload.get("summary") or "").strip()
+    detail = response or error or summary
+    if detail:
+        detail = _sanitize_public_notification_detail(detail[:4000])
+    if failed:
+        if not detail:
+            return "No pude completar eso."
+        if response:
+            return detail
+        return f"No pude completar eso.\n\n{detail}"
+    return detail
 
 
 def _public_task_state(value: str) -> str:
@@ -128,6 +148,25 @@ def should_send_fitness_reminder(now: datetime, stamp_path: Path) -> bool:
     if stamp_path.exists() and stamp_path.read_text().strip() == today_key:
         return False
     return True
+
+
+def should_route_observability_telegram_notifications(
+    observability_chat_id: object,
+    owner_chat_id: object,
+) -> bool:
+    target = _normalize_chat_id(observability_chat_id)
+    if not target:
+        return False
+    owner = _normalize_chat_id(owner_chat_id)
+    return not owner or target != owner
+
+
+def _normalize_chat_id(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (str, int)):
+        return str(value).strip()
+    return ""
 
 
 class PidLock:
@@ -192,6 +231,10 @@ async def run() -> int:
 
         # Wire NotebookLM with Telegram notify callback
         _loop = asyncio.get_running_loop()
+        observability_telegram_enabled = should_route_observability_telegram_notifications(
+            getattr(runtime.config, "observability_telegram_chat_id", None),
+            getattr(runtime.config, "telegram_allowed_user_id", None),
+        )
 
         def _send_owner_telegram_message(message: str, *, parse_mode: str | None = None) -> None:
             if not runtime.config.telegram_allowed_user_id or not transport._app:
@@ -207,7 +250,7 @@ async def run() -> int:
             future.result(timeout=20)
 
         def _send_observability_telegram_message(message: str) -> None:
-            chat_id_raw = runtime.config.observability_telegram_chat_id or runtime.config.telegram_allowed_user_id
+            chat_id_raw = _normalize_chat_id(getattr(runtime.config, "observability_telegram_chat_id", None))
             if not chat_id_raw or not transport._app:
                 raise RuntimeError("Telegram observability chat is not available")
             future = asyncio.run_coroutine_threadsafe(
@@ -217,7 +260,7 @@ async def run() -> int:
             future.result(timeout=20)
 
         def _send_observability_stream_message(message: str) -> None:
-            chat_id_raw = runtime.config.observability_telegram_chat_id
+            chat_id_raw = _normalize_chat_id(getattr(runtime.config, "observability_telegram_chat_id", None))
             if not chat_id_raw or not transport._app:
                 return
             future = asyncio.run_coroutine_threadsafe(
@@ -226,7 +269,7 @@ async def run() -> int:
             )
             future.result(timeout=20)
 
-        if runtime.observation_window is not None:
+        if runtime.observation_window is not None and observability_telegram_enabled:
             runtime.observation_window.set_alert_notifier(_send_observability_telegram_message)
             runtime.observation_window.set_stream_notifier(_send_observability_stream_message)
 
@@ -261,10 +304,9 @@ async def run() -> int:
             task_id = str(payload.get("task_id") or "")
             if task_id in _notified_task_ids:
                 return
-            status = str(payload.get("verification_status") or "unknown")
-            response = str(payload.get("response") or "").strip()
-            header = f"Cerré la tarea `{task_id}`.\nVerificación: {status}\n\n"
-            _send_session_telegram_message(session_id, header + response)
+            message = format_autonomous_task_terminal_message(payload)
+            if message:
+                _send_session_telegram_message(session_id, message)
             if task_id:
                 _notified_task_ids.add(task_id)
 
@@ -273,8 +315,9 @@ async def run() -> int:
             task_id = str(payload.get("task_id") or "")
             if task_id in _notified_task_ids:
                 return
-            response = str(payload.get("response") or payload.get("error") or "unknown error")
-            _send_session_telegram_message(session_id, f"No pude cerrar la tarea `{task_id}`.\n{response}")
+            message = format_autonomous_task_terminal_message(payload, failed=True)
+            if message:
+                _send_session_telegram_message(session_id, message)
             if task_id:
                 _notified_task_ids.add(task_id)
 
@@ -357,7 +400,8 @@ async def run() -> int:
             handler=evening_brief.run_if_due,
         ))
 
-        install_operational_alerts(observe=runtime.observe, notify=_nlm_notify)
+        if observability_telegram_enabled:
+            install_operational_alerts(observe=runtime.observe, notify=_send_observability_telegram_message)
 
         def _nlm_research_fallback(query: str) -> str | None:
             wiki = runtime.bot.wiki
@@ -483,9 +527,11 @@ async def run() -> int:
         ))
 
         # Daemon health check at 20:58 local — Observer Pattern.
-        # Kairos emits daemon_health_check_notification; this consumer
-        # forwards to Telegram via call_soon_threadsafe (cross-thread safe).
+        # Kairos emits daemon_health_check_notification; this consumer only
+        # forwards to a dedicated observability chat, never the owner chat.
         def _daemon_health_consumer(payload: dict) -> None:
+            if not observability_telegram_enabled:
+                return
             status = payload.get("status", "unknown")
             ts = payload.get("ts", "")
             if status == "ok":
@@ -496,17 +542,10 @@ async def run() -> int:
             else:
                 err = payload.get("error", "unknown")
                 msg = f"⚠️ Health check falló ({ts}): {err}"
-            if runtime.config.telegram_allowed_user_id and transport._app:
-                try:
-                    asyncio.run_coroutine_threadsafe(
-                        transport._app.bot.send_message(
-                            chat_id=int(runtime.config.telegram_allowed_user_id),
-                            text=msg,
-                        ),
-                        _loop,
-                    )
-                except Exception:
-                    logger.exception("daemon health consumer failed to enqueue telegram send")
+            try:
+                _send_observability_telegram_message(msg)
+            except Exception:
+                logger.exception("daemon health consumer failed to enqueue telegram send")
 
         runtime.observe.subscribe(
             "daemon_health_check_notification", _daemon_health_consumer

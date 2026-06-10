@@ -11,6 +11,7 @@ import time
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 from claw_v2.bot_commands import BotCommand, CommandContext
 from claw_v2.bot_helpers import (
@@ -26,11 +27,31 @@ BROWSER_USE_TIMEOUT_SECONDS = 180
 # Extra wall-clock the worker-thread future is allowed beyond the agent timeout,
 # to cover the bounded post-task screenshot capture plus browser cleanup.
 BROWSER_USE_TASK_GRACE_SECONDS = 60
+_NO_RESULT_SENTINEL = "(no result)"
 
 
 def _error_message(exc: BaseException) -> str:
     message = str(exc).strip()
     return message or exc.__class__.__name__
+
+
+def _is_unverifiable_browser_result(result: str | None) -> bool:
+    text = str(result or "").strip()
+    if not text:
+        return True
+    first_line = text.splitlines()[0].strip().lower()
+    return first_line == _NO_RESULT_SENTINEL
+
+
+def _format_unverifiable_browser_result(session: Any) -> str:
+    lines = [
+        "La automatización del navegador terminó sin un resultado verificable.",
+        "No marco la acción como completada. Hay que reintentar por pasos o cambiar de herramienta.",
+    ]
+    artifact_path = str(getattr(session, "screenshot_path", "") or "").strip()
+    if artifact_path:
+        lines.append(f"Captura disponible: {artifact_path}")
+    return "\n".join(lines)
 
 
 class ComputerHandler:
@@ -245,6 +266,7 @@ class ComputerHandler:
                     gate=gate,
                     model=self.computer_model,
                     system_prompt=self.computer_system_prompt,
+                    current_url_resolver=lambda: self._resolve_current_url(session_id, getattr(session, "task", "")),
                 )
         except Exception as exc:
             self._sessions.pop(session_id, None)
@@ -286,6 +308,15 @@ class ComputerHandler:
                 return "computer action requires approval, but approvals are unavailable"
             pending = dict(session.pending_action or {})
             screenshot_metadata = self._capture_approval_screenshot(session_id, session)
+            approval_scope = {
+                "backend": backend,
+                "action_hash": _approval_action_hash(pending),
+                "current_url": getattr(session, "current_url", None),
+                "url_origin": _url_origin(getattr(session, "current_url", None)),
+                "screenshot_hash": screenshot_metadata.get("screenshot_hash"),
+                "approved_domains": _normalized_domains(pending.get("approved_domains")),
+            }
+            pending["approval_scope"] = approval_scope
             summary = _format_computer_pending_summary(session.task, pending)
             pending_approval = self.approvals.create(
                 action=str(pending.get("action") or pending.get("type") or "computer_action"),
@@ -296,6 +327,7 @@ class ComputerHandler:
                     "task": session.task,
                     "pending_action": pending,
                     "current_url": session.current_url,
+                    "approval_scope": approval_scope,
                     **screenshot_metadata,
                 },
             )
@@ -444,6 +476,13 @@ class ComputerHandler:
         if session.pending_action is not None and session.pending_action.get("approval_id") != approval_id:
             self._emit("computer_approval_resume_blocked", {"approval_id": approval_id, "session_id": session_id, "reason": "approval_mismatch"})
             return "approved, but no matching pending computer action was found"
+        scope_error = self._validate_pending_approval_scope(session_id, session, metadata)
+        if scope_error is not None:
+            self._emit(
+                "computer_approval_resume_blocked",
+                {"approval_id": approval_id, "session_id": session_id, "reason": scope_error},
+            )
+            return "Aprobación registrada, pero el contexto de computer cambió. Reenvíame el objetivo para generar una aprobación nueva."
         if session.pending_action is not None:
             session.pending_action["approved"] = True
         session.status = "running"
@@ -456,6 +495,33 @@ class ComputerHandler:
             },
         )
         return self._run_session(session_id)
+
+    def _validate_pending_approval_scope(self, session_id: str, session: Any, metadata: dict[str, Any]) -> str | None:
+        pending = dict(session.pending_action or {})
+        scope = metadata.get("approval_scope") if isinstance(metadata, dict) else None
+        if not isinstance(scope, dict):
+            scope = pending.get("approval_scope")
+        if not isinstance(scope, dict):
+            return None
+        expected_hash = str(scope.get("action_hash") or "")
+        if expected_hash and _approval_action_hash(pending) != expected_hash:
+            return "action_hash_changed"
+        expected_origin = str(scope.get("url_origin") or "")
+        if expected_origin:
+            current_url = self._resolve_current_url(session_id, getattr(session, "task", "")) or getattr(session, "current_url", None)
+            if isinstance(current_url, str) and current_url.strip():
+                session.current_url = current_url.strip()
+            current_origin = _url_origin(getattr(session, "current_url", None))
+            if current_origin != expected_origin:
+                return "url_origin_changed"
+        expected_screenshot_hash = str(scope.get("screenshot_hash") or "")
+        if expected_screenshot_hash:
+            current_screenshot_hash = self._current_screenshot_hash()
+            if not current_screenshot_hash:
+                return "screenshot_unavailable"
+            if current_screenshot_hash != expected_screenshot_hash:
+                return "screenshot_changed"
+        return None
 
     def action_abort_response(self, approval_id: str) -> str:
         if self.approvals is None:
@@ -510,6 +576,7 @@ class ComputerHandler:
             and pending.get("approved") is True
             and isinstance(pending.get("approval_id"), str)
         )
+        explicitly_approved = approved
         if not approved and self._auto_approve_enabled() and not self._browser_task_is_sensitive(
             session.task, getattr(session, "current_url", None)
         ):
@@ -528,6 +595,11 @@ class ComputerHandler:
                 "action": "browser_use_task",
                 "backend": "browser_use",
                 "task": session.task,
+                "approved_domains": _domains_for_browser_task(
+                    session.task,
+                    getattr(session, "current_url", None),
+                    sensitive_urls=list(getattr(self.config, "sensitive_urls", []) or []),
+                ),
             }
             self._emit(
                 "computer_browser_use_approval_required",
@@ -549,10 +621,66 @@ class ComputerHandler:
                 "instruction_hash": _instruction_hash(getattr(session, "task", "")),
             },
         )
-        result = self._run_browser_use_task(session)
+        try:
+            result = self._run_browser_use_task(
+                session,
+                allow_high_risk_actions=explicitly_approved,
+                approved_domains=_normalized_domains(
+                    pending.get("approved_domains")
+                    or _domains_for_browser_task(
+                        session.task,
+                        getattr(session, "current_url", None),
+                        sensitive_urls=list(getattr(self.config, "sensitive_urls", []) or []),
+                    )
+                ),
+            )
+        except Exception as exc:
+            from claw_v2.computer import BrowserUsePolicyInterrupt
+
+            if not isinstance(exc, BrowserUsePolicyInterrupt):
+                raise
+            session.status = "awaiting_approval"
+            session.pending_action = {
+                "action": "browser_use_task",
+                "backend": "browser_use",
+                "task": session.task,
+                "interrupted_action": {
+                    "action": exc.action_name,
+                    "params": exc.params,
+                    "url": exc.url,
+                    "risk": exc.risk,
+                },
+                "approved_domains": exc.approved_domains
+                or _domains_for_browser_task(
+                    session.task,
+                    exc.url,
+                    sensitive_urls=list(getattr(self.config, "sensitive_urls", []) or []),
+                ),
+            }
+            self._emit(
+                "computer_browser_use_policy_interrupted",
+                {
+                    "backend": "browser_use",
+                    "action": exc.action_name,
+                    "risk": exc.risk,
+                    "current_url": exc.url,
+                    "instruction_hash": _instruction_hash(getattr(session, "task", "")),
+                },
+            )
+            return "Browser automation needs approval before continuing with a high-risk browser action."
         artifact_path = getattr(session, "screenshot_path", None)
         session.pending_action = None
         session.status = "done"
+        if _is_unverifiable_browser_result(result):
+            self._emit(
+                "computer_browser_use_task_unverifiable_result",
+                {
+                    "backend": "browser_use",
+                    "artifact_saved": bool(artifact_path),
+                    "instruction_hash": _instruction_hash(getattr(session, "task", "")),
+                },
+            )
+            return _format_unverifiable_browser_result(session)
         self._emit(
             "computer_browser_use_task_succeeded",
             {
@@ -564,7 +692,13 @@ class ComputerHandler:
         )
         return result
 
-    def _run_browser_use_task(self, session: Any) -> str:
+    def _run_browser_use_task(
+        self,
+        session: Any,
+        *,
+        allow_high_risk_actions: bool = False,
+        approved_domains: list[str] | None = None,
+    ) -> str:
         import asyncio
 
         model = self._browser_use_model()
@@ -578,7 +712,15 @@ class ComputerHandler:
                 # run_task bounds only the agent work by `timeout`; the
                 # best-effort artifact capture runs afterwards on its own budget.
                 result = await self.browser_use.run_task(
-                    session.task, model=model, timeout=timeout
+                    session.task,
+                    model=model,
+                    timeout=timeout,
+                    action_gate=self._get_gate(),
+                    sensitive_urls=list(getattr(self.config, "sensitive_urls", []) or []),
+                    allowed_domains=approved_domains if allow_high_risk_actions else None,
+                    prohibited_domains=None if allow_high_risk_actions else list(getattr(self.config, "sensitive_urls", []) or []),
+                    allow_high_risk_actions=allow_high_risk_actions,
+                    max_actions_per_step=1,
                 )
             except asyncio.TimeoutError as exc:
                 raise RuntimeError(timeout_message) from exc
@@ -635,6 +777,7 @@ class ComputerHandler:
             return {
                 "screenshot_path": str(path),
                 "screenshot_media_type": media_type,
+                "screenshot_hash": hashlib.sha256(raw).hexdigest(),
             }
         except Exception as exc:
             logger.warning("approval screenshot capture failed for %s: %s", session_id, exc)
@@ -643,6 +786,21 @@ class ComputerHandler:
                 {"session_id": session_id, "error": _error_message(exc)[:200]},
             )
             return {"screenshot_error": str(exc)[:200]}
+
+    def _current_screenshot_hash(self) -> str | None:
+        if self.computer is None or not hasattr(self.computer, "capture_screenshot"):
+            return None
+        try:
+            screenshot = self.computer.capture_screenshot()
+            encoded = str(screenshot.get("data") or "")
+            try:
+                raw = base64.b64decode(encoded)
+            except Exception:
+                raw = encoded.encode("utf-8", errors="ignore")
+            return hashlib.sha256(raw).hexdigest()
+        except Exception:
+            logger.debug("current screenshot hash capture failed", exc_info=True)
+            return None
 
     def diagnostics_response(self, session_id: str) -> str:
         self._emit("computer_diagnostic_started", {"session_id": session_id})
@@ -765,3 +923,87 @@ def _instruction_hash(instruction: str) -> str:
 def _instruction_preview(instruction: str) -> str:
     compact = " ".join((instruction or "").split())
     return redact_text(compact, limit=180)
+
+
+def _domains_for_browser_task(
+    task: str | None,
+    current_url: str | None = None,
+    *,
+    sensitive_urls: list[str] | None = None,
+) -> list[str]:
+    domains: list[str] = []
+    for value in [current_url, *_URL_RE.findall(task or "")]:
+        host = _host_from_url(value)
+        if host and host not in domains:
+            domains.append(host)
+    lowered = (task or "").lower()
+    for value in sensitive_urls or []:
+        host = _host_from_url(value)
+        if not host:
+            continue
+        brand = host.rsplit(".", 1)[0]
+        if brand and re.search(rf"\b{re.escape(brand)}\b", lowered) and host not in domains:
+            domains.append(host)
+    return domains
+
+
+def _host_from_url(url: str | None) -> str | None:
+    if not url:
+        return None
+    text = str(url).strip()
+    if not text:
+        return None
+    if "://" not in text:
+        text = "https://" + text
+    try:
+        host = urlparse(text).hostname
+    except Exception:
+        return None
+    return host.lower() if host else None
+
+
+def _url_origin(url: str | None) -> str | None:
+    if not url:
+        return None
+    text = str(url).strip()
+    if not text:
+        return None
+    if "://" not in text:
+        text = "https://" + text
+    try:
+        parsed = urlparse(text)
+    except Exception:
+        return None
+    if not parsed.scheme or not parsed.hostname:
+        return None
+    port = f":{parsed.port}" if parsed.port else ""
+    return f"{parsed.scheme.lower()}://{parsed.hostname.lower()}{port}"
+
+
+def _canonical_hash(value: Any) -> str:
+    try:
+        encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=repr)
+    except TypeError:
+        encoded = repr(value)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _approval_action_hash(action: dict[str, Any] | None) -> str:
+    excluded = {"approval_id", "approval_token", "approved", "approval_scope"}
+    payload = {k: v for k, v in dict(action or {}).items() if k not in excluded}
+    return _canonical_hash(payload)
+
+
+def _normalized_domains(value: Any) -> list[str]:
+    if isinstance(value, str):
+        values = [value]
+    elif isinstance(value, list | tuple | set):
+        values = list(value)
+    else:
+        values = []
+    domains: list[str] = []
+    for item in values:
+        host = _host_from_url(str(item))
+        if host and host not in domains:
+            domains.append(host)
+    return domains
