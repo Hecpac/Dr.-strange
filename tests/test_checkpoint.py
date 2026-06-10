@@ -97,6 +97,35 @@ class CheckpointCreateTests(unittest.TestCase):
         self.assertFalse(captured["locked_during_backup"])
         self.assertTrue(captured["dedicated"])
 
+    def test_concurrent_creates_do_not_purge_in_flight_snapshot(self) -> None:
+        # PR #84 review (codex P2): with the ring at capacity, an overlapping
+        # create's rotation could unlink the snapshot another create was
+        # still writing. The service-level mutex serializes the lifecycle.
+        import threading
+
+        service = CheckpointService(
+            memory=self.store, snapshots_dir=self.snapshots_dir, ring_size=1,
+        )
+        errors: list[Exception] = []
+
+        def worker() -> None:
+            try:
+                service.create(trigger_reason="race")
+            except Exception as exc:  # pragma: no cover - failure mode under test
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(errors, [])
+        latest = service.latest()
+        self.assertIsNotNone(latest)
+        self.assertTrue(Path(latest["file_path"]).exists())
+        self.assertEqual(len(list(self.snapshots_dir.glob("ckpt_*.db"))), 1)
+
     def test_create_failure_cleans_up_file(self) -> None:
         class FailingSource:
             def backup(self, target, **kwargs):
