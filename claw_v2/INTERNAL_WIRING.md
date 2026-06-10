@@ -8,9 +8,9 @@
 ## meta
 
 ```yaml
-describes_commit: 9a98873+invariant1-final-leg-dream-learning-off-tick
-doc_version: 2.4
-last_verified: 2026-06-05
+describes_commit: 32585b1+audit-group1-replay-guard-verifier-failclosed-grant-matcher
+doc_version: 2.5
+last_verified: 2026-06-10
 verification_method: manual + grep cross-check
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
@@ -257,7 +257,11 @@ Telegram → BotService.handle_text
    ├─ pre-hooks
    ├─ Adapter (Anthropic with session reuse for prefix cache)
    ├─ CircuitBreaker (opens per provider)
-   ├─ Fallback (anthropic ↔ openai; codex no fallback — explicit)
+   ├─ Fallback (anthropic ↔ openai; codex no fallback — explicit;
+   │   suppressed with llm_fallback_suppressed when the failed turn already
+   │   executed tools — replay would duplicate side effects; brain retries
+   │   honor the same tools_executed_before_failure marker and queue a
+   │   recovery job instead)
    ├─ ObservationWindow gate (cost_per_hour, tool_calls_per_minute)
    ├─ post-hooks (sanitize)
    ↓
@@ -275,6 +279,8 @@ Telegram → BotService.handle_text
    ├─ SubAgentService (assigned_agent → SOUL.md)
    ├─ ApprovalGate (tier 3)
    ├─ Verifier votes → _aggregate_verifier_votes → recommendation + risk
+   │   (evidence beyond the advisory 12k-char rendering bound fails closed:
+   │    evidence_pack_truncated blocker forces the human gate)
    ↓
    ObserveStream emits events at every layer (data/claw.db)
    ObservationWindowState gates / persists freeze state in

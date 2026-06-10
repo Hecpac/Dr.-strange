@@ -16,6 +16,7 @@ from claw_v2.adapters.base import (
     build_effective_input,
     build_effective_system_prompt,
     coerce_usage_dict,
+    record_tools_executed,
 )
 from claw_v2.approval_gate import ApprovalPending
 from claw_v2.pricing import estimate_cost_usd
@@ -80,6 +81,9 @@ class OpenAIAdapter(ProviderAdapter):
     def _complete_via_sdk(self, request: LLMRequest) -> LLMResponse:
         sdk = self._load_sdk()
         client = sdk.OpenAI(api_key=self._api_key) if self._api_key else sdk.OpenAI()
+        # Registry tools have no read-only marker here, so any executed tool
+        # counts: a later failure must not be replayed by fallback/retry.
+        executed_tools: list[str] = []
         try:
             kwargs: dict[str, Any] = dict(
                 model=request.model,
@@ -108,25 +112,35 @@ class OpenAIAdapter(ProviderAdapter):
 
             # Tool-calling loop
             if use_tools:
-                response = self._tool_loop(client, request, response)
+                response = self._tool_loop(client, request, response, executed_tools)
 
         except ApprovalPending:
             # Tier 3 soft-block — propagate past the adapter boundary so the
             # bot can format /approve for Hector.
             raise
-        except AdapterError:
+        except AdapterError as exc:
+            record_tools_executed(exc, executed_tools)
             raise
         except Exception as exc:
             if _is_stream_idle_error(exc):
-                raise StreamInterruptedError(
+                error: AdapterError = StreamInterruptedError(
                     f"OpenAI stream interrupted: {exc}",
                     partial_output=_extract_partial_output(exc),
-                ) from exc
-            raise AdapterError(f"OpenAI Responses request failed: {exc}") from exc
+                )
+            else:
+                error = AdapterError(f"OpenAI Responses request failed: {exc}")
+            record_tools_executed(error, executed_tools)
+            raise error from exc
 
         return self._build_response(response, request)
 
-    def _tool_loop(self, client: Any, request: LLMRequest, response: Any) -> Any:
+    def _tool_loop(
+        self,
+        client: Any,
+        request: LLMRequest,
+        response: Any,
+        executed_tools: list[str] | None = None,
+    ) -> Any:
         """Execute function calls in a loop until the model stops calling tools."""
         for _ in range(_MAX_TOOL_ROUNDS):
             function_calls = [
@@ -145,6 +159,8 @@ class OpenAIAdapter(ProviderAdapter):
                 except (json.JSONDecodeError, TypeError):
                     arguments = {}
 
+                if executed_tools is not None and name:
+                    executed_tools.append(name)
                 try:
                     result = self._tool_executor(name, arguments)  # type: ignore[misc]
                     output = json.dumps(result, default=str)

@@ -18,6 +18,7 @@ from claw_v2.adapters.base import (
     build_effective_input,
     build_effective_system_prompt,
     evidence_pack_serialized_chars,
+    tools_executed_before_failure,
 )
 from claw_v2.adapters.codex import CodexAdapter
 from claw_v2.adapters.google import GoogleAdapter
@@ -169,6 +170,21 @@ class LLMRouter:
         except AdapterError as exc:
             fallback_provider = self._pick_fallback(request.provider, lane)
             if fallback_provider is None:
+                raise
+            executed_tools = tools_executed_before_failure(exc)
+            if executed_tools:
+                # The failed turn already executed tools: replaying it on the
+                # fallback provider would duplicate external side effects.
+                self._audit_event(
+                    "llm_fallback_suppressed",
+                    request=request,
+                    metadata={
+                        "requested_provider": request.provider,
+                        "fallback_provider": fallback_provider,
+                        "reason": "tools_executed_before_failure",
+                        "tools_executed": executed_tools,
+                    },
+                )
                 raise
             fb_adapter = self._adapter_for(fallback_provider)
             if lane not in self.NON_TOOL_LANES and not fb_adapter.tool_capable:

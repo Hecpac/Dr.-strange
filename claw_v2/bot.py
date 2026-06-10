@@ -640,6 +640,13 @@ def _looks_like_computer_approval_reject(text: str) -> bool:
     )
 
 
+# Explicit authorization verbs may appear inside a longer message
+# ("Abre ChatGPT y crea la imagen. Te autorizo"), but only on word
+# boundaries and never alongside a negation.
+_COMPUTER_APPROVAL_VERB_RE = re.compile(r"\b(?:autorizo|apruebo)\b")
+_COMPUTER_APPROVAL_NEGATION_RE = re.compile(r"\b(?:no|ni|nunca|jamas|tampoco)\b")
+
+
 def _looks_like_computer_approval_grant(text: str) -> bool:
     if _looks_like_computer_approval_reject(text):
         return False
@@ -647,24 +654,29 @@ def _looks_like_computer_approval_grant(text: str) -> bool:
     normalized = re.sub(r"\s+", " ", normalized)
     if _looks_like_pending_tool_approval_grant(normalized):
         return True
-    return any(
-        phrase in normalized
-        for phrase in (
-            "te autorizo",
-            "lo autorizo",
-            "la autorizo",
-            "autorizo",
-            "te apruebo",
-            "lo apruebo",
-            "la apruebo",
-            "apruebo",
-            "puedes continuar",
-            "puedes hacerlo",
-            "continua",
-            "sigue",
-            "hazlo",
-            "dale",
-        )
+    # Ambiguous short grants must be the whole message: substring matching let
+    # unrelated messages ("consigue...", "continuamos", "dale una vuelta...")
+    # approve pending Tier-3 desktop actions. Non-matches fall to the brain.
+    if normalized in {
+        "te autorizo",
+        "lo autorizo",
+        "la autorizo",
+        "autorizo",
+        "te apruebo",
+        "lo apruebo",
+        "la apruebo",
+        "apruebo",
+        "puedes continuar",
+        "puedes hacerlo",
+        "continua",
+        "sigue",
+        "hazlo",
+        "dale",
+    }:
+        return True
+    return bool(
+        _COMPUTER_APPROVAL_VERB_RE.search(normalized)
+        and not _COMPUTER_APPROVAL_NEGATION_RE.search(normalized)
     )
 
 

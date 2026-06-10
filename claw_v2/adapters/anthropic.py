@@ -19,6 +19,7 @@ from claw_v2.adapters.base import (
     build_effective_input,
     build_effective_system_prompt,
     coerce_usage_dict,
+    record_tools_executed,
 )
 from claw_v2.approval import ApprovalManager
 from claw_v2.config import AppConfig
@@ -42,6 +43,13 @@ IDENTITY_OVERRIDE = (
     "or a generic agent. Dr. Strange is the persona; Claude/Claude Code is the underlying "
     "model and runtime. Never say 'I don't know what Dr. Strange is' or 'I am Claude/Claude Code' "
     "in user-facing chat. The persona definition that follows is canonical.\n\n"
+)
+
+# SDK tools that cannot mutate external state. Anything outside this set
+# (Bash, Edit, Write, Task, MCP tools, ...) is treated as potentially mutating
+# so a failed turn that already ran one is never replayed by fallback/retry.
+_READ_ONLY_SDK_TOOLS = frozenset(
+    {"Read", "Grep", "Glob", "WebSearch", "WebFetch", "TodoWrite", "BashOutput", "NotebookRead"}
 )
 
 SILENCE_DIRECTIVE = (
@@ -103,7 +111,13 @@ class ClaudeSDKExecutor:
             if len(stderr_lines) > 40:
                 del stderr_lines[0]
 
-        options = self._build_options(sdk, request, stderr_callback=_capture_stderr)
+        mutating_tools: list[str] = []
+        options = self._build_options(
+            sdk,
+            request,
+            stderr_callback=_capture_stderr,
+            mutation_tracker=mutating_tools,
+        )
         effective_input = build_effective_input(request)
         assistant_text_chunks: list[str] = []
         result_text: str | None = None
@@ -149,11 +163,16 @@ class ClaudeSDKExecutor:
                     f"Claude CLI not found at '{self.config.claude_cli_path}'."
                 ) from exc
             if isinstance(exc, AdapterError):
+                record_tools_executed(exc, mutating_tools)
                 raise
             if stderr_excerpt:
                 logger.error("Claude CLI stderr before failure: %s", stderr_excerpt)
-                raise AdapterError(f"Claude SDK execution failed: {exc}. Claude stderr: {stderr_excerpt}") from exc
-            raise AdapterError(f"Claude SDK execution failed: {exc}") from exc
+                error = AdapterError(f"Claude SDK execution failed: {exc}. Claude stderr: {stderr_excerpt}")
+                record_tools_executed(error, mutating_tools)
+                raise error from exc
+            error = AdapterError(f"Claude SDK execution failed: {exc}")
+            record_tools_executed(error, mutating_tools)
+            raise error from exc
 
         content = _coalesce_content(assistant_text_chunks, result_text)
         cache_read = usage.get("cache_read_input_tokens", 0)
@@ -230,11 +249,12 @@ class ClaudeSDKExecutor:
         request: LLMRequest,
         *,
         stderr_callback: Callable[[str], None] | None = None,
+        mutation_tracker: list[str] | None = None,
     ) -> Any:
         tools: Any
         system_prompt: Any
         can_use_tool = None
-        hooks = self._build_hooks(sdk, request)
+        hooks = self._build_hooks(sdk, request, mutation_tracker=mutation_tracker)
         effective_system_prompt = build_effective_system_prompt(request)
 
         if request.lane in ADVISORY_LANES:
@@ -349,10 +369,20 @@ class ClaudeSDKExecutor:
 
         return can_use_tool
 
-    def _build_hooks(self, sdk: Any, request: LLMRequest) -> dict[str, list[Any]] | None:
+    def _build_hooks(
+        self,
+        sdk: Any,
+        request: LLMRequest,
+        *,
+        mutation_tracker: list[str] | None = None,
+    ) -> dict[str, list[Any]] | None:
         hooks: dict[str, list[Any]] = {}
         policy = self._policy_for_request(request)
         runtime_policy = self._runtime_policy_for_request(request, policy)
+
+        def _track_mutation(tool_name: str) -> None:
+            if mutation_tracker is not None and tool_name and tool_name not in _READ_ONLY_SDK_TOOLS:
+                mutation_tracker.append(tool_name)
 
         async def pre_tool_use(input_data: dict[str, Any], tool_use_id: str | None, context: Any) -> dict[str, Any]:
             try:
@@ -384,6 +414,7 @@ class ClaudeSDKExecutor:
             return {"continue_": True}
 
         async def post_tool_use(input_data: dict[str, Any], tool_use_id: str | None, context: Any) -> dict[str, Any]:
+            _track_mutation(str(input_data.get("tool_name") or ""))
             if self.observe is not None:
                 tool_name = str(input_data.get("tool_name") or "")
                 payload = {
@@ -414,6 +445,9 @@ class ClaudeSDKExecutor:
         async def post_tool_use_failure(
             input_data: dict[str, Any], tool_use_id: str | None, context: Any
         ) -> dict[str, Any]:
+            # A failed tool may still have produced partial side effects
+            # (e.g. a Bash command that timed out after sending): count it.
+            _track_mutation(str(input_data.get("tool_name") or ""))
             if self.observe is not None:
                 tool_name = str(input_data.get("tool_name") or "")
                 tool_response = input_data.get("tool_response") or {}

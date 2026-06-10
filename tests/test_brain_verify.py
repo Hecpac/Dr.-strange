@@ -142,6 +142,58 @@ class BrainVerificationTests(unittest.TestCase):
                 self.assertEqual(verdict.consensus_status, "unanimous_approve")
                 self.assertEqual(len(verdict.verifier_votes), 2)
 
+    def test_verify_critical_action_fails_closed_on_truncated_evidence(self) -> None:
+        # 2026-06-10 audit: evidence beyond the advisory rendering bound used
+        # to reach the verifier truncated, and a clean "approve" on the visible
+        # fragment authorized autonomous execution. Oversized evidence must
+        # force the human gate even when the verifier approves.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "VERIFIER_PROVIDER": "openai",
+                "VERIFIER_MODEL": "gpt-5.4-mini",
+            }
+
+            def verifier_transport(request: LLMRequest) -> LLMResponse:
+                return LLMResponse(
+                    content=(
+                        '{"recommendation":"approve","risk_level":"low","summary":"Looks fine.",'
+                        '"reasons":["Visible fragment is clean"],"blockers":[],"missing_checks":[],"confidence":0.9}'
+                    ),
+                    lane="verifier",
+                    provider="openai",
+                    model=request.model,
+                    confidence=0.9,
+                    cost_estimate=0.01,
+                )
+
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=self._fake_brain, openai_transport=verifier_transport)
+                verdict = runtime.brain.verify_critical_action(
+                    plan="Ship large refactor",
+                    diff="diff --git a/x b/x\n" + ("+payload line\n" * 4000),
+                    test_output="unit ok",
+                    action="deploy_production",
+                )
+
+                self.assertFalse(verdict.should_proceed)
+                self.assertTrue(verdict.requires_human_approval)
+                self.assertTrue(
+                    any("evidence_pack_truncated" in blocker for blocker in verdict.blockers)
+                )
+                self.assertIsNotNone(verdict.approval_id)
+                events = runtime.observe.recent_events(limit=10)
+                verification_events = [
+                    event for event in events if event["event_type"] == "critical_action_verification"
+                ]
+                self.assertTrue(verification_events)
+                self.assertTrue(verification_events[0]["payload"]["evidence_pack_truncated"])
+
     def test_verify_critical_action_marks_evidence_as_untrusted(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

@@ -21,6 +21,27 @@ class AdapterUnavailableError(AdapterError):
     """Raised when a provider adapter cannot be used in the current environment."""
 
 
+# Set by tool-capable adapters when a request fails after one or more tools
+# already executed. Consumers (router fallback, brain retries) must not replay
+# such requests wholesale: the side effects would run twice.
+TOOLS_EXECUTED_METADATA_KEY = "tools_executed_before_failure"
+
+
+def record_tools_executed(exc: AdapterError, tools: list[str]) -> None:
+    if tools:
+        exc.metadata.setdefault(TOOLS_EXECUTED_METADATA_KEY, sorted(set(tools))[:20])
+
+
+def tools_executed_before_failure(exc: BaseException) -> list[str]:
+    metadata = getattr(exc, "metadata", None)
+    if not isinstance(metadata, dict):
+        return []
+    value = metadata.get(TOOLS_EXECUTED_METADATA_KEY)
+    if isinstance(value, list):
+        return [str(item) for item in value if item]
+    return []
+
+
 class StreamInterruptedError(AdapterError):
     """Raised when the provider stream was cut off mid-response (idle/timeout)."""
 

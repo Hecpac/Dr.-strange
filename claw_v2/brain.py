@@ -8,7 +8,14 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Callable, TYPE_CHECKING
 
-from claw_v2.adapters.base import AdapterError, UserContentBlock, UserPrompt
+from claw_v2.adapters.base import (
+    ADVISORY_EVIDENCE_PACK_MAX_CHARS,
+    AdapterError,
+    UserContentBlock,
+    UserPrompt,
+    evidence_pack_serialized_chars,
+    tools_executed_before_failure,
+)
 from claw_v2.approval import ApprovalManager
 from claw_v2.learning import LearningLoop
 from claw_v2.llm import LLMRouter
@@ -173,6 +180,10 @@ _RECOVERY_REASON_HINTS = {
     "provider_repeated_internal_trace": "el turno reincidió en un trace interno",
     "provider_session_retry": "el provider falló incluso al refrescar la sesión",
     "provider_error": "el provider falló preparando la respuesta",
+    "provider_error_after_side_effects": (
+        "el provider falló después de ejecutar acciones reales; no reintenté "
+        "automáticamente para no duplicarlas"
+    ),
 }
 
 
@@ -479,7 +490,34 @@ class BrainService:
                 timeout=300.0,
             )
         except AdapterError as exc:
-            if _is_image_processing_error(exc):
+            executed_tools = tools_executed_before_failure(exc)
+            if executed_tools:
+                # The failed turn already executed tools: any replay (fresh
+                # session, sanitized prompt) would duplicate side effects.
+                if self.observe is not None:
+                    self.observe.emit(
+                        "brain_retry_suppressed_side_effects",
+                        lane="brain",
+                        provider=session_provider,
+                        trace_id=trace["trace_id"],
+                        root_trace_id=trace["root_trace_id"],
+                        span_id=trace["span_id"],
+                        parent_span_id=trace["parent_span_id"],
+                        artifact_id=trace["artifact_id"],
+                        payload={
+                            "app_session_id": session_id,
+                            "tools_executed": executed_tools[:10],
+                            "error": str(exc)[:500],
+                        },
+                    )
+                response = self._queue_recovery_or_raise(
+                    exc=exc,
+                    session_id=session_id,
+                    stored_user_message=stored_user_message,
+                    trace=trace,
+                    failure_reason="provider_error_after_side_effects",
+                )
+            elif _is_image_processing_error(exc):
                 # Image-poison recovery (P0 hotfix A): the provider rejected
                 # an image in the conversation; reusing the same prompt or
                 # the same provider session guarantees the same failure.
@@ -1058,6 +1096,8 @@ class BrainService:
         create_approval: bool = True,
     ) -> CriticalActionVerification:
         evidence = _format_verifier_evidence(plan=plan, diff=diff, test_output=test_output)
+        evidence_chars = evidence_pack_serialized_chars(evidence)
+        evidence_truncated = evidence_chars > ADVISORY_EVIDENCE_PACK_MAX_CHARS
         primary_provider = self.router.config.provider_for_role("critical_verifier")
         primary_model = self.router.config.model_for_role("critical_verifier")
         votes = [
@@ -1087,6 +1127,17 @@ class BrainService:
             votes.append(secondary_vote)
         parsed = _aggregate_verifier_votes(votes)
         parsed = _apply_policy_floor(parsed, action=action)
+        if evidence_truncated:
+            # Fail closed: the advisory lane renders evidence packs bounded to
+            # ADVISORY_EVIDENCE_PACK_MAX_CHARS, so the verifier only judged a
+            # fragment. Its approval cannot authorize autonomous execution.
+            parsed["blockers"] = [
+                *parsed["blockers"],
+                (
+                    f"evidence_pack_truncated: evidence is {evidence_chars} chars but the "
+                    f"verifier only saw a rendering bounded to {ADVISORY_EVIDENCE_PACK_MAX_CHARS} chars"
+                ),
+            ]
         response = next((vote.get("response") for vote in votes if vote.get("response") is not None), None)
 
         requires_human_approval = (
@@ -1141,6 +1192,7 @@ class BrainService:
                     "confidence": parsed["confidence"],
                     "blocker_count": len(parsed["blockers"]),
                     "missing_check_count": len(parsed["missing_checks"]),
+                    "evidence_pack_truncated": evidence_truncated,
                 },
             )
 
