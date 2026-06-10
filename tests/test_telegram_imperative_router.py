@@ -579,7 +579,7 @@ def test_continue_sends_pending_action_context_to_brain_without_autonomous_task(
     assert records == []
     assert any(
         ev.get("handler") == "telegram_imperative"
-        and ev.get("route") == "intercepted"
+        and ev.get("route") == "brain_shortcut"
         and ev.get("reason") == "telegram_imperative:task.continue_active_mission:stateful"
         for ev in decisions
     ), decisions
@@ -608,7 +608,7 @@ def test_continue_uses_recent_contextual_proposal_in_telegram(bot) -> None:
     assert records == []
     assert any(
         ev.get("handler") == "telegram_imperative"
-        and ev.get("route") == "intercepted"
+        and ev.get("route") == "brain_shortcut"
         and ev.get("reason") == "telegram_imperative:task.continue_active_mission:stateful"
         for ev in decisions
     ), decisions
@@ -644,7 +644,7 @@ def test_continue_uses_reply_context_markdown_pending_line(bot) -> None:
     assert records == []
     assert any(
         ev.get("handler") == "telegram_imperative"
-        and ev.get("route") == "intercepted"
+        and ev.get("route") == "brain_shortcut"
         and ev.get("reason") == "telegram_imperative:task.continue_active_mission:stateful"
         for ev in decisions
     ), decisions
@@ -783,7 +783,7 @@ def test_replay_waiting_for_user_input_task_continua_resumes_task(bot) -> None:
     assert not any(record.runtime == "telegram_preflight" for record in records)
 
 
-def test_multiple_active_missions_asks_specific_choice_not_generic_action(bot) -> None:
+def test_multiple_active_missions_fall_through_to_brain(bot) -> None:
     bot.brain.memory.update_session_state(
         "tg-test",
         active_object={
@@ -810,11 +810,11 @@ def test_multiple_active_missions_asks_specific_choice_not_generic_action(bot) -
 
     response, _decisions, events = _drive(bot, "Procede")
 
-    _assert_valid_continuation_output(response)
-    assert "varias misiones activas" in response
-    assert "1. Codex: arreglar el router" in response
-    assert "2. Claude: pegar el prompt" in response
-    assert "telegram_continuation_stateful_resolved" in events
+    # SOUL routing policy (2026-06-10 audit A1): ambiguity between active
+    # missions is context-dependent resolution — it falls through to the
+    # brain instead of asking "¿Cuál continúo?" pre-brain.
+    assert response == "BRAIN_FALLBACK_USED"
+    assert "telegram_imperative_contextual_fallthrough" in events
 
 
 def test_quality_command_exposes_imperative_router_metrics(bot) -> None:

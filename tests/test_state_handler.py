@@ -107,8 +107,10 @@ class StateHandlerRegressionTests(unittest.TestCase):
 
         response = handler.maybe_resolve_stateful_followup("Vamos con la 2", session_id="s1")
 
-        self.assertIsInstance(response, str)
-        self.assertIn("opciones vigente", response)
+        # SOUL routing policy (2026-06-10 audit A5): stale option picks fall
+        # through to the brain (which re-derives options from the transcript)
+        # instead of clarifying pre-brain. The stale pick must NOT execute.
+        self.assertIsNone(response)
 
     def test_last_options_fresh_selects_option(self) -> None:
         memory, handler = self._handler()

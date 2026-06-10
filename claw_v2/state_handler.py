@@ -393,18 +393,20 @@ class StateHandler:
             options = state.get("last_options") or []
             if 1 <= option_index <= len(options):
                 if not self._last_options_still_valid(state):
+                    # SOUL routing policy: numbered picks are conversational
+                    # continuations — when this layer has no fresh options the
+                    # brain re-derives them from the transcript. No pre-brain
+                    # clarification.
                     self._emit(
                         "stale_options_rejected",
                         {
                             "session_id": session_id,
                             "option_index": option_index,
                             "options_count": len(options),
+                            "route": "fallthrough_to_brain",
                         },
                     )
-                    return (
-                        f"No tengo una lista de opciones vigente para elegir la {option_index}. "
-                        "Reenvíame las opciones o dime el objetivo concreto."
-                    )
+                    return None
                 selected = options[option_index - 1]
                 self._memory.update_session_state(
                     session_id,
@@ -423,12 +425,10 @@ class StateHandler:
                     "session_id": session_id,
                     "option_index": option_index,
                     "options_count": len(options) if isinstance(options, list) else 0,
+                    "route": "fallthrough_to_brain",
                 },
             )
-            return (
-                f"No tengo una opción {option_index} vigente. "
-                "Reenvíame las opciones o dime el objetivo concreto."
-            )
+            return None
         if _looks_like_proceed_request(text):
             if state.get("verification_status") == "awaiting_approval":
                 pending_approvals = state.get("pending_approvals") or []
@@ -590,11 +590,13 @@ class StateHandler:
                     ),
                     memory_text=text,
                 )
+            # Proceed-class turns with nothing resolvable here belong to the
+            # brain (SOUL routing policy) — it has the full transcript.
             self._emit(
-                "clarification_requested_after_context_lookup",
+                "proceed_contextual_fallthrough",
                 {"session_id": session_id, "reason": "proceed_without_pending_action"},
             )
-            return "¿Qué acción concreta quieres que ejecute?"
+            return None
         return None
 
     def _reject_sensitive_continuation(

@@ -199,7 +199,9 @@ def test_unscoped_pending_approval_does_not_hijack_continuation() -> None:
             assert pending.approval_id not in response
             assert "approval_id" not in response
             assert "aprobación pendiente" not in response.lower()
-            assert "misión" in response or "tarea activa" in response or "target" in response
+            # SOUL routing policy (2026-06-10 audit A1): an unresolved
+            # continuation falls through to the brain instead of clarifying.
+            assert response == "BRAIN_FALLBACK_USED"
             assert traces[0]["semantic_intent"] == "continue_active_mission"
 
 

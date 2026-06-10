@@ -3243,12 +3243,36 @@ class BotService:
             text=stripped,
             runtime_channel=runtime_channel,
         )
+        self._emit_dispatch_decision(
+            handler="brain_first_new_task",
+            route="brain_shortcut" if brain_first_new_task_response is not None else "fall_through",
+            reason=(
+                "brain_first_new_task_routed"
+                if brain_first_new_task_response is not None
+                else "brain_first_new_task_no_match"
+            ),
+            session_id=session_id,
+            text=stripped,
+            captured=False,
+        )
         if brain_first_new_task_response is not None:
             return brain_first_new_task_response
         computer_approval_response = self._handle_pending_computer_approval_response(
             session_id,
             stripped,
             semantic_turn=semantic_turn,
+        )
+        self._emit_dispatch_decision(
+            handler="computer_approval",
+            route="intercepted" if computer_approval_response is not None else "fall_through",
+            reason=(
+                "computer_approval_resolved"
+                if computer_approval_response is not None
+                else "computer_approval_no_match"
+            ),
+            session_id=session_id,
+            text=stripped,
+            captured=computer_approval_response is not None,
         )
         if computer_approval_response is not None:
             self._store_memory_turn(session_id, stripped, computer_approval_response, assistant_limit=2000)
@@ -3381,6 +3405,18 @@ class BotService:
             session_id=session_id,
             runtime_channel=runtime_channel,
         )
+        self._emit_dispatch_decision(
+            handler="owner_delegation",
+            route="intercepted" if owner_delegation_response is not None else "fall_through",
+            reason=(
+                "owner_delegation_matched"
+                if owner_delegation_response is not None
+                else "owner_delegation_no_match"
+            ),
+            session_id=session_id,
+            text=stripped,
+            captured=owner_delegation_response is not None,
+        )
         if owner_delegation_response is not None:
             self._store_memory_turn(
                 session_id, stripped, owner_delegation_response, assistant_limit=4000
@@ -3394,13 +3430,19 @@ class BotService:
                 runtime_channel=runtime_channel,
             )
         )
+        if isinstance(telegram_imperative_response, _BrainShortcut):
+            telegram_imperative_route, telegram_imperative_captured = "brain_shortcut", False
+        elif telegram_imperative_response is not None:
+            telegram_imperative_route, telegram_imperative_captured = "intercepted", True
+        else:
+            telegram_imperative_route, telegram_imperative_captured = "fall_through", False
         self._emit_dispatch_decision(
             handler="telegram_imperative",
-            route="intercepted" if telegram_imperative_response is not None else "fall_through",
+            route=telegram_imperative_route,
             reason=telegram_imperative_reason,
             session_id=session_id,
             text=stripped,
-            captured=telegram_imperative_response is not None,
+            captured=telegram_imperative_captured,
             matched_pattern=telegram_imperative_pattern,
         )
         if isinstance(telegram_imperative_response, _BrainShortcut):
@@ -3588,34 +3630,86 @@ class BotService:
             return capability_route_response
         self._remember_user_turn_state(session_id, stripped)
         pending_tool_approval = self._handle_pending_tool_approval_grant_response(session_id, stripped)
+        self._emit_dispatch_decision(
+            handler="pending_tool_approval_grant",
+            route="intercepted" if pending_tool_approval is not None else "fall_through",
+            reason=(
+                "pending_tool_approval_resolved"
+                if pending_tool_approval is not None
+                else "pending_tool_approval_no_match"
+            ),
+            session_id=session_id,
+            text=stripped,
+            captured=pending_tool_approval is not None,
+        )
         if pending_tool_approval is not None:
             return pending_tool_approval
-        if _looks_like_autonomy_grant(stripped):
+        autonomy_grant_matched = _looks_like_autonomy_grant(stripped)
+        self._emit_dispatch_decision(
+            handler="autonomy_grant",
+            route="intercepted" if autonomy_grant_matched else "fall_through",
+            reason="autonomy_grant_matched" if autonomy_grant_matched else "autonomy_grant_no_match",
+            session_id=session_id,
+            text=stripped,
+            captured=autonomy_grant_matched,
+        )
+        if autonomy_grant_matched:
             return self._handle_autonomy_grant_response(session_id, stripped)
         stateful_followup = self._maybe_resolve_stateful_followup(stripped, session_id=session_id)
         if isinstance(stateful_followup, _BrainShortcut):
+            # route=brain_shortcut: the turn is handled by the brain — this
+            # dispatcher only enriched the prompt. Labeling it "intercepted"
+            # made captures indistinguishable from brain routes in the stream.
+            self._emit_dispatch_decision(
+                handler="stateful_followup",
+                route="brain_shortcut",
+                reason="stateful_followup_brain_shortcut",
+                session_id=session_id,
+                text=stripped,
+                captured=False,
+            )
             return self._handle_stateful_brain_shortcut(
                 session_id,
                 stripped,
                 stateful_followup,
                 runtime_channel=runtime_channel,
             )
+        self._emit_dispatch_decision(
+            handler="stateful_followup",
+            route="intercepted" if stateful_followup is not None else "fall_through",
+            reason=(
+                "stateful_followup_resolved"
+                if stateful_followup is not None
+                else "stateful_followup_no_match"
+            ),
+            session_id=session_id,
+            text=stripped,
+            captured=stateful_followup is not None,
+        )
         if stateful_followup is not None:
             self._store_memory_turn(session_id, stripped, stateful_followup, assistant_limit=2000)
             self._remember_assistant_turn_state(session_id, stripped, stateful_followup)
             return stateful_followup
         shortcut_response = self._maybe_handle_shortcut(stripped, session_id=session_id)
+        if isinstance(shortcut_response, _BrainShortcut):
+            shortcut_route, shortcut_reason, shortcut_captured = (
+                "brain_shortcut", "shortcut_brain_shortcut", False,
+            )
+        elif shortcut_response is not None:
+            shortcut_route, shortcut_reason, shortcut_captured = (
+                "intercepted", "shortcut_matched", True,
+            )
+        else:
+            shortcut_route, shortcut_reason, shortcut_captured = (
+                "fall_through", "shortcut_no_match", False,
+            )
         self._emit_dispatch_decision(
             handler="shortcut",
-            route="intercepted" if shortcut_response is not None else "fall_through",
-            reason=(
-                "shortcut_matched"
-                if shortcut_response is not None
-                else "shortcut_no_match"
-            ),
+            route=shortcut_route,
+            reason=shortcut_reason,
             session_id=session_id,
             text=stripped,
-            captured=shortcut_response is not None,
+            captured=shortcut_captured,
         )
         if isinstance(shortcut_response, _BrainShortcut):
             return self._brain_text_response(
@@ -7354,15 +7448,21 @@ class BotService:
                     },
                 )
                 return stateful_followup, f"telegram_imperative:{intent.intent}:stateful", intent.matched_pattern
+            # SOUL routing policy: a continuation this layer cannot resolve
+            # deterministically belongs to the brain (it has session_state +
+            # reply_context). Pre-brain routers must not ask for clarification.
             self._emit_safe(
-                "telegram_imperative_clarification",
-                {"session_id": session_id, "intent": intent.intent, "reason": "continuation_context_not_found"},
+                "telegram_imperative_contextual_fallthrough",
+                {
+                    "session_id": session_id,
+                    "intent": intent.intent,
+                    "reason": resolution_source or "continuation_context_not_found",
+                },
             )
-            return (
-                "No encontré una misión, propuesta, aprobación o tarea reciente para continuar. "
-                "Respóndeme con el número/opción de la tarea activa o el target específico."
-            ), f"telegram_imperative:{intent.intent}:no_context", intent.matched_pattern
+            return None, f"telegram_imperative:{intent.intent}:fallthrough_to_brain", intent.matched_pattern
         response = self._handle_telegram_imperative(intent, text, session_id=session_id)
+        if response is None:
+            return None, f"telegram_imperative:{intent.intent}:fallthrough_to_brain", intent.matched_pattern
         return response, f"telegram_imperative:{intent.intent}", intent.matched_pattern
 
     def _telegram_ui_imperative_should_fallthrough(
@@ -7414,7 +7514,9 @@ class BotService:
         state = self.brain.memory.get_session_state(session_id)
         missions = self._telegram_active_mission_candidates(session_id, state)
         if len(missions) > 1:
-            return self._format_telegram_mission_choice(missions), "active_mission_ambiguous"
+            # Ambiguity is context-dependent resolution: the brain presents
+            # the options with full transcript context (SOUL routing policy).
+            return None, "active_mission_ambiguous"
         if len(missions) == 1:
             objective = self._mission_continuation_objective(missions[0], state)
             if objective:
@@ -7685,17 +7787,6 @@ class BotService:
             return f"Continuar misión activa para {target}"
         return None
 
-    def _format_telegram_mission_choice(self, missions: list[dict[str, Any]]) -> str:
-        lines = ["Tengo varias misiones activas para este chat. ¿Cuál continúo?"]
-        for index, mission in enumerate(missions[:5], start=1):
-            target = self._mission_target(mission) or "target sin nombre"
-            objective = self._mission_continuation_objective(mission, {}) or str(mission.get("summary") or "").strip()
-            if objective:
-                lines.append(f"{index}. {target}: {objective[:180]}")
-            else:
-                lines.append(f"{index}. {target}")
-        return "\n".join(lines)
-
     def _proposal_from_reply_context(self, state: dict[str, Any]) -> str | None:
         try:
             proposal = self._state_handler._extract_proposal_from_reply_context(state)
@@ -7841,12 +7932,16 @@ class BotService:
         text: str,
         *,
         session_id: str,
-    ) -> str:
+    ) -> str | None:
         state = self.brain.memory.get_session_state(session_id)
         mission = self._active_mission_context(state)
         target = self._resolve_telegram_target(intent, mission)
         artifact = self._resolve_telegram_artifact(intent, state, mission)
         artifact_text = self._resolve_telegram_artifact_text(intent, state, mission)
+        # SOUL routing policy: when this layer cannot resolve target/artifact
+        # from the literal text + active mission, the message belongs to the
+        # brain. Returning None falls through silently; the forbidden
+        # "¿en qué app o target?" clarification must never come from here.
         if intent.needs_context and not target and intent.intent in {
             "ui.paste_text",
             "ui.set_instructions",
@@ -7858,32 +7953,19 @@ class BotService:
                 "active_mission_resolution_failed",
                 {"session_id": session_id, "intent": intent.intent, "reason": "missing_target"},
             )
-            self._emit_safe("telegram_imperative_clarification", {"session_id": session_id, "intent": intent.intent})
-            return (
-                "Necesito una aclaración mínima: ¿en qué app o target ejecuto esto?\n"
-                f"Intent detectado: `{intent.intent}`."
-            )
+            return None
         if intent.artifact_hint and not artifact:
             self._emit_safe(
                 "active_mission_resolution_failed",
                 {"session_id": session_id, "intent": intent.intent, "reason": "missing_artifact"},
             )
-            self._emit_safe("telegram_imperative_clarification", {"session_id": session_id, "intent": intent.intent})
-            return (
-                "Necesito una aclaración mínima: ¿qué prompt/instrucciones uso?\n"
-                f"Intent detectado: `{intent.intent}`; target: `{target or 'desconocido'}`."
-            )
+            return None
         if intent.intent in {"ui.paste_text", "ui.set_instructions"} and not artifact_text:
             self._emit_safe(
                 "active_mission_resolution_failed",
                 {"session_id": session_id, "intent": intent.intent, "reason": "missing_artifact_text"},
             )
-            self._emit_safe("telegram_imperative_clarification", {"session_id": session_id, "intent": intent.intent})
-            return (
-                "Necesito una aclaración mínima: tengo la referencia del prompt/instrucciones, "
-                "pero no encontré el texto exacto para pegar.\n"
-                f"Intent detectado: `{intent.intent}`; target: `{target or 'desconocido'}`."
-            )
+            return None
         if mission:
             self._emit_safe(
                 "active_mission_resolution_success",
@@ -9116,26 +9198,14 @@ class BotService:
                     )
                     state = self.brain.memory.get_session_state(session_id)
                     objective, source = self._resolve_actionable_task_objective(text, state=state)
-                elif continuation is not None:
-                    self._emit_safe(
-                        "telegram_continuation_stateful_resolved",
-                        {
-                            "session_id": session_id,
-                            "intent": "task.continue_active_mission",
-                            "resolution_source": continuation_source,
-                            "resolution_kind": "clarification",
-                        },
-                    )
-                    return continuation
             if objective is None and self._looks_like_actionable_followup(text):
+                # SOUL routing policy: unresolved follow-ups fall through to
+                # the brain instead of clarifying pre-brain.
                 self._emit_safe(
-                    "clarification_requested_after_context_lookup",
+                    "actionable_task_contextual_fallthrough",
                     {"session_id": session_id, "reason": "actionable_task_context_not_found"},
                 )
-                return (
-                    "No encontré una misión, propuesta, aprobación o tarea reciente para continuar. "
-                    "Respóndeme con el número/opción de la tarea activa o el target específico."
-                )
+                return None
             if objective is None:
                 return None
         if os.getenv("CLAW_DISABLE_TELEGRAM_ACTIONABLE_TASK_ROUTER", "0") == "1":
