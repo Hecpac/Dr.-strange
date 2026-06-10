@@ -1349,6 +1349,23 @@ def _setup_scheduler(
     scheduler.register(ScheduledJob(name="morning_brief", interval_seconds=86400, handler=_morning_brief_handler))
     scheduler.register(ScheduledJob(name="daily_metrics", interval_seconds=86400, handler=_daily_metrics_handler))
 
+    def _observe_prune_handler() -> None:
+        import os
+
+        try:
+            retention_days = int(os.environ.get("OBSERVE_RETENTION_DAYS", "30"))
+        except ValueError:
+            retention_days = 30
+        deleted = observe.prune(retention_days=retention_days)
+        if deleted:
+            observe.emit(
+                "observe_stream_pruned",
+                payload={"deleted_rows": deleted, "retention_days": retention_days},
+            )
+
+    # Bounded local DELETE (no provider/subprocess work): safe to run inline.
+    scheduler.register(ScheduledJob(name="observe_prune", interval_seconds=3600, handler=_observe_prune_handler))
+
     dream = AutoDreamService(memory=memory, observe=observe, router=router)
     if daemon is not None and job_service is not None:
         auto_dream_runner = ScheduledBackgroundJobRunner(

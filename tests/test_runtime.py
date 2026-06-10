@@ -498,7 +498,9 @@ class RuntimeTests(unittest.TestCase):
                 self.assertIn("Mention the refund flow first.", prompt)
                 self.assertNotIn("Retry with a different backend.", prompt)
 
-    def test_brain_uses_wiki_query_for_strong_question_matches(self) -> None:
+    def test_brain_injects_wiki_snippets_without_blocking_llm_query(self) -> None:
+        # 2026-06-10 audit P1: prompt assembly must never run wiki.query (a
+        # synchronous router.ask of up to 90s) — only cheap snippet injection.
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             env = {
@@ -533,9 +535,10 @@ class RuntimeTests(unittest.TestCase):
 
                 prompt = seen_prompts[-1]
                 self.assertIsInstance(prompt, str)
-                self.assertIn("# Wiki answer", prompt)
-                self.assertIn("[[refund-policy]]", prompt)
-                runtime.brain.wiki.query.assert_called_once_with("¿Cuál es la política de refund?", archive=False)
+                self.assertIn("# Wiki context", prompt)
+                self.assertIn("Refund Policy", prompt)
+                self.assertIn("Refunds take 5 days.", prompt)
+                runtime.brain.wiki.query.assert_not_called()
 
     def test_brain_resume_only_catches_up_unsynced_shortcuts(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

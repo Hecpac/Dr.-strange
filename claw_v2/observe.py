@@ -45,7 +45,17 @@ CREATE INDEX IF NOT EXISTS idx_observe_stream_job_id_id
     ON observe_stream(job_id, id);
 CREATE INDEX IF NOT EXISTS idx_observe_stream_root_trace_id_id
     ON observe_stream(root_trace_id, id);
+CREATE INDEX IF NOT EXISTS idx_observe_stream_turn_id
+    ON observe_stream(json_extract(payload, '$.turn_id'));
+CREATE INDEX IF NOT EXISTS idx_observe_stream_timestamp
+    ON observe_stream(timestamp);
 """
+
+# Retention for the immutable event log. The table grows ~3+ rows/min when
+# idle and dozens per active turn; without pruning the per-turn receipt
+# lookup and every timestamp-window query degrade linearly forever.
+OBSERVE_RETENTION_DAYS = 30
+OBSERVE_PRUNE_MAX_ROWS = 20_000
 
 
 class ObserveStream:
@@ -163,6 +173,33 @@ class ObserveStream:
                 self._conn.execute(f"ALTER TABLE observe_stream ADD COLUMN {column} TEXT")
         self._conn.executescript(OBSERVE_INDEXES)
         self._conn.commit()
+
+    def prune(
+        self,
+        *,
+        retention_days: int = OBSERVE_RETENTION_DAYS,
+        max_rows: int = OBSERVE_PRUNE_MAX_ROWS,
+    ) -> int:
+        """Delete events older than the retention window, bounded per call.
+
+        The LIMIT keeps each sweep short so the scheduler tick that runs it
+        never stalls; a backlog drains across consecutive runs.
+        """
+        with self._lock:
+            cursor = self._conn.execute(
+                """
+                DELETE FROM observe_stream
+                WHERE id IN (
+                    SELECT id FROM observe_stream
+                    WHERE timestamp < datetime('now', ?)
+                    ORDER BY id
+                    LIMIT ?
+                )
+                """,
+                (f"-{int(retention_days)} days", int(max_rows)),
+            )
+            self._conn.commit()
+            return int(cursor.rowcount or 0)
 
     def cache_summary(self, hours: int = 24) -> dict:
         """Return prompt cache stats for the last N hours."""

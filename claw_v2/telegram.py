@@ -151,6 +151,35 @@ DEFAULT_POOL_TIMEOUT = 30.0
 DEFAULT_REQUEST_TIMEOUT = 30.0
 DEFAULT_MEDIA_WRITE_TIMEOUT = 60.0
 DEFAULT_GET_UPDATES_POOL_SIZE = 8
+DEFAULT_CONCURRENT_UPDATES = 8
+
+# Slash commands allowed to bypass the per-chat ordering lock so the operator
+# can inspect, approve, or freeze the agent while a long turn is running.
+# Everything here is state-inspection or acts on its own locking layer
+# (approval files / observation window), not on the active turn's session.
+_INTERRUPT_COMMANDS = frozenset(
+    {
+        "freeze",
+        "unfreeze",
+        "status",
+        "budget_status",
+        "approvals",
+        "approve",
+        "approval_status",
+        "task_approve",
+        "task_abort",
+        "action_approve",
+        "action_abort",
+    }
+)
+
+
+def _is_interrupt_command(text: str) -> bool:
+    stripped = (text or "").strip()
+    if not stripped.startswith("/"):
+        return False
+    command = stripped.split()[0][1:].split("@", 1)[0].lower()
+    return command in _INTERRUPT_COMMANDS
 
 _IMAGE_PATH_RE = re.compile(r"(/[^`\s]+?\.(?:png|jpe?g|webp))", re.IGNORECASE)
 _SEND_IMAGE_REQUEST_WORDS = (
@@ -357,8 +386,18 @@ class TelegramTransport:
         self._request_timeout = _env_float("TELEGRAM_REQUEST_TIMEOUT", DEFAULT_REQUEST_TIMEOUT)
         self._media_write_timeout = _env_float("TELEGRAM_MEDIA_WRITE_TIMEOUT", DEFAULT_MEDIA_WRITE_TIMEOUT)
         self._get_updates_pool_size = _env_int("TELEGRAM_GET_UPDATES_POOL_SIZE", DEFAULT_GET_UPDATES_POOL_SIZE)
+        self._concurrent_updates = _env_int("TELEGRAM_CONCURRENT_UPDATES", DEFAULT_CONCURRENT_UPDATES)
+        # Per-chat ordering: agent turns for the same session run one at a
+        # time even with concurrent update processing enabled.
+        self._chat_locks: dict[str, asyncio.Lock] = {}
         # P0 hotfix E: held for the lifetime of the polling loop.
         self._polling_lock_fh: IO[str] | None = None
+
+    def _chat_lock(self, session_id: str) -> asyncio.Lock:
+        lock = self._chat_locks.get(session_id)
+        if lock is None:
+            lock = self._chat_locks.setdefault(session_id, asyncio.Lock())
+        return lock
 
     def _emit_transport_event(self, event_type: str, payload: dict[str, Any]) -> None:
         observe = getattr(self._bot_service, "observe", None)
@@ -453,6 +492,10 @@ class TelegramTransport:
             return
         self._PID_FILE.write_text(str(os.getpid()))
         builder = ApplicationBuilder().token(self._token)
+        # Process updates concurrently so operator interrupts (/freeze,
+        # /approve) are not queued behind a multi-minute agent turn; per-chat
+        # ordering for agent turns is enforced by _chat_lock.
+        builder.concurrent_updates(self._concurrent_updates)
         builder.connection_pool_size(self._connection_pool_size)
         builder.pool_timeout(self._pool_timeout)
         builder.connect_timeout(self._request_timeout)
@@ -926,13 +969,14 @@ class TelegramTransport:
                 mime_type=mime_type,
                 durable_path=durable_path,
             )
-            response = await asyncio.to_thread(
-                self._handle_agent_multimodal_sync,
-                user_id=user_id,
-                session_id=session_id,
-                content_blocks=content_blocks,
-                memory_text=memory_text,
-            )
+            async with self._chat_lock(session_id):
+                response = await asyncio.to_thread(
+                    self._handle_agent_multimodal_sync,
+                    user_id=user_id,
+                    session_id=session_id,
+                    content_blocks=content_blocks,
+                    memory_text=memory_text,
+                )
         except Exception:
             logger.exception("Error handling image message")
             response = "Error procesando tu imagen. Intenta de nuevo."
@@ -991,13 +1035,14 @@ class TelegramTransport:
             {"type": "text", "text": f"{prompt}\n\n--- Contenido del archivo ---\n{text_content}"},
         ]
         try:
-            response = await asyncio.to_thread(
-                self._handle_agent_multimodal_sync,
-                user_id=user_id,
-                session_id=session_id,
-                content_blocks=content_blocks,
-                memory_text=memory_text,
-            )
+            async with self._chat_lock(session_id):
+                response = await asyncio.to_thread(
+                    self._handle_agent_multimodal_sync,
+                    user_id=user_id,
+                    session_id=session_id,
+                    content_blocks=content_blocks,
+                    memory_text=memory_text,
+                )
         except Exception:
             logger.exception("Error handling document")
             response = "Error procesando tu documento. Intenta de nuevo."
@@ -1155,13 +1200,24 @@ class TelegramTransport:
         text: str,
         context_metadata: dict[str, Any] | None = None,
     ) -> str | None:
-        return await asyncio.to_thread(
-            self._handle_agent_text_sync,
-            user_id,
-            session_id,
-            text,
-            context_metadata,
-        )
+        if _is_interrupt_command(text):
+            # Operator interrupts (/freeze, /approve, /status, ...) must not
+            # queue behind a long-running turn of the same chat.
+            return await asyncio.to_thread(
+                self._handle_agent_text_sync,
+                user_id,
+                session_id,
+                text,
+                context_metadata,
+            )
+        async with self._chat_lock(session_id):
+            return await asyncio.to_thread(
+                self._handle_agent_text_sync,
+                user_id,
+                session_id,
+                text,
+                context_metadata,
+            )
 
     def _handle_agent_text_sync(
         self,

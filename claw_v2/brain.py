@@ -1013,7 +1013,13 @@ class BrainService:
                         )
 
     def _wiki_context(self, message: str) -> str:
-        """Query the wiki for relevant pages and return a compact context section."""
+        """Inject compact wiki snippets for relevant pages.
+
+        Prompt assembly must never block on an LLM round-trip: the previous
+        wiki.query branch added a synchronous router.ask (up to 90s) to every
+        question-like turn before the brain call even started. The brain gets
+        titles + snippets and can go deeper via the wiki handler when needed.
+        """
         if self.wiki is None:
             return ""
         try:
@@ -1023,14 +1029,6 @@ class BrainService:
             return ""
         if not results:
             return ""
-        if _looks_like_knowledge_question(message) and float(results[0].get("similarity", 0.0)) >= 0.35:
-            try:
-                answer = self.wiki.query(message, archive=False)
-            except Exception:
-                logger.debug("Wiki query failed", exc_info=True)
-                answer = ""
-            if answer:
-                return f"<wiki-context>\n# Wiki answer\n{answer[:1200]}\n</wiki-context>"
         lines = ["<wiki-context>", "# Wiki context"]
         for r in results:
             lines.append(f"- **{r['title']}** (sim={r['similarity']}): {r['snippet'][:150]}")
@@ -1826,31 +1824,6 @@ def _average_confidence(votes: list[dict]) -> float:
     if not votes:
         return 0.0
     return round(sum(float(vote.get("confidence") or 0.0) for vote in votes) / len(votes), 3)
-
-
-def _looks_like_knowledge_question(message: str) -> bool:
-    stripped = message.strip().lower()
-    if "?" in stripped:
-        return True
-    starters = (
-        "que ",
-        "qué ",
-        "como ",
-        "cómo ",
-        "cual ",
-        "cuál ",
-        "donde ",
-        "dónde ",
-        "when ",
-        "what ",
-        "how ",
-        "why ",
-        "where ",
-        "who ",
-        "explain ",
-        "explica ",
-    )
-    return any(stripped.startswith(prefix) for prefix in starters)
 
 
 def _try_parse_json_object(content: str) -> dict | None:

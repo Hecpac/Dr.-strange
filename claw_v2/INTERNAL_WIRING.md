@@ -8,8 +8,8 @@
 ## meta
 
 ```yaml
-describes_commit: 3a6465c+audit-group2-adapter-timeouts-wal-safe-restore-atomic-approvals
-doc_version: 2.6
+describes_commit: edc5887+audit-group3-observe-prune-wiki-offpath-telegram-concurrency
+doc_version: 2.7
 last_verified: 2026-06-10
 verification_method: manual + grep cross-check
 anchor_strategy: symbol_only  # path:symbol, no line numbers
@@ -248,6 +248,9 @@ invariants:
 
 ```
 Telegram → BotService.handle_text
+   (transport: concurrent_updates with per-chat ordering via _chat_lock;
+    operator interrupt commands — /freeze, /approve, /approvals, /status,
+    /action_abort... — bypass the chat lock so a long turn cannot block them)
    ↓
    Layer 1: pre-brain dispatchers (15 handlers in chain — see §5.1)
    Layer 2: CapabilityRouter (intent → chat | runtime_handoff | skill)
@@ -282,7 +285,9 @@ Telegram → BotService.handle_text
    │   (evidence beyond the advisory 12k-char rendering bound fails closed:
    │    evidence_pack_truncated blocker forces the human gate)
    ↓
-   ObserveStream emits events at every layer (data/claw.db)
+   ObserveStream emits events at every layer (data/claw.db; turn_id
+   expression index serves turn receipts; scheduler job observe_prune
+   applies a 30-day retention in bounded hourly sweeps)
    ObservationWindowState gates / persists freeze state in
        data/observation_window.json (sibling of db_path).
 ```
