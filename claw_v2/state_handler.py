@@ -42,6 +42,19 @@ _TOPIC_STOPWORDS = {
 }
 _PROFILE_CORRECTION_TAGS = ("profile", "correction", "user_direct")
 
+# A quoted reply stops being valid continuation context after this window —
+# without it, a reply quoted days ago kept winning the continuation chain and
+# a later "Procede" could execute a stale proposal (2026-06-10 audit A6).
+REPLY_CONTEXT_TTL_SECONDS = 1800.0
+
+
+def reply_context_fresh(reply_context: dict[str, Any]) -> bool:
+    created_at = reply_context.get("created_at")
+    if not isinstance(created_at, (int, float)) or isinstance(created_at, bool):
+        # Legacy records without a timestamp: stale by default.
+        return False
+    return (time.time() - float(created_at)) <= REPLY_CONTEXT_TTL_SECONDS
+
 
 def _profile_fact_slug(value: str) -> str:
     normalized = _normalize_command_text(value)
@@ -1100,6 +1113,8 @@ class StateHandler:
             return ""
         reply_context = active_object.get("reply_context") or {}
         if not isinstance(reply_context, dict):
+            return ""
+        if not reply_context_fresh(reply_context):
             return ""
         return str(reply_context.get("text") or "")
 

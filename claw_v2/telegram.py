@@ -356,9 +356,14 @@ def _extract_document_text(path: Path, mime_type: str | None, file_name: str | N
 
 
 async def _maybe_send_chat_action(message: Any, action: str) -> None:
-    result = message.chat.send_action(action)
-    if inspect.isawaitable(result):
-        await result
+    # Best-effort indicator: a transient network error here must never kill
+    # the handler before the message is processed (2026-06-10 audit C1).
+    try:
+        result = message.chat.send_action(action)
+        if inspect.isawaitable(result):
+            await result
+    except Exception:
+        logger.debug("chat action %s failed", action, exc_info=True)
 
 
 class TelegramTransport:
@@ -398,6 +403,28 @@ class TelegramTransport:
         if lock is None:
             lock = self._chat_locks.setdefault(session_id, asyncio.Lock())
         return lock
+
+    async def _reply_parts(self, update: Update, parts: list[str]) -> bool:
+        """Send reply parts with flood-control retry.
+
+        Returns False when delivery ultimately failed so callers can emit
+        status="send_failed" — previously the exception propagated after the
+        assistant turn was already persisted, so the agent believed it
+        answered and no telemetry recorded the loss (2026-06-10 audit C2).
+        """
+        for part in parts:
+            for attempt in range(3):
+                try:
+                    await update.message.reply_text(part, link_preview_options=_NO_PREVIEW)
+                    break
+                except Exception as exc:
+                    retry_after = getattr(exc, "retry_after", None)
+                    if attempt >= 2:
+                        logger.warning("Telegram reply failed after retries", exc_info=True)
+                        return False
+                    delay = float(retry_after) + 0.5 if retry_after is not None else 1.5 * (attempt + 1)
+                    await asyncio.sleep(delay)
+        return True
 
     def _emit_transport_event(self, event_type: str, payload: dict[str, Any]) -> None:
         observe = getattr(self._bot_service, "observe", None)
@@ -693,17 +720,17 @@ class TelegramTransport:
                     ogg_path.unlink(missing_ok=True)
             except Exception:
                 logger.warning("TTS failed, falling back to text", exc_info=True)
-                for part in parts:
-                    await update.message.reply_text(part, link_preview_options=_NO_PREVIEW)
+                delivered = await self._reply_parts(update, parts)
+            else:
+                delivered = True
         else:
-            for part in parts:
-                await update.message.reply_text(part, link_preview_options=_NO_PREVIEW)
+            delivered = await self._reply_parts(update, parts)
         finished_at = time.perf_counter()
         self._emit_latency(
             session_id=session_id,
             user_id=user_id,
             message_kind="text",
-            status="ok",
+            status="ok" if delivered else "send_failed",
             bot_ms=(bot_done_at - started_at) * 1000,
             reply_ms=(finished_at - bot_done_at) * 1000,
             total_ms=(finished_at - started_at) * 1000,
@@ -951,12 +978,30 @@ class TelegramTransport:
         session_id = f"tg-{update.effective_chat.id}"
         started_at = time.perf_counter()
         await _maybe_send_chat_action(update.message, "typing")
-        file = await context.bot.get_file(file_id)
-        suffix = _download_suffix(getattr(file, 'file_path', None), mime_type)
-        tmp_path = Path(f"/tmp/claw-image-{file_unique_id}{suffix}")
-        _IMAGES_DIR.mkdir(parents=True, exist_ok=True)
-        durable_path = _IMAGES_DIR / f"{file_unique_id}{suffix}"
-        await file.download_to_drive(str(tmp_path))
+        try:
+            file = await context.bot.get_file(file_id)
+            suffix = _download_suffix(getattr(file, 'file_path', None), mime_type)
+            tmp_path = Path(f"/tmp/claw-image-{file_unique_id}{suffix}")
+            _IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+            durable_path = _IMAGES_DIR / f"{file_unique_id}{suffix}"
+            await file.download_to_drive(str(tmp_path))
+        except Exception:
+            # A failed download used to abort the handler in total silence
+            # (the voice/document handlers already apologize) — C1.
+            logger.exception("Error downloading image message")
+            await self._reply_parts(update, ["No pude descargar la imagen. Reenvíala e intento de nuevo."])
+            self._emit_latency(
+                session_id=session_id,
+                user_id=user_id,
+                message_kind="image",
+                status="download_failed",
+                bot_ms=0.0,
+                reply_ms=0.0,
+                total_ms=(time.perf_counter() - started_at) * 1000,
+                response_parts=1,
+                response_chars=0,
+            )
+            return
         try:
             import shutil
             shutil.copy2(str(tmp_path), str(durable_path))
@@ -987,14 +1032,13 @@ class TelegramTransport:
             response = "(procesando... intenta de nuevo en unos segundos)"
         response = self._sanitize_outbound_response(session_id, response)
         parts = _split_message(response)
-        for part in parts:
-            await update.message.reply_text(part, link_preview_options=_NO_PREVIEW)
+        delivered = await self._reply_parts(update, parts)
         finished_at = time.perf_counter()
         self._emit_latency(
             session_id=session_id,
             user_id=user_id,
             message_kind="image",
-            status="ok",
+            status="ok" if delivered else "send_failed",
             bot_ms=(bot_done_at - started_at) * 1000,
             reply_ms=(finished_at - bot_done_at) * 1000,
             total_ms=(finished_at - started_at) * 1000,
@@ -1053,14 +1097,13 @@ class TelegramTransport:
             response = "(procesando... intenta de nuevo en unos segundos)"
         response = self._sanitize_outbound_response(session_id, response)
         parts = _split_message(response)
-        for part in parts:
-            await update.message.reply_text(part, link_preview_options=_NO_PREVIEW)
+        delivered = await self._reply_parts(update, parts)
         finished_at = time.perf_counter()
         self._emit_latency(
             session_id=session_id,
             user_id=user_id,
             message_kind="document",
-            status="ok",
+            status="ok" if delivered else "send_failed",
             bot_ms=(bot_done_at - started_at) * 1000,
             reply_ms=(finished_at - bot_done_at) * 1000,
             total_ms=(finished_at - started_at) * 1000,
@@ -1160,17 +1203,17 @@ class TelegramTransport:
                     ogg_path.unlink(missing_ok=True)
             except Exception:
                 logger.warning("TTS failed, falling back to text", exc_info=True)
-                for part in parts:
-                    await update.message.reply_text(part, link_preview_options=_NO_PREVIEW)
+                delivered = await self._reply_parts(update, parts)
+            else:
+                delivered = True
         else:
-            for part in parts:
-                await update.message.reply_text(part, link_preview_options=_NO_PREVIEW)
+            delivered = await self._reply_parts(update, parts)
         finished_at = time.perf_counter()
         self._emit_latency(
             session_id=session_id,
             user_id=user_id,
             message_kind="transcript",
-            status="ok",
+            status="ok" if delivered else "send_failed",
             bot_ms=(bot_done_at - started_at) * 1000,
             reply_ms=(finished_at - bot_done_at) * 1000,
             total_ms=(finished_at - started_at) * 1000,

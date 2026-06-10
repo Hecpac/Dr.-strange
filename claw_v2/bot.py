@@ -44,7 +44,7 @@ from claw_v2.computer_handler import ComputerHandler
 from claw_v2.design_handler import DesignHandler
 from claw_v2.nlm_handler import NlmHandler
 from claw_v2.natural_language_renderer import NaturalLanguageRenderer
-from claw_v2.state_handler import StateHandler, _BrainShortcut
+from claw_v2.state_handler import StateHandler, _BrainShortcut, reply_context_fresh
 from claw_v2.semantic_turn import SemanticTurn, classify_semantic_turn
 from claw_v2.terminal_handler import TerminalHandler
 from claw_v2.wiki_handler import WikiHandler
@@ -2015,7 +2015,7 @@ class BotService:
         if not isinstance(active_object, dict):
             return ""
         reply_context = active_object.get("reply_context") or {}
-        if not isinstance(reply_context, dict):
+        if not isinstance(reply_context, dict) or not reply_context_fresh(reply_context):
             return ""
         text = str(reply_context.get("text") or "").strip()
         if len(text) < 12:
@@ -6031,6 +6031,14 @@ class BotService:
                 task_type="telegram_message",
             ).content
         except ApprovalPending as exc:
+            # Persist the pending approval like the text path does, so the
+            # natural follow-up ("sí, dale") can resolve it — image/document
+            # turns used to drop it, forcing a manual /approvals lookup.
+            self._record_pending_tool_approval(
+                session_id=session_id,
+                user_text=memory_text or multimodal_text,
+                exc=exc,
+            )
             return _format_approval_pending(exc)
 
     @staticmethod
@@ -7628,6 +7636,10 @@ class BotService:
     ) -> _BrainShortcut:
         objective = " ".join(str(objective or "").split()).strip()
         active_object = dict(state.get("active_object") or {})
+        if source == "reply_context":
+            # Single-use: once a continuation consumed the quoted reply, a
+            # later bare "Procede" must not re-execute the same proposal.
+            active_object.pop("reply_context", None)
         active_object["last_continuation_resolution"] = {
             "source": source,
             "objective": objective[:300],
@@ -8201,7 +8213,7 @@ class BotService:
         if not isinstance(active_object, dict):
             return None
         reply_context = active_object.get("reply_context") or {}
-        if not isinstance(reply_context, dict):
+        if not isinstance(reply_context, dict) or not reply_context_fresh(reply_context):
             return None
         text = str(reply_context.get("text") or "")
         if not text.strip():

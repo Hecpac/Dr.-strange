@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import threading
 import time
+from dataclasses import dataclass, field
 from typing import Callable, Literal
 
 RetryAction = Literal["retry", "switch_tool", "ask_user"]
@@ -81,80 +82,105 @@ class CircuitTransition:
 
 @dataclass(slots=True)
 class _ProviderCircuitState:
-    failures: int = 0
+    failure_times: list[float] = field(default_factory=list)
     opened_until: float = 0.0
     last_error: str = ""
 
 
 @dataclass(slots=True)
 class ProviderCircuitBreaker:
+    """Per-provider circuit breaker.
+
+    Thread-safe (bot worker threads, daemon job runners, and coordinator
+    workers all record through the same instance) and failures decay outside
+    a rolling window — two failures last week plus one today must not open
+    the circuit (2026-06-10 audit B10).
+    """
+
     failure_threshold: int = 3
     cooldown_seconds: float = 120.0
+    failure_window_seconds: float = 600.0
     clock: Callable[[], float] = time.monotonic
     _states: dict[str, _ProviderCircuitState] = field(default_factory=dict)
+    _lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def _prune_locked(self, state: _ProviderCircuitState, now: float) -> None:
+        cutoff = now - max(0.0, self.failure_window_seconds)
+        if state.failure_times and state.failure_times[0] <= cutoff:
+            state.failure_times = [t for t in state.failure_times if t > cutoff]
 
     def check(self, provider: str) -> CircuitDecision:
         name = _provider_key(provider)
-        state = self._states.get(name)
-        if state is None or state.failures <= 0:
-            return CircuitDecision(provider=name, allowed=True, status="closed")
         now = self.clock()
-        if state.opened_until > now:
-            return CircuitDecision(
-                provider=name,
-                allowed=False,
-                status="open",
-                failures=state.failures,
-                opened_until=state.opened_until,
-                reason=state.last_error,
-            )
-        if state.opened_until > 0:
+        with self._lock:
+            state = self._states.get(name)
+            if state is None:
+                return CircuitDecision(provider=name, allowed=True, status="closed")
+            self._prune_locked(state, now)
+            failures = len(state.failure_times)
+            if failures <= 0 and state.opened_until <= now:
+                return CircuitDecision(provider=name, allowed=True, status="closed")
+            if state.opened_until > now:
+                return CircuitDecision(
+                    provider=name,
+                    allowed=False,
+                    status="open",
+                    failures=failures,
+                    opened_until=state.opened_until,
+                    reason=state.last_error,
+                )
+            if state.opened_until > 0:
+                return CircuitDecision(
+                    provider=name,
+                    allowed=True,
+                    status="half_open",
+                    failures=failures,
+                    opened_until=state.opened_until,
+                    reason=state.last_error,
+                )
             return CircuitDecision(
                 provider=name,
                 allowed=True,
-                status="half_open",
-                failures=state.failures,
-                opened_until=state.opened_until,
+                status="closed",
+                failures=failures,
                 reason=state.last_error,
             )
-        return CircuitDecision(
-            provider=name,
-            allowed=True,
-            status="closed",
-            failures=state.failures,
-            reason=state.last_error,
-        )
 
     def record_failure(self, provider: str, error: BaseException | str) -> CircuitTransition:
         name = _provider_key(provider)
-        state = self._states.setdefault(name, _ProviderCircuitState())
-        was_open = state.opened_until > self.clock()
-        state.failures += 1
-        state.last_error = str(error)[:500]
-        if state.failures >= max(1, self.failure_threshold):
-            state.opened_until = self.clock() + max(0.0, self.cooldown_seconds)
+        now = self.clock()
+        with self._lock:
+            state = self._states.setdefault(name, _ProviderCircuitState())
+            was_open = state.opened_until > now
+            self._prune_locked(state, now)
+            state.failure_times.append(now)
+            failures = len(state.failure_times)
+            state.last_error = str(error)[:500]
+            if failures >= max(1, self.failure_threshold):
+                state.opened_until = now + max(0.0, self.cooldown_seconds)
+                return CircuitTransition(
+                    provider=name,
+                    status="open",
+                    failures=failures,
+                    opened_until=state.opened_until,
+                    changed=not was_open,
+                    reason=state.last_error,
+                )
             return CircuitTransition(
                 provider=name,
-                status="open",
-                failures=state.failures,
-                opened_until=state.opened_until,
-                changed=not was_open,
+                status="closed",
+                failures=failures,
                 reason=state.last_error,
             )
-        return CircuitTransition(
-            provider=name,
-            status="closed",
-            failures=state.failures,
-            reason=state.last_error,
-        )
 
     def record_success(self, provider: str) -> CircuitTransition:
         name = _provider_key(provider)
-        state = self._states.get(name)
-        if state is None or state.failures <= 0:
-            return CircuitTransition(provider=name, status="closed", failures=0)
-        was_recovering = state.opened_until > 0
-        self._states.pop(name, None)
+        with self._lock:
+            state = self._states.get(name)
+            if state is None or not state.failure_times:
+                return CircuitTransition(provider=name, status="closed", failures=0)
+            was_recovering = state.opened_until > 0
+            self._states.pop(name, None)
         return CircuitTransition(
             provider=name,
             status="closed",
@@ -163,10 +189,11 @@ class ProviderCircuitBreaker:
         )
 
     def reset(self, provider: str | None = None) -> None:
-        if provider is None:
-            self._states.clear()
-            return
-        self._states.pop(_provider_key(provider), None)
+        with self._lock:
+            if provider is None:
+                self._states.clear()
+                return
+            self._states.pop(_provider_key(provider), None)
 
 
 def _provider_key(provider: str) -> str:

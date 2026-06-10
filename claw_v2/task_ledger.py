@@ -104,43 +104,56 @@ class TaskLedger:
             self._conn.commit()
 
     def _ensure_completed_unverified_status_locked(self) -> None:
+        """Crash-safe CHECK-widening migration (mirrors memory.py's pattern).
+
+        Handles three input states: steady (new CHECK, no orphan), legacy
+        (old CHECK), and orphan (``agent_tasks_old`` left by a crash
+        mid-migration — previously that orphan was never drained and the
+        whole ledger silently vanished). Runs in one BEGIN IMMEDIATE and
+        verifies row counts before dropping the orphan.
+        """
         row = self._conn.execute(
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'agent_tasks'"
         ).fetchone()
         table_sql = str(row["sql"] if isinstance(row, sqlite3.Row) else row[0]) if row else ""
-        if "completed_unverified" in table_sql:
+        has_new_check = "completed_unverified" in table_sql
+        has_orphan_old = (
+            self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_tasks_old'"
+            ).fetchone()
+            is not None
+        )
+        if has_new_check and not has_orphan_old:
             return
-        self._conn.executescript(
-            """
-            ALTER TABLE agent_tasks RENAME TO agent_tasks_old;
-            """
+        columns = (
+            "task_id, session_id, channel, external_session_id, external_user_id, "
+            "objective, mode, runtime, provider, model, status, notify_policy, "
+            "created_at, started_at, completed_at, summary, error, verification_status, "
+            "artifacts_json, route_json, metadata_json, updated_at"
         )
-        self._conn.executescript(TASK_LEDGER_SCHEMA)
-        self._conn.execute(
-            """
-            INSERT INTO agent_tasks (
-                task_id, session_id, channel, external_session_id, external_user_id,
-                objective, mode, runtime, provider, model, status, notify_policy,
-                created_at, started_at, completed_at, summary, error, verification_status,
-                artifacts_json, route_json, metadata_json, updated_at
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            if not has_orphan_old:
+                self._conn.execute("ALTER TABLE agent_tasks RENAME TO agent_tasks_old")
+            # executescript() force-commits the open transaction — run the
+            # schema statement by statement to stay inside BEGIN IMMEDIATE.
+            for statement in TASK_LEDGER_SCHEMA.split(";"):
+                if statement.strip():
+                    self._conn.execute(statement)
+            self._conn.execute(
+                f"INSERT OR IGNORE INTO agent_tasks ({columns}) SELECT {columns} FROM agent_tasks_old"
             )
-            SELECT
-                task_id, session_id, channel, external_session_id, external_user_id,
-                objective, mode, runtime, provider, model, status, notify_policy,
-                created_at, started_at, completed_at, summary, error, verification_status,
-                artifacts_json, route_json, metadata_json, updated_at
-            FROM agent_tasks_old
-            """
-        )
-        self._conn.execute("DROP TABLE agent_tasks_old")
-        self._conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_agent_tasks_session_updated "
-            "ON agent_tasks(session_id, updated_at DESC)"
-        )
-        self._conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_agent_tasks_status_updated "
-            "ON agent_tasks(status, updated_at DESC)"
-        )
+            new_count = int(self._conn.execute("SELECT COUNT(*) FROM agent_tasks").fetchone()[0])
+            old_count = int(self._conn.execute("SELECT COUNT(*) FROM agent_tasks_old").fetchone()[0])
+            if new_count < old_count:
+                raise sqlite3.IntegrityError(
+                    f"agent_tasks migration copied {new_count} of {old_count} rows"
+                )
+            self._conn.execute("DROP TABLE agent_tasks_old")
+            self._conn.execute("COMMIT")
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
 
     def create(
         self,

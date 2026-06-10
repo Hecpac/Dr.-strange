@@ -282,6 +282,17 @@ class LLMRouter:
                         "error_preview": redact_sensitive(str(exc))[:300],
                     },
                 )
+            skip_reason = _non_provider_fault_reason(exc)
+            if skip_reason is not None:
+                # User-content rejections and budget aborts are not provider
+                # health signals: three image-poisoned messages must not open
+                # the provider circuit for every session (audit B10c).
+                self._audit_event(
+                    "llm_circuit_failure_skipped",
+                    request=request,
+                    metadata={"provider": request.provider, "reason": skip_reason},
+                )
+                raise
             transition = self.circuit_breaker.record_failure(request.provider, exc)
             if transition.status == "open" and transition.changed:
                 self._audit_event(
@@ -527,6 +538,19 @@ def _validate_provider_model_pair(provider: str, model: str) -> None:
         raise ValueError(f"{provider} provider cannot serve Anthropic model {model!r}.")
     if normalized_provider == "google" and not normalized_model.startswith("gemini-"):
         raise ValueError(f"Google provider cannot serve non-Gemini model {model!r}.")
+
+
+def _non_provider_fault_reason(exc: AdapterError) -> str | None:
+    """Classify failures that say nothing about provider health."""
+    metadata = exc.metadata if isinstance(exc.metadata, dict) else {}
+    if str(metadata.get("reason") or "") == "budget_exceeded":
+        return "budget_exceeded"
+    message = str(exc).lower()
+    if "max_budget" in message or "budget exceeded" in message:
+        return "budget_exceeded"
+    if "image" in message and ("could not be processed" in message or "could not process" in message):
+        return "user_content_image"
+    return None
 
 
 def _is_timeout_error(exc: AdapterError) -> bool:

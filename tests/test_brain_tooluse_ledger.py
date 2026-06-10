@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+import time
 import unittest
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -909,7 +910,11 @@ class BrainToolUseLedgerEdgeCasesTests(unittest.TestCase):
         )
         state = {
             "active_object": {
-                "reply_context": {"text": reply_plan, "source": "telegram_reply"}
+                "reply_context": {
+                    "text": reply_plan,
+                    "source": "telegram_reply",
+                    "created_at": time.time(),
+                }
             }
         }
         bot = _make_bot(observe, self.ledger, state=state)

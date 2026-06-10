@@ -79,6 +79,7 @@ class StateHandlerRegressionTests(unittest.TestCase):
                 "reply_context": {
                     "source": "telegram_reply",
                     "text": "Pendientes: 9:16 vertical y 1:1 cuadrado.",
+                    "created_at": time.time(),
                 }
             },
         )
