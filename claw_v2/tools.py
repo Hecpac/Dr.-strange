@@ -588,6 +588,16 @@ class ToolRegistry:
                 # error field instead of silently swallowing.
                 logger.exception("attach_artifact_to_result failed for tool %s", definition.name)
                 result["_artifact_build_error"] = f"{type(exc).__name__}: {exc}"[:200]
+            try:
+                from claw_v2.turn_context import record_tool_artifact_result
+
+                record_tool_artifact_result(result)
+            except Exception:
+                logger.debug(
+                    "failed to record success_condition artifact for %s",
+                    definition.name,
+                    exc_info=True,
+                )
         if definition.ingests_external_content and isinstance(result, dict):
             return sanitize_tool_output(definition, result, agent_class=agent_class)
         return result

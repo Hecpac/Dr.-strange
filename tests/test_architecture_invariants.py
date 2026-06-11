@@ -127,6 +127,30 @@ class ArchitectureInvariantTests(unittest.TestCase):
         self.assertIn("RecoveryJobDrainRunner", main_source)
         self.assertIn('name="recovery_drain"', main_source)
 
+    def test_success_condition_artifact_lift_has_runtime_caller(self) -> None:
+        # 2026-06-11 audit C4: local tools attached contract artifacts, but
+        # the helper that moves them onto task checkpoints had no runtime
+        # caller, so the promote gate was inert on coordinated/autonomous work.
+        callers: list[str] = []
+        for path in sorted((REPO_ROOT / "claw_v2").rglob("*.py")):
+            rel_path = str(path.relative_to(REPO_ROOT))
+            if rel_path == "claw_v2/verification/local_tool_runner.py":
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                if isinstance(func, ast.Name) and func.id == "lift_artifact_to_checkpoint":
+                    callers.append(f"{rel_path}:{node.lineno}")
+                elif isinstance(func, ast.Attribute) and func.attr == "lift_artifact_to_checkpoint":
+                    callers.append(f"{rel_path}:{node.lineno}")
+        self.assertTrue(callers, "lift_artifact_to_checkpoint has no runtime caller")
+        self.assertTrue(
+            any(caller.startswith("claw_v2/task_handler.py:") for caller in callers),
+            f"lift_artifact_to_checkpoint is not wired at task_handler promote gate: {callers}",
+        )
+
     def test_computer_module_does_not_import_pyautogui_at_module_scope(self) -> None:
         tree = ast.parse((REPO_ROOT / "claw_v2" / "computer.py").read_text(encoding="utf-8"))
         offenders: list[str] = []

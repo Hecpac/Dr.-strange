@@ -361,6 +361,87 @@ class TaskHandlerTests(unittest.TestCase):
             assert implementation is not None
             self.assertEqual(implementation[0].timeout_seconds, 1200.0)
 
+    def test_autonomous_task_lifts_tool_contract_marker_before_promote_gate(self) -> None:
+        from claw_v2.turn_context import record_tool_artifact_result
+        from claw_v2.verification.local_tool_runner import CONTRACT_REQUIRED_KEY
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            memory = MemoryStore(root / "claw.db")
+            observe = ObserveStream(root / "observe.db")
+            ledger = TaskLedger(root / "claw.db", observe=observe)
+            jobs = JobService(root / "claw.db", observe=observe)
+
+            class _ContractRecordingCoordinator:
+                def run(
+                    self,
+                    task_id,
+                    objective,
+                    research_tasks,
+                    implementation_tasks=None,
+                    verification_tasks=None,
+                    lane_overrides=None,
+                ):
+                    record_tool_artifact_result({CONTRACT_REQUIRED_KEY: True})
+                    return CoordinatorResult(
+                        task_id=task_id,
+                        phase_results={
+                            "implementation": [
+                                WorkerResult(
+                                    task_name="execute_change",
+                                    content="Tool returned ok=True for a contracted action.",
+                                    duration_seconds=0.1,
+                                )
+                            ],
+                            "verification": [
+                                WorkerResult(
+                                    task_name="verify_operation",
+                                    content="Verification Status: passed",
+                                    duration_seconds=0.1,
+                                )
+                            ]
+                        },
+                        synthesis="done",
+                    )
+
+            handler = TaskHandler(
+                coordinator=_ContractRecordingCoordinator(),
+                observe=observe,
+                task_ledger=ledger,
+                job_service=jobs,
+                get_session_state=memory.get_session_state,
+                update_session_state=memory.update_session_state,
+                workspace_root=root,
+            )
+
+            ack = handler.start_autonomous_task(
+                "tg-contract",
+                "Ejecuta un tool con contrato y verifica el resultado",
+                mode="coding",
+            )
+
+            self.assertIn("Tarea autónoma iniciada", ack)
+            task_id = ack.split("`", 2)[1]
+            self.assertTrue(handler.wait_for_task(task_id, timeout=2))
+
+            record = ledger.get(task_id)
+            self.assertIsNotNone(record)
+            assert record is not None
+            self.assertEqual(record.status, "running")
+            self.assertEqual(record.verification_status, "blocked")
+
+            state = memory.get_session_state("tg-contract")
+            self.assertEqual(state["verification_status"], "blocked")
+            checkpoint = state["last_checkpoint"]
+            self.assertTrue(checkpoint["contract_required"])
+            self.assertEqual(
+                checkpoint["promote_gate_reason"],
+                "contract_required_artifact_missing",
+            )
+
+            event_types = [event["event_type"] for event in observe.recent_events(limit=50)]
+            self.assertIn("promote_gate_contract_bypass_detected", event_types)
+
 
 if __name__ == "__main__":
     unittest.main()

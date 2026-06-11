@@ -8,8 +8,8 @@
 ## meta
 
 ```yaml
-describes_commit: fe99808+spec-002-self-improve-promotion-hotfix+spec-002-subprocess-bounded-pr-c+spec-002-approval-manager-pr-d+spec-002-promotion-tooling-phase-4+brain-delegation-tool+recovery-jobs-drain-c1+audit-m3-m4-offloop-emits-nonblocking-checkpoint-backup
-doc_version: 2.18
+describes_commit: fe99808+spec-002-self-improve-promotion-hotfix+spec-002-subprocess-bounded-pr-c+spec-002-approval-manager-pr-d+spec-002-promotion-tooling-phase-4+brain-delegation-tool+recovery-jobs-drain-c1+audit-m3-m4-offloop-emits-nonblocking-checkpoint-backup+success-condition-artifact-lift-c4
+doc_version: 2.19
 last_verified: 2026-06-11
 verification_method: manual + pytest + AST sentinel cross-check
 anchor_strategy: symbol_only  # path:symbol, no line numbers
@@ -54,6 +54,23 @@ invariants:
       - ToolPolicy.allowed_contexts  # from where it can be invoked
       - tier_check  # tier ≤ autoexec_max_tier OR approval_gate(...)
     why: Single-flag bypass is impossible by construction.
+
+  success_condition_promote_gate:
+    rule: A tool result carrying `_contract_required` or
+          `_success_condition_artifact` must reach the autonomous task
+          checkpoint before `apply_promote_gate_to_checkpoint` runs.
+    chokepoints:
+      - tools.ToolRegistry.execute -> turn_context.record_tool_artifact_result
+      - coordinator.CoordinatorService._dispatch_parallel -> contextvars.copy_context
+      - task_handler._run_coordinated_task -> reset_tool_artifact_result
+      - task_handler._run_autonomous_task -> lift_artifact_to_checkpoint before promote gate
+    enforced_by:
+      - tests/test_task_handler.py::TaskHandlerTests::test_autonomous_task_lifts_tool_contract_marker_before_promote_gate
+      - tests/test_coordinator.py::DispatchParallelTests::test_worker_thread_preserves_tool_artifact_context
+      - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_success_condition_artifact_lift_has_runtime_caller
+    why: Without this lift, the promote gate sees no artifact and falls into
+         legacy passthrough, allowing a worker/verifier `passed` claim to mark
+         contracted work as succeeded without artifact verification.
 
   kairos_external_mutation_gated:
     rule: Kairos handlers that mutate external state (post to social, push

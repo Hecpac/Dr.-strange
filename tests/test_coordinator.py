@@ -53,6 +53,34 @@ class DispatchParallelTests(unittest.TestCase):
         self.assertEqual(len(results), 3)
         self.assertEqual(router.ask.call_count, 3)
 
+    def test_worker_thread_preserves_tool_artifact_context(self) -> None:
+        from claw_v2.turn_context import (
+            current_tool_artifact_result,
+            record_tool_artifact_result,
+            reset_tool_artifact_result,
+        )
+        from claw_v2.verification.local_tool_runner import CONTRACT_REQUIRED_KEY
+
+        svc, router, *_ = _make_service()
+
+        def fake_ask(_prompt, **_kwargs):
+            record_tool_artifact_result({CONTRACT_REQUIRED_KEY: True})
+            return MagicMock(content="ok")
+
+        reset_tool_artifact_result()
+        try:
+            router.ask.side_effect = fake_ask
+            results = svc._dispatch_parallel([WorkerTask(name="t1", instruction="do A")])
+
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0].error, "")
+            result = current_tool_artifact_result()
+            self.assertIsNotNone(result)
+            assert result is not None
+            self.assertTrue(result[CONTRACT_REQUIRED_KEY])
+        finally:
+            reset_tool_artifact_result()
+
     def test_worker_error_captured(self) -> None:
         svc, router, *_ = _make_service()
         router.ask.side_effect = RuntimeError("provider down")

@@ -37,6 +37,7 @@ from claw_v2.bot_helpers import (
 from claw_v2.evidence_ledger import EvidenceRef, record_claim
 from claw_v2.goal_contract import create_goal
 from claw_v2.model_registry import model_overrides_from_state
+from claw_v2.turn_context import current_tool_artifact_result, reset_tool_artifact_result
 from claw_v2.verification import (
     DimensionRawResponse,
     parse_judge_response,
@@ -44,6 +45,7 @@ from claw_v2.verification import (
     run_petri_judge_for_task,
     should_use_petri_verifier,
 )
+from claw_v2.verification.local_tool_runner import lift_artifact_to_checkpoint
 
 import logging as _logging
 import uuid as _uuid
@@ -576,6 +578,7 @@ class TaskHandler:
         forced: bool,
         task_id: str,
     ) -> str:
+        reset_tool_artifact_result()
         research_tasks, implementation_tasks, verification_tasks = _build_coordinator_tasks(mode, objective)
         result = self.coordinator.run(
             task_id,
@@ -774,6 +777,12 @@ class TaskHandler:
                 else "failed" if verification_status == "failed"
                 else ""
             )
+            tool_artifact_result = current_tool_artifact_result()
+            if tool_artifact_result is not None:
+                completed_checkpoint = lift_artifact_to_checkpoint(
+                    completed_checkpoint,
+                    tool_artifact_result,
+                )
             # F2.5 + F2.5.1 (2026-05-26) — promote gate: no task with a declared
             # success_condition can land `succeeded` from tool.ok=True alone.
             # FAIL-CLOSED on exception when a success_condition_artifact is present
@@ -786,6 +795,12 @@ class TaskHandler:
                     raw_verification_status=verification_status,
                     completed_checkpoint=completed_checkpoint,
                 )
+            )
+            reset_tool_artifact_result()
+            self._update_session_state(
+                session_id,
+                verification_status=verification_status,
+                last_checkpoint=completed_checkpoint,
             )
             for _event_name, _event_payload in _gate_events:
                 self._emit(

@@ -4,6 +4,7 @@ import json
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextvars import copy_context
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -381,10 +382,18 @@ class CoordinatorService:
         pool = ThreadPoolExecutor(max_workers=min(self.max_workers, len(tasks)))
         shutdown_early = False
         try:
-            futures = {
-                pool.submit(self._execute_worker, task, trace_context, lane_overrides=lane_overrides): task
-                for task in tasks
-            }
+            futures = {}
+            for task in tasks:
+                context = copy_context()
+                futures[
+                    pool.submit(
+                        context.run,
+                        self._execute_worker,
+                        task,
+                        trace_context,
+                        lane_overrides=lane_overrides,
+                    )
+                ] = task
             for future in as_completed(futures):
                 task = futures[future]
                 try:

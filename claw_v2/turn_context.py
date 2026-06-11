@@ -17,11 +17,14 @@ from __future__ import annotations
 import contextlib
 import secrets
 from contextvars import ContextVar
-from typing import Iterator
+from typing import Any, Iterator, Mapping
 
 __all__ = [
+    "current_tool_artifact_result",
     "current_turn_id",
     "new_turn_id",
+    "record_tool_artifact_result",
+    "reset_tool_artifact_result",
     "turn_id_context",
     "CRITICAL_OBSERVE_EVENTS_REQUIRING_TURN_ID",
 ]
@@ -30,6 +33,13 @@ __all__ = [
 _TURN_ID_CONTEXT: ContextVar[str | None] = ContextVar(
     "claw_turn_id_context", default=None
 )
+
+_TOOL_ARTIFACT_RESULT_CONTEXT: ContextVar[list[dict[str, Any]] | None] = ContextVar(
+    "claw_tool_artifact_result_context", default=None
+)
+
+_ARTIFACT_RESULT_KEY = "_success_condition_artifact"
+_CONTRACT_REQUIRED_KEY = "_contract_required"
 
 
 CRITICAL_OBSERVE_EVENTS_REQUIRING_TURN_ID: frozenset[str] = frozenset(
@@ -79,3 +89,57 @@ def turn_id_context(turn_id: str) -> Iterator[None]:
 def current_turn_id() -> str | None:
     """Return the active turn_id or None when no context is open."""
     return _TURN_ID_CONTEXT.get()
+
+
+def reset_tool_artifact_result() -> None:
+    """Clear the per-task contract artifact bucket.
+
+    The bucket value is mutable on purpose: coordinator worker threads receive
+    a copied context that still points at the same list, so tool calls made in
+    those workers can append results for the parent task thread to read.
+    """
+    bucket = _TOOL_ARTIFACT_RESULT_CONTEXT.get()
+    if bucket is None:
+        _TOOL_ARTIFACT_RESULT_CONTEXT.set([])
+    else:
+        bucket.clear()
+
+
+def record_tool_artifact_result(result: Mapping[str, Any]) -> None:
+    """Remember reserved success-condition fields from a tool result."""
+    if not isinstance(result, Mapping):
+        return
+    artifact = result.get(_ARTIFACT_RESULT_KEY)
+    required = bool(result.get(_CONTRACT_REQUIRED_KEY))
+    if not required and artifact is None:
+        return
+
+    entry: dict[str, Any] = {}
+    if required:
+        entry[_CONTRACT_REQUIRED_KEY] = True
+    if artifact is not None:
+        entry[_ARTIFACT_RESULT_KEY] = artifact
+    error = result.get("_artifact_build_error")
+    if isinstance(error, str) and error:
+        entry["_artifact_build_error"] = error
+
+    bucket = _TOOL_ARTIFACT_RESULT_CONTEXT.get()
+    if bucket is None:
+        bucket = []
+        _TOOL_ARTIFACT_RESULT_CONTEXT.set(bucket)
+    bucket.append(entry)
+
+
+def current_tool_artifact_result() -> dict[str, Any] | None:
+    """Return the contract-bearing tool result the promote gate should lift."""
+    bucket = _TOOL_ARTIFACT_RESULT_CONTEXT.get()
+    if not bucket:
+        return None
+
+    for entry in bucket:
+        if entry.get(_CONTRACT_REQUIRED_KEY) and entry.get(_ARTIFACT_RESULT_KEY) is None:
+            return dict(entry)
+    for entry in reversed(bucket):
+        if entry.get(_ARTIFACT_RESULT_KEY) is not None or entry.get(_CONTRACT_REQUIRED_KEY):
+            return dict(entry)
+    return None
