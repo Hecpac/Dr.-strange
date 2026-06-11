@@ -99,11 +99,11 @@ def _queue_secret(queue_dir: Path, explicit_secret: str | None = None) -> str:
     if existing:
         return existing
     secret = uuid.uuid4().hex + uuid.uuid4().hex
-    secret_path.write_text(secret, encoding="utf-8")
-    try:
-        os.chmod(secret_path, 0o600)
-    except OSError:
-        pass
+    # Create with 0o600 atomically; write_text-then-chmod leaves a window where
+    # the secret is group/world readable under a permissive umask.
+    fd = os.open(secret_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(secret)
     return secret
 
 
@@ -113,11 +113,11 @@ def _write_signed_handoff(path: Path, handoff: RuntimeHandoff, secret: str) -> N
     handoff.signature = str(payload["signature"])
     tmp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
-        tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-        try:
-            os.chmod(tmp_path, 0o600)
-        except OSError:
-            pass
+        # Create with 0o600 atomically (see _queue_secret) so the signed handoff
+        # is never briefly group/world readable under a permissive umask.
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, indent=2, sort_keys=True))
         os.replace(tmp_path, path)
     finally:
         try:
