@@ -436,6 +436,16 @@ class SafetyTests(unittest.TestCase):
             self.assertIsNotNone(check_command("pip3 install evil", policy))
             self.assertIsNotNone(check_command("python3 -m compileall /etc", policy))
 
+    def test_instagram_cli_not_in_python_safe_modules(self) -> None:
+        # C5: the IG CLI is an orphan vector; publishing goes through the Tier-3
+        # InstagramPublish tool, never via Bash. The module must not be safe-listed.
+        with tempfile.TemporaryDirectory() as workspace_str:
+            policy = SandboxPolicy(workspace_root=Path(workspace_str), capability_profile="engineer")
+            violation = check_command(
+                "python3 -m claw_v2.cli.instagram_publish photo.jpg --caption hi", policy
+            )
+            self.assertIsNotNone(violation)
+
     def test_engineer_profile_blocks_node_inline_execution(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir) / "workspace"

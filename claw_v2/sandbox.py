@@ -84,7 +84,6 @@ PYTHON_SAFE_MODULES = frozenset(
         "claw_v2.browser_cli",
         "claw_v2.cli.echo_smoke",
         "claw_v2.cli.heygen_deliver",
-        "claw_v2.cli.instagram_publish",
         "claw_v2.terminal_bridge_cli",
         "compileall",
         "py_compile",
