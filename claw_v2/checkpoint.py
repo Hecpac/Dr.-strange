@@ -81,12 +81,20 @@ class CheckpointService:
         # backup on the live connection held the memory lock for the whole
         # copy and restarted on every external write — under load the hot
         # path froze until "database is locked" surfaced to the user.
+        # Write to a staging file and rename only after the copy completes:
+        # the committed row's file_path must not exist until the snapshot is
+        # whole, or a concurrent /rollback (or a crash mid-copy) could restore
+        # a partial/truncated database (PR #91 review, codex P2).
+        tmp_path = file_path.with_name(file_path.name + ".tmp")
         source_conn: sqlite3.Connection | None = None
         target_conn: sqlite3.Connection | None = None
         try:
             source_conn = self._open_backup_source()
-            target_conn = sqlite3.connect(file_path)
+            target_conn = sqlite3.connect(tmp_path)
             source_conn.backup(target_conn)
+            target_conn.close()
+            target_conn = None
+            tmp_path.replace(file_path)  # atomic publish (same dir/filesystem)
         except Exception:
             # Roll back the metadata row so the DB stays clean.
             with self.memory._lock:
@@ -106,6 +114,7 @@ class CheckpointService:
                 except Exception:
                     pass
                 target_conn = None
+            tmp_path.unlink(missing_ok=True)
             file_path.unlink(missing_ok=True)
             raise
         finally:
@@ -159,6 +168,13 @@ class CheckpointService:
         delimiters (a `?` or `#`, or Windows backslashes) is percent-encoded
         instead of truncating the URI and silently opening the wrong database.
         """
+        raw = str(self.memory.db_path)
+        if raw == ":memory:" or "mode=memory" in raw:
+            # An in-memory db has no file to copy via a read-only file: URI;
+            # as_uri() would silently create a file literally named ":memory:".
+            raise ValueError(
+                "checkpoint backup requires a file-backed database, not an in-memory db"
+            )
         db_uri = f"{Path(self.memory.db_path).absolute().as_uri()}?mode=ro"
         return sqlite3.connect(db_uri, uri=True, timeout=15.0)
 

@@ -33,22 +33,66 @@ class CheckpointCreateTests(unittest.TestCase):
         # SQLite opens a DIFFERENT (empty) db and the snapshot silently copies
         # the wrong/empty database — a corrupt checkpoint. Assert the snapshot
         # carries the LIVE data, not just that a file exists.
-        tmp = Path(tempfile.mkdtemp())
-        store = MemoryStore(tmp / "weird?name.db")
-        store.store_fact("marker", "live-data", source="test")
-        service = CheckpointService(memory=store, snapshots_dir=tmp / "snaps")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            store = MemoryStore(tmp / "weird?name.db")
+            store.store_fact("marker", "live-data", source="test")
+            service = CheckpointService(memory=store, snapshots_dir=tmp / "snaps")
 
-        ckpt_id = service.create(trigger_reason="test")
+            ckpt_id = service.create(trigger_reason="test")
 
-        snap_conn = sqlite3.connect(tmp / "snaps" / f"{ckpt_id}.db")
-        try:
-            row = snap_conn.execute(
-                "SELECT value FROM facts WHERE key = 'marker'"
-            ).fetchone()
-            self.assertIsNotNone(row, "snapshot copied the wrong/empty database")
-            self.assertEqual(row[0], "live-data")
-        finally:
-            snap_conn.close()
+            snap_conn = sqlite3.connect(tmp / "snaps" / f"{ckpt_id}.db")
+            try:
+                row = snap_conn.execute(
+                    "SELECT value FROM facts WHERE key = 'marker'"
+                ).fetchone()
+                self.assertIsNotNone(row, "snapshot copied the wrong/empty database")
+                self.assertEqual(row[0], "live-data")
+            finally:
+                snap_conn.close()
+
+    def test_final_snapshot_path_absent_until_backup_completes(self) -> None:
+        # PR #91 review round 2 (codex P2): M4 commits the row and releases
+        # memory._lock before the backup finishes, so a concurrent /rollback (or
+        # a crash) could see the committed row and a partially-written file_path.
+        # The final .db must be published atomically (temp + rename), so it is
+        # never visible at its final path mid-backup.
+        observed: dict = {}
+        real_open = self.service._open_backup_source
+
+        class _BackupSpyConn:
+            def __init__(self, inner, snapshots_dir):
+                self._inner = inner
+                self._snapshots_dir = snapshots_dir
+
+            def backup(self, target, **kwargs):
+                observed["final_dbs_mid_backup"] = sorted(
+                    p.name for p in self._snapshots_dir.glob("*.db")
+                )
+                return self._inner.backup(target, **kwargs)
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+        with patch.object(
+            self.service,
+            "_open_backup_source",
+            lambda: _BackupSpyConn(real_open(), self.snapshots_dir),
+        ):
+            ckpt_id = self.service.create(trigger_reason="test")
+
+        # No final `<ckpt>.db` may exist while the copy is still running.
+        self.assertEqual(observed["final_dbs_mid_backup"], [])
+        # ...but once create() returns, the snapshot is published.
+        self.assertTrue((self.snapshots_dir / f"{ckpt_id}.db").exists())
+
+    def test_open_backup_source_rejects_in_memory_db(self) -> None:
+        # PR #91 review round 2 (gemini): an in-memory db has no file to copy via
+        # a read-only file: URI; fail fast instead of silently creating a file
+        # literally named ":memory:".
+        self.store.db_path = Path(":memory:")
+        with self.assertRaises(ValueError):
+            self.service._open_backup_source()
 
     def test_create_writes_snapshot_file_to_disk(self) -> None:
         ckpt_id = self.service.create(trigger_reason="test")
