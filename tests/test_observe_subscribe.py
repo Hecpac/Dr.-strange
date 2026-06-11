@@ -41,7 +41,7 @@ class ObserveSubscribeTests(unittest.TestCase):
         self.stream.emit("evt", payload={"n": 1})
         self.assertEqual(good_received, [{"n": 1}])
 
-    def test_locked_database_drops_event_without_breaking_emit(self) -> None:
+    def test_locked_database_still_dispatches_subscribers_without_breaking_emit(self) -> None:
         received: list[dict] = []
         self.stream.subscribe("evt", received.append)
         fake_conn = MagicMock()
@@ -53,7 +53,7 @@ class ObserveSubscribeTests(unittest.TestCase):
 
         self.assertEqual(fake_conn.execute.call_count, 3)
         self.assertGreaterEqual(fake_conn.rollback.call_count, 1)
-        self.assertEqual(received, [])
+        self.assertEqual(received, [{"n": 1}])
 
     def test_emit_persists_even_when_no_subscribers(self) -> None:
         self.stream.emit("lonely_event", payload={"a": 1})
