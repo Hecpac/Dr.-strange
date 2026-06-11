@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -135,13 +134,9 @@ GIT_ENV_EXEC_SINK_VARS = frozenset(
         "GIT_SEQUENCE_EDITOR",
         "GIT_ASKPASS",
         "GIT_CONFIG",
-        "GIT_CONFIG_GLOBAL",
-        "GIT_CONFIG_SYSTEM",
-        "GIT_CONFIG_COUNT",
         "GIT_EXEC_PATH",
     }
 )
-_GIT_CONFIG_ENV_KV_RE = re.compile(r"^GIT_CONFIG_(?:KEY|VALUE)_\d+$")
 # General-purpose env vars that relocate git's global config search to an
 # attacker-writable dir (~/.gitconfig, $XDG_CONFIG_HOME/git/config). Blocked
 # only when the command is git — they have legitimate non-git uses.
@@ -391,7 +386,11 @@ def _check_git_env_injection(tokens: list[str]) -> str | None:
         if token.startswith("-") or "=" not in token:
             continue
         name = token.split("=", 1)[0]
-        if name in GIT_ENV_EXEC_SINK_VARS or _GIT_CONFIG_ENV_KV_RE.match(name):
+        # Fail closed on the whole GIT_CONFIG_* env family (COUNT/KEY_n/VALUE_n,
+        # the older GIT_CONFIG_PARAMETERS, GLOBAL/SYSTEM, and any future member)
+        # plus the standalone exec-sink vars — they all fold into git config or
+        # an executed program.
+        if name in GIT_ENV_EXEC_SINK_VARS or name.startswith("GIT_CONFIG_"):
             return (
                 "git exec-sink environment variables (GIT_CONFIG_*, GIT_SSH_COMMAND, "
                 "GIT_EXTERNAL_DIFF, GIT_PAGER, ...) are not allowed"

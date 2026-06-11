@@ -326,6 +326,9 @@ class SafetyTests(unittest.TestCase):
                 "env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0=id git log",
                 "env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.pwn GIT_CONFIG_VALUE_0=evil git pwn",
                 "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0=id git log",
+                # GIT_CONFIG_PARAMETERS is git's older inline-config env channel
+                # (PR #89 round 5, codex); fail closed on all GIT_CONFIG_*.
+                "env GIT_CONFIG_PARAMETERS='alias.pwn=!echo' git pwn",
                 "env GIT_SSH_COMMAND=id git fetch origin",
                 "env GIT_EXTERNAL_DIFF=id git diff",
                 "env GIT_PAGER=id git log",
