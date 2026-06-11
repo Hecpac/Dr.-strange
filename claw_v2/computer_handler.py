@@ -482,6 +482,9 @@ class ComputerHandler:
                 "computer_approval_resume_blocked",
                 {"approval_id": approval_id, "session_id": session_id, "reason": scope_error},
             )
+            # Drop the now-stale session so it doesn't linger in awaiting_approval
+            # forever (orphan/leak); the user is told to re-send the objective.
+            self._sessions.pop(session_id, None)
             return "Aprobación registrada, pero el contexto de computer cambió. Reenvíame el objetivo para generar una aprobación nueva."
         if session.pending_action is not None:
             session.pending_action["approved"] = True
