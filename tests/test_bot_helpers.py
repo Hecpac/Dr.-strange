@@ -215,6 +215,16 @@ class BotHelperRegressionTests(unittest.TestCase):
         self.assertNotIn("Reglas internas", sanitized)
         self.assertFalse(_chat_response_has_internal_leak(sanitized))
 
+    def test_sanitize_strips_leftover_response_contract_tags(self) -> None:
+        # 2026-06-10 defense-in-depth: even if an upstream path leaks a literal
+        # <response> wrapper tag (e.g. the unclosed-tag fallback), no outbound
+        # channel may ship the contract tag itself.
+        text = "<response>\nEl daemon esta corriendo.\n</response>"
+        sanitized = _sanitize_chat_response(text)
+        self.assertNotIn("<response>", sanitized)
+        self.assertNotIn("</response>", sanitized)
+        self.assertIn("El daemon esta corriendo.", sanitized)
+
     def test_leading_role_echo_inside_opening_code_fence_is_nuked(self) -> None:
         # Review probe (R1): a leading role header wrapped in an opening ``` code
         # fence is the same leak, just Markdown-wrapped. Must still be nuked.

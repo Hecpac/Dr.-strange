@@ -151,6 +151,7 @@ CREATE TABLE IF NOT EXISTS recovery_jobs (
     turn_id TEXT,
     failure_reason TEXT NOT NULL,
     original_request_sanitized TEXT NOT NULL,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
     status TEXT NOT NULL DEFAULT 'pending_recovery'
         CHECK(status IN ('pending_recovery', 'resolved', 'dismissed')),
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -363,6 +364,10 @@ ALTER TABLE session_state ADD COLUMN task_queue_json TEXT NOT NULL DEFAULT '[]';
 
 _MIGRATION_ADD_OUTCOME_PREDICTED_CONFIDENCE = """
 ALTER TABLE task_outcomes ADD COLUMN predicted_confidence REAL;
+"""
+
+_MIGRATION_ADD_RECOVERY_METADATA = """
+ALTER TABLE recovery_jobs ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}';
 """
 
 _MIGRATION_CREATE_CALIBRATION_STATS = """
@@ -675,6 +680,14 @@ class MemoryStore:
                     "CREATE INDEX IF NOT EXISTS idx_checkpoints_pending_restore "
                     "ON checkpoints(pending_restore) WHERE pending_restore = 1;"
                 )
+                self._conn.commit()
+            except sqlite3.OperationalError:
+                pass
+        cursor = self._conn.execute("PRAGMA table_info(recovery_jobs)")
+        recovery_cols = {row[1] for row in cursor.fetchall()}
+        if "metadata_json" not in recovery_cols:
+            try:
+                self._conn.execute(_MIGRATION_ADD_RECOVERY_METADATA)
                 self._conn.commit()
             except sqlite3.OperationalError:
                 pass
@@ -1517,15 +1530,22 @@ class MemoryStore:
         turn_id: str | None,
         failure_reason: str,
         original_request_sanitized: str,
+        metadata: dict[str, Any] | None = None,
     ) -> int:
         with self._lock:
             cursor = self._conn.execute(
                 """
                 INSERT INTO recovery_jobs
-                    (session_id, turn_id, failure_reason, original_request_sanitized)
-                VALUES (?, ?, ?, ?)
+                    (session_id, turn_id, failure_reason, original_request_sanitized, metadata_json)
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                (session_id, turn_id, failure_reason, original_request_sanitized),
+                (
+                    session_id,
+                    turn_id,
+                    failure_reason,
+                    original_request_sanitized,
+                    json.dumps(dict(metadata or {}), sort_keys=True),
+                ),
             )
             self._conn.commit()
             return int(cursor.lastrowid or 0)
@@ -1538,7 +1558,7 @@ class MemoryStore:
             cursor = self._conn.execute(
                 """
                 SELECT id, session_id, turn_id, failure_reason,
-                       original_request_sanitized, status, created_at, resolved_at
+                       original_request_sanitized, metadata_json, status, created_at, resolved_at
                 FROM recovery_jobs
                 WHERE status = 'pending_recovery'
                 ORDER BY id ASC
@@ -1548,7 +1568,7 @@ class MemoryStore:
             cursor = self._conn.execute(
                 """
                 SELECT id, session_id, turn_id, failure_reason,
-                       original_request_sanitized, status, created_at, resolved_at
+                       original_request_sanitized, metadata_json, status, created_at, resolved_at
                 FROM recovery_jobs
                 WHERE session_id = ? AND status = 'pending_recovery'
                 ORDER BY id ASC
@@ -1562,9 +1582,10 @@ class MemoryStore:
                 "turn_id": row[2],
                 "failure_reason": row[3],
                 "original_request_sanitized": row[4],
-                "status": row[5],
-                "created_at": row[6],
-                "resolved_at": row[7],
+                "metadata": _loads_json_object(row[5], default={}),
+                "status": row[6],
+                "created_at": row[7],
+                "resolved_at": row[8],
             }
             for row in cursor.fetchall()
         ]

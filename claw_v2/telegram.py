@@ -17,8 +17,10 @@ from typing import IO, Any, Callable
 
 from asyncio import CancelledError as _AsyncioCancelledError
 from asyncio import create_task as _asyncio_create_task
+from asyncio import get_running_loop as _asyncio_get_running_loop
 from asyncio import shield as _asyncio_shield
 from asyncio import sleep as _asyncio_sleep
+from concurrent.futures import ThreadPoolExecutor
 
 from telegram import LinkPreviewOptions, Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
@@ -601,6 +603,14 @@ class TelegramTransport:
         )
         # P0 hotfix E: held for the lifetime of the polling loop.
         self._polling_lock_fh: IO[str] | None = None
+        # Diagnostic observe events are persisted on this dedicated single
+        # worker so the synchronous locked-SQLite retry sleep in
+        # ObserveStream._persist_event (up to ~0.3s under contention) never
+        # runs on the asyncio event loop and stutters Telegram handling during
+        # a lock storm (2026-06-10 incident). One worker keeps emit ordering;
+        # isolating it from the loop's default executor stops emit retry-naps
+        # from starving message delivery. Created lazily on first emit.
+        self._observe_executor: ThreadPoolExecutor | None = None
 
     def _chat_lock(self, session_id: str) -> asyncio.Lock:
         lock = self._chat_locks.get(session_id)
@@ -643,7 +653,48 @@ class TelegramTransport:
         """Callback signature acquire_polling_lock expects (event_type, payload)."""
         self._emit_transport_event(event_type, payload)
 
-    def _emit_latency(
+    def _observe_emit_executor(self) -> ThreadPoolExecutor:
+        executor = self._observe_executor
+        if executor is None:
+            # Created on the event-loop thread (the only caller of the async
+            # emit path), so this lazy init needs no extra locking.
+            executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="tg-observe-emit"
+            )
+            self._observe_executor = executor
+        return executor
+
+    def _shutdown_observe_executor(self) -> None:
+        executor = self._observe_executor
+        if executor is not None:
+            self._observe_executor = None
+            # wait=False: don't block shutdown on a lock-storm retry; queued
+            # diagnostic emits still drain on the worker before it exits.
+            executor.shutdown(wait=False)
+
+    async def _aemit_transport_event(
+        self, event_type: str, payload: dict[str, Any]
+    ) -> None:
+        """Persist a transport event off the event-loop thread.
+
+        ``observe.emit`` -> ``ObserveStream._persist_event`` retries
+        locked-SQLite writes with a synchronous ``time.sleep``; running it
+        inline on the loop stutters all Telegram handling during a lock storm.
+        Offload the (unchanged) synchronous emit to the dedicated single-worker
+        executor and await it: the loop stays free to service other handlers
+        while the write — and any retry sleep — happens on the worker thread,
+        and awaiting keeps each session's events ordered and visible to the
+        caller once its handler returns.
+        """
+        loop = _asyncio_get_running_loop()
+        await loop.run_in_executor(
+            self._observe_emit_executor(),
+            self._emit_transport_event,
+            event_type,
+            payload,
+        )
+
+    async def _emit_latency(
         self,
         *,
         session_id: str,
@@ -656,28 +707,22 @@ class TelegramTransport:
         response_parts: int,
         response_chars: int,
     ) -> None:
-        observe = getattr(self._bot_service, "observe", None)
-        if observe is None:
-            return
-        try:
-            observe.emit(
-                "telegram_latency",
-                payload={
-                    "session_id": session_id,
-                    "user_id": user_id,
-                    "message_kind": message_kind,
-                    "status": status,
-                    "bot_ms": round(bot_ms, 1),
-                    "reply_ms": round(reply_ms, 1),
-                    "total_ms": round(total_ms, 1),
-                    "response_parts": response_parts,
-                    "response_chars": response_chars,
-                },
-            )
-        except Exception:
-            logger.debug("Could not emit telegram latency", exc_info=True)
+        await self._aemit_transport_event(
+            "telegram_latency",
+            {
+                "session_id": session_id,
+                "user_id": user_id,
+                "message_kind": message_kind,
+                "status": status,
+                "bot_ms": round(bot_ms, 1),
+                "reply_ms": round(reply_ms, 1),
+                "total_ms": round(total_ms, 1),
+                "response_parts": response_parts,
+                "response_chars": response_chars,
+            },
+        )
 
-    def _emit_outbound_text_event(
+    async def _emit_outbound_text_event(
         self,
         event_type: str,
         *,
@@ -708,7 +753,7 @@ class TelegramTransport:
         if error is not None:
             payload["error_type"] = type(error).__name__
             payload["error"] = str(error)[:300]
-        self._emit_transport_event(event_type, payload)
+        await self._aemit_transport_event(event_type, payload)
 
     async def _sleep_before_text_send_retry(self, exc: BaseException, attempt: int) -> None:
         retry_after = getattr(exc, "retry_after", None)
@@ -766,7 +811,7 @@ class TelegramTransport:
     ) -> bool:
         timeout_kwargs = self._send_text_timeout_kwargs()
         for attempt in range(1, self._text_send_retries + 1):
-            self._emit_outbound_text_event(
+            await self._emit_outbound_text_event(
                 "telegram_outbound_attempt",
                 session_id=session_id,
                 user_id=user_id,
@@ -790,7 +835,7 @@ class TelegramTransport:
                     "; retrying" if retryable and attempt < self._text_send_retries else "",
                     exc_info=True,
                 )
-                self._emit_outbound_text_event(
+                await self._emit_outbound_text_event(
                     "telegram_outbound_error",
                     session_id=session_id,
                     user_id=user_id,
@@ -808,7 +853,7 @@ class TelegramTransport:
                     await self._sleep_before_text_send_retry(exc, attempt)
             else:
                 message_id = getattr(result, "message_id", None)
-                self._emit_outbound_text_event(
+                await self._emit_outbound_text_event(
                     "telegram_outbound_sent",
                     session_id=session_id,
                     user_id=user_id,
@@ -843,7 +888,7 @@ class TelegramTransport:
             return True
 
         for attempt in range(1, self._text_send_retries + 1):
-            self._emit_outbound_text_event(
+            await self._emit_outbound_text_event(
                 "telegram_outbound_attempt",
                 session_id=session_id,
                 user_id=user_id,
@@ -868,7 +913,7 @@ class TelegramTransport:
                     "; retrying" if retryable and attempt < self._text_send_retries else "",
                     exc_info=True,
                 )
-                self._emit_outbound_text_event(
+                await self._emit_outbound_text_event(
                     "telegram_outbound_error",
                     session_id=session_id,
                     user_id=user_id,
@@ -887,7 +932,7 @@ class TelegramTransport:
                 continue
 
             message_id = getattr(result, "message_id", None)
-            self._emit_outbound_text_event(
+            await self._emit_outbound_text_event(
                 "telegram_outbound_sent",
                 session_id=session_id,
                 user_id=user_id,
@@ -915,7 +960,7 @@ class TelegramTransport:
     ) -> bool:
         if not self._token:
             return False
-        self._emit_outbound_text_event(
+        await self._emit_outbound_text_event(
             "telegram_outbound_attempt",
             session_id=session_id,
             user_id=user_id,
@@ -934,7 +979,7 @@ class TelegramTransport:
             )
         except Exception as exc:
             logger.warning("Telegram direct Bot API fallback failed", exc_info=True)
-            self._emit_outbound_text_event(
+            await self._emit_outbound_text_event(
                 "telegram_outbound_error",
                 session_id=session_id,
                 user_id=user_id,
@@ -947,7 +992,7 @@ class TelegramTransport:
                 error=exc,
             )
             return False
-        self._emit_outbound_text_event(
+        await self._emit_outbound_text_event(
             "telegram_outbound_sent",
             session_id=session_id,
             user_id=user_id,
@@ -1078,6 +1123,7 @@ class TelegramTransport:
 
     async def stop(self) -> None:
         if self._app is None:
+            self._shutdown_observe_executor()
             return
         app = self._app
         self._app = None
@@ -1114,6 +1160,7 @@ class TelegramTransport:
             except Exception:
                 logger.debug("Could not close Telegram polling lock", exc_info=True)
             self._polling_lock_fh = None
+        self._shutdown_observe_executor()
 
     async def _set_commands(self) -> None:
         from telegram import BotCommand
@@ -1219,7 +1266,7 @@ class TelegramTransport:
         bot_done_at = time.perf_counter()
         if response is None:
             finished_at = time.perf_counter()
-            self._emit_latency(
+            await self._emit_latency(
                 session_id=session_id,
                 user_id=user_id,
                 message_kind="text",
@@ -1273,7 +1320,7 @@ class TelegramTransport:
                 message_kind="text",
             )
         finished_at = time.perf_counter()
-        self._emit_latency(
+        await self._emit_latency(
             session_id=session_id,
             user_id=user_id,
             message_kind="text",
@@ -1350,7 +1397,7 @@ class TelegramTransport:
                 )
             except Exception as exc:
                 logger.warning("Telegram late direct delivery failed", exc_info=True)
-                self._emit_outbound_text_event(
+                await self._emit_outbound_text_event(
                     "telegram_outbound_error",
                     session_id=session_id,
                     user_id=user_id,
@@ -1364,7 +1411,7 @@ class TelegramTransport:
                 )
                 break
             sent_parts += 1
-            self._emit_outbound_text_event(
+            await self._emit_outbound_text_event(
                 "telegram_outbound_sent",
                 session_id=session_id,
                 user_id=user_id,
@@ -1378,7 +1425,7 @@ class TelegramTransport:
             )
         finished_at = time.perf_counter()
         if sent_parts:
-            self._emit_latency(
+            await self._emit_latency(
                 session_id=session_id,
                 user_id=user_id,
                 message_kind="text",
@@ -1623,7 +1670,7 @@ class TelegramTransport:
 
         bot_done_at = time.perf_counter()
         if response is None:
-            self._emit_latency(
+            await self._emit_latency(
                 session_id=session_id,
                 user_id=user_id,
                 message_kind="video",
@@ -1647,7 +1694,7 @@ class TelegramTransport:
             message_kind="video",
         )
         finished_at = time.perf_counter()
-        self._emit_latency(
+        await self._emit_latency(
             session_id=session_id,
             user_id=user_id,
             message_kind="video",
@@ -1726,7 +1773,7 @@ class TelegramTransport:
             # (the voice/document handlers already apologize) — C1.
             logger.exception("Error downloading image message")
             await self._reply_parts(update, ["No pude descargar la imagen. Reenvíala e intento de nuevo."])
-            self._emit_latency(
+            await self._emit_latency(
                 session_id=session_id,
                 user_id=user_id,
                 message_kind="image",
@@ -1770,7 +1817,7 @@ class TelegramTransport:
         parts = _split_message(response)
         delivered = await self._reply_parts(update, parts)
         finished_at = time.perf_counter()
-        self._emit_latency(
+        await self._emit_latency(
             session_id=session_id,
             user_id=user_id,
             message_kind="image",
@@ -1835,7 +1882,7 @@ class TelegramTransport:
         parts = _split_message(response)
         delivered = await self._reply_parts(update, parts)
         finished_at = time.perf_counter()
-        self._emit_latency(
+        await self._emit_latency(
             session_id=session_id,
             user_id=user_id,
             message_kind="document",
@@ -1906,7 +1953,7 @@ class TelegramTransport:
             response = "Error processing your voice message."
         bot_done_at = time.perf_counter()
         if response is None:
-            self._emit_latency(
+            await self._emit_latency(
                 session_id=session_id,
                 user_id=user_id,
                 message_kind="transcript",
@@ -1945,7 +1992,7 @@ class TelegramTransport:
         else:
             delivered = await self._reply_parts(update, parts)
         finished_at = time.perf_counter()
-        self._emit_latency(
+        await self._emit_latency(
             session_id=session_id,
             user_id=user_id,
             message_kind="transcript",

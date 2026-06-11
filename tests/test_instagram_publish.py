@@ -79,26 +79,56 @@ class _FakeFC:
 
 
 class _FakePage:
-    def __init__(self, *, logged_out=False, hrefs=None, body_text="Se compartió tu reel"):
+    def __init__(
+        self,
+        *,
+        logged_out=False,
+        hrefs=None,
+        body_text="Se compartió tu reel",
+        icon_only_create=False,
+        post_counts=None,
+        first_posts=None,
+    ):
         self.keyboard = _FakeKeyboard()
         self._logged_out = logged_out
         self._hrefs = hrefs if hrefs is not None else ["/pachanodesign/"]
         self._body_text = body_text
+        self._icon_only_create = icon_only_create
+        self._post_counts = list(post_counts or [])
+        self._first_posts = list(first_posts or [])
         self.files_set = []
         self.shots = []
+        self.clicked_roles = []
+        self.evaluated_scripts = []
     def goto(self, *a, **k):
         pass
     def wait_for_timeout(self, *a, **k):
         pass
     def evaluate(self, js, *a):
+        self.evaluated_scripts.append(js)
         if "name=username" in js or "name=password" in js:
             return self._logged_out
         if "a[href]" in js:
             return self._hrefs
         if "document.body.innerText" in js:
             return self._body_text
+        if "window.__clawClickInstagramCreate" in js:
+            return self._icon_only_create
+        if "recorte|crop" in js:
+            return True
+        if "document.querySelectorAll('main a[href*=" in js:
+            if self._first_posts:
+                return self._first_posts.pop(0)
+            return None
+        if "publicaciones" in js:
+            if self._post_counts:
+                return self._post_counts.pop(0)
+            return None
         return None
     def get_by_role(self, role, name=None):
+        self.clicked_roles.append((role, name))
+        if self._icon_only_create and name in ("Crear", "Create"):
+            return _FakeLoc(fail=True)
         return _FakeLoc()
     def get_by_text(self, text, exact=False):
         return _FakeLoc()
@@ -221,6 +251,54 @@ def test_publish_share_not_confirmed(svc, tmp_path, monkeypatch):
     assert res.reason == "share_not_confirmed"
 
 
+def test_share_success_is_accent_insensitive():
+    assert is_share_success("Se compartio tu publicacion") is True
+
+
+def test_publish_photo_icon_only_create_requires_modal_and_profile_verification(svc, tmp_path, monkeypatch):
+    photo = tmp_path / "hero.jpg"
+    photo.write_bytes(b"x" * 1024)
+    page = _FakePage(
+        hrefs=["/pachanodesign/"],
+        body_text="Se compartió tu publicación",
+        icon_only_create=True,
+        post_counts=["6", "7"],
+        first_posts=["/p/OLD/", "/p/NEW/"],
+    )
+    _install_fake_playwright(monkeypatch, page)
+
+    res = svc.publish_photo(str(photo), caption="hero", expected_account="pachanodesign")
+
+    assert res.ok is True
+    assert res.shared is True
+    assert res.verified is True
+    assert res.profile_verified is True
+    assert res.media_kind == "photo"
+    assert res.media_path == str(photo)
+    assert page.files_set == [str(photo)]
+    assert any("window.__clawClickInstagramCreate" in script for script in page.evaluated_scripts)
+
+
+def test_publish_photo_rejects_unverified_profile_after_share(svc, tmp_path, monkeypatch):
+    photo = tmp_path / "hero.jpg"
+    photo.write_bytes(b"x" * 1024)
+    page = _FakePage(
+        hrefs=["/pachanodesign/"],
+        body_text="Se compartió tu publicación",
+        post_counts=["6", "6"],
+        first_posts=["/p/OLD/", "/p/OLD/"],
+    )
+    _install_fake_playwright(monkeypatch, page)
+
+    res = svc.publish_photo(str(photo), caption="hero", expected_account="pachanodesign")
+
+    assert res.ok is False
+    assert res.shared is True
+    assert res.verified is True
+    assert res.profile_verified is False
+    assert res.reason == "profile_not_verified"
+
+
 def test_brain_tool_registered_with_schema():
     from claw_v2.tools import (
         DEFAULT_TOOL_AGENT_CLASSES,
@@ -236,7 +314,7 @@ def test_brain_tool_registered_with_schema():
     assert tool.mutates_state is True
     assert tool.requires_network is True
     props = tool.parameter_schema.get("properties", {})
-    assert {"video_path", "caption", "account"}.issubset(props)
-    assert "video_path" in tool.parameter_schema.get("required", [])
+    assert {"video_path", "photo_path", "media_path", "media_type", "caption", "account"}.issubset(props)
+    assert tool.parameter_schema.get("required", []) == []
     assert tool.success_condition is not None
     assert tool.preflight is not None

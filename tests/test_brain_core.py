@@ -442,6 +442,35 @@ class HandleMessageTests(unittest.TestCase):
         msgs = self.memory.get_recent_messages("s1")
         self.assertNotIn("to=functions", msgs[-1]["content"])
 
+    def test_unclosed_response_tag_delivers_only_post_tag_tail(self) -> None:
+        # 2026-06-10: SDK output truncated near the 300s brain-lane timeout
+        # emitted an opening <response> with the closing tag cut off. The old
+        # fallback set response.content = raw, shipping internal pre-response
+        # narration + the literal <response> tag to Telegram (14 real messages).
+        # Only the post-tag tail is the visible reply.
+        self.router.ask.return_value = LLMResponse(
+            content=(
+                "Voy a revisar el estado del daemon y los ultimos logs.\n"
+                "Reviso el task ledger para confirmar el estado real.\n"
+                "<response>\n"
+                "El daemon esta corriendo y la ultima tarea quedo"
+            ),
+            lane="brain",
+            provider="anthropic",
+            model="test",
+        )
+
+        result = self.brain.handle_message("s1", "estatus del daemon")
+
+        self.assertEqual(result.content, "El daemon esta corriendo y la ultima tarea quedo")
+        self.assertNotIn("<response>", result.content)
+        self.assertNotIn("Voy a revisar", result.content)
+        self.assertNotIn("task ledger", result.content)
+        self.assertEqual(result.artifacts["contract_violation"], "unclosed_response_tag")
+        msgs = self.memory.get_recent_messages("s1")
+        self.assertEqual(msgs[-1]["content"], "El daemon esta corriendo y la ultima tarea quedo")
+        self.assertNotIn("<response>", msgs[-1]["content"])
+
     def test_suppresses_internal_tool_trace_inside_response_block(self) -> None:
         self.router.ask.return_value = LLMResponse(
             content="<trace>tried a tool</trace><response>Listo.to=GPTImage {}</response>",

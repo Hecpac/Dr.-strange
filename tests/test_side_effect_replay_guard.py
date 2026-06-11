@@ -133,6 +133,11 @@ class BrainRetrySuppressionTests(unittest.TestCase):
         )
         event_types = [row["event_type"] for row in self.observe.recent_events(limit=100)]
         self.assertIn("brain_retry_suppressed_side_effects", event_types)
+        jobs = self.memory.list_pending_recovery_jobs("s1")
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["metadata"]["tools_executed"], ["Bash", "Write"])
+        self.assertEqual(jobs[0]["metadata"]["trace_id"], result.artifacts["trace_id"])
+        self.assertIn("provider died mid-turn", jobs[0]["metadata"]["error"])
 
     def test_image_poison_error_with_side_effects_is_not_replayed(self) -> None:
         self.router.ask.side_effect = _side_effect_error(
