@@ -1552,29 +1552,28 @@ class MemoryStore:
 
     @_synchronized
     def list_pending_recovery_jobs(
-        self, session_id: str | None = None
+        self,
+        session_id: str | None = None,
+        *,
+        older_than_seconds: float | None = None,
     ) -> list[dict[str, Any]]:
-        if session_id is None:
-            cursor = self._conn.execute(
-                """
-                SELECT id, session_id, turn_id, failure_reason,
-                       original_request_sanitized, metadata_json, status, created_at, resolved_at
-                FROM recovery_jobs
-                WHERE status = 'pending_recovery'
-                ORDER BY id ASC
-                """
-            )
-        else:
-            cursor = self._conn.execute(
-                """
-                SELECT id, session_id, turn_id, failure_reason,
-                       original_request_sanitized, metadata_json, status, created_at, resolved_at
-                FROM recovery_jobs
-                WHERE session_id = ? AND status = 'pending_recovery'
-                ORDER BY id ASC
-                """,
-                (session_id,),
-            )
+        clauses = ["status = 'pending_recovery'"]
+        params: list[Any] = []
+        if session_id is not None:
+            clauses.append("session_id = ?")
+            params.append(session_id)
+        if older_than_seconds is not None:
+            # Only rows at least `older_than_seconds` old. Lets the off-tick
+            # drainer skip freshly-queued recovery promises (the user was just
+            # told they'd be resumed) and clean only genuine backlog.
+            clauses.append("created_at <= datetime('now', ?)")
+            params.append(f"-{int(max(0.0, older_than_seconds))} seconds")
+        cursor = self._conn.execute(
+            "SELECT id, session_id, turn_id, failure_reason, "
+            "original_request_sanitized, metadata_json, status, created_at, resolved_at "
+            f"FROM recovery_jobs WHERE {' AND '.join(clauses)} ORDER BY id ASC",
+            params,
+        )
         return [
             {
                 "id": row[0],

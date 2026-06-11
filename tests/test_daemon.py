@@ -500,7 +500,7 @@ class RecoveryJobDrainRunnerTests(unittest.TestCase):
             original_request_sanitized="arregla el deploy de producción",
         )
         sent: list[str] = []
-        drainer = RecoveryJobDrainRunner(memory=store, notifier=sent.append)
+        drainer = RecoveryJobDrainRunner(memory=store, notifier=sent.append, min_age_seconds=0.0)
 
         self.assertEqual(drainer.run_once(), 1)
         self.assertEqual(len(sent), 1)
@@ -525,9 +525,70 @@ class RecoveryJobDrainRunnerTests(unittest.TestCase):
         def boom(_message: str) -> None:
             raise RuntimeError("telegram unreachable")
 
-        drainer = RecoveryJobDrainRunner(memory=store, notifier=boom)
+        drainer = RecoveryJobDrainRunner(memory=store, notifier=boom, min_age_seconds=0.0)
         self.assertEqual(drainer.run_once(), 0)
         self.assertEqual(len(store.list_pending_recovery_jobs()), 1)
+
+    def test_does_not_drain_fresh_jobs(self) -> None:
+        # PR #90 review (codex P2): the brain tells the user a recovery request
+        # is queued "para retomarlo cuando el contexto se limpie", so a
+        # just-created job must NOT be dismissed minutes later — only stale
+        # backlog gets drained.
+        store = self._store()
+        store.create_recovery_job(
+            "sess-1",
+            turn_id=None,
+            failure_reason="x",
+            original_request_sanitized="pedido reciente",
+        )
+        sent: list[str] = []
+        drainer = RecoveryJobDrainRunner(
+            memory=store, notifier=sent.append, min_age_seconds=3600.0
+        )
+        self.assertEqual(drainer.run_once(), 0)
+        self.assertEqual(sent, [])
+        self.assertEqual(len(store.list_pending_recovery_jobs()), 1)
+
+    def test_truncates_long_request_in_message(self) -> None:
+        # PR #90 review (gemini): Telegram rejects messages over 4096 chars; an
+        # unbounded request would brick the drain forever. Truncate defensively.
+        store = self._store()
+        store.create_recovery_job(
+            "sess-1",
+            turn_id=None,
+            failure_reason="x",
+            original_request_sanitized="A" * 1000,
+        )
+        sent: list[str] = []
+        drainer = RecoveryJobDrainRunner(memory=store, notifier=sent.append, min_age_seconds=0.0)
+        self.assertEqual(drainer.run_once(), 1)
+        self.assertLess(len(sent[0]), 500)
+        self.assertIn("...", sent[0])
+
+    def test_caps_per_cycle_and_paces_between_sends(self) -> None:
+        # PR #90 review (gemini): a large backlog must not block the thread or
+        # blow Telegram's per-chat rate limit. Cap per cycle and pace sends.
+        store = self._store()
+        for i in range(3):
+            store.create_recovery_job(
+                f"sess-{i}",
+                turn_id=None,
+                failure_reason="x",
+                original_request_sanitized=f"req{i}",
+            )
+        sent: list[str] = []
+        slept: list[float] = []
+        drainer = RecoveryJobDrainRunner(
+            memory=store,
+            notifier=sent.append,
+            min_age_seconds=0.0,
+            max_per_cycle=2,
+            sleep=slept.append,
+        )
+        self.assertEqual(drainer.run_once(), 2)
+        self.assertEqual(len(sent), 2)
+        self.assertEqual(len(slept), 1)  # one pace between the two sends
+        self.assertEqual(len(store.list_pending_recovery_jobs()), 1)  # 1 left for next cycle
 
 
 class DaemonRunLoopTests(unittest.IsolatedAsyncioTestCase):

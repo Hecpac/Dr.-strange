@@ -539,8 +539,15 @@ class PendingVerificationReconciliationJobRunner:
         self.observe.emit(event_type, payload=payload)
 
 
+# A recovery job younger than this is still a live promise (the brain just
+# told the user it would resume the request "cuando el contexto se limpie"), so
+# the drainer leaves it alone and only cleans genuinely-stale backlog.
+RECOVERY_JOB_STALE_SECONDS = 86_400.0
+_RECOVERY_REQUEST_PREVIEW_CHARS = 300
+
+
 class RecoveryJobDrainRunner:
-    """Drains pending ``recovery_jobs`` off-tick (2026-06-10 audit C1).
+    """Drains stale ``recovery_jobs`` off-tick (2026-06-10 audit C1).
 
     ``recovery_jobs`` accumulated forever because ``resolve_recovery_job`` had
     no runtime caller — a false promise of continuity (the agent told the user
@@ -550,7 +557,9 @@ class RecoveryJobDrainRunner:
     Notify-and-close MVP: it NEVER re-executes the request (auto-replay would
     be a separate opt-in evolution). notify-then-resolve ordering means a failed
     notification leaves the job pending for the next cycle rather than silently
-    dropping it — we would rather double-notify than lose the promise.
+    dropping it — we would rather double-notify than lose the promise. Only jobs
+    older than ``min_age_seconds`` are touched, and each cycle is capped and
+    paced to respect Telegram's per-chat rate limit.
     """
 
     def __init__(
@@ -560,17 +569,30 @@ class RecoveryJobDrainRunner:
         notifier: Callable[[str], object],
         observe: ObserveStream | None = None,
         should_stop: Callable[[], bool] | None = None,
+        min_age_seconds: float = RECOVERY_JOB_STALE_SECONDS,
+        max_per_cycle: int = 10,
+        inter_message_delay_seconds: float = 1.0,
+        sleep: Callable[[float], object] = time.sleep,
     ) -> None:
         self.memory = memory
         self.notifier = notifier
         self.observe = observe
         self.should_stop = should_stop
+        self.min_age_seconds = min_age_seconds
+        self.max_per_cycle = max(1, int(max_per_cycle))
+        self.inter_message_delay_seconds = inter_message_delay_seconds
+        self.sleep = sleep
 
     def run_once(self) -> int:
         if self.should_stop is not None and self.should_stop():
             return 0
+        jobs = self.memory.list_pending_recovery_jobs(
+            older_than_seconds=self.min_age_seconds
+        )[: self.max_per_cycle]
         drained = 0
-        for job in self.memory.list_pending_recovery_jobs():
+        for index, job in enumerate(jobs):
+            if self.should_stop is not None and self.should_stop():
+                break
             try:
                 self.notifier(self._format(job))
             except Exception:
@@ -592,11 +614,17 @@ class RecoveryJobDrainRunner:
                         "failure_reason": job.get("failure_reason"),
                     },
                 )
+            # Pace successful sends so a backlog cannot trip Telegram's per-chat
+            # rate limit (~1 msg/sec). No pace after the last job of the cycle.
+            if index < len(jobs) - 1:
+                self.sleep(self.inter_message_delay_seconds)
         return drained
 
     @staticmethod
     def _format(job: dict[str, Any]) -> str:
         request = (job.get("original_request_sanitized") or "").strip()
+        if len(request) > _RECOVERY_REQUEST_PREVIEW_CHARS:
+            request = request[: _RECOVERY_REQUEST_PREVIEW_CHARS - 3] + "..."
         reason = job.get("failure_reason") or "desconocido"
         return (
             "Tenía una petición que prometí retomar y no completé "

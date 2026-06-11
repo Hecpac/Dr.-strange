@@ -212,10 +212,12 @@ invariants:
           drained by a runtime caller of resolve_recovery_job. The
           RecoveryJobDrainRunner (notify-and-close MVP) stays registered as a
           daemon background runner off-tick; losing the wiring regresses the
-          queue to a cemetery + false promise of continuity (audit C1).
+          queue to a cemetery + false promise of continuity (audit C1). Only
+          STALE jobs are drained (>= RECOVERY_JOB_STALE_SECONDS old) so a
+          freshly-queued promise is not dismissed before the user can continue.
     chokepoints:
-      - daemon.RecoveryJobDrainRunner.run_once  # notify-then-resolve, never re-executes
-      - main._setup_scheduler  # register_background_job_runner(name="recovery_drain")
+      - daemon.RecoveryJobDrainRunner.run_once  # notify-then-resolve, never re-executes, stale-only + paced
+      - main._setup_scheduler  # register_background_job_runner(name="recovery_drain"), gated on Telegram config
       - memory.MemoryStore.resolve_recovery_job  # finally has a runtime caller
     enforced_by:
       - tests/test_daemon.py::RecoveryJobDrainRunnerTests
