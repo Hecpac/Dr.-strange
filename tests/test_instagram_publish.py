@@ -299,6 +299,33 @@ def test_publish_photo_rejects_unverified_profile_after_share(svc, tmp_path, mon
     assert res.reason == "profile_not_verified"
 
 
+def test_publish_photo_profile_nav_failure_is_not_verified(svc, tmp_path, monkeypatch):
+    # If the profile page never loads, the snapshot must report unknown instead
+    # of evaluating whatever page is still up (whose links would fake a change).
+    photo = tmp_path / "hero.jpg"
+    photo.write_bytes(b"x" * 1024)
+
+    class _ProfileNavFailPage(_FakePage):
+        def goto(self, url, *a, **k):
+            if "/pachanodesign/" in str(url):
+                raise RuntimeError("net::ERR_TIMED_OUT")
+
+    page = _ProfileNavFailPage(
+        hrefs=["/pachanodesign/"],
+        body_text="Se compartió tu publicación",
+        post_counts=["6", "7"],
+        first_posts=["/p/OLD/", "/p/NEW/"],
+    )
+    _install_fake_playwright(monkeypatch, page)
+
+    res = svc.publish_photo(str(photo), caption="hero", expected_account="pachanodesign")
+
+    assert res.shared is True
+    assert res.profile_verified is False
+    assert res.ok is False
+    assert res.reason == "profile_not_verified"
+
+
 def test_brain_tool_registered_with_schema():
     from claw_v2.tools import (
         DEFAULT_TOOL_AGENT_CLASSES,

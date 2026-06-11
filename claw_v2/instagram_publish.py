@@ -218,12 +218,14 @@ class InstagramPublishService:
             page.goto(f"https://www.instagram.com/{account}/", wait_until="domcontentloaded", timeout=45000)
             page.wait_for_timeout(6000)
         except Exception:
-            pass
+            # Navigation failed: evaluating whatever page is still loaded would
+            # read counts/links from the wrong page and fake a profile change.
+            return None, None
         try:
             count = page.evaluate(
                 """
                 () => {
-                  const m = (document.body.innerText || '').match(/([\\d.,]+)\\s+publicaciones/i);
+                  const m = (document.body.innerText || '').match(/([\\d.,]+)\\s+(?:publicaciones|posts)/i);
                   return m ? m[1] : null;
                 }
                 """
