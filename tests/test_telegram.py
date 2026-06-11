@@ -1160,6 +1160,21 @@ class ObserveEmitOffloadTests(unittest.IsolatedAsyncioTestCase):
             "observe locked-retry time.sleep ran on the event-loop thread",
         )
 
+    async def test_emit_after_stop_runs_inline_without_new_executor(self) -> None:
+        bot_service = MagicMock()
+        transport = TelegramTransport(bot_service=bot_service, token="t")
+        await transport.stop()  # never started: _app stays None, executor closed
+
+        await transport._aemit_transport_event("telegram_outbound_text", {"k": "v"})
+
+        # A shutdown-tail emit must not resurrect an executor nobody will shut
+        # down again...
+        self.assertIsNone(transport._observe_executor)
+        # ...but the audit event itself must still land (inline fallback).
+        bot_service.observe.emit.assert_called_once_with(
+            "telegram_outbound_text", payload={"k": "v"}
+        )
+
     async def test_async_latency_emit_does_not_sleep_on_loop_thread(self) -> None:
         stream = self._locked_observe_stream()
         bot_service = MagicMock()

@@ -611,6 +611,7 @@ class TelegramTransport:
         # isolating it from the loop's default executor stops emit retry-naps
         # from starving message delivery. Created lazily on first emit.
         self._observe_executor: ThreadPoolExecutor | None = None
+        self._observe_executor_closed = False
 
     def _chat_lock(self, session_id: str) -> asyncio.Lock:
         lock = self._chat_locks.get(session_id)
@@ -653,7 +654,11 @@ class TelegramTransport:
         """Callback signature acquire_polling_lock expects (event_type, payload)."""
         self._emit_transport_event(event_type, payload)
 
-    def _observe_emit_executor(self) -> ThreadPoolExecutor:
+    def _observe_emit_executor(self) -> ThreadPoolExecutor | None:
+        if self._observe_executor_closed:
+            # stop() already shut the executor down: don't resurrect one
+            # nobody will shut down again.
+            return None
         executor = self._observe_executor
         if executor is None:
             # Created on the event-loop thread (the only caller of the async
@@ -665,6 +670,7 @@ class TelegramTransport:
         return executor
 
     def _shutdown_observe_executor(self) -> None:
+        self._observe_executor_closed = True
         executor = self._observe_executor
         if executor is not None:
             self._observe_executor = None
@@ -686,9 +692,14 @@ class TelegramTransport:
         and awaiting keeps each session's events ordered and visible to the
         caller once its handler returns.
         """
+        executor = self._observe_emit_executor()
+        if executor is None:
+            # Shutdown-tail emit: keep the audit event, accept the inline write.
+            self._emit_transport_event(event_type, payload)
+            return
         loop = _asyncio_get_running_loop()
         await loop.run_in_executor(
-            self._observe_emit_executor(),
+            executor,
             self._emit_transport_event,
             event_type,
             payload,
@@ -1078,6 +1089,8 @@ class TelegramTransport:
                 exc.owner_pid,
             )
             return
+        # (Re)starting: late emits may offload again.
+        self._observe_executor_closed = False
         self._PID_FILE.write_text(str(os.getpid()))
         builder = ApplicationBuilder().token(self._token)
         # Process updates concurrently so operator interrupts (/freeze,
