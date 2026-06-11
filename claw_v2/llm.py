@@ -170,6 +170,16 @@ class LLMRouter:
             response = self._complete_with_circuit(adapter, request)
             _suppress_corrupt_provider_content(response)
         except AdapterError as exc:
+            if isinstance(exc.metadata, dict) and exc.metadata.get("reason") == "cost_metering_unknown":
+                # The aborted round was already billed at a rate we cannot price,
+                # but the abort means no llm_response will carry cost_unknown=1.
+                # Record the unpriced billable spend so the daily gate freezes
+                # future billable traffic instead of leaking one round per call.
+                self._audit_event(
+                    "cost_metering_unknown",
+                    request=request,
+                    metadata={"provider": request.provider, "model": request.model, "aborted": True},
+                )
             fallback_provider = self._pick_fallback(request.provider, lane)
             if fallback_provider is None:
                 raise

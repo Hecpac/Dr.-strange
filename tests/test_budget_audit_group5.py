@@ -101,13 +101,13 @@ class CostBreakerBlocksLlmTests(unittest.TestCase):
         window.before_llm_request(lane="brain", provider="anthropic", model="claude-opus-4-7")
 
 
-def _tool_request(*, max_budget: float) -> LLMRequest:
+def _tool_request(*, max_budget: float, model: str = "gpt-5.4-mini") -> LLMRequest:
     return LLMRequest(
         prompt="haz la tarea",
         system_prompt=None,
         lane="worker",
         provider="openai",
-        model="gpt-5.4-mini",
+        model=model,
         effort=None,
         session_id=None,
         max_budget=max_budget,
@@ -176,6 +176,17 @@ class OpenAIBudgetEnforcementTests(unittest.TestCase):
                 adapter.complete(_tool_request(max_budget=0.01))
         self.assertEqual(ctx.exception.metadata.get("reason"), "budget_exceeded")
 
+    def test_unpriced_metered_round_aborts_with_cost_metering_unknown(self) -> None:
+        # M21 abort path: a billed round on an unpriced model under max_budget>0
+        # must abort with reason=cost_metering_unknown (not run uncapped).
+        rounds = [_fake_round(calls=1, usage_tokens=1000), _fake_round(calls=0, usage_tokens=1000)]
+        client = _FakeToolClient(rounds)
+        adapter = self._adapter()
+        with patch.object(OpenAIAdapter, "_load_sdk", staticmethod(lambda: SimpleNamespace(OpenAI=lambda **kw: client))):
+            with self.assertRaises(AdapterError) as ctx:
+                adapter.complete(_tool_request(max_budget=5.0, model="gpt-unpriced-xyz"))
+        self.assertEqual(ctx.exception.metadata.get("reason"), "cost_metering_unknown")
+
     def test_multi_round_usage_and_cost_are_summed(self) -> None:
         rounds = [_fake_round(calls=1, usage_tokens=1000), _fake_round(calls=0, usage_tokens=1000)]
         client = _FakeToolClient(rounds)
@@ -193,6 +204,30 @@ class OpenAIBudgetEnforcementTests(unittest.TestCase):
                 "openai", "gpt-5.4-mini", {"input_tokens": 1000, "output_tokens": 1000}
             )
             self.assertAlmostEqual(response.cost_estimate, per_round.amount_usd * 2, places=9)
+
+
+class UnknownCostGateCountsAbortMarkerTests(unittest.TestCase):
+    """PR #89 review round 3 (codex P1): the M21 abort raises before any
+    llm_response is built, so the round it already billed left no
+    cost_unknown=1 row. The daily gate must also count the cost_metering_unknown
+    audit marker, or repeated unpriced requests leak one paid round each while
+    never freezing future billable traffic."""
+
+    def test_gate_counts_cost_metering_unknown_event(self) -> None:
+        from claw_v2.observe import ObserveStream
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stream = ObserveStream(Path(tmpdir) / "observe.db")
+            # The abort marker carries no cost_unknown=1 in its payload — the
+            # gate must key on the event type itself.
+            stream.emit(
+                "cost_metering_unknown",
+                provider="openai",
+                payload={"model": "gpt-unpriced-xyz", "aborted": True},
+            )
+            self.assertTrue(stream.has_unknown_billable_cost_today(providers={"openai"}))
+            # Provider filter still scopes it: a non-openai gate must not trip.
+            self.assertFalse(stream.has_unknown_billable_cost_today(providers={"anthropic"}))
 
 
 if __name__ == "__main__":

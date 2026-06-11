@@ -35,8 +35,6 @@ DEVELOPMENT_ALLOWED_BINARIES = frozenset(
         "npm",
         "npx",
         "pnpm",
-        "pip",
-        "pip3",
         "python",
         "python3",
     }
@@ -86,18 +84,63 @@ PYTHON_SAFE_MODULES = frozenset(
         "claw_v2.browser_cli",
         "claw_v2.cli.echo_smoke",
         "claw_v2.cli.heygen_deliver",
-        "claw_v2.cli.instagram_publish",
         "claw_v2.terminal_bridge_cli",
         "compileall",
-        "ensurepip",
-        "pip",
         "py_compile",
-        "pytest",
         "unittest",
         "venv",
     }
 )
 NODE_INTERPRETERS = frozenset({"node"})
+GIT_INTERPRETERS = frozenset({"git"})
+# git config keys that are documented command-execution sinks: setting any of
+# these (via `-c key=val`, `--config-env`, or a `git config` write) makes a
+# later git operation shell out to an attacker-chosen command. Deny them so a
+# Bash caller cannot escape the binary allowlist through git's own config.
+GIT_CONFIG_EXEC_SINK_KEYS = frozenset(
+    {
+        "core.pager",
+        "core.sshcommand",
+        "core.fsmonitor",
+        "core.editor",
+        "core.hookspath",
+        "core.askpass",
+        "sequence.editor",
+        "protocol.ext.allow",
+        "uploadpack.packobjectshook",
+        "diff.external",
+        "gpg.program",
+        "gpg.ssh.program",
+        "gpg.x509.program",
+    }
+)
+# Suffixes of git config sub-keys that name a program git later executes:
+# `<tool>.cmd` and `<tool>.path` (difftool/mergetool/man/browser/guitool),
+# `filter.<d>.process/.clean/.smudge`, `credential[.<url>].helper`,
+# `diff.<d>.command`/`trailer.<t>.command`, `merge.<d>.driver`.
+GIT_CONFIG_EXEC_SINK_SUFFIXES = (".cmd", ".process", ".helper", ".command", ".driver", ".clean", ".smudge", ".path")
+# git reads these from the environment straight into runtime config / exec
+# hooks, so an `env VAR=val git ...` (or inline-prefixed) call is the same
+# exec-sink escape as `git -c`/`git config`, just routed through the shell env
+# that _unwrap_command_tokens strips before the git check.
+GIT_ENV_EXEC_SINK_VARS = frozenset(
+    {
+        "GIT_SSH",
+        "GIT_SSH_COMMAND",
+        "GIT_PROXY_COMMAND",
+        "GIT_EXTERNAL_DIFF",
+        "GIT_PAGER",
+        "GIT_EDITOR",
+        "GIT_SEQUENCE_EDITOR",
+        "GIT_ASKPASS",
+        "GIT_CONFIG",
+        "GIT_EXEC_PATH",
+    }
+)
+# General-purpose env vars that relocate git's global config search to an
+# attacker-writable dir (~/.gitconfig, $XDG_CONFIG_HOME/git/config). Blocked
+# only when the command is git — they have legitimate non-git uses.
+GIT_HOME_CONFIG_VARS = frozenset({"HOME", "XDG_CONFIG_HOME"})
 VERSION_OR_HELP_FLAGS = frozenset({"--version", "-V", "-VV", "--help", "-h"})
 VERSION_OR_HELP_ONLY_BINARIES = frozenset({"claude", "codex"})
 WORKSPACE_SCRIPT_SUFFIXES = (".sh",)
@@ -213,9 +256,27 @@ def check_command(command: str, policy: SandboxPolicy) -> str | None:
         return "unparseable command"
     if not tokens:
         return None
-    tokens = _unwrap_command_tokens(tokens)
+    # Scan for git exec-sink env injection on the raw tokens (catches
+    # `env VAR=val git ...` and inline `VAR=val git ...`, where _unwrap strips
+    # the assignments) and again post-unwrap (catches `bash -c '... git ...'`,
+    # where they survive inside the -c string).
+    raw_tokens = tokens
+    env_sink = _check_git_env_injection(raw_tokens)
+    if env_sink is not None:
+        return env_sink
+    tokens = _unwrap_command_tokens(raw_tokens)
     if not tokens:
         return "unparseable command"
+    env_sink = _check_git_env_injection(tokens)
+    if env_sink is not None:
+        return env_sink
+    # HOME/XDG_CONFIG_HOME redirection is an exec-sink escape only for git (it
+    # reads a global gitconfig from there); they have legitimate non-git uses,
+    # so gate this on git being the resolved command.
+    if Path(tokens[0]).name in GIT_INTERPRETERS:
+        home_sink = _check_git_home_redirection(raw_tokens)
+        if home_sink is not None:
+            return home_sink
     if "xargs" in [Path(token).name for token in tokens]:
         return "xargs is not allowed"
     base_cmd = Path(tokens[0]).name
@@ -240,6 +301,8 @@ def _check_interpreter_invocation(base_cmd: str, tokens: list[str], policy: Sand
         return _check_python_invocation(tokens, policy)
     if base_cmd in NODE_INTERPRETERS:
         return _check_node_invocation(tokens, policy)
+    if base_cmd in GIT_INTERPRETERS:
+        return _check_git_invocation(tokens)
     return None
 
 
@@ -256,9 +319,9 @@ def _check_python_invocation(tokens: list[str], policy: SandboxPolicy) -> str | 
             return "inline python execution is not allowed; write a workspace script and run it"
         if arg == "-m":
             module_name = args[index + 1] if index + 1 < len(args) else ""
-            return _check_python_module(module_name)
+            return _check_python_module(module_name, args[index + 2 :], policy)
         if arg.startswith("-m") and len(arg) > 2:
-            return _check_python_module(arg[2:])
+            return _check_python_module(arg[2:], args[index + 1 :], policy)
     script = _first_non_option_arg(args)
     if script is None:
         return "python execution requires an explicit workspace script"
@@ -269,11 +332,20 @@ def _check_python_invocation(tokens: list[str], policy: SandboxPolicy) -> str | 
     return None
 
 
-def _check_python_module(module_name: str) -> str | None:
+def _check_python_module(module_name: str, module_args: list[str], policy: SandboxPolicy) -> str | None:
     normalized = module_name.strip()
-    if normalized in PYTHON_SAFE_MODULES:
-        return None
-    return f"python module '{normalized or '<missing>'}' is not in the safe module allowlist"
+    if normalized not in PYTHON_SAFE_MODULES:
+        return f"python module '{normalized or '<missing>'}' is not in the safe module allowlist"
+    for arg in module_args:
+        # _is_path_token also unwraps --opt=/path values and catches slash-less
+        # tokens that exist in the workspace (`..`, an in-workspace symlink), so
+        # option-embedded and relative escapes get the same boundary check.
+        if not _is_path_token(arg, policy):
+            continue
+        candidate = _path_candidate_token(arg) or arg
+        if not _script_path_within_policy(candidate, policy):
+            return "python module path argument outside allowed boundaries"
+    return None
 
 
 def _check_node_invocation(tokens: list[str], policy: SandboxPolicy) -> str | None:
@@ -294,6 +366,82 @@ def _check_node_invocation(tokens: list[str], policy: SandboxPolicy) -> str | No
         return "node execution is limited to explicit .js, .mjs, or .cjs scripts"
     if not _script_path_within_policy(script, policy):
         return "node script path outside allowed boundaries"
+    return None
+
+
+def _check_git_home_redirection(tokens: list[str]) -> str | None:
+    for token in tokens:
+        if token.startswith("-") or "=" not in token:
+            continue
+        if token.split("=", 1)[0] in GIT_HOME_CONFIG_VARS:
+            return (
+                "overriding HOME/XDG_CONFIG_HOME for git is not allowed; git would "
+                "read an attacker-writable global gitconfig (core.sshCommand, ...)"
+            )
+    return None
+
+
+def _check_git_env_injection(tokens: list[str]) -> str | None:
+    for token in tokens:
+        if token.startswith("-") or "=" not in token:
+            continue
+        name = token.split("=", 1)[0]
+        # Fail closed on the whole GIT_CONFIG_* env family (COUNT/KEY_n/VALUE_n,
+        # the older GIT_CONFIG_PARAMETERS, GLOBAL/SYSTEM, and any future member)
+        # plus the standalone exec-sink vars — they all fold into git config or
+        # an executed program.
+        if name in GIT_ENV_EXEC_SINK_VARS or name.startswith("GIT_CONFIG_"):
+            return (
+                "git exec-sink environment variables (GIT_CONFIG_*, GIT_SSH_COMMAND, "
+                "GIT_EXTERNAL_DIFF, GIT_PAGER, ...) are not allowed"
+            )
+    return None
+
+
+def _check_git_invocation(tokens: list[str]) -> str | None:
+    args = tokens[1:]
+    config_index: int | None = None
+    for index, arg in enumerate(args):
+        # `git -c key=val` / `-ckey=val` / `--config-env=key=ENV` inject config
+        # for this invocation; the exec-sink keys turn into arbitrary command
+        # execution. No legitimate runtime caller passes inline git config.
+        if arg in {"-c", "--config-env"}:
+            return "inline git config (-c/--config-env) is not allowed; it can execute arbitrary commands"
+        if arg.startswith("-c") and len(arg) > 2:
+            return "inline git config (-c/--config-env) is not allowed; it can execute arbitrary commands"
+        if arg.startswith("--config-env"):
+            return "inline git config (-c/--config-env) is not allowed; it can execute arbitrary commands"
+        # `git --exec-path=<dir>` redirects where git looks for its git-*
+        # subprograms, so a planted git-remote-https/etc. runs on the next op.
+        if arg == "--exec-path" or arg.startswith("--exec-path="):
+            return "git --exec-path is not allowed; it can execute arbitrary commands"
+        # `config` may appear AFTER global options (`-C <path>`, `--git-dir=`,
+        # `--work-tree=`, ...), so match it in any position, not just index 0.
+        if arg == "config" and config_index is None:
+            config_index = index
+    if config_index is not None:
+        # Value-taking options (`--type string`, `--file <f>`, ...) shift the
+        # key's position, so screen every operand as a potential key instead of
+        # sniffing only the first.
+        operands = [a for a in args[config_index + 1 :] if not a.startswith("-")]
+        for operand in operands:
+            key = operand.lower()
+            # `git config <sink-key> <cmd>` persists a command-execution sink
+            # for later runs (a subsequent `git log`/`git diff` shells out to
+            # it); *.helper covers credential[.<url>].helper, whose `!` values
+            # are documented shell snippets.
+            if key in GIT_CONFIG_EXEC_SINK_KEYS or key.endswith(GIT_CONFIG_EXEC_SINK_SUFFIXES):
+                return "git config of a command-execution sink (core.pager, sshCommand, *.cmd, ...) is not allowed"
+        # `git config alias.X '!<shell>'` runs an arbitrary shell command when
+        # the alias is later invoked via `git X`. Value-taking options
+        # (`--type string`, `--file <f>`) can sit between the key and the value,
+        # so don't rely on key/value adjacency: a `!` value anywhere in an alias
+        # write is the escape. A bare `git config --get alias.x` read has no `!`
+        # operand, so it stays allowed.
+        if any(op.lower().startswith("alias.") for op in operands) and any(
+            op.lstrip().startswith("!") for op in operands
+        ):
+            return "git alias with a shell escape (!) is not allowed; it can execute arbitrary commands"
     return None
 
 

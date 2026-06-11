@@ -7,7 +7,7 @@ import time
 import unittest
 from pathlib import Path
 
-from claw_v2.jobs import JobService
+from claw_v2.jobs import JOB_TERMINAL_STATUSES, JobService
 from claw_v2.observe import ObserveStream
 
 
@@ -174,6 +174,56 @@ class JobServiceTests(unittest.TestCase):
             self.assertEqual(len(claimed), 1)
             self.assertEqual(seed.summary(), {"running": 1})
 
+    def test_update_does_not_resurrect_terminal_job_across_service_instances(self) -> None:
+        # Defense-in-depth twin of the claim_next transactionality guard:
+        # _update must not let a second JobService connection flip a job
+        # terminal between its SELECT and its UPDATE. `completer` reads the
+        # running row, a sibling instance commits `failed` into the read->write
+        # window, and the late completion must not overwrite (resurrect) the
+        # terminal status. Without BEGIN IMMEDIATE, completer's UPDATE clobbers
+        # the committed `failed` with `completed` (a torn write).
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            seed = JobService(db_path)
+            created = seed.enqueue(kind="pipeline.issue")
+            seed.claim_next(worker_id="worker-seed")  # -> running
+
+            completer = JobService(db_path)
+            failer = JobService(db_path)
+            barrier = threading.Barrier(2)
+            results = {}
+
+            def widen_completer_write_window(statement: str) -> None:
+                # Fires as each completer statement begins. The SELECT has
+                # already read `running` by the time the UPDATE starts; hold
+                # that window open so `failer` can commit `failed` into it.
+                if statement.strip().upper().startswith("UPDATE AGENT_JOBS"):
+                    time.sleep(0.2)
+
+            completer._conn.set_trace_callback(widen_completer_write_window)
+
+            def run_complete() -> None:
+                barrier.wait()
+                results["complete"] = completer.complete(created.job_id, result={"ok": True})
+
+            def run_fail() -> None:
+                barrier.wait()
+                time.sleep(0.01)  # let completer's SELECT read `running` first
+                results["fail"] = failer.fail(created.job_id, error="boom", retry=False)
+
+            threads = [threading.Thread(target=run_complete), threading.Thread(target=run_fail)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+            persisted = seed.get(created.job_id).status
+            # No torn write: every caller's returned status must match the row
+            # that actually persisted.
+            self.assertIn(persisted, JOB_TERMINAL_STATUSES)
+            self.assertEqual(results["complete"].status, persisted)
+            self.assertEqual(results["fail"].status, persisted)
+
     def test_fail_retries_until_attempt_budget_is_exhausted(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             service = JobService(Path(tmpdir) / "claw.db")
@@ -227,6 +277,26 @@ class JobServiceTests(unittest.TestCase):
                 ["job_enqueued", "job_claimed", "job_completed"],
             )
             self.assertTrue(all(event["job_id"] == created.job_id for event in events))
+
+    def test_complete_does_not_resurrect_terminal_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = JobService(Path(tmpdir) / "claw.db")
+            rec = service.enqueue(kind="demo")
+            service.fail(rec.job_id, error="boom", retry=False)
+            self.assertEqual(service.get(rec.job_id).status, "failed")
+            out = service.complete(rec.job_id, result={"ok": True})  # must not resurrect
+            self.assertIsNotNone(out)
+            self.assertEqual(out.status, "failed")
+            self.assertEqual(service.get(rec.job_id).status, "failed")
+
+    def test_fail_does_not_resurrect_completed_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = JobService(Path(tmpdir) / "claw.db")
+            rec = service.enqueue(kind="demo")
+            service.complete(rec.job_id, result={"ok": True})
+            out = service.fail(rec.job_id, error="late")  # must not resurrect, must not deadlock
+            self.assertIsNotNone(out)
+            self.assertEqual(out.status, "completed")
 
 
 if __name__ == "__main__":

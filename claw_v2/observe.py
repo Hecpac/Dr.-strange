@@ -308,7 +308,7 @@ class ObserveStream:
                 f"""
                 SELECT COALESCE(SUM(json_extract(payload, '$.cost_estimate')), 0.0)
                 FROM observe_stream
-                WHERE event_type = 'llm_response'
+                WHERE event_type IN ('llm_response', 'llm_fallback')
                   AND timestamp >= date('now', 'start of day')
                   {provider_filter}
                 """,
@@ -336,9 +336,12 @@ class ObserveStream:
                 f"""
                 SELECT 1
                 FROM observe_stream
-                WHERE event_type = 'llm_response'
-                  AND timestamp >= date('now', 'start of day')
-                  AND json_extract(payload, '$.cost_unknown') = 1
+                WHERE timestamp >= date('now', 'start of day')
+                  AND (
+                      (event_type IN ('llm_response', 'llm_fallback')
+                       AND json_extract(payload, '$.cost_unknown') = 1)
+                      OR event_type = 'cost_metering_unknown'
+                  )
                   {provider_filter}
                 LIMIT 1
                 """,

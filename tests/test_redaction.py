@@ -41,6 +41,35 @@ class RedactSensitiveTests(unittest.TestCase):
         self.assertNotIn("AbcDefGhIjKl", result)
         self.assertIn("[REDACTED]", result)
 
+    def test_strips_truncated_two_segment_jwt(self) -> None:
+        # 2026-06-10 audit (C6): observe_stream stored a real Regrid JWT in
+        # cleartext because the payload was sliced to 80 chars (cutting the 3rd
+        # segment) BEFORE redaction, and the JWT pattern required 3 segments.
+        # A 2-segment header.payload prefix is still a usable token.
+        truncated = "eyJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJyZWdyaWQuY29tIiwiaWF0IjoxNzgwOTQ0MjM5LCJleHAiOjE"
+        result = redact_sensitive(f"pegue este token {truncated}")
+        self.assertNotIn("eyJhbGciOiJIUzI1NiJ9", result)
+        self.assertNotIn("eyJpc3MiOiJyZWdyaWQ", result)
+        self.assertIn("[REDACTED]", result)
+
+    def test_redacts_truncated_jwt_with_short_third_segment(self) -> None:
+        # PR #89 review round 6 (gemini medium): two long segments already
+        # identify a JWT, so a short trailing 3rd segment must be fully redacted
+        # rather than left as "[REDACTED].ab".
+        token = "eyJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJyZWdyaWQuY29tIiwiaWF0IjoxNzgwOTQ0MjM5.ab"
+        self.assertEqual(redact_sensitive(f"tok {token}"), "tok [REDACTED]")
+
+    def test_keeps_short_two_segment_base64_pair(self) -> None:
+        # PR #89 review round 4 (gemini medium): the truncated-JWT fallback now
+        # requires >=10-char payload/signature segments (matching the 3-part
+        # regex), so a short eyJ-prefixed pair is not over-redacted.
+        self.assertEqual(redact_sensitive("eyJabcdefghij.abcd"), "eyJabcdefghij.abcd")
+
+    def test_keeps_bare_jwt_header_without_dot(self) -> None:
+        # Guard against over-redaction: a base64-ish word with no dot is not a
+        # credential and must survive.
+        self.assertEqual(redact_sensitive("eyJhbGciOiJIUzI1NiJ9"), "eyJhbGciOiJIUzI1NiJ9")
+
     def test_strips_query_string_token(self) -> None:
         text = "https://example.com/form?token=secret-token-123456789&mode=cyber"
         result = redact_sensitive(text)

@@ -215,6 +215,212 @@ class SafetyTests(unittest.TestCase):
             policy = SandboxPolicy(workspace_root=workspace)
             self.assertIsNotNone(check_command("echo $(cat ~/.netrc)", policy))
 
+    def test_sandbox_blocks_git_config_exec_sink(self) -> None:
+        # 2026-06-10 audit (C2): `git` is in the lowest-privilege allowlist, but
+        # `git -c core.pager=<cmd>` (and sshCommand/fsmonitor/protocol.ext) makes
+        # git shell out to an attacker-chosen command -> ACE past the binary
+        # allowlist, with no shell metachar to trip _SHELL_OPERATORS_RE.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            policy = SandboxPolicy(workspace_root=workspace)
+            for command in (
+                "git -c core.pager=id log",
+                "git -c core.sshCommand=id ls-remote origin",
+                "git -c core.fsmonitor=/tmp/evil.sh status",
+                "git -c protocol.ext.allow=always clone ext::sh -c id",
+                "git -ccore.pager=id log",
+                "git config core.pager id",
+            ):
+                with self.subTest(command=command):
+                    self.assertIsNotNone(check_command(command, policy), msg=command)
+
+    def test_sandbox_allows_legitimate_git(self) -> None:
+        # Guard against over-blocking: real runtime git calls (incl. the
+        # self-improve worktree flow that uses `-C <repo>`) must stay allowed.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            policy = SandboxPolicy(workspace_root=workspace)
+            for command in (
+                "git status",
+                "git -C /some/repo status",
+                "git diff -- .",
+                "git add --all -- .",
+            ):
+                with self.subTest(command=command):
+                    self.assertIsNone(check_command(command, policy), msg=command)
+
+    def test_git_config_sink_blocked_after_global_options(self) -> None:
+        # C2 bypass: a global option before `config` must not slip the sink past the guard.
+        with tempfile.TemporaryDirectory() as workspace_str:
+            policy = SandboxPolicy(workspace_root=Path(workspace_str))
+            for cmd in (
+                "git -C . config core.pager 'touch /tmp/pwned'",
+                "git --git-dir=.git config core.sshCommand evil",
+                "git config alias.boom '!touch /tmp/pwned'",
+            ):
+                with self.subTest(command=cmd):
+                    self.assertIsNotNone(check_command(cmd, policy), f"should block: {cmd}")
+
+    def test_git_legitimate_commands_still_allowed(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace_str:
+            policy = SandboxPolicy(workspace_root=Path(workspace_str))
+            for cmd in (
+                "git -C /tmp status",
+                "git status",
+                "git log --oneline",
+                "git config --get user.name",
+                "git config --type string user.name hector",
+                "git config --get alias.st",
+            ):
+                with self.subTest(command=cmd):
+                    self.assertIsNone(check_command(cmd, policy), f"should allow: {cmd}")
+
+    def test_git_config_sink_blocked_despite_value_taking_options(self) -> None:
+        # PR #89 review (gemini high + codex P1): value-taking options
+        # (`--type string`, `--file <f>`) shift the key past the first-operand
+        # sniffing, and credential.helper '!cmd' is a documented shell snippet
+        # missing from the sink list (including its URL-scoped *.helper form).
+        with tempfile.TemporaryDirectory() as workspace_str:
+            policy = SandboxPolicy(workspace_root=Path(workspace_str))
+            for cmd in (
+                "git config --type string core.pager id",
+                "git config --file .gitconfig core.sshCommand evil",
+                "git config --type string alias.boom '!touch /tmp/pwned'",
+                "git config credential.helper '!id'",
+                "git config credential.https://example.com.helper '!id'",
+            ):
+                with self.subTest(command=cmd):
+                    self.assertIsNotNone(check_command(cmd, policy), f"should block: {cmd}")
+
+    def test_git_config_additional_exec_sinks_blocked(self) -> None:
+        # PR #89 review round 2 (gemini high x2): more documented git exec
+        # sinks — askpass/gpg program paths, diff.external, and the custom
+        # diff/merge/filter driver commands (.command/.driver/.clean/.smudge).
+        with tempfile.TemporaryDirectory() as workspace_str:
+            policy = SandboxPolicy(workspace_root=Path(workspace_str))
+            for cmd in (
+                "git config core.askpass /tmp/evil.sh",
+                "git config gpg.program /tmp/evil.sh",
+                "git config gpg.ssh.program /tmp/evil.sh",
+                "git config gpg.x509.program /tmp/evil.sh",
+                "git config diff.external /tmp/evil.sh",
+                "git config diff.evil.command /tmp/evil.sh",
+                "git config merge.evil.driver '/tmp/evil.sh %O %A %B'",
+                "git config filter.evil.clean /tmp/evil.sh",
+                "git config filter.evil.smudge /tmp/evil.sh",
+                # .path points git's diff/merge/browser tools at an executable
+                # (PR #89 round 6, gemini).
+                "git config mergetool.evil.path /tmp/evil.sh",
+                "git config difftool.evil.path /tmp/evil.sh",
+            ):
+                with self.subTest(command=cmd):
+                    self.assertIsNotNone(check_command(cmd, policy), f"should block: {cmd}")
+
+    def test_git_config_env_injection_blocked(self) -> None:
+        # PR #89 review round 2 (codex P1): git reads GIT_CONFIG_COUNT +
+        # GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n> from the environment into
+        # runtime config, and GIT_SSH_COMMAND/GIT_EXTERNAL_DIFF/... are exec
+        # sinks too. `env`/inline assignments get stripped before the git
+        # check, so an env-wrapped (or bash -c wrapped) git call escaped C2.
+        with tempfile.TemporaryDirectory() as workspace_str:
+            policy = SandboxPolicy(workspace_root=Path(workspace_str))
+            for cmd in (
+                "env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0=id git log",
+                "env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.pwn GIT_CONFIG_VALUE_0=evil git pwn",
+                "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0=id git log",
+                # GIT_CONFIG_PARAMETERS is git's older inline-config env channel
+                # (PR #89 round 5, codex); fail closed on all GIT_CONFIG_*.
+                "env GIT_CONFIG_PARAMETERS='alias.pwn=!echo' git pwn",
+                "env GIT_SSH_COMMAND=id git fetch origin",
+                "env GIT_EXTERNAL_DIFF=id git diff",
+                "env GIT_PAGER=id git log",
+                "bash -c 'env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0=id git log'",
+            ):
+                with self.subTest(command=cmd):
+                    self.assertIsNotNone(check_command(cmd, policy), f"should block: {cmd}")
+
+    def test_git_exec_path_redirection_blocked(self) -> None:
+        # PR #89 review round 3 (gemini critical x2): GIT_EXEC_PATH / --exec-path
+        # point git at an attacker dir for its git-* subprograms, so a planted
+        # git-remote-https (etc.) runs on the next git op.
+        with tempfile.TemporaryDirectory() as workspace_str:
+            policy = SandboxPolicy(workspace_root=Path(workspace_str))
+            for cmd in (
+                "env GIT_EXEC_PATH=/tmp/evil git status",
+                "git --exec-path=/tmp/evil status",
+                "git --exec-path status",
+            ):
+                with self.subTest(command=cmd):
+                    self.assertIsNotNone(check_command(cmd, policy), f"should block: {cmd}")
+
+    def test_git_alias_shell_escape_with_leading_space_blocked(self) -> None:
+        # PR #89 review round 3 (gemini high): git ignores leading whitespace
+        # before the `!` shell-escape marker in an alias value.
+        with tempfile.TemporaryDirectory() as workspace_str:
+            policy = SandboxPolicy(workspace_root=Path(workspace_str))
+            for cmd in (
+                "git config alias.boom ' !touch /tmp/pwned'",
+                "git config --type string alias.boom '  !id'",
+                # value-taking option BETWEEN the key and value shifts the `!`
+                # value off the immediate-next operand (PR #89 round 5, gemini).
+                "git config alias.boom --type string '  !id'",
+            ):
+                with self.subTest(command=cmd):
+                    self.assertIsNotNone(check_command(cmd, policy), f"should block: {cmd}")
+
+    def test_git_home_config_redirection_blocked(self) -> None:
+        # PR #89 review round 4 (codex P1): pointing HOME/XDG_CONFIG_HOME at a
+        # writable dir makes git read an attacker-planted global gitconfig
+        # (~/.gitconfig / $XDG_CONFIG_HOME/git/config) whose core.sshCommand etc.
+        # execute on the next git op — an exec-sink escape with no GIT_* var.
+        with tempfile.TemporaryDirectory() as workspace_str:
+            policy = SandboxPolicy(workspace_root=Path(workspace_str))
+            for cmd in (
+                "env HOME=/tmp/evil git ls-remote ssh://example.com/x",
+                "env XDG_CONFIG_HOME=/tmp/evil git fetch origin",
+            ):
+                with self.subTest(command=cmd):
+                    self.assertIsNotNone(check_command(cmd, policy), f"should block: {cmd}")
+
+    def test_git_benign_env_prefix_still_allowed(self) -> None:
+        # Guard against over-blocking: non-sink env prefixes on git stay fine.
+        with tempfile.TemporaryDirectory() as workspace_str:
+            policy = SandboxPolicy(workspace_root=Path(workspace_str))
+            for cmd in (
+                "env GIT_AUTHOR_NAME=hector git status",
+                "env LANG=C git log --oneline",
+            ):
+                with self.subTest(command=cmd):
+                    self.assertIsNone(check_command(cmd, policy), f"should allow: {cmd}")
+
+    def test_python_module_path_args_cannot_escape_workspace(self) -> None:
+        # PR #89 review (gemini high + codex P1): option-embedded values
+        # (--start-directory=/tmp) were skipped wholesale, and slash-less
+        # relative tokens (`..` or an in-workspace symlink pointing out)
+        # dodged the module-arg boundary check entirely.
+        with tempfile.TemporaryDirectory() as workspace_str:
+            workspace = Path(workspace_str) / "ws"
+            workspace.mkdir()
+            (workspace / "pkg").mkdir()
+            (workspace / "exit_link").symlink_to(Path(workspace_str))
+            policy = SandboxPolicy(workspace_root=workspace, capability_profile="engineer")
+            for cmd in (
+                "python3 -m unittest discover --start-directory=/tmp",
+                "python3 -m compileall ..",
+                "python3 -m unittest discover -s exit_link",
+            ):
+                with self.subTest(command=cmd):
+                    self.assertIsNotNone(check_command(cmd, policy), f"should block: {cmd}")
+            for cmd in (
+                "python3 -m compileall pkg",
+                "python3 -m unittest discover -s pkg",
+                "python3 -m unittest discover",
+            ):
+                with self.subTest(command=cmd):
+                    self.assertIsNone(check_command(cmd, policy), f"should allow: {cmd}")
+
     def test_sandbox_allows_regex_dollar_anchor(self) -> None:
         # Guard against over-blocking: a `$` end-of-line regex anchor inside
         # single quotes is a literal, not a variable expansion, and must stay
@@ -357,8 +563,34 @@ class SafetyTests(unittest.TestCase):
             workspace = Path(tmpdir) / "workspace"
             workspace.mkdir()
             policy = SandboxPolicy(workspace_root=workspace, capability_profile="engineer")
-            self.assertIsNone(check_command("python3 -m ensurepip", policy))
+            self.assertIsNone(check_command("python3 -m compileall", policy))
             self.assertIsNone(check_command("python3 -m unittest tests.test_safety", policy))
+
+    def test_engineer_profile_blocks_pip_and_pytest_module_ace(self) -> None:
+        # 2026-06-10 audit (C3): the `-m` check validated only the module name
+        # and returned, ignoring install targets / paths; pip+pytest were in the
+        # safe-module list and pip/pip3 in the binary allowlist. `pip install`
+        # runs attacker setup.py; `pytest <dir>` auto-imports its conftest.py.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            policy = SandboxPolicy(workspace_root=workspace, capability_profile="engineer")
+            self.assertIsNotNone(check_command("python3 -m pip install requests", policy))
+            self.assertIsNotNone(check_command("python3 -m pip install --target /tmp/x evilpkg", policy))
+            self.assertIsNotNone(check_command("python3 -m pytest /etc", policy))
+            self.assertIsNotNone(check_command("pip install requests", policy))
+            self.assertIsNotNone(check_command("pip3 install evil", policy))
+            self.assertIsNotNone(check_command("python3 -m compileall /etc", policy))
+
+    def test_instagram_cli_not_in_python_safe_modules(self) -> None:
+        # C5: the IG CLI is an orphan vector; publishing goes through the Tier-3
+        # InstagramPublish tool, never via Bash. The module must not be safe-listed.
+        with tempfile.TemporaryDirectory() as workspace_str:
+            policy = SandboxPolicy(workspace_root=Path(workspace_str), capability_profile="engineer")
+            violation = check_command(
+                "python3 -m claw_v2.cli.instagram_publish photo.jpg --caption hi", policy
+            )
+            self.assertIsNotNone(violation)
 
     def test_engineer_profile_blocks_node_inline_execution(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

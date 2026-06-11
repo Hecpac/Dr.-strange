@@ -7,6 +7,11 @@ _PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\b\d{8,12}:[A-Za-z0-9_\-]{30,}\b"), "<REDACTED:telegram_token>"),
     (re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b"), "[REDACTED]"),
     (re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.(?:\[REDACTED\]|<REDACTED(?::[^>]+)?>|[A-Za-z0-9_\-]{10,})\.[A-Za-z0-9_\-]{10,}\b"), "[REDACTED]"),
+    # Truncated/2-segment JWT fallback: a header.payload prefix whose 3rd
+    # segment was cut off (e.g. text sliced to 80 chars before redaction)
+    # still leaks a usable token, so redact header.payload with an optional
+    # 3rd segment. Header alone (no dot) is not a credential and is left.
+    (re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}(?:\.[A-Za-z0-9_\-]+)?"), "[REDACTED]"),
     (re.compile(r"\+1[\s.-]?\d{10}\b"), "[REDACTED:phone]"),
     (re.compile(r"\b(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}\b"), "[REDACTED:phone]"),
     # Generic high-entropy catcher. Hardened 2026-05-11 after adversarial
