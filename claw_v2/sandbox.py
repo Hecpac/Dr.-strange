@@ -35,8 +35,6 @@ DEVELOPMENT_ALLOWED_BINARIES = frozenset(
         "npm",
         "npx",
         "pnpm",
-        "pip",
-        "pip3",
         "python",
         "python3",
     }
@@ -89,10 +87,7 @@ PYTHON_SAFE_MODULES = frozenset(
         "claw_v2.cli.instagram_publish",
         "claw_v2.terminal_bridge_cli",
         "compileall",
-        "ensurepip",
-        "pip",
         "py_compile",
-        "pytest",
         "unittest",
         "venv",
     }
@@ -275,9 +270,9 @@ def _check_python_invocation(tokens: list[str], policy: SandboxPolicy) -> str | 
             return "inline python execution is not allowed; write a workspace script and run it"
         if arg == "-m":
             module_name = args[index + 1] if index + 1 < len(args) else ""
-            return _check_python_module(module_name)
+            return _check_python_module(module_name, args[index + 2 :], policy)
         if arg.startswith("-m") and len(arg) > 2:
-            return _check_python_module(arg[2:])
+            return _check_python_module(arg[2:], args[index + 1 :], policy)
     script = _first_non_option_arg(args)
     if script is None:
         return "python execution requires an explicit workspace script"
@@ -288,11 +283,17 @@ def _check_python_invocation(tokens: list[str], policy: SandboxPolicy) -> str | 
     return None
 
 
-def _check_python_module(module_name: str) -> str | None:
+def _check_python_module(module_name: str, module_args: list[str], policy: SandboxPolicy) -> str | None:
     normalized = module_name.strip()
-    if normalized in PYTHON_SAFE_MODULES:
-        return None
-    return f"python module '{normalized or '<missing>'}' is not in the safe module allowlist"
+    if normalized not in PYTHON_SAFE_MODULES:
+        return f"python module '{normalized or '<missing>'}' is not in the safe module allowlist"
+    for arg in module_args:
+        if arg.startswith("-"):
+            continue
+        if "/" in arg or Path(arg).is_absolute():
+            if not _script_path_within_policy(arg, policy):
+                return "python module path argument outside allowed boundaries"
+    return None
 
 
 def _check_node_invocation(tokens: list[str], policy: SandboxPolicy) -> str | None:

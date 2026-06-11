@@ -393,8 +393,24 @@ class SafetyTests(unittest.TestCase):
             workspace = Path(tmpdir) / "workspace"
             workspace.mkdir()
             policy = SandboxPolicy(workspace_root=workspace, capability_profile="engineer")
-            self.assertIsNone(check_command("python3 -m ensurepip", policy))
+            self.assertIsNone(check_command("python3 -m compileall", policy))
             self.assertIsNone(check_command("python3 -m unittest tests.test_safety", policy))
+
+    def test_engineer_profile_blocks_pip_and_pytest_module_ace(self) -> None:
+        # 2026-06-10 audit (C3): the `-m` check validated only the module name
+        # and returned, ignoring install targets / paths; pip+pytest were in the
+        # safe-module list and pip/pip3 in the binary allowlist. `pip install`
+        # runs attacker setup.py; `pytest <dir>` auto-imports its conftest.py.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            policy = SandboxPolicy(workspace_root=workspace, capability_profile="engineer")
+            self.assertIsNotNone(check_command("python3 -m pip install requests", policy))
+            self.assertIsNotNone(check_command("python3 -m pip install --target /tmp/x evilpkg", policy))
+            self.assertIsNotNone(check_command("python3 -m pytest /etc", policy))
+            self.assertIsNotNone(check_command("pip install requests", policy))
+            self.assertIsNotNone(check_command("pip3 install evil", policy))
+            self.assertIsNotNone(check_command("python3 -m compileall /etc", policy))
 
     def test_engineer_profile_blocks_node_inline_execution(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
