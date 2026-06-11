@@ -529,6 +529,32 @@ class RecoveryJobDrainRunnerTests(unittest.TestCase):
         self.assertEqual(drainer.run_once(), 0)
         self.assertEqual(len(store.list_pending_recovery_jobs()), 1)
 
+    def test_query_fetches_at_most_the_requested_limit(self) -> None:
+        # PR #90 review round 2 (codex P2): the per-cycle cap must bound the SQL
+        # query, not just slice in Python — the stale backlog can be unbounded,
+        # so materializing every row each cycle defeats the cap.
+        store = self._store()
+        for i in range(5):
+            store.create_recovery_job(
+                f"sess-{i}",
+                turn_id=None,
+                failure_reason="x",
+                original_request_sanitized=f"r{i}",
+            )
+        self.assertEqual(
+            len(store.list_pending_recovery_jobs(older_than_seconds=0.0, limit=2)), 2
+        )
+
+    def test_clamps_negative_inter_message_delay(self) -> None:
+        # PR #90 review round 2 (gemini): a misconfigured negative delay would
+        # raise ValueError inside time.sleep — clamp it to 0.
+        drainer = RecoveryJobDrainRunner(
+            memory=self._store(),
+            notifier=lambda _m: None,
+            inter_message_delay_seconds=-5.0,
+        )
+        self.assertEqual(drainer.inter_message_delay_seconds, 0.0)
+
     def test_does_not_drain_fresh_jobs(self) -> None:
         # PR #90 review (codex P2): the brain tells the user a recovery request
         # is queued "para retomarlo cuando el contexto se limpie", so a

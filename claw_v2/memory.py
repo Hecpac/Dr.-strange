@@ -1556,6 +1556,7 @@ class MemoryStore:
         session_id: str | None = None,
         *,
         older_than_seconds: float | None = None,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
         clauses = ["status = 'pending_recovery'"]
         params: list[Any] = []
@@ -1568,10 +1569,16 @@ class MemoryStore:
             # told they'd be resumed) and clean only genuine backlog.
             clauses.append("created_at <= datetime('now', ?)")
             params.append(f"-{int(max(0.0, older_than_seconds))} seconds")
+        limit_sql = ""
+        if limit is not None:
+            # Bound the query itself (not just a Python slice) so a backlog that
+            # grew unbounded can't materialize every row each drain cycle.
+            limit_sql = " LIMIT ?"
+            params.append(max(0, int(limit)))
         cursor = self._conn.execute(
             "SELECT id, session_id, turn_id, failure_reason, "
             "original_request_sanitized, metadata_json, status, created_at, resolved_at "
-            f"FROM recovery_jobs WHERE {' AND '.join(clauses)} ORDER BY id ASC",
+            f"FROM recovery_jobs WHERE {' AND '.join(clauses)} ORDER BY id ASC{limit_sql}",
             params,
         )
         return [

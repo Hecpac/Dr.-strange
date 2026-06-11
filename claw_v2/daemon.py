@@ -580,15 +580,16 @@ class RecoveryJobDrainRunner:
         self.should_stop = should_stop
         self.min_age_seconds = min_age_seconds
         self.max_per_cycle = max(1, int(max_per_cycle))
-        self.inter_message_delay_seconds = inter_message_delay_seconds
+        self.inter_message_delay_seconds = max(0.0, float(inter_message_delay_seconds))
         self.sleep = sleep
 
     def run_once(self) -> int:
         if self.should_stop is not None and self.should_stop():
             return 0
         jobs = self.memory.list_pending_recovery_jobs(
-            older_than_seconds=self.min_age_seconds
-        )[: self.max_per_cycle]
+            older_than_seconds=self.min_age_seconds,
+            limit=self.max_per_cycle,
+        )
         drained = 0
         for index, job in enumerate(jobs):
             if self.should_stop is not None and self.should_stop():
