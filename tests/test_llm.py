@@ -33,6 +33,36 @@ class LLMRouterTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 router.ask("judge this", lane="judge")
 
+    def test_cost_metering_unknown_abort_is_recorded_for_the_daily_gate(self) -> None:
+        # PR #89 review round 3 (codex P1): when the adapter aborts a billable
+        # round it could not price (reason=cost_metering_unknown), ask() must
+        # emit the cost_metering_unknown marker even though no llm_response is
+        # built — otherwise the already-billed round is invisible to the daily
+        # freeze gate and repeated calls leak one paid round each.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            audit_events: list[dict] = []
+
+            def aborting(request: LLMRequest) -> LLMResponse:
+                raise AdapterError(
+                    "OpenAI request cannot be cost-metered; aborting under max_budget",
+                    metadata={"reason": "cost_metering_unknown", "model": request.model},
+                )
+
+            router = LLMRouter(
+                config=config,
+                adapters={"openai": StaticAdapter("openai", tool_capable=True, responder=aborting)},
+                audit_sink=audit_events.append,
+            )
+
+            with self.assertRaises(AdapterError):
+                router.ask("do the task", lane="worker", provider="openai", model="gpt-unpriced-xyz")
+
+            self.assertTrue(
+                any(event.get("action") == "cost_metering_unknown" for event in audit_events),
+                "abort path must emit cost_metering_unknown so the daily gate can freeze",
+            )
+
     def test_secondary_lane_falls_back_to_anthropic(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = make_config(Path(tmpdir))
