@@ -225,6 +225,15 @@ class BotHelperRegressionTests(unittest.TestCase):
         self.assertNotIn("</response>", sanitized)
         self.assertIn("El daemon esta corriendo.", sanitized)
 
+    def test_sanitize_strips_response_contract_tags_with_attributes(self) -> None:
+        # brain.py accepts attributes on the wrapper tag (<response ...>); the
+        # egress strip must cover the same shape, not just the bare tag.
+        text = '<response id="t-1" final="true">El daemon esta corriendo.</response>'
+        sanitized = _sanitize_chat_response(text)
+        self.assertNotIn("<response", sanitized)
+        self.assertNotIn("</response>", sanitized)
+        self.assertIn("El daemon esta corriendo.", sanitized)
+
     def test_leading_role_echo_inside_opening_code_fence_is_nuked(self) -> None:
         # Review probe (R1): a leading role header wrapped in an opening ``` code
         # fence is the same leak, just Markdown-wrapped. Must still be nuked.
