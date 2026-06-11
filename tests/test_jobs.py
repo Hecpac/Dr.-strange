@@ -228,6 +228,26 @@ class JobServiceTests(unittest.TestCase):
             )
             self.assertTrue(all(event["job_id"] == created.job_id for event in events))
 
+    def test_complete_does_not_resurrect_terminal_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = JobService(Path(tmpdir) / "claw.db")
+            rec = service.enqueue(kind="demo")
+            service.fail(rec.job_id, error="boom", retry=False)
+            self.assertEqual(service.get(rec.job_id).status, "failed")
+            out = service.complete(rec.job_id, result={"ok": True})  # must not resurrect
+            self.assertIsNotNone(out)
+            self.assertEqual(out.status, "failed")
+            self.assertEqual(service.get(rec.job_id).status, "failed")
+
+    def test_fail_does_not_resurrect_completed_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = JobService(Path(tmpdir) / "claw.db")
+            rec = service.enqueue(kind="demo")
+            service.complete(rec.job_id, result={"ok": True})
+            out = service.fail(rec.job_id, error="late")  # must not resurrect, must not deadlock
+            self.assertIsNotNone(out)
+            self.assertEqual(out.status, "completed")
+
 
 if __name__ == "__main__":
     unittest.main()
