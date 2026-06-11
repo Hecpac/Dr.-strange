@@ -300,7 +300,8 @@ class JobService:
                     return None
                 if row["status"] in JOB_TERMINAL_STATUSES:
                     # Idempotent: a job already terminal must not be moved back to
-                    # failed/retrying.
+                    # failed/retrying. Return the row we just read (NOT self.get(),
+                    # which would re-acquire the non-reentrant lock).
                     self._conn.commit()
                     return self._row_to_record(row)
                 should_retry = retry and int(row["attempts"] or 0) < int(row["max_attempts"] or 1)
@@ -468,20 +469,30 @@ class JobService:
             params.append(completed_at)
         params.append(job_id)
         with self._lock:
-            current = self._conn.execute(
-                "SELECT * FROM agent_jobs WHERE job_id = ?", (job_id,)
-            ).fetchone()
-            if current is None:
-                return None
-            if current["status"] in JOB_TERMINAL_STATUSES:
-                # Idempotent: never resurrect a terminal job. Use the row we just
-                # read (NOT self.get(), which re-acquires the non-reentrant lock).
-                return self._row_to_record(current)
-            self._conn.execute(
-                f"UPDATE agent_jobs SET {', '.join(assignments)} WHERE job_id = ?",
-                params,
-            )
-            self._conn.commit()
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                current = self._conn.execute(
+                    "SELECT * FROM agent_jobs WHERE job_id = ?", (job_id,)
+                ).fetchone()
+                if current is None:
+                    self._conn.commit()
+                    return None
+                if current["status"] in JOB_TERMINAL_STATUSES:
+                    # Idempotent: never resurrect a terminal job. BEGIN IMMEDIATE
+                    # holds the write lock across this read+UPDATE so a sibling
+                    # connection cannot flip the row terminal between them. Return
+                    # the row we just read (NOT self.get(), which would re-acquire
+                    # the non-reentrant lock).
+                    self._conn.commit()
+                    return self._row_to_record(current)
+                self._conn.execute(
+                    f"UPDATE agent_jobs SET {', '.join(assignments)} WHERE job_id = ?",
+                    params,
+                )
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
         record = self.get(job_id)
         if record is not None:
             self._emit(event_type, record)
