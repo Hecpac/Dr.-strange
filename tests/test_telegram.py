@@ -522,6 +522,35 @@ class HandleTextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(latency_payload["status"], "late_ok")
         self.assertEqual(latency_payload["response_parts"], 1)
 
+    async def test_late_delivery_grace_zero_disables_direct_delivery_guard(self) -> None:
+        bot_service = MagicMock()
+        bot_service.observe = MagicMock()
+        transport = TelegramTransport(
+            bot_service=bot_service, token="t", allowed_user_id="123",
+        )
+        transport._late_delivery_grace_seconds = 0.0
+        transport._send_text_direct_bot_api_sync = MagicMock(return_value=99)
+        update = MagicMock()
+        update.effective_chat.id = 1
+
+        async def completed_response():
+            return "late response text"
+
+        response_task = asyncio.create_task(completed_response())
+        await response_task
+
+        await transport._late_deliver_text_response(
+            response_task,
+            update=update,
+            session_id="tg-1",
+            user_id="123",
+            started_at=0.0,
+            delivery_state={"normal_send_started": False},
+        )
+
+        transport._send_text_direct_bot_api_sync.assert_not_called()
+        bot_service.observe.emit.assert_not_called()
+
     async def test_authorized_user_gets_no_reply_when_bot_returns_none(self) -> None:
         bot_service = MagicMock()
         bot_service.handle_text.return_value = None

@@ -1382,8 +1382,9 @@ class TelegramTransport:
         started_at: float,
         delivery_state: dict[str, bool],
     ) -> None:
-        if self._late_delivery_grace_seconds > 0:
-            await _asyncio_sleep(self._late_delivery_grace_seconds)
+        if self._late_delivery_grace_seconds <= 0:
+            return
+        await _asyncio_sleep(self._late_delivery_grace_seconds)
         if delivery_state.get("normal_send_started"):
             return
         if response_task.cancelled():
