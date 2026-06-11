@@ -135,8 +135,9 @@ class ObserveStream:
             artifact_id=artifact_id,
             clean_payload=clean_payload,
         )
-        if not persisted:
-            return
+        # Dispatch in-process subscribers even if the diagnostic write was
+        # dropped: a transient SQLite lock must not swallow task-completion
+        # notifications (autonomous_task_completed/failed) wired as subscribers.
         callbacks = self._subscribers.get(event_type)
         if callbacks:
             event_payload = clean_payload
@@ -145,6 +146,8 @@ class ObserveStream:
                     cb(event_payload)
                 except Exception:
                     logger.exception("observe subscriber for %s failed", event_type)
+        if not persisted:
+            return
         if emit_turn_id_missing:
             # Recurse with a sentinel payload; the early `event_type !=
             # "turn_id_missing"` guard above prevents infinite recursion.
