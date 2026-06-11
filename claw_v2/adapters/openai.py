@@ -269,6 +269,16 @@ def _enforce_request_budget(request: LLMRequest, usage_rounds: list[dict[str, An
     if request.max_budget <= 0:
         return
     spent, spend_unknown = _estimate_rounds_cost(request.model, usage_rounds)
+    # Fail-closed: this adapter is always API-billed, so a metered round that
+    # cannot be priced (model not in model_prices.json -> estimate.unknown)
+    # must abort the tool-loop, not run uncapped up to _MAX_TOOL_ROUNDS.
+    # pricing.py's contract is explicit that unknown != zero spend.
+    if spend_unknown and usage_rounds:
+        raise AdapterError(
+            f"OpenAI request cannot be cost-metered for model {request.model!r}; "
+            "aborting under max_budget to avoid uncapped billable spend",
+            metadata={"reason": "cost_metering_unknown", "model": request.model},
+        )
     if not spend_unknown and spent > request.max_budget:
         raise AdapterError(
             f"OpenAI request exceeded max_budget: ${spent:.4f} > ${request.max_budget:.4f}",
