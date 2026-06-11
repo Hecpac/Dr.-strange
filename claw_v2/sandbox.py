@@ -287,11 +287,14 @@ def _check_python_module(module_name: str, module_args: list[str], policy: Sandb
     if normalized not in PYTHON_SAFE_MODULES:
         return f"python module '{normalized or '<missing>'}' is not in the safe module allowlist"
     for arg in module_args:
-        if arg.startswith("-"):
+        # _is_path_token also unwraps --opt=/path values and catches slash-less
+        # tokens that exist in the workspace (`..`, an in-workspace symlink), so
+        # option-embedded and relative escapes get the same boundary check.
+        if not _is_path_token(arg, policy):
             continue
-        if "/" in arg or Path(arg).is_absolute():
-            if not _script_path_within_policy(arg, policy):
-                return "python module path argument outside allowed boundaries"
+        candidate = _path_candidate_token(arg) or arg
+        if not _script_path_within_policy(candidate, policy):
+            return "python module path argument outside allowed boundaries"
     return None
 
 
@@ -334,17 +337,22 @@ def _check_git_invocation(tokens: list[str]) -> str | None:
         if arg == "config" and config_index is None:
             config_index = index
     if config_index is not None:
+        # Value-taking options (`--type string`, `--file <f>`, ...) shift the
+        # key's position, so screen every operand as a potential key instead of
+        # sniffing only the first.
         operands = [a for a in args[config_index + 1 :] if not a.startswith("-")]
-        key = operands[0].lower() if operands else ""
-        value = operands[1] if len(operands) > 1 else ""
-        # `git config <sink-key> <cmd>` persists a command-execution sink for
-        # later runs (a subsequent `git log`/`git diff` shells out to it).
-        if key in GIT_CONFIG_EXEC_SINK_KEYS or key.endswith((".cmd", ".process")):
-            return "git config of a command-execution sink (core.pager, sshCommand, *.cmd, ...) is not allowed"
-        # `git config alias.X '!<shell>'` runs an arbitrary shell command when
-        # the alias is later invoked via `git X`.
-        if key.startswith("alias.") and value.startswith("!"):
-            return "git alias with a shell escape (!) is not allowed; it can execute arbitrary commands"
+        for index, operand in enumerate(operands):
+            key = operand.lower()
+            # `git config <sink-key> <cmd>` persists a command-execution sink
+            # for later runs (a subsequent `git log`/`git diff` shells out to
+            # it); *.helper covers credential[.<url>].helper, whose `!` values
+            # are documented shell snippets.
+            if key in GIT_CONFIG_EXEC_SINK_KEYS or key.endswith((".cmd", ".process", ".helper")):
+                return "git config of a command-execution sink (core.pager, sshCommand, *.cmd, ...) is not allowed"
+            # `git config alias.X '!<shell>'` runs an arbitrary shell command
+            # when the alias is later invoked via `git X`.
+            if key.startswith("alias.") and index + 1 < len(operands) and operands[index + 1].startswith("!"):
+                return "git alias with a shell escape (!) is not allowed; it can execute arbitrary commands"
     return None
 
 

@@ -271,6 +271,51 @@ class SafetyTests(unittest.TestCase):
                 "git status",
                 "git log --oneline",
                 "git config --get user.name",
+                "git config --type string user.name hector",
+                "git config --get alias.st",
+            ):
+                with self.subTest(command=cmd):
+                    self.assertIsNone(check_command(cmd, policy), f"should allow: {cmd}")
+
+    def test_git_config_sink_blocked_despite_value_taking_options(self) -> None:
+        # PR #89 review (gemini high + codex P1): value-taking options
+        # (`--type string`, `--file <f>`) shift the key past the first-operand
+        # sniffing, and credential.helper '!cmd' is a documented shell snippet
+        # missing from the sink list (including its URL-scoped *.helper form).
+        with tempfile.TemporaryDirectory() as workspace_str:
+            policy = SandboxPolicy(workspace_root=Path(workspace_str))
+            for cmd in (
+                "git config --type string core.pager id",
+                "git config --file .gitconfig core.sshCommand evil",
+                "git config --type string alias.boom '!touch /tmp/pwned'",
+                "git config credential.helper '!id'",
+                "git config credential.https://example.com.helper '!id'",
+            ):
+                with self.subTest(command=cmd):
+                    self.assertIsNotNone(check_command(cmd, policy), f"should block: {cmd}")
+
+    def test_python_module_path_args_cannot_escape_workspace(self) -> None:
+        # PR #89 review (gemini high + codex P1): option-embedded values
+        # (--start-directory=/tmp) were skipped wholesale, and slash-less
+        # relative tokens (`..` or an in-workspace symlink pointing out)
+        # dodged the module-arg boundary check entirely.
+        with tempfile.TemporaryDirectory() as workspace_str:
+            workspace = Path(workspace_str) / "ws"
+            workspace.mkdir()
+            (workspace / "pkg").mkdir()
+            (workspace / "exit_link").symlink_to(Path(workspace_str))
+            policy = SandboxPolicy(workspace_root=workspace, capability_profile="engineer")
+            for cmd in (
+                "python3 -m unittest discover --start-directory=/tmp",
+                "python3 -m compileall ..",
+                "python3 -m unittest discover -s exit_link",
+            ):
+                with self.subTest(command=cmd):
+                    self.assertIsNotNone(check_command(cmd, policy), f"should block: {cmd}")
+            for cmd in (
+                "python3 -m compileall pkg",
+                "python3 -m unittest discover -s pkg",
+                "python3 -m unittest discover",
             ):
                 with self.subTest(command=cmd):
                     self.assertIsNone(check_command(cmd, policy), f"should allow: {cmd}")
