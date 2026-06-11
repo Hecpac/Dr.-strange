@@ -251,6 +251,30 @@ class SafetyTests(unittest.TestCase):
                 with self.subTest(command=command):
                     self.assertIsNone(check_command(command, policy), msg=command)
 
+    def test_git_config_sink_blocked_after_global_options(self) -> None:
+        # C2 bypass: a global option before `config` must not slip the sink past the guard.
+        with tempfile.TemporaryDirectory() as workspace_str:
+            policy = SandboxPolicy(workspace_root=Path(workspace_str))
+            for cmd in (
+                "git -C . config core.pager 'touch /tmp/pwned'",
+                "git --git-dir=.git config core.sshCommand evil",
+                "git config alias.boom '!touch /tmp/pwned'",
+            ):
+                with self.subTest(command=cmd):
+                    self.assertIsNotNone(check_command(cmd, policy), f"should block: {cmd}")
+
+    def test_git_legitimate_commands_still_allowed(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace_str:
+            policy = SandboxPolicy(workspace_root=Path(workspace_str))
+            for cmd in (
+                "git -C /tmp status",
+                "git status",
+                "git log --oneline",
+                "git config --get user.name",
+            ):
+                with self.subTest(command=cmd):
+                    self.assertIsNone(check_command(cmd, policy), f"should allow: {cmd}")
+
     def test_sandbox_allows_regex_dollar_anchor(self) -> None:
         # Guard against over-blocking: a `$` end-of-line regex anchor inside
         # single quotes is a literal, not a variable expansion, and must stay

@@ -319,22 +319,33 @@ def _check_node_invocation(tokens: list[str], policy: SandboxPolicy) -> str | No
 
 def _check_git_invocation(tokens: list[str]) -> str | None:
     args = tokens[1:]
+    config_index: int | None = None
     for index, arg in enumerate(args):
         # `git -c key=val` / `-ckey=val` / `--config-env=key=ENV` inject config
         # for this invocation; the exec-sink keys turn into arbitrary command
-        # execution. No legitimate runtime caller passes inline git config, so
-        # deny the whole option rather than allowlisting individual keys.
+        # execution. No legitimate runtime caller passes inline git config.
         if arg in {"-c", "--config-env"}:
             return "inline git config (-c/--config-env) is not allowed; it can execute arbitrary commands"
         if arg.startswith("-c") and len(arg) > 2:
             return "inline git config (-c/--config-env) is not allowed; it can execute arbitrary commands"
         if arg.startswith("--config-env"):
             return "inline git config (-c/--config-env) is not allowed; it can execute arbitrary commands"
-        # `git config <sink-key> <cmd>` persists the same sink for later runs.
-        if index == 0 and arg == "config":
-            key = next((a.lower() for a in args[1:] if not a.startswith("-")), "")
-            if key in GIT_CONFIG_EXEC_SINK_KEYS or key.endswith((".cmd", ".process")):
-                return "git config of a command-execution sink (core.pager, sshCommand, *.cmd, ...) is not allowed"
+        # `config` may appear AFTER global options (`-C <path>`, `--git-dir=`,
+        # `--work-tree=`, ...), so match it in any position, not just index 0.
+        if arg == "config" and config_index is None:
+            config_index = index
+    if config_index is not None:
+        operands = [a for a in args[config_index + 1 :] if not a.startswith("-")]
+        key = operands[0].lower() if operands else ""
+        value = operands[1] if len(operands) > 1 else ""
+        # `git config <sink-key> <cmd>` persists a command-execution sink for
+        # later runs (a subsequent `git log`/`git diff` shells out to it).
+        if key in GIT_CONFIG_EXEC_SINK_KEYS or key.endswith((".cmd", ".process")):
+            return "git config of a command-execution sink (core.pager, sshCommand, *.cmd, ...) is not allowed"
+        # `git config alias.X '!<shell>'` runs an arbitrary shell command when
+        # the alias is later invoked via `git X`.
+        if key.startswith("alias.") and value.startswith("!"):
+            return "git alias with a shell escape (!) is not allowed; it can execute arbitrary commands"
     return None
 
 
