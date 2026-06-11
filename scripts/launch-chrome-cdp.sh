@@ -66,7 +66,9 @@ open -na "Google Chrome" --args \
     --remote-debugging-port="$CDP_PORT" \
     --remote-allow-origins="*" \
     --user-data-dir="$CDP_DIR" \
-    --no-first-run
+    --no-first-run \
+    --start-maximized \
+    --window-position=0,0
 
 echo "Chrome CDP launching on port $CDP_PORT..."
 for i in 1 2 3 4 5; do

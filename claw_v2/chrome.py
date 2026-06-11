@@ -132,7 +132,16 @@ class ManagedChrome:
             "--disable-default-apps",
         ]
         if headless:
+            # Headless windows have no OS chrome; force a large virtual window
+            # so screenshots/viewport capture the full page context, not a
+            # cramped default.
             cmd.append("--headless=new")
+            cmd.append("--window-size=1512,982")
+        else:
+            # Visible launch (e.g. /chrome_login): open maximized so the full
+            # page is on screen instead of macOS restoring a tiny last-used size.
+            cmd.append("--start-maximized")
+            cmd.append("--window-position=0,0")
 
         self._process = subprocess.Popen(
             cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
