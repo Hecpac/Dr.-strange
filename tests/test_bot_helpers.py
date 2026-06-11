@@ -52,6 +52,41 @@ class BotHelperRegressionTests(unittest.TestCase):
         self.assertNotIn("terminal bridge", sanitized.lower())
         self.assertNotIn("/Users/hector", sanitized)
 
+    def test_cdp_ops_task_gets_long_worker_timeout(self) -> None:
+        _, implementation, _ = _build_coordinator_tasks(
+            "ops",
+            (
+                "Crear un cuaderno en NotebookLM via Chrome CDP "
+                "http://localhost:9250 y verificarlo con evidencia"
+            ),
+        )
+
+        self.assertIsNotNone(implementation)
+        assert implementation is not None
+        self.assertEqual(implementation[0].timeout_seconds, 1200.0)
+        self.assertIn("split", implementation[0].instruction.lower())
+        self.assertIn("direct shell", implementation[0].instruction.lower())
+
+    def test_regular_ops_task_keeps_default_worker_timeout(self) -> None:
+        _, implementation, _ = _build_coordinator_tasks(
+            "ops",
+            "Resume el estado de las tareas pendientes sin abrir navegador",
+        )
+
+        self.assertIsNotNone(implementation)
+        assert implementation is not None
+        self.assertIsNone(implementation[0].timeout_seconds)
+
+    def test_browse_task_gets_long_worker_timeout(self) -> None:
+        _, implementation, _ = _build_coordinator_tasks(
+            "browse",
+            "Navega el sitio y extrae la informacion solicitada",
+        )
+
+        self.assertIsNotNone(implementation)
+        assert implementation is not None
+        self.assertEqual(implementation[0].timeout_seconds, 1200.0)
+
     def test_visible_chat_response_redacts_outbound_secrets_and_tracebacks(self) -> None:
         # #9: token-shaped secrets and Python tracebacks must never reach the user.
         secrets = (

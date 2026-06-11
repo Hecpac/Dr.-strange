@@ -301,6 +301,66 @@ class TaskHandlerTests(unittest.TestCase):
             events = [event["event_type"] for event in observe.recent_events(limit=50)]
             self.assertIn("autonomous_task_started", events)
 
+    def test_start_autonomous_task_cdp_ops_uses_long_operation_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            memory = MemoryStore(root / "claw.db")
+            observe = ObserveStream(root / "observe.db")
+            ledger = TaskLedger(root / "claw.db", observe=observe)
+            jobs = JobService(root / "claw.db", observe=observe)
+            recorded: dict[str, object] = {}
+
+            class _RecordingCoordinator:
+                def run(
+                    self,
+                    task_id,
+                    objective,
+                    research_tasks,
+                    implementation_tasks=None,
+                    verification_tasks=None,
+                    lane_overrides=None,
+                ):
+                    recorded["implementation_tasks"] = implementation_tasks
+                    return CoordinatorResult(
+                        task_id=task_id,
+                        phase_results={
+                            "verification": [
+                                WorkerResult(
+                                    task_name="verify_operation",
+                                    content="Verification Status: passed",
+                                    duration_seconds=0.1,
+                                )
+                            ]
+                        },
+                        synthesis="done",
+                    )
+
+            handler = TaskHandler(
+                coordinator=_RecordingCoordinator(),
+                observe=observe,
+                task_ledger=ledger,
+                job_service=jobs,
+                get_session_state=memory.get_session_state,
+                update_session_state=memory.update_session_state,
+                workspace_root=root,
+            )
+
+            ack = handler.start_autonomous_task(
+                "tg-1",
+                "Crear cuaderno NotebookLM via Chrome CDP http://localhost:9250",
+                mode="ops",
+                source_text="Crear cuaderno NotebookLM via Chrome CDP http://localhost:9250",
+            )
+
+            self.assertIn("Tarea autónoma iniciada", ack)
+            task_id = ack.split("`", 2)[1]
+            self.assertTrue(handler.wait_for_task(task_id, timeout=2))
+
+            implementation = recorded["implementation_tasks"]
+            self.assertIsNotNone(implementation)
+            assert implementation is not None
+            self.assertEqual(implementation[0].timeout_seconds, 1200.0)
+
 
 if __name__ == "__main__":
     unittest.main()
