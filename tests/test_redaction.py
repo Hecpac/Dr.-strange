@@ -52,6 +52,12 @@ class RedactSensitiveTests(unittest.TestCase):
         self.assertNotIn("eyJpc3MiOiJyZWdyaWQ", result)
         self.assertIn("[REDACTED]", result)
 
+    def test_keeps_short_two_segment_base64_pair(self) -> None:
+        # PR #89 review round 4 (gemini medium): the truncated-JWT fallback now
+        # requires >=10-char payload/signature segments (matching the 3-part
+        # regex), so a short eyJ-prefixed pair is not over-redacted.
+        self.assertEqual(redact_sensitive("eyJabcdefghij.abcd"), "eyJabcdefghij.abcd")
+
     def test_keeps_bare_jwt_header_without_dot(self) -> None:
         # Guard against over-redaction: a base64-ish word with no dot is not a
         # credential and must survive.

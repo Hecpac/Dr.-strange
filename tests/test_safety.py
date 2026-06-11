@@ -360,6 +360,20 @@ class SafetyTests(unittest.TestCase):
                 with self.subTest(command=cmd):
                     self.assertIsNotNone(check_command(cmd, policy), f"should block: {cmd}")
 
+    def test_git_home_config_redirection_blocked(self) -> None:
+        # PR #89 review round 4 (codex P1): pointing HOME/XDG_CONFIG_HOME at a
+        # writable dir makes git read an attacker-planted global gitconfig
+        # (~/.gitconfig / $XDG_CONFIG_HOME/git/config) whose core.sshCommand etc.
+        # execute on the next git op — an exec-sink escape with no GIT_* var.
+        with tempfile.TemporaryDirectory() as workspace_str:
+            policy = SandboxPolicy(workspace_root=Path(workspace_str))
+            for cmd in (
+                "env HOME=/tmp/evil git ls-remote ssh://example.com/x",
+                "env XDG_CONFIG_HOME=/tmp/evil git fetch origin",
+            ):
+                with self.subTest(command=cmd):
+                    self.assertIsNotNone(check_command(cmd, policy), f"should block: {cmd}")
+
     def test_git_benign_env_prefix_still_allowed(self) -> None:
         # Guard against over-blocking: non-sink env prefixes on git stay fine.
         with tempfile.TemporaryDirectory() as workspace_str:

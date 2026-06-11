@@ -142,6 +142,10 @@ GIT_ENV_EXEC_SINK_VARS = frozenset(
     }
 )
 _GIT_CONFIG_ENV_KV_RE = re.compile(r"^GIT_CONFIG_(?:KEY|VALUE)_\d+$")
+# General-purpose env vars that relocate git's global config search to an
+# attacker-writable dir (~/.gitconfig, $XDG_CONFIG_HOME/git/config). Blocked
+# only when the command is git — they have legitimate non-git uses.
+GIT_HOME_CONFIG_VARS = frozenset({"HOME", "XDG_CONFIG_HOME"})
 VERSION_OR_HELP_FLAGS = frozenset({"--version", "-V", "-VV", "--help", "-h"})
 VERSION_OR_HELP_ONLY_BINARIES = frozenset({"claude", "codex"})
 WORKSPACE_SCRIPT_SUFFIXES = (".sh",)
@@ -261,15 +265,23 @@ def check_command(command: str, policy: SandboxPolicy) -> str | None:
     # `env VAR=val git ...` and inline `VAR=val git ...`, where _unwrap strips
     # the assignments) and again post-unwrap (catches `bash -c '... git ...'`,
     # where they survive inside the -c string).
-    env_sink = _check_git_env_injection(tokens)
+    raw_tokens = tokens
+    env_sink = _check_git_env_injection(raw_tokens)
     if env_sink is not None:
         return env_sink
-    tokens = _unwrap_command_tokens(tokens)
+    tokens = _unwrap_command_tokens(raw_tokens)
     if not tokens:
         return "unparseable command"
     env_sink = _check_git_env_injection(tokens)
     if env_sink is not None:
         return env_sink
+    # HOME/XDG_CONFIG_HOME redirection is an exec-sink escape only for git (it
+    # reads a global gitconfig from there); they have legitimate non-git uses,
+    # so gate this on git being the resolved command.
+    if Path(tokens[0]).name in GIT_INTERPRETERS:
+        home_sink = _check_git_home_redirection(raw_tokens)
+        if home_sink is not None:
+            return home_sink
     if "xargs" in [Path(token).name for token in tokens]:
         return "xargs is not allowed"
     base_cmd = Path(tokens[0]).name
@@ -359,6 +371,18 @@ def _check_node_invocation(tokens: list[str], policy: SandboxPolicy) -> str | No
         return "node execution is limited to explicit .js, .mjs, or .cjs scripts"
     if not _script_path_within_policy(script, policy):
         return "node script path outside allowed boundaries"
+    return None
+
+
+def _check_git_home_redirection(tokens: list[str]) -> str | None:
+    for token in tokens:
+        if token.startswith("-") or "=" not in token:
+            continue
+        if token.split("=", 1)[0] in GIT_HOME_CONFIG_VARS:
+            return (
+                "overriding HOME/XDG_CONFIG_HOME for git is not allowed; git would "
+                "read an attacker-writable global gitconfig (core.sshCommand, ...)"
+            )
     return None
 
 
