@@ -49,7 +49,7 @@ from claw_v2.terminal_handler import TerminalHandler
 from claw_v2.wiki_handler import WikiHandler
 from claw_v2.coordinator import CoordinatorService
 from claw_v2.content import ContentEngine
-from claw_v2.redaction import redact_sensitive
+from claw_v2.redaction import redact_sensitive, redact_text
 from claw_v2.github import GitHubPullRequestService
 from claw_v2.heartbeat import HeartbeatService, HeartbeatSnapshot, _compute_health
 from claw_v2.idle_executor import IdleOwnershipExecutor
@@ -1611,7 +1611,7 @@ class BotService:
                     "reason": reason,
                     "captured": captured,
                     "matched_pattern": matched_pattern,
-                    "text_preview": text[:80],
+                    "text_preview": redact_text(text)[:80],
                     "text_len": len(text),
                     # legacy alias kept so existing dashboards keep parsing
                     "text_length": len(text),
@@ -1653,7 +1653,7 @@ class BotService:
                     "decision": decision,
                     "output_kind": output_kind,
                     "leaked_internal_labels": leaked,
-                    "text_preview": text[:80],
+                    "text_preview": redact_text(text)[:80],
                     "text_len": len(text),
                     "reasons": list(semantic_turn.reasons),
                 },

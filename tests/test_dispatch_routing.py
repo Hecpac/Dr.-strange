@@ -31,6 +31,7 @@ import pytest
 
 from claw_v2.adapters.base import LLMRequest
 from claw_v2.main import build_runtime
+from claw_v2.semantic_turn import SemanticTurn
 from claw_v2.types import LLMResponse
 
 
@@ -337,3 +338,63 @@ def test_dispatch_decision_payload_includes_matched_pattern_field(bot) -> None:
             assert ev["matched_pattern"], (
                 f"captured event must have non-empty matched_pattern: {ev!r}"
             )
+
+
+class _CaptureObserve:
+    def __init__(self) -> None:
+        self.events: list[dict] = []
+
+    def emit(self, event_type: str, *, payload: dict | None = None, **_kwargs) -> None:
+        self.events.append({"event_type": event_type, "payload": payload or {}})
+
+
+def _jwt_that_would_leak_if_truncated_first() -> str:
+    return "eyJhbGciOiJI" + ("a" * 30) + ".eyJzdWIi" + ("b" * 30) + ".sig"
+
+
+def test_dispatch_decision_redacts_text_preview_before_truncating(bot) -> None:
+    capture = _CaptureObserve()
+    bot.observe = capture
+    token = _jwt_that_would_leak_if_truncated_first()
+
+    bot._emit_dispatch_decision(
+        session_id="s-redact",
+        text=f"token {token}",
+        handler="test_handler",
+        captured=False,
+        route="fall_through",
+        reason="test",
+    )
+
+    preview = capture.events[-1]["payload"]["text_preview"]
+    assert preview == "token [REDACTED]"
+    assert "eyJ" not in preview
+
+
+def test_semantic_turn_trace_redacts_text_preview_before_truncating(bot) -> None:
+    capture = _CaptureObserve()
+    bot.observe = capture
+    token = _jwt_that_would_leak_if_truncated_first()
+
+    bot._emit_semantic_turn_trace(
+        session_id="s-redact",
+        text=f"token {token}",
+        semantic_turn=SemanticTurn(
+            intent="question",
+            objective=None,
+            confidence=0.9,
+            clear_goal=False,
+            explicit_authorization=False,
+            explicit_continuation=False,
+            debug_mode=False,
+            reasons=("test",),
+        ),
+        state_sources_checked=[],
+        approval_scope_match="none",
+        decision="fallthrough",
+        output_kind="brain",
+    )
+
+    preview = capture.events[-1]["payload"]["text_preview"]
+    assert preview == "token [REDACTED]"
+    assert "eyJ" not in preview
