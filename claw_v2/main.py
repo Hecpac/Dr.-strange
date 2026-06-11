@@ -49,7 +49,7 @@ from claw_v2.computer import (
 from claw_v2.config import AppConfig, MonitoredSiteConfig, ScheduledSubAgentConfig
 from claw_v2.coordinator import CoordinatorService
 from claw_v2.cron import CronScheduler, ScheduledJob
-from claw_v2.daemon import ClawDaemon
+from claw_v2.daemon import ClawDaemon, RecoveryJobDrainRunner
 from claw_v2.dream import AutoDreamService
 from claw_v2.github import GitHubPullRequestService
 from claw_v2.heartbeat import HeartbeatService
@@ -1407,6 +1407,32 @@ def _setup_scheduler(
             name="approval_sweep",
             handler=lambda: approval_sweep_runner.run_available(limit=1),
         )
+        # C1 (2026-06-10 audit): drain the recovery_jobs cemetery off-tick.
+        # Notify-and-close — surface each request the agent promised to resume
+        # and mark it resolved, so resolve_recovery_job finally has a runtime
+        # caller instead of jobs accumulating forever. Only register when
+        # Telegram is configured: without a chat to send to, the notifier would
+        # raise every cycle (log spam) and never drain.
+        if config.telegram_bot_token and config.telegram_allowed_user_id:
+            from claw_v2.stop_notifier import send_telegram_message
+
+            def _recovery_drain_notifier(message: str) -> None:
+                send_telegram_message(
+                    config.telegram_bot_token or "",
+                    config.telegram_allowed_user_id or "",
+                    message,
+                )
+
+            recovery_drain_runner = RecoveryJobDrainRunner(
+                memory=memory,
+                notifier=_recovery_drain_notifier,
+                observe=observe,
+            )
+            daemon.register_background_job_runner(
+                name="recovery_drain",
+                handler=recovery_drain_runner.run_once,
+                interval=300.0,
+            )
 
     scheduler.register(ScheduledJob(name="heartbeat", interval_seconds=config.heartbeat_interval, handler=heartbeat.emit))
     scheduler.register(ScheduledJob(name="task_lifecycle_watchdog", interval_seconds=300, handler=_task_lifecycle_watchdog_handler))

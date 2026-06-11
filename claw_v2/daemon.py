@@ -539,6 +539,101 @@ class PendingVerificationReconciliationJobRunner:
         self.observe.emit(event_type, payload=payload)
 
 
+# A recovery job younger than this is still a live promise (the brain just
+# told the user it would resume the request "cuando el contexto se limpie"), so
+# the drainer leaves it alone and only cleans genuinely-stale backlog.
+RECOVERY_JOB_STALE_SECONDS = 86_400.0
+_RECOVERY_REQUEST_PREVIEW_CHARS = 300
+
+
+class RecoveryJobDrainRunner:
+    """Drains stale ``recovery_jobs`` off-tick (2026-06-10 audit C1).
+
+    ``recovery_jobs`` accumulated forever because ``resolve_recovery_job`` had
+    no runtime caller — a false promise of continuity (the agent told the user
+    it would resume a request, then never did). This runner surfaces each
+    abandoned request to the operator and marks it resolved.
+
+    Notify-and-close MVP: it NEVER re-executes the request (auto-replay would
+    be a separate opt-in evolution). notify-then-resolve ordering means a failed
+    notification leaves the job pending for the next cycle rather than silently
+    dropping it — we would rather double-notify than lose the promise. Only jobs
+    older than ``min_age_seconds`` are touched, and each cycle is capped and
+    paced to respect Telegram's per-chat rate limit.
+    """
+
+    def __init__(
+        self,
+        *,
+        memory: Any,
+        notifier: Callable[[str], object],
+        observe: ObserveStream | None = None,
+        should_stop: Callable[[], bool] | None = None,
+        min_age_seconds: float = RECOVERY_JOB_STALE_SECONDS,
+        max_per_cycle: int = 10,
+        inter_message_delay_seconds: float = 1.0,
+        sleep: Callable[[float], object] = time.sleep,
+    ) -> None:
+        self.memory = memory
+        self.notifier = notifier
+        self.observe = observe
+        self.should_stop = should_stop
+        self.min_age_seconds = min_age_seconds
+        self.max_per_cycle = max(1, int(max_per_cycle))
+        self.inter_message_delay_seconds = max(0.0, float(inter_message_delay_seconds))
+        self.sleep = sleep
+
+    def run_once(self) -> int:
+        if self.should_stop is not None and self.should_stop():
+            return 0
+        jobs = self.memory.list_pending_recovery_jobs(
+            older_than_seconds=self.min_age_seconds,
+            limit=self.max_per_cycle,
+        )
+        drained = 0
+        for index, job in enumerate(jobs):
+            if self.should_stop is not None and self.should_stop():
+                break
+            try:
+                self.notifier(self._format(job))
+            except Exception:
+                # Leave the job pending so the next cycle retries the notify;
+                # never resolve a job the operator was not told about.
+                logger.exception(
+                    "recovery job drain notification failed for job %s",
+                    job.get("id"),
+                )
+                continue
+            self.memory.resolve_recovery_job(job["id"], status="resolved")
+            drained += 1
+            if self.observe is not None:
+                self.observe.emit(
+                    "recovery_job_drained",
+                    payload={
+                        "recovery_job_id": job.get("id"),
+                        "session_id": job.get("session_id"),
+                        "failure_reason": job.get("failure_reason"),
+                    },
+                )
+            # Pace successful sends so a backlog cannot trip Telegram's per-chat
+            # rate limit (~1 msg/sec). No pace after the last job of the cycle.
+            if index < len(jobs) - 1:
+                self.sleep(self.inter_message_delay_seconds)
+        return drained
+
+    @staticmethod
+    def _format(job: dict[str, Any]) -> str:
+        request = (job.get("original_request_sanitized") or "").strip()
+        if len(request) > _RECOVERY_REQUEST_PREVIEW_CHARS:
+            request = request[: _RECOVERY_REQUEST_PREVIEW_CHARS - 3] + "..."
+        reason = job.get("failure_reason") or "desconocido"
+        return (
+            "Tenía una petición que prometí retomar y no completé "
+            f"(motivo: {reason}): «{request}». "
+            "La marqué como cerrada — vuelve a pedírmela si todavía la necesitas."
+        )
+
+
 def _compact_drain_result(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return dict(value)

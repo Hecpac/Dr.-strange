@@ -118,6 +118,15 @@ class ArchitectureInvariantTests(unittest.TestCase):
         }
         self.assertTrue(required.issubset(set(PROMOTION_SENSITIVE_PATH_PATTERNS)))
 
+    def test_recovery_job_drainer_stays_wired_into_runtime(self) -> None:
+        # 2026-06-10 audit C1: recovery_jobs accumulated forever because
+        # resolve_recovery_job had no runtime caller (a false promise of
+        # continuity). The off-tick RecoveryJobDrainRunner must stay registered
+        # in main.py — losing the wiring regresses it back to a cemetery.
+        main_source = (REPO_ROOT / "claw_v2" / "main.py").read_text(encoding="utf-8")
+        self.assertIn("RecoveryJobDrainRunner", main_source)
+        self.assertIn('name="recovery_drain"', main_source)
+
     def test_computer_module_does_not_import_pyautogui_at_module_scope(self) -> None:
         tree = ast.parse((REPO_ROOT / "claw_v2" / "computer.py").read_text(encoding="utf-8"))
         offenders: list[str] = []

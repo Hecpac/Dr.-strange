@@ -8,9 +8,9 @@
 ## meta
 
 ```yaml
-describes_commit: fe99808+spec-002-self-improve-promotion-hotfix+spec-002-subprocess-bounded-pr-c+spec-002-approval-manager-pr-d+spec-002-promotion-tooling-phase-4+brain-delegation-tool
-doc_version: 2.16
-last_verified: 2026-06-10
+describes_commit: fe99808+spec-002-self-improve-promotion-hotfix+spec-002-subprocess-bounded-pr-c+spec-002-approval-manager-pr-d+spec-002-promotion-tooling-phase-4+brain-delegation-tool+recovery-jobs-drain-c1
+doc_version: 2.17
+last_verified: 2026-06-11
 verification_method: manual + pytest + AST sentinel cross-check
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
@@ -206,6 +206,26 @@ invariants:
     why: Expired approvals were only discovered lazily during approval, and
          reject() lacked terminal-state parity. Proactive expiry must not create
          a second approval database or run inline in daemon.tick.
+
+  recovery_jobs_drained_off_tick:
+    rule: recovery_jobs (the brain's "I promised to resume this" queue) must be
+          drained by a runtime caller of resolve_recovery_job. The
+          RecoveryJobDrainRunner (notify-and-close MVP) stays registered as a
+          daemon background runner off-tick; losing the wiring regresses the
+          queue to a cemetery + false promise of continuity (audit C1). Only
+          STALE jobs are drained (>= RECOVERY_JOB_STALE_SECONDS old) so a
+          freshly-queued promise is not dismissed before the user can continue.
+    chokepoints:
+      - daemon.RecoveryJobDrainRunner.run_once  # notify-then-resolve, never re-executes, stale-only + paced
+      - main._setup_scheduler  # register_background_job_runner(name="recovery_drain"), gated on Telegram config
+      - memory.MemoryStore.resolve_recovery_job  # finally has a runtime caller
+    enforced_by:
+      - tests/test_daemon.py::RecoveryJobDrainRunnerTests
+      - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_recovery_job_drainer_stays_wired_into_runtime
+    why: resolve_recovery_job had no runtime caller, so promised-but-abandoned
+         requests accumulated forever. Auto-replay (re-injecting the request)
+         is intentionally NOT the MVP — it stays a future opt-in to avoid
+         re-running external side effects.
 
   evidence_gate_meta_skip_sync_path:
     rule: The chain handle_text → _brain_text_response →

@@ -6,7 +6,42 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from claw_v2.stop_notifier import StopNotifier, build_stop_notifier
+from claw_v2.stop_notifier import (
+    StopNotifier,
+    build_stop_notifier,
+    send_telegram_message,
+)
+
+
+def test_send_telegram_message_posts_chat_id_and_text():
+    import json
+
+    with patch("urllib.request.urlopen") as urlopen:
+        urlopen.return_value.__enter__.return_value.read.return_value = b"ok"
+        send_telegram_message("tok", "12345", "hola Hector")
+        assert urlopen.call_count == 1
+        request = urlopen.call_args.args[0]
+        assert "bottok/sendMessage" in request.full_url
+        body = json.loads(request.data.decode("utf-8"))
+        assert body["chat_id"] == "12345"
+        assert body["text"] == "hola Hector"
+
+
+def test_send_telegram_message_raises_without_token_or_chat():
+    # The drainer relies on this: a missing/failed send must raise so the
+    # recovery job stays pending instead of being resolved un-notified.
+    with pytest.raises(ValueError):
+        send_telegram_message("", "12345", "x")
+    with pytest.raises(ValueError):
+        send_telegram_message("tok", "", "x")
+
+
+def test_send_telegram_message_propagates_post_failure():
+    import urllib.error
+
+    with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("down")):
+        with pytest.raises(urllib.error.URLError):
+            send_telegram_message("tok", "12345", "x")
 
 
 def _wait_for_threads():

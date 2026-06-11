@@ -13,10 +13,12 @@ from claw_v2.daemon import (
     PENDING_VERIFICATION_RECONCILIATION_RESUME_KEY,
     ClawDaemon,
     PendingVerificationReconciliationJobRunner,
+    RecoveryJobDrainRunner,
     TickResult,
 )
 from claw_v2.heartbeat import HeartbeatSnapshot
 from claw_v2.jobs import JobService
+from claw_v2.memory import MemoryStore
 from claw_v2.task_ledger import TaskLedger
 
 
@@ -476,6 +478,143 @@ class DaemonTickTests(unittest.TestCase):
                 "daemon_job_reconciliation",
                 payload={"cancelled_orphan_jobs": 1},
             )
+
+
+class RecoveryJobDrainRunnerTests(unittest.TestCase):
+    """C1 (2026-06-10 audit): recovery_jobs accumulated forever because
+    resolve_recovery_job had no runtime caller — a false promise of continuity.
+    The off-tick drainer surfaces each promised-but-abandoned request to the
+    operator and marks it resolved, idempotently."""
+
+    def _store(self) -> MemoryStore:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        return MemoryStore(Path(tmp.name) / "claw.db")
+
+    def test_notifies_and_resolves_each_pending_job(self) -> None:
+        store = self._store()
+        store.create_recovery_job(
+            "sess-1",
+            turn_id=None,
+            failure_reason="image_error",
+            original_request_sanitized="arregla el deploy de producción",
+        )
+        sent: list[str] = []
+        drainer = RecoveryJobDrainRunner(memory=store, notifier=sent.append, min_age_seconds=0.0)
+
+        self.assertEqual(drainer.run_once(), 1)
+        self.assertEqual(len(sent), 1)
+        self.assertIn("arregla el deploy", sent[0])
+        self.assertEqual(store.list_pending_recovery_jobs(), [])
+        # Idempotent: the cemetery is drained, so a second pass does nothing and
+        # never re-notifies.
+        self.assertEqual(drainer.run_once(), 0)
+        self.assertEqual(len(sent), 1)
+
+    def test_keeps_job_pending_when_notify_fails(self) -> None:
+        # notify-then-resolve: if the operator notification fails, the job must
+        # stay pending so the next cycle retries it — never silently dropped.
+        store = self._store()
+        store.create_recovery_job(
+            "sess-1",
+            turn_id=None,
+            failure_reason="x",
+            original_request_sanitized="haz la tarea pendiente",
+        )
+
+        def boom(_message: str) -> None:
+            raise RuntimeError("telegram unreachable")
+
+        drainer = RecoveryJobDrainRunner(memory=store, notifier=boom, min_age_seconds=0.0)
+        self.assertEqual(drainer.run_once(), 0)
+        self.assertEqual(len(store.list_pending_recovery_jobs()), 1)
+
+    def test_query_fetches_at_most_the_requested_limit(self) -> None:
+        # PR #90 review round 2 (codex P2): the per-cycle cap must bound the SQL
+        # query, not just slice in Python — the stale backlog can be unbounded,
+        # so materializing every row each cycle defeats the cap.
+        store = self._store()
+        for i in range(5):
+            store.create_recovery_job(
+                f"sess-{i}",
+                turn_id=None,
+                failure_reason="x",
+                original_request_sanitized=f"r{i}",
+            )
+        self.assertEqual(
+            len(store.list_pending_recovery_jobs(older_than_seconds=0.0, limit=2)), 2
+        )
+
+    def test_clamps_negative_inter_message_delay(self) -> None:
+        # PR #90 review round 2 (gemini): a misconfigured negative delay would
+        # raise ValueError inside time.sleep — clamp it to 0.
+        drainer = RecoveryJobDrainRunner(
+            memory=self._store(),
+            notifier=lambda _m: None,
+            inter_message_delay_seconds=-5.0,
+        )
+        self.assertEqual(drainer.inter_message_delay_seconds, 0.0)
+
+    def test_does_not_drain_fresh_jobs(self) -> None:
+        # PR #90 review (codex P2): the brain tells the user a recovery request
+        # is queued "para retomarlo cuando el contexto se limpie", so a
+        # just-created job must NOT be dismissed minutes later — only stale
+        # backlog gets drained.
+        store = self._store()
+        store.create_recovery_job(
+            "sess-1",
+            turn_id=None,
+            failure_reason="x",
+            original_request_sanitized="pedido reciente",
+        )
+        sent: list[str] = []
+        drainer = RecoveryJobDrainRunner(
+            memory=store, notifier=sent.append, min_age_seconds=3600.0
+        )
+        self.assertEqual(drainer.run_once(), 0)
+        self.assertEqual(sent, [])
+        self.assertEqual(len(store.list_pending_recovery_jobs()), 1)
+
+    def test_truncates_long_request_in_message(self) -> None:
+        # PR #90 review (gemini): Telegram rejects messages over 4096 chars; an
+        # unbounded request would brick the drain forever. Truncate defensively.
+        store = self._store()
+        store.create_recovery_job(
+            "sess-1",
+            turn_id=None,
+            failure_reason="x",
+            original_request_sanitized="A" * 1000,
+        )
+        sent: list[str] = []
+        drainer = RecoveryJobDrainRunner(memory=store, notifier=sent.append, min_age_seconds=0.0)
+        self.assertEqual(drainer.run_once(), 1)
+        self.assertLess(len(sent[0]), 500)
+        self.assertIn("...", sent[0])
+
+    def test_caps_per_cycle_and_paces_between_sends(self) -> None:
+        # PR #90 review (gemini): a large backlog must not block the thread or
+        # blow Telegram's per-chat rate limit. Cap per cycle and pace sends.
+        store = self._store()
+        for i in range(3):
+            store.create_recovery_job(
+                f"sess-{i}",
+                turn_id=None,
+                failure_reason="x",
+                original_request_sanitized=f"req{i}",
+            )
+        sent: list[str] = []
+        slept: list[float] = []
+        drainer = RecoveryJobDrainRunner(
+            memory=store,
+            notifier=sent.append,
+            min_age_seconds=0.0,
+            max_per_cycle=2,
+            sleep=slept.append,
+        )
+        self.assertEqual(drainer.run_once(), 2)
+        self.assertEqual(len(sent), 2)
+        self.assertEqual(len(slept), 1)  # one pace between the two sends
+        self.assertEqual(len(store.list_pending_recovery_jobs()), 1)  # 1 left for next cycle
 
 
 class DaemonRunLoopTests(unittest.IsolatedAsyncioTestCase):
