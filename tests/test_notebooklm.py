@@ -6,11 +6,16 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, MagicMock
 
 from claw_v2 import notebooklm_cdp
 from claw_v2.jobs import JobService
 from claw_v2.notebooklm import NotebookLMService, classify_notebooklm_failure
+from tests.helpers import make_config
+
+if TYPE_CHECKING:
+    from claw_v2.bot import BotService
 
 
 def _mock_notebook(notebook_id: str = "abc123-def456", title: str = "Test NB"):
@@ -321,12 +326,6 @@ class BackgroundTests(unittest.TestCase):
         self.assertNotIn("abc-full", svc._running)
 
 
-import tempfile
-from pathlib import Path
-
-from tests.helpers import make_config
-
-
 def _make_bot_with_nlm(nlm_service: NotebookLMService) -> "BotService":
     """Create a minimal BotService with a NotebookLMService attached."""
     from claw_v2.bot import BotService
@@ -410,6 +409,29 @@ class BotCommandTests(unittest.TestCase):
         nlm.create_notebook.assert_called_once_with("Tendencias IA")
         nlm.start_research.assert_called_once_with("nb-full-id", "Tendencias IA")
         self.assertIn("Deep Research iniciado", result)
+
+    def test_markdown_quoted_create_notebook_intercepts_before_brain(self) -> None:
+        nlm = MagicMock(spec=NotebookLMService)
+        title = (
+            "Fable 5: capacidades del modelo, benchmarks, comentarios y reseñas de expertos, "
+            "casos de uso y buenas prácticas para usarlo en agentes y en código."
+        )
+        nlm.create_notebook.return_value = {"id": "nb-full-id", "title": title}
+        nlm.start_research.return_value = "Deep Research iniciado..."
+        bot = _make_bot_with_nlm(nlm)
+
+        result = bot.handle_text(
+            user_id="123",
+            session_id="s1",
+            text=f'**"Crea un cuaderno en NotebookLM sobre {title}"**',
+        )
+
+        nlm.create_notebook.assert_called_once_with(title)
+        nlm.start_research.assert_called_once_with("nb-full-id", title)
+        self.assertIn("Deep Research iniciado", result)
+        self.assertNotEqual(result, "brain response")
+        self.assertNotIn("bridge", result.lower())
+        self.assertNotIn("script", result.lower())
 
     def test_plain_language_podcast_uses_active_notebook(self) -> None:
         nlm = MagicMock(spec=NotebookLMService)

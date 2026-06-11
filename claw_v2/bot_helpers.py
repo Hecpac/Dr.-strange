@@ -285,6 +285,21 @@ _NLM_CREATE_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _NLM_VOICE_PREFIX_RE = re.compile(r"^\s*\[\s*nota\s+de\s+voz\s*\]\s*:?\s*", re.IGNORECASE)
+_NLM_REQUEST_WRAPPERS = (
+    ("```", "```"),
+    ('"""', '"""'),
+    ("'''", "'''"),
+    ("**", "**"),
+    ("__", "__"),
+    ("`", "`"),
+    ('"', '"'),
+    ("'", "'"),
+    ("“", "”"),
+    ("‘", "’"),
+    ("«", "»"),
+    ("*", "*"),
+    ("_", "_"),
+)
 _NLM_ARTIFACT_KINDS = {
     "podcast": "podcast",
     "audio del cuaderno": "podcast",
@@ -511,8 +526,30 @@ def _strip_voice_prefix(text: str) -> str:
     return _NLM_VOICE_PREFIX_RE.sub("", text, count=1)
 
 
+def _strip_nlm_request_wrapping(text: str) -> str:
+    cleaned = text.strip()
+    changed = True
+    while changed:
+        changed = False
+        cleaned = cleaned.strip()
+        if cleaned.startswith(">"):
+            cleaned = cleaned[1:].strip()
+            changed = True
+            continue
+        for prefix, suffix in _NLM_REQUEST_WRAPPERS:
+            if (
+                cleaned.startswith(prefix)
+                and cleaned.endswith(suffix)
+                and len(cleaned) > len(prefix) + len(suffix)
+            ):
+                cleaned = cleaned[len(prefix):-len(suffix)].strip()
+                changed = True
+                break
+    return cleaned
+
+
 def _extract_nlm_create_topic(text: str) -> str | None:
-    cleaned = _strip_voice_prefix(text).strip()
+    cleaned = _strip_nlm_request_wrapping(_strip_voice_prefix(text))
     if _looks_like_nlm_meta_discussion(cleaned):
         return None
     match = _NLM_CREATE_RE.match(cleaned)
