@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
+
+from telegram.error import TimedOut
 
 from claw_v2.memory import MemoryStore
 from claw_v2.telegram import TelegramTransport, _polling_lock_path, _split_message
@@ -223,12 +227,297 @@ class HandleTextTests(unittest.IsolatedAsyncioTestCase):
             await transport._handle_text(update, MagicMock())
 
         update.message.reply_text.assert_awaited()
-        bot_service.observe.emit.assert_called_once()
-        payload = bot_service.observe.emit.call_args.kwargs["payload"]
+        event_names = [call.args[0] for call in bot_service.observe.emit.call_args_list]
+        self.assertIn("telegram_outbound_attempt", event_names)
+        self.assertIn("telegram_outbound_sent", event_names)
+        self.assertIn("telegram_latency", event_names)
+        latency_call = next(
+            call for call in bot_service.observe.emit.call_args_list if call.args[0] == "telegram_latency"
+        )
+        payload = latency_call.kwargs["payload"]
         self.assertEqual(payload["message_kind"], "text")
         self.assertEqual(payload["status"], "ok")
         self.assertEqual(payload["response_parts"], 1)
         self.assertGreaterEqual(payload["total_ms"], 0.0)
+
+    async def test_database_locked_error_is_not_exposed_to_chat(self) -> None:
+        bot_service = MagicMock()
+        bot_service.handle_text.side_effect = sqlite3.OperationalError("database is locked")
+        bot_service.observe = MagicMock()
+        bot_service.is_voice_mode.return_value = None
+        transport = TelegramTransport(
+            bot_service=bot_service, token="t", allowed_user_id="123",
+        )
+        update = MagicMock()
+        update.effective_user.id = 123
+        update.effective_chat.id = 1
+        update.message.text = "Abre Claude"
+        update.message.reply_text = AsyncMock()
+        update.message.chat.send_action = AsyncMock()
+
+        await transport._handle_text(update, MagicMock())
+
+        update.message.reply_text.assert_awaited()
+        reply = update.message.reply_text.await_args.args[0]
+        self.assertIn("contención de base de datos", reply)
+        self.assertNotIn("database is locked", reply)
+
+    async def test_authorized_text_continues_when_chat_action_times_out(self) -> None:
+        bot_service = MagicMock()
+        bot_service.handle_text.return_value = "response text"
+        bot_service.observe = MagicMock()
+        transport = TelegramTransport(
+            bot_service=bot_service, token="t", allowed_user_id="123",
+        )
+        update = MagicMock()
+        update.effective_user.id = 123
+        update.effective_chat.id = 1
+        update.message.text = "hello"
+        update.message.reply_text = AsyncMock()
+        update.message.chat.send_action = AsyncMock(side_effect=TimedOut("Timed out"))
+
+        with patch("claw_v2.telegram.asyncio") as mock_asyncio:
+            mock_asyncio.to_thread = AsyncMock(return_value="response text")
+            await transport._handle_text(update, MagicMock())
+
+        update.message.chat.send_action.assert_awaited_once_with("typing")
+        update.message.reply_text.assert_awaited()
+        event_names = [call.args[0] for call in bot_service.observe.emit.call_args_list]
+        self.assertIn("telegram_outbound_sent", event_names)
+        latency_payload = next(
+            call.kwargs["payload"]
+            for call in bot_service.observe.emit.call_args_list
+            if call.args[0] == "telegram_latency"
+        )
+        self.assertEqual(latency_payload["status"], "ok")
+
+    async def test_authorized_text_uses_direct_bot_api_when_reply_times_out(self) -> None:
+        bot_service = MagicMock()
+        bot_service.handle_text.return_value = "response text"
+        bot_service.observe = MagicMock()
+        transport = TelegramTransport(
+            bot_service=bot_service, token="t", allowed_user_id="123",
+        )
+        transport._text_send_retry_delay = 0.0
+        transport._app = MagicMock()
+        transport._app.bot = AsyncMock()
+        transport._send_text_direct_bot_api_sync = MagicMock(return_value=77)
+        update = MagicMock()
+        update.effective_user.id = 123
+        update.effective_chat.id = 1
+        update.message.text = "hello"
+        update.message.reply_text = AsyncMock(side_effect=TimedOut("Timed out"))
+        update.message.chat.send_action = AsyncMock()
+
+        with patch("claw_v2.telegram.asyncio") as mock_asyncio:
+            async def fake_to_thread(func, *args, **kwargs):
+                return func(*args, **kwargs)
+
+            mock_asyncio.to_thread = fake_to_thread
+            await transport._handle_text(update, MagicMock())
+
+        self.assertEqual(update.message.reply_text.await_count, 1)
+        transport._app.bot.send_message.assert_not_awaited()
+        transport._send_text_direct_bot_api_sync.assert_called_once_with(
+            chat_id=1,
+            text="response text",
+        )
+        events = [
+            (call.args[0], call.kwargs["payload"])
+            for call in bot_service.observe.emit.call_args_list
+        ]
+        self.assertTrue(
+            any(
+                name == "telegram_outbound_error"
+                and payload["method"] == "reply_text"
+                and payload["error_type"] == "TimedOut"
+                for name, payload in events
+            )
+        )
+        self.assertTrue(
+            any(
+                name == "telegram_outbound_sent"
+                and payload["method"] == "bot_api_direct_fallback"
+                and payload["message_id"] == 77
+                for name, payload in events
+            )
+        )
+        latency_payload = next(payload for name, payload in events if name == "telegram_latency")
+        self.assertEqual(latency_payload["status"], "ok")
+        self.assertEqual(latency_payload["response_parts"], 1)
+
+    async def test_authorized_text_retries_reply_before_fallback(self) -> None:
+        bot_service = MagicMock()
+        bot_service.handle_text.return_value = "response text"
+        bot_service.observe = MagicMock()
+        transport = TelegramTransport(
+            bot_service=bot_service, token="t", allowed_user_id="123",
+        )
+        transport._text_send_retries = 3
+        transport._text_send_retry_delay = 0.0
+        transport._app = MagicMock()
+        transport._app.bot = AsyncMock()
+        update = MagicMock()
+        update.effective_user.id = 123
+        update.effective_chat.id = 1
+        update.message.text = "hello"
+        update.message.reply_text = AsyncMock(
+            side_effect=[TimedOut("Timed out"), SimpleNamespace(message_id=10)]
+        )
+        update.message.chat.send_action = AsyncMock()
+
+        with patch("claw_v2.telegram.asyncio") as mock_asyncio:
+            mock_asyncio.to_thread = AsyncMock(return_value="response text")
+            await transport._handle_text(update, MagicMock())
+
+        self.assertEqual(update.message.reply_text.await_count, 2)
+        transport._app.bot.send_message.assert_not_awaited()
+        events = [
+            (call.args[0], call.kwargs["payload"])
+            for call in bot_service.observe.emit.call_args_list
+        ]
+        self.assertTrue(
+            any(
+                name == "telegram_outbound_sent"
+                and payload["method"] == "reply_text"
+                and payload["attempt"] == 2
+                for name, payload in events
+            )
+        )
+        latency_payload = next(payload for name, payload in events if name == "telegram_latency")
+        self.assertEqual(latency_payload["status"], "ok")
+        self.assertEqual(latency_payload["response_parts"], 1)
+
+    async def test_authorized_text_marks_send_failed_when_reply_and_fallback_fail(self) -> None:
+        bot_service = MagicMock()
+        bot_service.handle_text.return_value = "response text"
+        bot_service.observe = MagicMock()
+        transport = TelegramTransport(
+            bot_service=bot_service, token="t", allowed_user_id="123",
+        )
+        transport._text_send_retry_delay = 0.0
+        transport._app = MagicMock()
+        transport._app.bot = AsyncMock()
+        transport._app.bot.send_message.side_effect = TimedOut("Timed out")
+        transport._send_text_direct_bot_api = AsyncMock(return_value=False)
+        update = MagicMock()
+        update.effective_user.id = 123
+        update.effective_chat.id = 1
+        update.message.text = "hello"
+        update.message.reply_text = AsyncMock(side_effect=TimedOut("Timed out"))
+        update.message.chat.send_action = AsyncMock()
+
+        with patch("claw_v2.telegram.asyncio") as mock_asyncio:
+            mock_asyncio.to_thread = AsyncMock(return_value="response text")
+            await transport._handle_text(update, MagicMock())
+
+        events = [
+            (call.args[0], call.kwargs["payload"])
+            for call in bot_service.observe.emit.call_args_list
+        ]
+        fallback_error = [
+            payload
+            for name, payload in events
+            if name == "telegram_outbound_error" and payload["method"] == "send_message_fallback"
+        ]
+        self.assertEqual(fallback_error[0]["error_type"], "TimedOut")
+        latency_payload = next(payload for name, payload in events if name == "telegram_latency")
+        self.assertEqual(latency_payload["status"], "send_failed")
+        self.assertEqual(latency_payload["response_parts"], 0)
+
+    async def test_authorized_text_uses_ptb_fallback_when_direct_api_fails(self) -> None:
+        bot_service = MagicMock()
+        bot_service.handle_text.return_value = "response text"
+        bot_service.observe = MagicMock()
+        transport = TelegramTransport(
+            bot_service=bot_service, token="t", allowed_user_id="123",
+        )
+        transport._text_send_retry_delay = 0.0
+        transport._app = MagicMock()
+        transport._app.bot = AsyncMock()
+        transport._app.bot.send_message.return_value = SimpleNamespace(message_id=88)
+        transport._send_text_direct_bot_api = AsyncMock(return_value=False)
+        update = MagicMock()
+        update.effective_user.id = 123
+        update.effective_chat.id = 1
+        update.message.text = "hello"
+        update.message.reply_text = AsyncMock(side_effect=TimedOut("Timed out"))
+        update.message.chat.send_action = AsyncMock()
+
+        with patch("claw_v2.telegram.asyncio") as mock_asyncio:
+            mock_asyncio.to_thread = AsyncMock(return_value="response text")
+            mock_asyncio.sleep = AsyncMock()
+            await transport._handle_text(update, MagicMock())
+
+        self.assertEqual(update.message.reply_text.await_count, 1)
+        transport._send_text_direct_bot_api.assert_awaited_once()
+        transport._app.bot.send_message.assert_awaited_once()
+        self.assertEqual(transport._app.bot.send_message.await_args.kwargs["chat_id"], 1)
+        self.assertEqual(transport._app.bot.send_message.await_args.kwargs["text"], "response text")
+        events = [
+            (call.args[0], call.kwargs["payload"])
+            for call in bot_service.observe.emit.call_args_list
+        ]
+        self.assertTrue(
+            any(
+                name == "telegram_outbound_sent"
+                and payload["method"] == "send_message_fallback"
+                and payload["message_id"] == 88
+                for name, payload in events
+            )
+        )
+        latency_payload = next(payload for name, payload in events if name == "telegram_latency")
+        self.assertEqual(latency_payload["status"], "ok")
+        self.assertEqual(latency_payload["response_parts"], 1)
+
+    async def test_late_delivery_guard_sends_direct_when_handler_is_cancelled(self) -> None:
+        bot_service = MagicMock()
+        bot_service.observe = MagicMock()
+        bot_service.is_voice_mode.return_value = None
+        transport = TelegramTransport(
+            bot_service=bot_service, token="t", allowed_user_id="123",
+        )
+        transport._late_delivery_grace_seconds = 0.01
+        transport._send_text_direct_bot_api_sync = MagicMock(return_value=99)
+        update = MagicMock()
+        update.effective_user.id = 123
+        update.effective_chat.id = 1
+        update.message.text = "hello"
+        update.message.reply_text = AsyncMock()
+        update.message.chat.send_action = AsyncMock()
+
+        async def delayed_response(**_kwargs):
+            await asyncio.sleep(0.05)
+            return "late response text"
+
+        transport._handle_agent_text = delayed_response
+        task = asyncio.create_task(transport._handle_text(update, MagicMock()))
+        await asyncio.sleep(0.01)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(0.12)
+
+        update.message.reply_text.assert_not_awaited()
+        transport._send_text_direct_bot_api_sync.assert_called_once_with(
+            chat_id=1,
+            text="late response text",
+        )
+        events = [
+            (call.args[0], call.kwargs["payload"])
+            for call in bot_service.observe.emit.call_args_list
+        ]
+        self.assertTrue(
+            any(
+                name == "telegram_outbound_sent"
+                and payload["method"] == "bot_api_late_delivery"
+                and payload["message_id"] == 99
+                for name, payload in events
+            )
+        )
+        latency_payload = next(payload for name, payload in events if name == "telegram_latency")
+        self.assertEqual(latency_payload["status"], "late_ok")
+        self.assertEqual(latency_payload["response_parts"], 1)
 
     async def test_authorized_user_gets_no_reply_when_bot_returns_none(self) -> None:
         bot_service = MagicMock()
@@ -653,6 +942,80 @@ class HandleImageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["status"], "suppressed")
         self.assertEqual(payload["response_chars"], 0)
         self.assertEqual(payload["response_parts"], 0)
+
+
+class HandleVideoTests(unittest.IsolatedAsyncioTestCase):
+    async def test_video_without_audio_falls_back_to_multimodal_frames(self) -> None:
+        bot_service = MagicMock()
+        bot_service.observe = MagicMock()
+        transport = TelegramTransport(
+            bot_service=bot_service, token="t", allowed_user_id="123",
+        )
+        update = MagicMock()
+        update.effective_user.id = 123
+        update.effective_chat.id = 1
+        update.message.caption = "revisa este video"
+        update.message.video = SimpleNamespace(
+            file_id="video-file",
+            file_unique_id="video-uniq",
+            file_size=4096,
+        )
+        update.message.video_note = None
+        update.message.reply_text = AsyncMock()
+        update.message.chat.send_action = AsyncMock()
+
+        mock_file = AsyncMock()
+
+        async def download_to_drive(path: str) -> None:
+            Path(path).write_bytes(b"fake-mp4")
+
+        mock_file.download_to_drive.side_effect = download_to_drive
+        mock_context = MagicMock()
+        mock_context.bot.get_file = AsyncMock(return_value=mock_file)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_root = Path(tmpdir)
+            frame_path = tmp_root / "frame-01.jpg"
+            frame_path.write_bytes(b"\xff\xd8\xff")
+            with patch("claw_v2.telegram._VIDEOS_DIR", tmp_root / "videos"):
+                with patch(
+                    "claw_v2.telegram.extract_audio",
+                    new_callable=AsyncMock,
+                    side_effect=RuntimeError("no audio"),
+                ):
+                    with patch(
+                        "claw_v2.telegram._extract_video_frame_paths",
+                        new_callable=AsyncMock,
+                        return_value=([frame_path], 38.0),
+                    ) as mock_frames:
+                        with patch(
+                            "claw_v2.telegram.asyncio.to_thread",
+                            new_callable=AsyncMock,
+                            return_value="video response",
+                        ) as mock_to_thread:
+                            await transport._handle_video(update, mock_context)
+
+        update.message.reply_text.assert_awaited()
+        self.assertEqual(update.message.reply_text.await_args.args[0], "video response")
+        mock_frames.assert_awaited_once()
+        _, kwargs = mock_to_thread.await_args
+        self.assertEqual(kwargs["user_id"], "123")
+        self.assertEqual(kwargs["session_id"], "tg-1")
+        self.assertIn("[Video adjunto]", kwargs["memory_text"])
+        blocks = kwargs["content_blocks"]
+        self.assertEqual(blocks[0]["type"], "text")
+        self.assertIn("revisa este video", blocks[0]["text"])
+        self.assertIn("Audio", blocks[0]["text"])
+        self.assertEqual(blocks[1]["type"], "image")
+        self.assertEqual(blocks[1]["source"]["media_type"], "image/jpeg")
+        self.assertEqual(base64.b64decode(blocks[1]["source"]["data"]), b"\xff\xd8\xff")
+        latency_payload = [
+            call.kwargs["payload"]
+            for call in bot_service.observe.emit.call_args_list
+            if call.args[0] == "telegram_latency"
+        ][0]
+        self.assertEqual(latency_payload["message_kind"], "video")
+        self.assertEqual(latency_payload["status"], "ok")
 
 
 class SendPhotoTests(unittest.IsolatedAsyncioTestCase):

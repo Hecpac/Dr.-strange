@@ -11,7 +11,12 @@ from pathlib import Path
 
 from claw_v2.approval import APPROVAL_TTL_SECONDS, ApprovalManager
 from claw_v2.approval_sensitivity import classify_sensitive_change
-from claw_v2.approval_gate import ApprovalPending, approved_tool_invocation, build_telegram_approval_gate
+from claw_v2.approval_gate import (
+    ApprovalPending,
+    approval_args_hash,
+    approved_tool_invocation,
+    build_telegram_approval_gate,
+)
 from claw_v2.tools import TIER_REQUIRES_APPROVAL, ToolDefinition
 
 
@@ -155,6 +160,161 @@ diff --git a/package-lock.json b/package-lock.json
             self.assertFalse(m.approve(p.approval_id, p.token))
             self.assertEqual(m.status(p.approval_id), "expired")
 
+    def test_expired_pending_uses_configured_ttl(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            m = ApprovalManager(Path(tmpdir), "secret", ttl_seconds=5)
+            p = m.create("deploy", "x")
+            path = m._path_for(p.approval_id)
+            data = json.loads(path.read_text(encoding="utf-8"))
+            data["created_at"] = time.time() - 6
+            path.write_text(json.dumps(data), encoding="utf-8")
+
+            self.assertFalse(m.approve(p.approval_id, p.token))
+            self.assertEqual(m.status(p.approval_id), "expired")
+
+    def test_reject_does_not_mutate_terminal_states(self) -> None:
+        terminal_states = ("approved", "rejected", "expired", "archived")
+        for status in terminal_states:
+            with self.subTest(status=status):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    m = ApprovalManager(Path(tmpdir), "secret")
+                    p = m.create("deploy", "x")
+                    path = m._path_for(p.approval_id)
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                    data["status"] = status
+                    data["resolved_by"] = "test"
+                    data["resolved_at"] = 123.0
+                    if status == "archived":
+                        data["archived_at"] = 123.0
+                    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+                    before = path.read_text(encoding="utf-8")
+
+                    self.assertFalse(m.reject(p.approval_id))
+
+                    self.assertEqual(m.status(p.approval_id), status)
+                    self.assertEqual(path.read_text(encoding="utf-8"), before)
+
+    def test_reject_mutates_pending_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            m = ApprovalManager(Path(tmpdir), "secret")
+            p = m.create("deploy", "x")
+
+            self.assertTrue(m.reject(p.approval_id))
+
+            payload = m.read(p.approval_id)
+            self.assertEqual(payload["status"], "rejected")
+            self.assertEqual(payload["resolved_by"], "human")
+
+    def test_expire_due_expires_only_pending_due_records(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            m = ApprovalManager(Path(tmpdir), "secret", ttl_seconds=10)
+            due = m.create("deploy", "due")
+            fresh = m.create("deploy", "fresh")
+            approved = m.create("deploy", "approved")
+            rejected = m.create("deploy", "rejected")
+            expired = m.create("deploy", "expired")
+            archived = m.create("deploy", "archived")
+            old_created = time.time() - 20
+            fresh_created = time.time()
+            for approval, status, created in (
+                (due, "pending", old_created),
+                (fresh, "pending", fresh_created),
+                (approved, "approved", old_created),
+                (rejected, "rejected", old_created),
+                (expired, "expired", old_created),
+                (archived, "archived", old_created),
+            ):
+                path = m._path_for(approval.approval_id)
+                data = json.loads(path.read_text(encoding="utf-8"))
+                data["status"] = status
+                data["created_at"] = created
+                if status != "pending":
+                    data["resolved_at"] = old_created
+                    data["resolved_by"] = "test"
+                if status == "archived":
+                    data["archived_at"] = old_created
+                path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+            self.assertEqual(m.expire_due(now=fresh_created), 1)
+
+            self.assertEqual(m.status(due.approval_id), "expired")
+            self.assertEqual(m.status(fresh.approval_id), "pending")
+            self.assertEqual(m.status(approved.approval_id), "approved")
+            self.assertEqual(m.status(rejected.approval_id), "rejected")
+            self.assertEqual(m.status(expired.approval_id), "expired")
+            self.assertEqual(m.status(archived.approval_id), "archived")
+            self.assertEqual(m.read(archived.approval_id)["archived_at"], old_created)
+
+    def test_expire_due_tolerates_corrupt_records(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            m = ApprovalManager(Path(tmpdir), "secret", ttl_seconds=1)
+            due = m.create("deploy", "due")
+            data = json.loads(m._path_for(due.approval_id).read_text(encoding="utf-8"))
+            data["created_at"] = time.time() - 10
+            m._path_for(due.approval_id).write_text(json.dumps(data), encoding="utf-8")
+            (Path(tmpdir) / "bad.json").write_text("{not-json", encoding="utf-8")
+
+            self.assertEqual(m.expire_due(), 1)
+            self.assertEqual(m.status(due.approval_id), "expired")
+
+    def test_swept_expired_record_cannot_be_approved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            m = ApprovalManager(Path(tmpdir), "secret", ttl_seconds=1)
+            pending = m.create("deploy", "due")
+            path = m._path_for(pending.approval_id)
+            data = json.loads(path.read_text(encoding="utf-8"))
+            data["created_at"] = time.time() - 10
+            path.write_text(json.dumps(data), encoding="utf-8")
+
+            self.assertEqual(m.expire_due(), 1)
+            self.assertFalse(m.approve(pending.approval_id, pending.token))
+            self.assertEqual(m.status(pending.approval_id), "expired")
+
+    def test_expire_due_emits_flat_events(self) -> None:
+        class Observe:
+            def __init__(self) -> None:
+                self.events: list[str] = []
+                self.payloads: list[dict] = []
+
+            def emit(self, event_type: str, *, payload: dict) -> None:
+                self.events.append(event_type)
+                self.payloads.append(payload)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = Observe()
+            m = ApprovalManager(Path(tmpdir), "secret", ttl_seconds=1, observe=observe)
+            p = m.create("deploy", "x")
+            path = m._path_for(p.approval_id)
+            data = json.loads(path.read_text(encoding="utf-8"))
+            data["created_at"] = time.time() - 10
+            path.write_text(json.dumps(data), encoding="utf-8")
+
+            self.assertEqual(m.expire_due(), 1)
+
+        self.assertIn("approval_expired", observe.events)
+        self.assertIn("approval_sweep_completed", observe.events)
+        self.assertTrue(all("." not in event for event in observe.events))
+
+    def test_create_redacts_sensitive_record_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            m = ApprovalManager(Path(tmpdir), "secret")
+            pending = m.create(
+                "deploy",
+                "deploy with OPENAI_API_KEY=sk-secretsecretsecretsecret",
+                metadata={
+                    "api_key": "sk-secretsecretsecretsecret",
+                    "authorization": "Bearer abcdefghijklmnop",
+                    "nested": {"password": "super-secret-password"},
+                },
+            )
+
+            payload = m.read(pending.approval_id)
+
+        self.assertNotIn("sk-secret", json.dumps(payload))
+        self.assertEqual(payload["metadata"]["api_key"], "[REDACTED]")
+        self.assertEqual(payload["metadata"]["authorization"], "[REDACTED]")
+        self.assertEqual(payload["metadata"]["nested"]["password"], "[REDACTED]")
+
     def test_approve_does_not_persist_result_side_channel(self) -> None:
         # The _result return side-channel must never be written to the record.
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -211,6 +371,27 @@ diff --git a/package-lock.json b/package-lock.json
                 gate(definition, {"prompt": "ok"})
                 with self.assertRaises(ApprovalPending):
                     gate(definition, {"prompt": "second"})
+
+    def test_approved_tool_invocation_requires_matching_args_hash_when_present(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = ApprovalManager(Path(tmpdir), "secret")
+            gate = build_telegram_approval_gate(manager)
+            definition = ToolDefinition(
+                name="GPTImage",
+                description="Generate an image",
+                allowed_agent_classes=("operator",),
+                handler=lambda args: {"ok": True},
+                tier=TIER_REQUIRES_APPROVAL,
+            )
+
+            with approved_tool_invocation(
+                tool="GPTImage",
+                approval_id="approval-1",
+                reason="test",
+                args_hash=approval_args_hash({"prompt": "original"}),
+            ):
+                with self.assertRaises(ApprovalPending):
+                    gate(definition, {"prompt": "changed"})
 
     def test_telegram_gate_logs_notifier_exception(self) -> None:
         """C4: notifier failure must be visible (logger.exception)."""

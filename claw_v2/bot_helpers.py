@@ -374,6 +374,9 @@ _PROCEED_TOKENS = (
     "seguir",
     "dale",
     "hazlo",
+    "hazla",
+    "hazlos",
+    "hazlas",
     "haz la prueba",
     "haz prueba",
     "haz esa prueba",
@@ -387,10 +390,23 @@ _PROCEED_TOKENS = (
     "si",
     "sí",
     "yes",
+    "go",
     "asi",
     "vale",
     "avanza",
     "adelante",
+    "ya esta desbloqueada",
+    "ya esta desbloqueado",
+    "esta desbloqueada",
+    "esta desbloqueado",
+    "desbloqueada",
+    "desbloqueado",
+    "ya desbloquee",
+    "ya lo desbloquee",
+    "ya la desbloquee",
+    "ya entre al escritorio",
+    "ya esta en el escritorio",
+    "ya esta en escritorio",
 )
 _OPTION_ORDINALS = {
     "a": 1,
@@ -1012,6 +1028,7 @@ _TELEGRAM_IMPERATIVE_RULES: tuple[dict[str, Any], ...] = (
         # SOUL routing policy belongs to the brain, not this router.
         "patterns": (
             r"^\s*(?:continua|sigue|procede)(?:\s+(?:por\s+favor|porfa|pues|ya))?[\s.!?…]*$",
+            r"^\s*(?:dale|go)\s*[\s.!?…]*$",
             r"^\s*(?:continue|proceed)(?:\s+please)?[\s.!?…]*$",
         ),
         "needs_context": True,
@@ -1248,6 +1265,8 @@ def _looks_like_proceed_request(text: str) -> bool:
     if stripped in _PROCEED_TOKENS:
         return True
     if normalized in _PROCEED_TOKENS:
+        return True
+    if re.search(r"^(?:haz|hace|crea|genera|regenera|arma)(?:lo|la|los|las)\b", normalized):
         return True
     return any(
         " " in token and (
@@ -1602,6 +1621,16 @@ def _extract_pending_action_from_reply(text: str) -> str | None:
     for line in text.splitlines():
         normalized_line = re.sub(r"^\s*(?:[-*]\s*)+", "", line.strip())
         normalized_line = normalized_line.replace("**", "").replace("__", "")
+        unlock_match = re.match(
+            r"^\s*(?:apenas|cuando)\s+(?:la\s+)?"
+            r"(?:desbloquees|desbloquee|desbloquees\s+la\s+mac|sesion\s+este\s+activa|sesi[oó]n\s+est[eé]\s+activa|"
+            r"mac\s+est[eé]\s+desbloqueada|entres\s+al\s+escritorio|pase)\s*,?\s+"
+            r"(?:yo\s+)?(?:ejecuto|retomo|sigo|voy|manejo|hago)\s*(?:solo|todo|con\s+eso)?\s*:\s*(.+?)\s*$",
+            normalized_line,
+            re.IGNORECASE,
+        )
+        if unlock_match:
+            return unlock_match.group(1).strip()
         match = re.match(
             r"^\s*(?:siguiente paso|next step|pendiente|retomo la acci[oó]n)\s*:\s*(.+?)\s*$",
             normalized_line,
@@ -1796,6 +1825,65 @@ def _build_coordinator_tasks(
                 lane="verifier",
                 instruction=(
                     "Verify the implementation from the available evidence. "
+                    "Return a concise operational review and include a line `Verification Status: passed|pending|failed`. "
+                    "If more work is needed, include `Siguiente paso: ...`. "
+                    f"Objective: {objective}"
+                ),
+            )
+        ]
+        return research, implementation, verification
+
+    if mode in {"ops", "publish", "browse"}:
+        flavor = {
+            "ops": (
+                "Execute the operation with the workspace tools (shell scripts, local CLIs, "
+                "desktop/computer automation already available in the workspace)."
+            ),
+            "publish": (
+                "Prepare and publish the content using the local CLIs/automation already "
+                "available in the workspace. If an action is blocked behind a human approval "
+                "gate, report it as a blocker with evidence — never bypass the gate."
+            ),
+            "browse": (
+                "Drive the workspace browser/automation tooling to complete the navigation "
+                "or extraction described in the objective."
+            ),
+        }[mode]
+        research = [
+            WorkerTask(
+                name="scope_operation",
+                lane="research",
+                instruction=(
+                    "Identify the capabilities this operation needs (CLIs, browser sessions, "
+                    "credentials), the preconditions and risks, and the smallest viable "
+                    f"operational plan. Objective: {objective}"
+                ),
+            )
+        ]
+        implementation = [
+            WorkerTask(
+                name="execute_operation",
+                lane="worker",
+                instruction=(
+                    f"{flavor} "
+                    "Work in three explicit phases and emit each phase as its own labeled section in the response:\n"
+                    "1) `## Actions` — every command/automation step executed, one per line.\n"
+                    "2) `## Verify` — for each check that the operation took effect, "
+                    "list `check: <what>` and `result: ok|fail (<short reason>)`. If nothing was verified, "
+                    "say `none` and explain why.\n"
+                    "3) `## Evidence` — artifact paths the next phase can inspect (screenshots, logs, output files). "
+                    "If none, say `none`.\n"
+                    "Do NOT skip any of the three sections. If a phase fails, still emit the section and state the failure.\n"
+                    f"Objective: {objective}"
+                ),
+            )
+        ]
+        verification = [
+            WorkerTask(
+                name="verify_operation",
+                lane="verifier",
+                instruction=(
+                    "Verify the operation from the available evidence. "
                     "Return a concise operational review and include a line `Verification Status: passed|pending|failed`. "
                     "If more work is needed, include `Siguiente paso: ...`. "
                     f"Objective: {objective}"

@@ -94,6 +94,11 @@
       "allowed_paths": ["WORKSPACE_ROOT"],
       "blocked_path_patterns": "SECRET_PATH_PATTERNS"
     },
+    "mcp__claw__delegate_task": {
+      "risk_level": "medium",
+      "read_only": false,
+      "allowed_contexts": ["brain"]
+    },
     "Glob": {
       "risk_level": "low",
       "read_only": true,

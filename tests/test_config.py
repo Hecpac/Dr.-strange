@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from claw_v2.approval import APPROVAL_TTL_SECONDS
 from claw_v2.config import AppConfig, ProviderRolePolicyError
 from claw_v2.sandbox import SandboxPolicy, sandbox_hook
 
@@ -22,6 +23,22 @@ class AppConfigDefaultsTests(unittest.TestCase):
             finally:
                 os.chdir(previous_cwd)
         self.assertEqual(config.workspace_root, Path(tmpdir).resolve())
+
+    def test_max_autonomous_workers_defaults_and_env_override(self) -> None:
+        home = str(Path.home())
+        with patch.dict(os.environ, {"HOME": home}, clear=True):
+            default_config = AppConfig.from_env()
+        self.assertEqual(default_config.max_autonomous_workers, 4)
+
+        with patch.dict(os.environ, {"HOME": home, "CLAW_MAX_AUTONOMOUS_WORKERS": "2"}, clear=True):
+            configured = AppConfig.from_env()
+            configured.validate()
+        self.assertEqual(configured.max_autonomous_workers, 2)
+
+        with patch.dict(os.environ, {"HOME": home, "CLAW_MAX_AUTONOMOUS_WORKERS": "0"}, clear=True):
+            invalid = AppConfig.from_env()
+            with self.assertRaises(ValueError):
+                invalid.validate()
 
     def test_default_allowed_read_paths_scoped_to_claw_not_home(self) -> None:
         # 2026-05-31 audit (H2): the default read-root is ~/.claw (+ /private/tmp),
@@ -138,6 +155,33 @@ class AppConfigDefaultsTests(unittest.TestCase):
                 with patch.dict(os.environ, {"BRAIN_TOOLUSE_VERIFY": "true"}, clear=True):
                     configured = AppConfig.from_env()
                 self.assertTrue(configured.brain_tooluse_verify)
+            finally:
+                os.chdir(previous_cwd)
+
+    def test_approval_ttl_defaults_to_900_and_accepts_override(self) -> None:
+        previous_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.chdir(tmpdir)
+            try:
+                with patch.dict(os.environ, {}, clear=True):
+                    config = AppConfig.from_env()
+                self.assertEqual(config.approval_ttl_seconds, APPROVAL_TTL_SECONDS)
+
+                with patch.dict(os.environ, {"APPROVAL_TTL_SECONDS": "120"}, clear=True):
+                    configured = AppConfig.from_env()
+                self.assertEqual(configured.approval_ttl_seconds, 120)
+            finally:
+                os.chdir(previous_cwd)
+
+    def test_approval_ttl_validation_rejects_non_positive_values(self) -> None:
+        previous_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.chdir(tmpdir)
+            try:
+                with patch.dict(os.environ, {"APPROVAL_TTL_SECONDS": "0"}, clear=True):
+                    config = AppConfig.from_env()
+                with self.assertRaises(ValueError):
+                    config.validate()
             finally:
                 os.chdir(previous_cwd)
 
@@ -541,6 +585,7 @@ class CodexConfigTests(unittest.TestCase):
                 os.chdir(previous_cwd)
         self.assertEqual(config.codex_model, "codex-mini-latest")
         self.assertEqual(config.computer_use_backend, "openai")
+        self.assertFalse(config.computer_use_required)
 
     def test_computer_use_backend_codex_passes_validate(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

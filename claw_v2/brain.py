@@ -239,6 +239,25 @@ Success and approval invariants:
 - The verifier may increase risk; it may not lower deterministic policy floors.
 - When the task ledger says pending/missing_evidence/interrupted, explain that state honestly and offer the next safe resume step instead of claiming success."""
 
+DELEGATION_CONTRACT = """# Delegation contract
+Your chat turn has a hard 300-second wall. Work that drives the screen or the browser does not fit inside it and will time out — so it is delegated, never run inline.
+
+Bright line — delegate via the `mcp__claw__delegate_task` tool whenever the work needs ANY of these, even for a single step and even just to "check" or "verify":
+- Chrome / CDP / browser automation of any kind (opening a site, screenshotting a profile, reading a feed, clicking, posting).
+- Computer-use or desktop-GUI control (driving an app, a window, the mouse/keyboard).
+- Publishing or social posting; content/image generation batches.
+- Any multi-step job expected to run longer than ~2 minutes.
+
+This includes VERIFICATION: "let me just open the profile via CDP to confirm" is exactly the inline browser drive that times out. If confirming the result needs a browser or the desktop, fold that verification INTO the delegated objective ("publish X, then verify it posted and report") — do not do it inline first.
+
+Stays inline (these are fast and local): git, file reads/writes, grep/ls, reading logs, querying the local DB, WebSearch/WebFetch. Running a Bash script that itself drives Chrome/CDP or computer-use is NOT inline work — that is delegation.
+
+How to call it:
+- `objective`: one imperative, self-contained instruction (the task runs with no memory of this conversation).
+- `mode`: `ops` (desktop/terminal automation), `publish` (social/content publishing), `browse` (web navigation/extraction), or `coding`/`research`.
+- `reason`: one line.
+- Weave the returned acknowledgement (it carries the task id) into your <response> so the user knows the task is running and the result will arrive when it finishes. After delegating, do NOT also run the work inline, and do not delegate the same objective twice."""
+
 RUNTIME_OPERATIONS_CONTRACT = """# Runtime operations contract
 Claw runs as a single launchd service:
 - Label: com.pachano.claw
@@ -310,6 +329,9 @@ class BrainService:
     learning: LearningLoop | None = None
     checkpoint: "CheckpointService | None" = None
     wiki: object | None = None  # WikiService, injected after init
+    # Factory(session_id) -> plain closure for LLMRequest.delegation_handler;
+    # injected after init by BotService (same pattern as `wiki`).
+    delegation_handler_factory: Callable[[str], Callable[[dict[str, Any]], dict[str, Any]]] | None = None
     playbooks: PlaybookLoader = None  # type: ignore[assignment]
 
     _last_confidence: OrderedDict = field(default_factory=OrderedDict)  # session_id → float
@@ -441,6 +463,11 @@ class BrainService:
         # When resuming a provider session, skip message history — the SDK already has it.
         # Including both causes Claude to re-summarize the entire conversation each time.
         resuming = provider_session_id is not None
+        delegation_handler = (
+            self.delegation_handler_factory(session_id)
+            if self.delegation_handler_factory is not None
+            else None
+        )
         prompt = self._build_prompt(
             session_id=session_id,
             message=message,
@@ -479,7 +506,9 @@ class BrainService:
                     )
             response = self.router.ask(
                 prompt,
-                system_prompt=_brain_system_prompt(self.system_prompt),
+                system_prompt=_brain_system_prompt(
+                    self.system_prompt, include_delegation=delegation_handler is not None
+                ),
                 lane="brain",
                 provider=model_override.provider if model_override else None,
                 model=model_override.model if model_override else None,
@@ -488,6 +517,7 @@ class BrainService:
                 evidence_pack=attach_trace({"app_session_id": session_id}, trace),
                 max_budget=_resolve_max_budget(self.router),
                 timeout=300.0,
+                delegation_handler=delegation_handler,
             )
         except AdapterError as exc:
             executed_tools = tools_executed_before_failure(exc)
@@ -574,7 +604,9 @@ class BrainService:
                 try:
                     response = self.router.ask(
                         sanitized_prompt,
-                        system_prompt=_brain_system_prompt(self.system_prompt),
+                        system_prompt=_brain_system_prompt(
+                            self.system_prompt, include_delegation=delegation_handler is not None
+                        ),
                         lane="brain",
                         provider=model_override.provider if model_override else None,
                         model=model_override.model if model_override else None,
@@ -586,6 +618,7 @@ class BrainService:
                         ),
                         max_budget=_resolve_max_budget(self.router) * 0.75,
                         timeout=300.0,
+                        delegation_handler=delegation_handler,
                     )
                 except AdapterError as retry_exc:
                     if self.observe is not None:
@@ -667,7 +700,9 @@ class BrainService:
                 try:
                     response = self.router.ask(
                         prompt,
-                        system_prompt=_brain_system_prompt(self.system_prompt),
+                        system_prompt=_brain_system_prompt(
+                            self.system_prompt, include_delegation=delegation_handler is not None
+                        ),
                         lane="brain",
                         provider=model_override.provider if model_override else None,
                         model=model_override.model if model_override else None,
@@ -678,6 +713,7 @@ class BrainService:
                         # if the original turn already burned cycles before failing.
                         max_budget=_resolve_max_budget(self.router) * 0.75,
                         timeout=300.0,
+                        delegation_handler=delegation_handler,
                     )
                 except AdapterError as retry_exc:
                     response = self._queue_recovery_or_raise(
@@ -1545,7 +1581,8 @@ def _parse_verifier_payload(content: str) -> dict:
     }
 
 
-def _brain_system_prompt(system_prompt: str) -> str:
+def _brain_system_prompt(system_prompt: str, *, include_delegation: bool = False) -> str:
+    delegation_block = f"{DELEGATION_CONTRACT}\n\n" if include_delegation else ""
     return (
         f"{system_prompt.rstrip()}\n\n"
         f"{BRAIN_RESPONSE_CONTRACT}\n\n"
@@ -1553,6 +1590,7 @@ def _brain_system_prompt(system_prompt: str) -> str:
         f"{BRAIN_PUSHBACK_CONTRACT}\n\n"
         f"{SELF_HEALING_LOOP_CONTRACT}\n\n"
         f"{AUTONOMY_EXECUTION_CONTRACT}\n\n"
+        f"{delegation_block}"
         f"{RUNTIME_OPERATIONS_CONTRACT}\n\n"
         f"{CAPABILITY_DENIAL_CONTRACT}\n\n"
         f"{IDENTITY_ANCHOR}"
@@ -1895,6 +1933,8 @@ RISK_FLOORS: dict[str, str] = {
     "deploy_production": "critical",
     "deploy_prod": "critical",
     "pipeline_merge": "high",
+    "promote": "critical",
+    "self_improve": "critical",
     "git_push_main": "high",
     "git_force_push": "critical",
     "force_push": "critical",

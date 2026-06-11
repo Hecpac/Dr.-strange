@@ -71,6 +71,94 @@ class ValidateCompletionTests(unittest.TestCase):
         self.assertEqual(decision.verification_status, "passed")
         self.assertEqual(decision.reason, "verified_with_evidence")
 
+    def test_outcome_manifest_with_pending_async_blocks_succeeded(self) -> None:
+        record = {
+            "status": "succeeded",
+            "verification_status": "passed",
+            "summary": "Started NotebookLM export.",
+            "artifacts": {
+                "notebook_title": "Research Notebook",
+                "outcome_manifest": {
+                    "version": 1,
+                    "final_outcome": "pending",
+                    "pending_async_jobs": [
+                        {"job_id": "job-1", "status": "running"},
+                    ],
+                    "blockers": [],
+                    "verifications": [{"kind": "handler", "result": "passed"}],
+                },
+            },
+            "evidence": {},
+        }
+        decision = validate_completion(record)
+        self.assertEqual(decision.final_status, "pending")
+        self.assertEqual(decision.verification_status, "needs_verification")
+        self.assertEqual(decision.reason, "outcome_manifest_has_pending_async_jobs")
+        self.assertIn("async_job_terminal_outcome", decision.missing_evidence)
+
+    def test_outcome_manifest_with_blockers_blocks_succeeded(self) -> None:
+        record = {
+            "status": "succeeded",
+            "verification_status": "passed",
+            "summary": "Published reel.",
+            "artifacts": {
+                "publish_attempt": "started",
+                "outcome_manifest": {
+                    "version": 1,
+                    "final_outcome": "blocked",
+                    "blockers": ["codex_login_missing"],
+                    "verifications": [{"kind": "handler", "result": "passed"}],
+                },
+            },
+            "evidence": {},
+        }
+        decision = validate_completion(record)
+        self.assertEqual(decision.final_status, "pending")
+        self.assertEqual(decision.verification_status, "blocked")
+        self.assertEqual(decision.reason, "outcome_manifest_has_blockers")
+
+    def test_outcome_manifest_alone_is_not_execution_evidence(self) -> None:
+        record = {
+            "status": "succeeded",
+            "verification_status": "passed",
+            "summary": "Done.",
+            "artifacts": {
+                "outcome_manifest": {
+                    "version": 1,
+                    "final_outcome": "passed",
+                    "blockers": [],
+                    "pending_async_jobs": [],
+                },
+            },
+            "evidence": {},
+        }
+        decision = validate_completion(record)
+        self.assertEqual(decision.final_status, "pending")
+        self.assertEqual(decision.reason, "success_without_evidence")
+
+    def test_passed_outcome_manifest_with_verification_evidence_succeeds(self) -> None:
+        record = {
+            "status": "succeeded",
+            "verification_status": "passed",
+            "summary": "Brain tool-use verified.",
+            "artifacts": {
+                "outcome_manifest": {
+                    "version": 1,
+                    "final_outcome": "passed",
+                    "blockers": [],
+                    "pending_async_jobs": [],
+                    "verifications": [
+                        {"kind": "brain_tooluse_verifier", "result": "passed"},
+                    ],
+                },
+            },
+            "evidence": {},
+        }
+        decision = validate_completion(record)
+        self.assertEqual(decision.final_status, "succeeded")
+        self.assertEqual(decision.verification_status, "passed")
+        self.assertEqual(decision.reason, "verified_with_evidence")
+
     def test_running_task_can_persist_without_evidence(self) -> None:
         record = {
             "status": "running",

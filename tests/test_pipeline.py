@@ -219,7 +219,7 @@ class BranchValidationTests(unittest.TestCase):
     def test_git_commands_terminate_options_before_branch_name(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            with patch("claw_v2.pipeline.subprocess.run") as mock_run:
+            with patch("claw_v2.pipeline.run_subprocess_bounded") as mock_run:
                 _create_branch(root, "feat/safe")
                 _create_worktree(root, "feat/safe")
                 _push_branch(root, "feat/safe")
@@ -237,7 +237,7 @@ class BranchValidationTests(unittest.TestCase):
             'R  "docs/old file.md" -> "docs/new file.md"\n'
             '?? "docs/new note.md"\n'
         )
-        with patch("claw_v2.pipeline.subprocess.run") as mock_run:
+        with patch("claw_v2.pipeline.run_subprocess_bounded") as mock_run:
             mock_run.return_value = subprocess.CompletedProcess(
                 args=["git", "status"],
                 returncode=0,

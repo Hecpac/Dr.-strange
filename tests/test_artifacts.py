@@ -40,6 +40,20 @@ class ArtifactTests(unittest.TestCase):
         self.assertEqual([event["kind"] for event in lifecycle["events"]], ["plan", "execution"])
         self.assertEqual(len(lifecycle["artifact_ids"]), 2)
 
+    def test_planned_phases_include_implementation_for_ops_publish_browse(self) -> None:
+        for mode in ("coding", "ops", "publish", "browse"):
+            self.assertEqual(
+                planned_phases_for_mode(mode),
+                ["research", "synthesis", "implementation", "verification"],
+                mode,
+            )
+        for mode in ("research", "chat", "unknown"):
+            self.assertEqual(
+                planned_phases_for_mode(mode),
+                ["research", "synthesis", "verification"],
+                mode,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

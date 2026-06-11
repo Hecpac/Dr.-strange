@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import tempfile
 import unittest
@@ -104,8 +103,13 @@ class RuntimeTests(unittest.TestCase):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 runtime.brain.handle_message("session-1", "hello")
                 payload = runtime.bot.handle_text(user_id="123", session_id="session-1", text="/status")
-                parsed = json.loads(payload)
-                self.assertIn("brain:anthropic:claude-opus-4-7", parsed["lane_metrics"])
+                self.assertIn("Estoy vivo.", payload)
+                self.assertIn("Aprobaciones: 0 pendientes.", payload)
+                self.assertIn("Agentes:", payload)
+                self.assertIn("Uso hoy: 1 llamadas", payload)
+                self.assertIn("Más detalle: `/approvals`, `/jobs`, `/tasks`, `/budget_status`.", payload)
+                self.assertNotIn('"lane_metrics"', payload)
+                self.assertNotIn("brain:anthropic:claude-opus-4-7", payload)
 
     def test_build_runtime_wires_agent_infrastructure(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

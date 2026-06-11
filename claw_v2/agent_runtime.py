@@ -225,7 +225,10 @@ class AgentRuntime:
     def _emit(self, event_type: str, payload: dict[str, Any]) -> None:
         if self.observe is None:
             return
-        self.observe.emit(event_type, lane="agent_runtime", payload=payload)
+        try:
+            self.observe.emit(event_type, lane="agent_runtime", payload=payload)
+        except Exception:
+            logger.debug("agent runtime observe emit failed for %s", event_type, exc_info=True)
 
 
 def _accepts_runtime_channel(handler: Any) -> bool:

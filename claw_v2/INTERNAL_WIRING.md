@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: fe99808+audit-group6-crash-safe-migrations-send-retry-breaker-decay
-doc_version: 2.10
+describes_commit: fe99808+spec-002-self-improve-promotion-hotfix+spec-002-subprocess-bounded-pr-c+spec-002-approval-manager-pr-d+spec-002-promotion-tooling-phase-4+brain-delegation-tool
+doc_version: 2.16
 last_verified: 2026-06-10
-verification_method: manual + grep cross-check
+verification_method: manual + pytest + AST sentinel cross-check
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -82,6 +82,7 @@ invariants:
       - pipeline_poll -> scheduler.pipeline_poll  # PR1B-c, enqueue + ScheduledBackgroundJobRunner (was raw ScheduledJob: git worktree+worker LLM+pytest+push, no skip gate)
       - pipeline_poll_merges -> scheduler.pipeline_poll_merges  # PR1B-c, enqueue + ScheduledBackgroundJobRunner
       - a2a_process_inbox -> scheduler.a2a_process_inbox  # PR1B-d, enqueue + ScheduledBackgroundJobRunner, added _maintenance_skip kill-switch (was router.ask per inbox task inline, no skip gate)
+      - approval_sweep -> scheduler.approval_sweep  # PR-D1, enqueue + ScheduledBackgroundJobRunner; ApprovalManager.expire_due never runs inline in daemon.tick
       - scheduled sub-agent jobs -> scheduler.sub_agent  # PR1B-d, each job enqueues an {agent,skill,lane} payload (resume_key scheduler:sub_agent:<agent>:<skill>) to one shared off-tick runner; was run_skill->dispatch (provider) inline, default-on via _default_scheduled_sub_agents
       - auto_dream -> scheduler.auto_dream  # final leg, enqueue + ScheduledBackgroundJobRunner (was dream.run router.ask(lane=research) inline, no explicit timeout)
       - learning_consolidate -> scheduler.learning_consolidate  # final leg, enqueue + ScheduledBackgroundJobRunner, added _maintenance_skip kill-switch (was router.ask(lane=judge) inline, no skip gate)
@@ -96,6 +97,115 @@ invariants:
          subprocess/codegen scheduler job enqueues a durable agent_job and
          executes in a ClawDaemon background runner off-tick. The backstop fails
          if any future job re-introduces inline heavy work.
+
+  self_improve_promotion_gate:
+    rule: self-improve promotion actions must pass through BrainService
+          critical-action verification and may not commit generated changes to
+          the live HEAD by default. Promotion must also pass diff-scoped
+          tooling checks; Ruff is required on touched Python files, Mypy is
+          advisory until the baseline is green, and sensitive paths are reported
+          explicitly under the same critical gate.
+    chokepoints:
+      - brain.RISK_FLOORS[promote] = critical
+      - brain.RISK_FLOORS[self_improve] = critical
+      - agents.GitWorktreeExperimentRunner -> brain.execute_critical_action(action=promote_<agent>)
+      - agents.PromotionToolingGate runs uvx ruff check and uvx ruff format --check
+        only on touched Python files from the promotion manifest. For existing
+        files, historical baseline Ruff failures do not block; new files or new
+        failures still fail the gate.
+      - agents.PromotionToolingGate runs uvx mypy only as advisory and never
+        blocks promotion on Mypy alone.
+      - agents.PROMOTION_SENSITIVE_PATH_PATTERNS lists runtime / approval /
+        scheduler / subprocess / architecture files that must be surfaced in
+        the promotion report.
+      - agents.GitBranchPromotionExecutor commits in an isolated detached worktree
+        and attaches a claw/<agent>/<sha> branch when commit_on_promotion is enabled.
+      - agents.GitBranchPromotionExecutor raises PromotionToolingError before
+        applying changes if required Ruff tooling fails.
+    enforced_by:
+      - tests/test_brain_verify.py::PolicyFloorTests
+      - tests/test_worktree_runner.py::WorktreeRunnerTests::test_worktree_runner_does_not_promote_without_critical_approval
+      - tests/test_worktree_runner.py::WorktreeRunnerTests::test_git_branch_promotion_defaults_to_isolated_branch_when_commit_enabled
+      - tests/test_worktree_runner.py::WorktreeRunnerTests::test_git_branch_promotion_ignores_live_head_state_flag
+      - tests/test_worktree_runner.py::WorktreeRunnerTests::test_promotion_tooling_gate_runs_only_on_touched_python_files
+      - tests/test_worktree_runner.py::WorktreeRunnerTests::test_promotion_tooling_gate_blocks_ruff_check_failure
+      - tests/test_worktree_runner.py::WorktreeRunnerTests::test_promotion_tooling_gate_blocks_ruff_format_failure
+      - tests/test_worktree_runner.py::WorktreeRunnerTests::test_promotion_tooling_gate_does_not_block_historical_baseline_ruff_failure
+      - tests/test_worktree_runner.py::WorktreeRunnerTests::test_promotion_tooling_gate_blocks_new_file_ruff_failure_even_when_baseline_is_red
+      - tests/test_worktree_runner.py::WorktreeRunnerTests::test_promotion_tooling_gate_mypy_failure_is_advisory
+      - tests/test_worktree_runner.py::WorktreeRunnerTests::test_promotion_tooling_gate_reports_sensitive_paths
+      - tests/test_worktree_runner.py::WorktreeRunnerTests::test_git_branch_promotion_blocks_ruff_failure_without_touching_live_head
+      - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_self_improve_promotion_actions_have_critical_floor
+      - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_branch_promotion_executor_does_not_accept_live_head_state_flag
+      - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_branch_promotion_executor_runs_diff_scoped_tooling_gate
+      - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_promotion_sensitive_path_denylist_covers_runtime_chokepoints
+
+  computer_use_import_safe:
+    rule: computer-use must be import-safe on headless hosts. Importing
+          claw_v2.computer or claw_v2.main must not import pyautogui, and the
+          runtime must not construct ComputerUseService when computer-use is
+          disabled.
+    chokepoints:
+      - computer._load_pyautogui is the only pyautogui import path.
+      - main._probe_pyautogui_display bounds pyautogui.size() with a sync-safe timeout.
+      - main._setup_operational_services constructs ComputerUseService only when
+        config.computer_use_enabled is true.
+    enforced_by:
+      - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_computer_module_does_not_import_pyautogui_at_module_scope
+      - tests/test_computer_import_safety.py
+
+  subprocess_bounded_execution:
+    rule: Runtime subprocess execution must be time-bounded. New synchronous
+          subprocess callers should use subprocess_runner.run_subprocess_bounded
+          unless they have a local, explicit timeout and a documented reason.
+          Async callers should use run_subprocess_bounded_off_loop rather than
+          adding create_subprocess_exec to scheduler/runtime paths.
+    chokepoints:
+      - subprocess_runner.run_subprocess_bounded  # timeout + process-group terminate/kill + bounded output + event arg redaction
+      - subprocess_runner.run_subprocess_bounded_off_loop  # asyncio.to_thread wrapper with cancellation signal for async callers
+      - main._self_improve_handler  # pytest verification now uses bounded runner
+      - agents.GitWorktreeExperimentRunner / GitBranchPromotionExecutor  # git ops now bounded
+      - pipeline git branch/worktree/diff/push helpers  # git ops now bounded
+      - telegram.TelegramTransport.start  # ps probe runs off-loop through bounded runner
+    legacy_async_subprocess_exec_allowlist:
+      - voice._transcribe_local
+      - voice.extract_audio
+      - voice._wav_to_ogg
+      - voice._mp3_to_ogg
+    enforced_by:
+      - tests/test_subprocess_runner.py
+      - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_subprocess_run_calls_in_runtime_code_have_timeouts
+      - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_runtime_code_does_not_introduce_async_subprocess_exec
+      - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_runtime_code_restricts_direct_subprocess_popen
+      - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_runtime_code_does_not_use_shell_true_or_os_system
+      - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_runtime_builder_and_git_probe_remain_sync
+    why: git, pytest, gh, keychain, and ps calls can otherwise pin a worker
+         thread or leave descendant processes alive after timeout. PR-C keeps
+         build_runtime and _is_git_repo synchronous, avoids a create_subprocess
+         migration, and bounds the real blocking callsites instead.
+
+  approval_manager_single_source:
+    rule: ApprovalManager remains the only approval source of truth. Approval
+          hardening must extend the existing file-backed, HMAC-token,
+          fcntl-locked records in place; no SQLite approval table, ApprovalStore
+          adapter, or parallel channel may decide approval state.
+    states: [pending, approved, rejected, expired, archived]
+    chokepoints:
+      - approval.ApprovalManager.reject  # terminal states cannot be mutated to rejected
+      - approval.ApprovalManager.expire_due  # pending-only proactive expiry
+      - main._setup_core_state  # startup expiry sweep
+      - scheduler.approval_sweep -> ScheduledBackgroundJobRunner  # periodic off-tick sweep
+      - config.AppConfig.approval_ttl_seconds  # default APPROVAL_TTL_SECONDS=900, env override APPROVAL_TTL_SECONDS
+    action_hash_status: out_of_scope_until_execution_chokepoint_is_recabled
+    enforced_by:
+      - tests/test_approval.py::ApprovalManagerTests
+      - tests/test_approval_runtime_wiring.py
+      - tests/test_config.py::AppConfigDefaultsTests::test_approval_ttl_defaults_to_900_and_accepts_override
+      - tests/test_config.py::AppConfigDefaultsTests::test_approval_ttl_validation_rejects_non_positive_values
+      - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_no_default_on_scheduler_job_runs_heavy_work_inline_in_daemon_tick
+    why: Expired approvals were only discovered lazily during approval, and
+         reject() lacked terminal-state parity. Proactive expiry must not create
+         a second approval database or run inline in daemon.tick.
 
   evidence_gate_meta_skip_sync_path:
     rule: The chain handle_text → _brain_text_response →
@@ -280,6 +390,13 @@ Telegram → BotService.handle_text
    ├─ sanitize_tool_output (anti prompt-injection)
    ↓
    Heavy tasks → TaskHandler.start_autonomous_task
+   ├─ entry A: brain calls mcp__claw__delegate_task (in-process SDK MCP
+   │   server, attached in _build_options only when lane=brain AND a
+   │   delegation_handler closure is on the LLMRequest; BotService injects
+   │   the factory into BrainService at __init__; ack returned to the turn,
+   │   result delivered later via autonomous_task_completed/_failed)
+   ├─ entry B: pre-brain coordinated_task handler (autonomy_mode=autonomous
+   │   + mode ∈ {coding, research} only)
    ├─ TaskLedger.create (SQLite ledger in data/claw.db)
    ├─ CoordinatorService — research → synthesis → impl → verify
    ├─ AgentLoop wrap (plan/exec/observe/verify/critique/replan)
@@ -453,6 +570,24 @@ in-code tuple — secret patterns stay code-owned, not config-owned, so a
 JSON edit cannot weaken the secret denylist. New tools or risk-level
 changes require a JSON edit + tests + INTERNAL_WIRING bump.
 
+Brain-lane SDK tool names (preset tools and in-process MCP tools alike) are
+enforced against these policies fail-closed in BOTH the PreToolUse hook and
+`can_use_tool` (`runtime_policy.enforce`; unknown name → RuntimePolicyViolation).
+`mcp__claw__delegate_task` (medium, not read_only, contexts `[brain]`) is the
+brain's delegation tool: `_context_candidates` maps only the brain lane onto
+the `brain` context, so coordinator workers cannot re-delegate recursively.
+
+**Inline browser-drive backstop** (`_inline_browser_drive_reason`,
+`claw_v2/adapters/anthropic.py`): the PreToolUse hook denies — `brain` lane
+only — any Bash call that would drive Chrome/CDP, a browser, or desktop
+computer-use (high-confidence markers: peekaboo, playwright/selenium, Chrome
+debug ports `:9250/:9222`, `webSocketDebuggerUrl`, `/json/list`; it also reads
+a referenced local `.py` script's contents so `python3 _ig_publish.py` is
+caught). The deny nudges the model to `delegate_task` instead. This is the
+structural backstop to the prompt-level DELEGATION_CONTRACT: such work does not
+fit the brain turn's 300s wall. Worker/`worker_heavy` lanes are NOT gated —
+delegated coordinator work legitimately drives CDP.
+
 ### output sanitization
 
 If `definition.ingests_external_content` is true, `sanitize_tool_output`
@@ -572,6 +707,15 @@ phases: [research, synthesis, implementation, verification]
 parallelism:
   max_workers: 4   # per CoordinatorService
   scope: across tasks; phases within a task are sequential.
+
+mode_phases:  # planned_phases_for_mode (artifacts.py) + _build_coordinator_tasks (bot_helpers.py)
+  coding|ops|publish|browse: [research, synthesis, implementation, verification]
+    # implementation worker: lane=worker (tool-capable claude_code preset),
+    # cwd=workspace_root; ops/publish/browse added 2026-06-10 — reachable
+    # ONLY via brain delegation (entry A in §2), the pre-brain gate stays
+    # {coding, research}.
+  research: [research, synthesis, verification]
+  other: [research, synthesis, verification]  # text-only fallback
 
 scratch_dir: ~/.claw/scratch/<task_id>/
   persists: research/*.json, synthesis.md, implementation/*.json, verification/*.json

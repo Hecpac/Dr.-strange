@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
-from claw_v2.observe import ObserveStream
+from claw_v2.observe import OBSERVE_SQLITE_BUSY_TIMEOUT_MS, ObserveStream
 
 
 class ObserveSubscribeTests(unittest.TestCase):
@@ -39,11 +41,29 @@ class ObserveSubscribeTests(unittest.TestCase):
         self.stream.emit("evt", payload={"n": 1})
         self.assertEqual(good_received, [{"n": 1}])
 
+    def test_locked_database_drops_event_without_breaking_emit(self) -> None:
+        received: list[dict] = []
+        self.stream.subscribe("evt", received.append)
+        fake_conn = MagicMock()
+        fake_conn.execute.side_effect = sqlite3.OperationalError("database is locked")
+        self.stream._conn = fake_conn
+
+        with patch("claw_v2.observe.OBSERVE_LOCKED_RETRY_DELAY_SECONDS", 0):
+            self.stream.emit("evt", payload={"n": 1})
+
+        self.assertEqual(fake_conn.execute.call_count, 3)
+        self.assertGreaterEqual(fake_conn.rollback.call_count, 1)
+        self.assertEqual(received, [])
+
     def test_emit_persists_even_when_no_subscribers(self) -> None:
         self.stream.emit("lonely_event", payload={"a": 1})
         events = self.stream.recent_events(limit=1)
         self.assertEqual(events[0]["event_type"], "lonely_event")
         self.assertEqual(events[0]["payload"], {"a": 1})
+
+    def test_observe_connection_uses_short_busy_timeout(self) -> None:
+        busy_timeout = self.stream._conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        self.assertEqual(busy_timeout, OBSERVE_SQLITE_BUSY_TIMEOUT_MS)
 
     def test_observe_indexes_are_created(self) -> None:
         rows = self.stream._conn.execute("PRAGMA index_list(observe_stream)").fetchall()

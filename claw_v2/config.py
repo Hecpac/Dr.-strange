@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from claw_v2.approval import APPROVAL_TTL_SECONDS
+
 from .types import Lane, ProviderRole
 
 
@@ -351,6 +353,7 @@ class AppConfig:
     claude_cli_path: str
     claude_auth_mode: str
     approval_secret: str
+    approval_ttl_seconds: int
     brain_provider: str
     brain_model: str
     worker_provider: str
@@ -428,6 +431,7 @@ class AppConfig:
     notebooklm_cli_timeout_seconds: float
     notebooklm_cli_long_timeout_seconds: float
     computer_use_enabled: bool
+    computer_use_required: bool
     computer_auto_approve: bool
     computer_display_width: int
     computer_display_height: int
@@ -446,6 +450,7 @@ class AppConfig:
     morning_brief_calendar_command: str | None
     evening_brief_enabled: bool
     evening_brief_hour: int
+    max_autonomous_workers: int
     telemetry_root: Path = field(default_factory=lambda: Path.home() / ".claw" / "telemetry")
     verifier_effort: str | None = None
     research_effort: str | None = None
@@ -511,6 +516,7 @@ class AppConfig:
             claude_cli_path=os.getenv("CLAUDE_CLI_PATH") or shutil.which("claude") or "claude",
             claude_auth_mode=os.getenv("CLAUDE_AUTH_MODE", "subscription"),
             approval_secret=os.getenv("APPROVAL_SECRET") or _load_or_create_approval_secret(),
+            approval_ttl_seconds=_env_int("APPROVAL_TTL_SECONDS", APPROVAL_TTL_SECONDS),
             brain_provider=os.getenv("BRAIN_PROVIDER", "anthropic"),
             brain_model=os.getenv("BRAIN_MODEL", "claude-opus-4-7"),
             worker_provider=worker_provider,
@@ -603,6 +609,7 @@ class AppConfig:
             notebooklm_cli_timeout_seconds=_env_float("NOTEBOOKLM_CLI_TIMEOUT_SECONDS", 120.0),
             notebooklm_cli_long_timeout_seconds=_env_float("NOTEBOOKLM_CLI_LONG_TIMEOUT_SECONDS", 1200.0),
             computer_use_enabled=_env_bool("COMPUTER_USE_ENABLED", True),
+            computer_use_required=_env_bool("COMPUTER_USE_REQUIRED", False),
             # When true, browser_use_task and desktop/CDP actions auto-execute
             # without "te autorizo" EXCEPT for sensitive URLs (SENSITIVE_URLS),
             # destructive hotkeys, and CDP submit, which still require approval.
@@ -627,6 +634,7 @@ class AppConfig:
             morning_brief_calendar_command=os.getenv("MORNING_BRIEF_CALENDAR_COMMAND") or None,
             evening_brief_enabled=_env_bool("EVENING_BRIEF_ENABLED", True),
             evening_brief_hour=_env_int("EVENING_BRIEF_HOUR", 21),
+            max_autonomous_workers=_env_int("CLAW_MAX_AUTONOMOUS_WORKERS", 4),
             telemetry_root=Path(os.getenv("TELEMETRY_ROOT", str(home / ".claw" / "telemetry"))),
             claw_worker_summary_limit=_env_int("CLAW_WORKER_SUMMARY_LIMIT", 16_000),
             claw_phase_input_limit=_env_int("CLAW_PHASE_INPUT_LIMIT", 48_000),
@@ -667,6 +675,8 @@ class AppConfig:
             raise ValueError("worker_heavy_provider must be 'anthropic', 'codex', or 'openai'.")
         if self.claude_auth_mode not in {"subscription", "api_key", "auto"}:
             raise ValueError("claude_auth_mode must be one of: subscription, api_key, auto.")
+        if self.approval_ttl_seconds <= 0:
+            raise ValueError("approval_ttl_seconds must be positive.")
         supported = {"anthropic", "openai", "google", "ollama", "codex"}
         supported_browse_backends = {"auto", "chrome_cdp", "playwright_local", "browserbase_cdp"}
         secondary = {
@@ -725,6 +735,8 @@ class AppConfig:
             raise ValueError("notebooklm_cli_timeout_seconds must be positive.")
         if self.notebooklm_cli_long_timeout_seconds <= 0:
             raise ValueError("notebooklm_cli_long_timeout_seconds must be positive.")
+        if self.max_autonomous_workers <= 0:
+            raise ValueError("max_autonomous_workers must be positive.")
         if self.claw_worker_summary_limit <= 0:
             raise ValueError("claw_worker_summary_limit must be positive.")
         if self.claw_phase_input_limit <= 0:

@@ -4,6 +4,7 @@ import json
 import logging
 import sqlite3
 import threading
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -16,6 +17,9 @@ from claw_v2.turn_context import (
 logger = logging.getLogger(__name__)
 
 EventCallback = Callable[[dict], None]
+OBSERVE_LOCKED_RETRY_ATTEMPTS = 3
+OBSERVE_LOCKED_RETRY_DELAY_SECONDS = 0.1
+OBSERVE_SQLITE_BUSY_TIMEOUT_MS = 250
 
 
 OBSERVE_SCHEMA = """
@@ -63,6 +67,9 @@ class ObserveStream:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = connect_runtime_sqlite(self.db_path, row_factory=False)
+        # Observe events are diagnostic. If another runtime writer owns the DB,
+        # drop the event quickly instead of blocking the chat/event loop.
+        self._conn.execute(f"PRAGMA busy_timeout={OBSERVE_SQLITE_BUSY_TIMEOUT_MS}")
         self._conn.executescript(OBSERVE_SCHEMA)
         self._lock = threading.Lock()
         self._subscribers: dict[str, list[EventCallback]] = {}
@@ -115,31 +122,21 @@ class ObserveStream:
             )
         else:
             emit_turn_id_missing = False
-        with self._lock:
-            self._conn.execute(
-                """
-                INSERT INTO observe_stream (
-                    event_type, lane, provider, model,
-                    trace_id, root_trace_id, span_id, parent_span_id, job_id, artifact_id,
-                    payload
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    event_type,
-                    lane,
-                    provider,
-                    model,
-                    trace_id,
-                    root_trace_id,
-                    span_id,
-                    parent_span_id,
-                    job_id,
-                    artifact_id,
-                    json.dumps(clean_payload),
-                ),
-            )
-            self._conn.commit()
+        persisted = self._persist_event(
+            event_type,
+            lane=lane,
+            provider=provider,
+            model=model,
+            trace_id=trace_id,
+            root_trace_id=root_trace_id,
+            span_id=span_id,
+            parent_span_id=parent_span_id,
+            job_id=job_id,
+            artifact_id=artifact_id,
+            clean_payload=clean_payload,
+        )
+        if not persisted:
+            return
         callbacks = self._subscribers.get(event_type)
         if callbacks:
             event_payload = clean_payload
@@ -155,6 +152,67 @@ class ObserveStream:
                 "turn_id_missing",
                 payload={"origin_event": event_type},
             )
+
+    def _persist_event(
+        self,
+        event_type: str,
+        *,
+        lane: str | None,
+        provider: str | None,
+        model: str | None,
+        trace_id: str | None,
+        root_trace_id: str | None,
+        span_id: str | None,
+        parent_span_id: str | None,
+        job_id: str | None,
+        artifact_id: str | None,
+        clean_payload: dict,
+    ) -> bool:
+        payload_json = json.dumps(clean_payload)
+        for attempt in range(1, OBSERVE_LOCKED_RETRY_ATTEMPTS + 1):
+            try:
+                with self._lock:
+                    self._conn.execute(
+                        """
+                        INSERT INTO observe_stream (
+                            event_type, lane, provider, model,
+                            trace_id, root_trace_id, span_id, parent_span_id, job_id, artifact_id,
+                            payload
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            event_type,
+                            lane,
+                            provider,
+                            model,
+                            trace_id,
+                            root_trace_id,
+                            span_id,
+                            parent_span_id,
+                            job_id,
+                            artifact_id,
+                            payload_json,
+                        ),
+                    )
+                    self._conn.commit()
+                return True
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower():
+                    raise
+                try:
+                    self._conn.rollback()
+                except Exception:
+                    logger.debug("observe rollback failed after locked DB", exc_info=True)
+                if attempt >= OBSERVE_LOCKED_RETRY_ATTEMPTS:
+                    logger.warning(
+                        "dropping observe event after locked database retries: %s",
+                        event_type,
+                        exc_info=True,
+                    )
+                    return False
+                time.sleep(OBSERVE_LOCKED_RETRY_DELAY_SECONDS * attempt)
+        return False
 
     def _ensure_schema(self) -> None:
         existing = {

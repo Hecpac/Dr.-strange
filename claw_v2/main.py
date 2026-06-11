@@ -39,7 +39,13 @@ from claw_v2.browser import DevBrowserService
 from claw_v2.checkpoint import CheckpointService
 from claw_v2.buddy import BuddyService
 from claw_v2.bus import AgentBus
-from claw_v2.computer import BrowserUseService, CodexComputerBackend, ComputerUseService
+from claw_v2.computer import (
+    BrowserUseService,
+    CodexComputerBackend,
+    ComputerUseService,
+    ComputerUseUnavailable,
+    _load_pyautogui,
+)
 from claw_v2.config import AppConfig, MonitoredSiteConfig, ScheduledSubAgentConfig
 from claw_v2.coordinator import CoordinatorService
 from claw_v2.cron import CronScheduler, ScheduledJob
@@ -65,7 +71,9 @@ from claw_v2.skills import SkillRegistry
 from claw_v2.social import SocialPublisher
 from claw_v2.content import ContentEngine
 from claw_v2.sandbox import SandboxPolicy
+from claw_v2.subprocess_runner import run_subprocess_bounded
 from claw_v2.runtime_policy import RuntimePolicyEngine
+from claw_v2.sqlite_runtime import check_runtime_sqlite_health
 from claw_v2.task_board import TaskBoard
 from claw_v2.task_ledger import TaskLedger
 from claw_v2.terminal_bridge import TerminalBridgeService
@@ -75,6 +83,8 @@ from claw_v2.wiki import WikiService
 from claw_v2.scheduled_background_jobs import (
     A2A_PROCESS_INBOX_JOB_KIND,
     A2A_PROCESS_INBOX_RESUME_KEY,
+    APPROVAL_SWEEP_JOB_KIND,
+    APPROVAL_SWEEP_RESUME_KEY,
     AUTO_DREAM_JOB_KIND,
     AUTO_DREAM_RESUME_KEY,
     KAIROS_TICK_JOB_KIND,
@@ -290,15 +300,50 @@ def _find_local_chrome() -> str | None:
     return None
 
 
-def _probe_pyautogui_display() -> tuple[int, int]:
-    import pyautogui
+def _probe_pyautogui_display(*, timeout_s: float = 5.0) -> tuple[int, int]:
+    import queue
+    import threading
 
-    size = pyautogui.size()
-    return int(getattr(size, "width", 0)), int(getattr(size, "height", 0))
+    results: queue.Queue[tuple[bool, object]] = queue.Queue(maxsize=1)
+
+    def worker() -> None:
+        try:
+            pag = _load_pyautogui()
+            size = pag.size()
+            results.put((True, (int(getattr(size, "width", 0)), int(getattr(size, "height", 0)))))
+        except Exception as exc:
+            results.put((False, exc))
+
+    thread = threading.Thread(target=worker, name="computer-use-pyautogui-probe", daemon=True)
+    thread.start()
+    thread.join(timeout_s)
+    if thread.is_alive():
+        raise TimeoutError(f"pyautogui display probe timed out after {timeout_s:.1f}s")
+    ok, value = results.get_nowait()
+    if ok:
+        return value  # type: ignore[return-value]
+    raise value  # type: ignore[misc]
 
 
 def _run_startup_healthchecks(config: AppConfig, observe: ObserveStream) -> StartupHealthReport:
     report = StartupHealthReport()
+
+    def computer_required_failed(name: str, detail: str) -> None:
+        observe.emit(
+            "computer_use_required_failed",
+            payload={
+                "name": name,
+                "backend": config.computer_use_backend,
+                "detail": detail,
+            },
+        )
+        report.add_failed(name, detail, capability="computer_use")
+
+    def degrade_or_fail_computer(name: str, detail: str) -> None:
+        if config.computer_use_required:
+            computer_required_failed(name, detail)
+        else:
+            report.add_degraded(name, detail, capability="computer_use")
 
     for name, path in (
         ("workspace_root", config.workspace_root),
@@ -359,50 +404,84 @@ def _run_startup_healthchecks(config: AppConfig, observe: ObserveStream) -> Star
             f"configured: backend={config.computer_use_backend}",
             capability="computer_use",
         )
-        try:
-            display_width, display_height = _probe_pyautogui_display()
-        except Exception as exc:
-            report.add_degraded(
-                "computer_display",
-                f"pyautogui display probe failed: {exc}",
+        if config.computer_use_backend == "openai":
+            observe.emit(
+                "computer_use_probe_started",
+                payload={"backend": config.computer_use_backend},
             )
-        else:
-            if display_width <= 0 or display_height <= 0:
-                report.add_degraded(
-                    "computer_display",
-                    f"pyautogui reports unusable display size: {display_width}x{display_height}",
+            try:
+                display_width, display_height = _probe_pyautogui_display()
+            except ComputerUseUnavailable as exc:
+                detail = f"pyautogui import failed: {exc}"
+                observe.emit(
+                    "computer_use_import_failed",
+                    payload={"backend": config.computer_use_backend, "error": str(exc)[:200]},
                 )
+                degrade_or_fail_computer("computer_display", detail)
+            except Exception as exc:
+                degrade_or_fail_computer("computer_display", f"pyautogui display probe failed: {exc}")
             else:
-                report.add_ok("computer_display", f"{display_width}x{display_height}")
+                if display_width <= 0 or display_height <= 0:
+                    degrade_or_fail_computer(
+                        "computer_display",
+                        f"pyautogui reports unusable display size: {display_width}x{display_height}",
+                    )
+                else:
+                    report.add_ok("computer_display", f"{display_width}x{display_height}")
+                    observe.emit(
+                        "computer_use_available",
+                        payload={
+                            "backend": config.computer_use_backend,
+                            "display_width": display_width,
+                            "display_height": display_height,
+                        },
+                    )
     else:
-        report.add_degraded(
-            "computer_use",
-            "Computer Use está desactivado en la configuración",
-            capability="computer_use",
+        disabled_detail = "Computer Use está desactivado en la configuración"
+        observe.emit(
+            "computer_use_disabled",
+            payload={"required": config.computer_use_required},
         )
+        if config.computer_use_required:
+            computer_required_failed("computer_use", disabled_detail)
+        else:
+            report.add_degraded(
+                "computer_use",
+                disabled_detail,
+                capability="computer_use",
+            )
 
     if config.computer_use_backend == "codex":
         codex_path = shutil.which(config.codex_cli_path) if config.codex_cli_path else None
         if codex_path is None:
-            report.add_degraded(
-                "codex_cli",
-                f"Codex CLI no está disponible en '{config.codex_cli_path}'",
-                capability="computer_control",
-            )
+            detail = f"Codex CLI no está disponible en '{config.codex_cli_path}'"
+            if config.computer_use_enabled and config.computer_use_required:
+                computer_required_failed("codex_cli", detail)
+            else:
+                report.add_degraded(
+                    "codex_cli",
+                    detail,
+                    capability="computer_control",
+                )
         else:
             report.add_ok("codex_cli", codex_path, capability="computer_control")
     elif config.computer_use_backend == "openai":
         if config.computer_use_enabled and not config.openai_api_key:
-            report.add_degraded(
-                "openai_api_key",
-                "OPENAI_API_KEY no está configurado; el backend openai fallará al ejecutar acciones reales",
-            )
+            detail = "OPENAI_API_KEY no está configurado; el backend openai fallará al ejecutar acciones reales"
+            if config.computer_use_required:
+                computer_required_failed("openai_api_key", detail)
+            else:
+                report.add_degraded("openai_api_key", detail)
         if config.computer_use_enabled and not sys.modules.get("openai") and importlib.util.find_spec("openai") is None:
-            report.add_degraded(
-                "openai_sdk",
-                "OpenAI SDK no está instalado; el control de escritorio asistido quedará degradado",
-                capability="computer_control",
-            )
+            detail = "OpenAI SDK no está instalado; el control de escritorio asistido quedará degradado"
+            if config.computer_use_required:
+                computer_required_failed("openai_sdk", detail)
+            else:
+                report.add_degraded(
+                    "openai_sdk",
+                    detail,
+                    capability="computer_control",
+                )
         else:
             report.add_ok("computer_control", config.computer_use_backend, capability="computer_control")
     else:
@@ -456,7 +535,13 @@ def _setup_core_state(config: AppConfig) -> tuple[MemoryStore, ObserveStream, Me
     memory = MemoryStore(config.db_path)
     observe = ObserveStream(config.db_path)
     metrics = MetricsTracker()
-    approvals = ApprovalManager(config.approvals_root, config.approval_secret)
+    approvals = ApprovalManager(
+        config.approvals_root,
+        config.approval_secret,
+        ttl_seconds=config.approval_ttl_seconds,
+        observe=observe,
+    )
+    approvals.expire_due()
     bus = AgentBus(config.agent_state_root / "_bus")
     agent_store = FileAgentStore(config.agent_state_root)
     return memory, observe, metrics, approvals, bus, agent_store
@@ -645,7 +730,7 @@ def _setup_agent_services(
             router=router,
             brain=brain,
             evaluator=wiki_quality_evaluator,
-            promotion_executor=GitBranchPromotionExecutor(config.workspace_root),
+            promotion_executor=GitBranchPromotionExecutor(config.workspace_root, observe=observe),
             observe=observe,
         )
 
@@ -812,7 +897,7 @@ def _setup_operational_services(
     kairos: KairosService,
     startup_health: StartupHealthReport,
     observation_window: ObservationWindowState | None,
-) -> tuple[ClawDaemon, BotService, PipelineService, DevBrowserService, BrowserUseService, ComputerUseService]:
+) -> tuple[ClawDaemon, BotService, PipelineService, DevBrowserService, BrowserUseService, ComputerUseService | None]:
     daemon = ClawDaemon(
         scheduler=CronScheduler(),
         heartbeat=heartbeat,
@@ -831,17 +916,19 @@ def _setup_operational_services(
         policy_context="telegram",
         default_cwd=config.workspace_root,
     )
-    codex_computer_backend: CodexComputerBackend | None = None
-    if config.computer_use_backend == "codex":
-        codex_computer_backend = CodexComputerBackend(
-            cli_path=config.codex_cli_path,
-            model=config.codex_model,
+    computer: ComputerUseService | None = None
+    if config.computer_use_enabled:
+        codex_computer_backend: CodexComputerBackend | None = None
+        if config.computer_use_backend == "codex":
+            codex_computer_backend = CodexComputerBackend(
+                cli_path=config.codex_cli_path,
+                model=config.codex_model,
+            )
+        computer = ComputerUseService(
+            display_width=config.computer_display_width,
+            display_height=config.computer_display_height,
+            codex_backend=codex_computer_backend,
         )
-    computer = ComputerUseService(
-        display_width=config.computer_display_width,
-        display_height=config.computer_display_height,
-        codex_backend=codex_computer_backend,
-    )
     browser_use = BrowserUseService(cdp_url=f"http://localhost:{config.claw_chrome_port}")
     from claw_v2.stop_notifier import build_stop_notifier
     stop_notifier = build_stop_notifier(config=config)
@@ -1088,13 +1175,12 @@ def _setup_scheduler(
             return
 
         try:
-            test_result = subprocess.run(
+            test_result = run_subprocess_bounded(
                 pytest_args,
-                capture_output=True,
-                text=True,
                 check=False,
                 cwd=str(repo_root),
-                timeout=config.self_improve_test_timeout_seconds,
+                timeout_s=config.self_improve_test_timeout_seconds,
+                observe=observe,
             )
         except subprocess.TimeoutExpired as exc:
             observe.emit(
@@ -1122,6 +1208,7 @@ def _setup_scheduler(
                 state={
                     "promote_on_improvement": True,
                     "commit_on_promotion": True,
+                    "branch_on_promotion": True,
                     "metric_command": f"PYTHONPATH=. {sys.executable} -m pytest tests/ -x -q --tb=no",
                 },
             )
@@ -1305,6 +1392,21 @@ def _setup_scheduler(
             name="self_improve",
             handler=lambda: self_improve_runner.run_available(limit=1),
         )
+        approval_sweep_runner = ScheduledBackgroundJobRunner(
+            job_name="approval_sweep",
+            job_kind=APPROVAL_SWEEP_JOB_KIND,
+            job_service=job_service,
+            handler=lambda _payload: approvals.expire_due(),
+            observe=observe,
+            worker_id="approval-sweep-runner",
+            result_summary=lambda expired_count: {
+                "expired_count": safe_non_negative_int(expired_count, default=0)
+            },
+        )
+        daemon.register_background_job_runner(
+            name="approval_sweep",
+            handler=lambda: approval_sweep_runner.run_available(limit=1),
+        )
 
     scheduler.register(ScheduledJob(name="heartbeat", interval_seconds=config.heartbeat_interval, handler=heartbeat.emit))
     scheduler.register(ScheduledJob(name="task_lifecycle_watchdog", interval_seconds=300, handler=_task_lifecycle_watchdog_handler))
@@ -1323,6 +1425,24 @@ def _setup_scheduler(
                     observe=observe,
                 ),
                 skip_if=_maintenance_skip,
+            ),
+        )
+    )
+    scheduler.register(
+        ScheduledJob(
+            name="approval_sweep",
+            interval_seconds=300,
+            handler=_wrap_job_handler(
+                name="approval_sweep",
+                observe=observe,
+                handler=lambda: enqueue_scheduled_background_job(
+                    job_name="approval_sweep",
+                    job_kind=APPROVAL_SWEEP_JOB_KIND,
+                    resume_key=APPROVAL_SWEEP_RESUME_KEY,
+                    job_service=job_service,
+                    observe=observe,
+                    max_attempts=1,
+                ),
             ),
         )
     )
@@ -1734,6 +1854,7 @@ def build_runtime(
     config = AppConfig.from_env()
     config.validate()
     config.ensure_directories()
+    check_runtime_sqlite_health(config.db_path, thorough=True)
 
     memory, observe, metrics, approvals, bus, agent_store = _setup_core_state(config)
     task_ledger = TaskLedger(config.db_path, observe=observe)

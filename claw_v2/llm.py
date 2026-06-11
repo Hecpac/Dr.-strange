@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 import re
-from typing import Callable
+from typing import Any, Callable
 
 from claw_v2.adapters.anthropic import AnthropicAgentAdapter
 from claw_v2.adapters.base import (
@@ -73,8 +73,9 @@ class LLMRouter:
         timeout: float | None = None,
         thinking_tokens: int | None = None,
         role: ProviderRole | None = None,
+        delegation_handler: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     ) -> LLMResponse:
-        self._validate_lane_input(lane, evidence_pack, allowed_tools, agents, hooks)
+        self._validate_lane_input(lane, evidence_pack, allowed_tools, agents, hooks, delegation_handler)
         configured_provider = self.config.provider_for_lane(lane)
         selected_provider = provider or (self.config.provider_for_role(role) if role else configured_provider)
         selected_model = (
@@ -120,6 +121,7 @@ class LLMRouter:
             cache_ttl=self.config.cache_prefix_ttl if self.config.cache_prefix_ttl > 0 else None,
             thinking_tokens=max(0, int(selected_thinking)),
             role=role,
+            delegation_handler=delegation_handler,
         )
         request.evidence_pack = {
             **(request.evidence_pack or {}),
@@ -473,11 +475,12 @@ class LLMRouter:
         allowed_tools: list[str] | None,
         agents: dict | None,
         hooks: dict | None,
+        delegation_handler: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     ) -> None:
         if lane in self.NON_TOOL_LANES:
             if evidence_pack is None:
                 raise ValueError(f"Lane '{lane}' requires an evidence_pack.")
-            if any(value is not None for value in (allowed_tools, agents, hooks)):
+            if any(value is not None for value in (allowed_tools, agents, hooks, delegation_handler)):
                 raise ValueError(f"Lane '{lane}' cannot receive tool-loop configuration.")
 
 

@@ -21,10 +21,12 @@ Two flavors:
 from __future__ import annotations
 
 import contextlib
+import hashlib
+import json
 import logging
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable, Iterator
+from typing import TYPE_CHECKING, Any, Callable, Iterator
 
 from claw_v2.approval import ApprovalManager, PendingApproval
 
@@ -39,6 +41,19 @@ if TYPE_CHECKING:  # avoid circular at runtime
 # this to "system" via `system_approval_mode(reason=...)` context manager.
 _DAEMON_REASON: ContextVar[str | None] = ContextVar("claw_daemon_reason", default=None)
 _APPROVED_TOOL_CONTEXT: ContextVar[dict | None] = ContextVar("claw_approved_tool_context", default=None)
+
+
+def approval_args_hash(args: dict[str, Any] | None) -> str:
+    """Stable hash for a tool invocation's arguments.
+
+    The hash is stored with approvals so an approved retry can authorize the
+    same concrete invocation, not just any later call to the same Tier 3 tool.
+    """
+    try:
+        canonical = json.dumps(args or {}, sort_keys=True, separators=(",", ":"), default=repr)
+    except TypeError:
+        canonical = repr(args or {})
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 @contextlib.contextmanager
@@ -63,7 +78,13 @@ def current_daemon_reason() -> str | None:
 
 
 @contextlib.contextmanager
-def approved_tool_invocation(*, tool: str, approval_id: str, reason: str) -> Iterator[None]:
+def approved_tool_invocation(
+    *,
+    tool: str,
+    approval_id: str,
+    reason: str,
+    args_hash: str | None = None,
+) -> Iterator[None]:
     """Allow one already-approved interactive Tier 3 tool invocation.
 
     This is used when Hector approves a pending tool request from the same
@@ -76,6 +97,7 @@ def approved_tool_invocation(*, tool: str, approval_id: str, reason: str) -> Ite
             "tool": tool,
             "approval_id": approval_id,
             "reason": reason,
+            "args_hash": args_hash,
             "used": False,
         }
     )
@@ -102,6 +124,7 @@ class ApprovalPending(Exception):
     required_confirmation: str | None = None
     diff_summary: str | None = None
     sensitive_paths: tuple[str, ...] = ()
+    args_hash: str | None = None
 
     def __str__(self) -> str:
         return f"Tier 3 tool '{self.tool}' pending approval (id={self.approval_id})"
@@ -121,11 +144,16 @@ def build_telegram_approval_gate(
     """
 
     def gate(definition: "ToolDefinition", args: dict) -> None:
+        args_hash = approval_args_hash(args)
         approved_context = _APPROVED_TOOL_CONTEXT.get()
         if (
             isinstance(approved_context, dict)
             and not approved_context.get("used")
             and approved_context.get("tool") == definition.name
+            and (
+                not approved_context.get("args_hash")
+                or approved_context.get("args_hash") == args_hash
+            )
         ):
             approved_context["used"] = True
             return
@@ -137,6 +165,7 @@ def build_telegram_approval_gate(
                 "tool": definition.name,
                 "tier": definition.tier,
                 "args_keys": sorted(args.keys()),
+                "args_hash": args_hash,
             },
             risk_basis=f"tier3_tool:{definition.name}",
         )
@@ -158,6 +187,7 @@ def build_telegram_approval_gate(
             required_confirmation=pending_metadata.get("required_confirmation"),
             diff_summary=pending_metadata.get("diff_summary"),
             sensitive_paths=tuple(pending_metadata.get("sensitive_paths") or ()),
+            args_hash=str(pending_metadata.get("args_hash") or args_hash),
         )
 
     return gate
@@ -177,6 +207,7 @@ def build_system_auto_approve_gate(
     """
 
     def gate(definition: "ToolDefinition", args: dict) -> None:
+        args_hash = approval_args_hash(args)
         pending = approvals.create(
             action=f"tool:{definition.name}",
             summary=f"[auto] {definition.name} ({reason})",
@@ -184,6 +215,7 @@ def build_system_auto_approve_gate(
                 "tool": definition.name,
                 "tier": definition.tier,
                 "args_keys": sorted(args.keys()),
+                "args_hash": args_hash,
                 "auto_approved_reason": reason,
             },
             risk_basis=f"system_auto_tier3_tool:{definition.name}:{reason}",

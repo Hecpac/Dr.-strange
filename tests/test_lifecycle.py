@@ -7,7 +7,13 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from claw_v2.lifecycle import PidLock, load_soul, run, should_send_fitness_reminder
+from claw_v2.lifecycle import (
+    PidLock,
+    load_soul,
+    run,
+    should_route_observability_telegram_notifications,
+    should_send_fitness_reminder,
+)
 
 
 class PidLockTests(unittest.TestCase):
@@ -71,6 +77,15 @@ class FitnessReminderTests(unittest.TestCase):
             stamp.write_text("2026-04-15")
             self.assertFalse(should_send_fitness_reminder(datetime(2026, 4, 15, 5, 30), stamp))
             self.assertTrue(should_send_fitness_reminder(datetime(2026, 4, 16, 5, 0), stamp))
+
+
+class ObservabilityTelegramRoutingTests(unittest.TestCase):
+    def test_requires_separate_observability_chat(self) -> None:
+        self.assertFalse(should_route_observability_telegram_notifications(None, "123"))
+        self.assertFalse(should_route_observability_telegram_notifications("", "123"))
+        self.assertFalse(should_route_observability_telegram_notifications("123", "123"))
+        self.assertFalse(should_route_observability_telegram_notifications(123, "123"))
+        self.assertTrue(should_route_observability_telegram_notifications("456", "123"))
 
 
 class RunTests(unittest.IsolatedAsyncioTestCase):

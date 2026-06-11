@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import inspect
 import os
 import tempfile
 import unittest
@@ -9,9 +10,10 @@ from unittest.mock import MagicMock, patch
 
 from claw_v2.adapters.base import LLMRequest, LLMResponse
 from claw_v2.config import AppConfig, ProviderRolePolicyError
-from claw_v2.main import build_runtime, _sanitize_job_name
+from claw_v2.main import build_runtime, _is_git_repo, _sanitize_job_name
 from claw_v2.scheduled_background_jobs import (
     A2A_PROCESS_INBOX_JOB_KIND,
+    APPROVAL_SWEEP_JOB_KIND,
     AUTO_DREAM_JOB_KIND,
     KAIROS_TICK_JOB_KIND,
     LEARNING_CONSOLIDATE_JOB_KIND,
@@ -42,6 +44,7 @@ SLOW_SCHEDULER_AGENT_JOBS = {
     "pipeline_poll": PIPELINE_POLL_JOB_KIND,
     "pipeline_poll_merges": PIPELINE_POLL_MERGES_JOB_KIND,
     "a2a_process_inbox": A2A_PROCESS_INBOX_JOB_KIND,
+    "approval_sweep": APPROVAL_SWEEP_JOB_KIND,
     "auto_dream": AUTO_DREAM_JOB_KIND,
     "learning_consolidate": LEARNING_CONSOLIDATE_JOB_KIND,
     "learning_soul_suggestions": LEARNING_SOUL_SUGGESTIONS_JOB_KIND,
@@ -65,6 +68,190 @@ class _HeavyInlineCall(BaseException):
 
 
 class ArchitectureInvariantTests(unittest.TestCase):
+    def test_runtime_builder_and_git_probe_remain_sync(self) -> None:
+        self.assertFalse(inspect.iscoroutinefunction(build_runtime))
+        self.assertFalse(inspect.iscoroutinefunction(_is_git_repo))
+
+    def test_self_improve_promotion_actions_have_critical_floor(self) -> None:
+        from claw_v2.brain import _risk_floor_for_action
+
+        self.assertEqual(_risk_floor_for_action("promote"), "critical")
+        self.assertEqual(_risk_floor_for_action("promote_self-improve"), "critical")
+        self.assertEqual(_risk_floor_for_action("self_improve"), "critical")
+
+    def test_branch_promotion_executor_does_not_accept_live_head_state_flag(self) -> None:
+        from claw_v2.agents import GitBranchPromotionExecutor
+
+        source = inspect.getsource(GitBranchPromotionExecutor.__call__)
+        self.assertNotIn("allow_live_head_promotion", source)
+        self.assertIn("_commit_to_isolated_branch", source)
+
+    def test_branch_promotion_executor_runs_diff_scoped_tooling_gate(self) -> None:
+        from claw_v2.agents import GitBranchPromotionExecutor
+
+        source = inspect.getsource(GitBranchPromotionExecutor.__call__)
+        self.assertIn("tooling_gate.evaluate", source)
+        self.assertIn("PromotionToolingError", source)
+
+    def test_promotion_sensitive_path_denylist_covers_runtime_chokepoints(self) -> None:
+        from claw_v2.agents import PROMOTION_SENSITIVE_PATH_PATTERNS
+
+        required = {
+            "claw_v2/brain.py",
+            "claw_v2/agents.py",
+            "claw_v2/approval.py",
+            "claw_v2/approval_gate.py",
+            "claw_v2/config.py",
+            "claw_v2/main.py",
+            "claw_v2/tools.py",
+            "claw_v2/scheduler*",
+            "claw_v2/scheduled_background_jobs.py",
+            "claw_v2/computer.py",
+            "claw_v2/memory*",
+            "claw_v2/secrets*",
+            "claw_v2/auth*",
+            "claw_v2/subprocess_runner.py",
+            "tests/test_architecture_invariants.py",
+            "claw_v2/INTERNAL_WIRING.md",
+            "CLAUDE.md",
+            "AGENTS.md",
+        }
+        self.assertTrue(required.issubset(set(PROMOTION_SENSITIVE_PATH_PATTERNS)))
+
+    def test_computer_module_does_not_import_pyautogui_at_module_scope(self) -> None:
+        tree = ast.parse((REPO_ROOT / "claw_v2" / "computer.py").read_text(encoding="utf-8"))
+        offenders: list[str] = []
+        for node in tree.body:
+            if isinstance(node, ast.Import):
+                offenders.extend(alias.name for alias in node.names if alias.name == "pyautogui")
+            elif isinstance(node, ast.ImportFrom) and node.module == "pyautogui":
+                offenders.append(node.module)
+        self.assertEqual(offenders, [])
+
+    def test_subprocess_run_calls_in_runtime_code_have_timeouts(self) -> None:
+        offenders: list[str] = []
+        for path in sorted((REPO_ROOT / "claw_v2").rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                is_subprocess_run = (
+                    isinstance(func, ast.Attribute)
+                    and func.attr == "run"
+                    and isinstance(func.value, ast.Name)
+                    and func.value.id == "subprocess"
+                )
+                if not is_subprocess_run:
+                    continue
+                kwargs = {keyword.arg for keyword in node.keywords if keyword.arg}
+                if "timeout" not in kwargs:
+                    offenders.append(f"{path.relative_to(REPO_ROOT)}:{node.lineno}")
+        self.assertEqual(offenders, [])
+
+    def test_runtime_code_does_not_introduce_async_subprocess_exec(self) -> None:
+        legacy_voice_subprocesses = {
+            ("claw_v2/voice.py", "_transcribe_local"),
+            ("claw_v2/voice.py", "extract_audio"),
+            ("claw_v2/voice.py", "_wav_to_ogg"),
+            ("claw_v2/voice.py", "_mp3_to_ogg"),
+        }
+        offenders: list[str] = []
+        for path in sorted((REPO_ROOT / "claw_v2").rglob("*.py")):
+            rel_path = str(path.relative_to(REPO_ROOT))
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for function in [
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+            ]:
+                for node in ast.walk(function):
+                    if not isinstance(node, ast.Call):
+                        continue
+                    func = node.func
+                    is_create_subprocess_exec = (
+                        isinstance(func, ast.Attribute)
+                        and func.attr == "create_subprocess_exec"
+                        and isinstance(func.value, ast.Name)
+                        and func.value.id == "asyncio"
+                    )
+                    if not is_create_subprocess_exec:
+                        continue
+                    if (rel_path, function.name) in legacy_voice_subprocesses:
+                        continue
+                    offenders.append(f"{rel_path}:{node.lineno}:{function.name}")
+            for node in tree.body:
+                if not isinstance(node, ast.Expr | ast.Assign | ast.AnnAssign):
+                    continue
+                for call in ast.walk(node):
+                    if not isinstance(call, ast.Call):
+                        continue
+                    func = call.func
+                    if (
+                        isinstance(func, ast.Attribute)
+                        and func.attr == "create_subprocess_exec"
+                        and isinstance(func.value, ast.Name)
+                        and func.value.id == "asyncio"
+                    ):
+                        offenders.append(f"{rel_path}:{call.lineno}:module")
+        self.assertEqual(offenders, [])
+
+    def test_runtime_code_restricts_direct_subprocess_popen(self) -> None:
+        allowed_popen_callers = {
+            ("claw_v2/chrome.py", "_spawn_chrome"),  # long-lived managed Chrome process
+            ("claw_v2/subprocess_runner.py", "run_subprocess_bounded"),
+            ("claw_v2/terminal_bridge.py", "run_session"),  # long-lived PTY session runner
+        }
+        offenders: list[str] = []
+        for path in sorted((REPO_ROOT / "claw_v2").rglob("*.py")):
+            rel_path = str(path.relative_to(REPO_ROOT))
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for function in [
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+            ]:
+                for node in ast.walk(function):
+                    if not isinstance(node, ast.Call):
+                        continue
+                    func = node.func
+                    is_popen = (
+                        isinstance(func, ast.Attribute)
+                        and func.attr == "Popen"
+                        and isinstance(func.value, ast.Name)
+                        and func.value.id == "subprocess"
+                    )
+                    if not is_popen:
+                        continue
+                    if (rel_path, function.name) in allowed_popen_callers:
+                        continue
+                    offenders.append(f"{rel_path}:{node.lineno}:{function.name}")
+        self.assertEqual(offenders, [])
+
+    def test_runtime_code_does_not_use_shell_true_or_os_system(self) -> None:
+        offenders: list[str] = []
+        for path in sorted((REPO_ROOT / "claw_v2").rglob("*.py")):
+            rel_path = str(path.relative_to(REPO_ROOT))
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                is_os_system = (
+                    isinstance(func, ast.Attribute)
+                    and func.attr == "system"
+                    and isinstance(func.value, ast.Name)
+                    and func.value.id == "os"
+                )
+                if is_os_system:
+                    offenders.append(f"{rel_path}:{node.lineno}:os.system")
+                for keyword in node.keywords:
+                    if keyword.arg != "shell":
+                        continue
+                    if isinstance(keyword.value, ast.Constant) and keyword.value.value is True:
+                        offenders.append(f"{rel_path}:{node.lineno}:shell=True")
+        self.assertEqual(offenders, [])
+
     def test_no_default_on_scheduler_job_runs_heavy_work_inline_in_daemon_tick(self) -> None:
         """Deny-by-default backstop for Core Invariant 1.
 

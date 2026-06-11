@@ -68,6 +68,7 @@ class TaskHandler:
         store_message: Callable[[str, str, str], Any] | None = None,
         workspace_root: Path | None = None,
         telemetry_root: Path | str | None = None,
+        max_autonomous_workers: int = 4,
     ) -> None:
         self.approvals = approvals
         self.coordinator = coordinator
@@ -80,6 +81,8 @@ class TaskHandler:
         self._store_message = store_message
         self._workspace_root = Path(workspace_root) if workspace_root is not None else None
         self._telemetry_root = Path(telemetry_root).expanduser() if telemetry_root is not None else None
+        self._max_autonomous_workers = max(1, int(max_autonomous_workers))
+        self._autonomous_slots = threading.BoundedSemaphore(self._max_autonomous_workers)
         self._task_threads: dict[str, threading.Thread] = {}
         self._cancelled_tasks: set[str] = set()
         self._task_lock = threading.Lock()
@@ -343,15 +346,29 @@ class TaskHandler:
             route=active_route,
             reason="task_started",
         )
-        thread = threading.Thread(
-            target=self._run_autonomous_task,
-            args=(session_id, task_id, objective, mode, job_id),
-            daemon=True,
+        if not self._start_autonomous_thread(
+            session_id=session_id,
+            task_id=task_id,
+            objective=objective,
+            mode=mode,
+            job_id=job_id,
+            resumed=False,
             name=f"autonomous-task-{task_id[-8:]}",
-        )
-        with self._task_lock:
-            self._task_threads[task_id] = thread
-        thread.start()
+        ):
+            self._mark_autonomous_task_queued_for_capacity(
+                session_id=session_id,
+                task_id=task_id,
+                objective=objective,
+                mode=mode,
+                job_id=job_id,
+                reason="start_autonomous_task",
+            )
+            return (
+                "Tengo el límite de tareas autónomas activo. La dejé en cola durable y la retomaré cuando haya cupo.\n\n"
+                f"Tarea autónoma en cola: `{task_id}`\n"
+                f"Modo: {mode}\n"
+                "Para mirar el estado en vivo: `/task_loop`."
+            )
         return (
             "Voy con eso. La dejo corriendo y te aviso cuando cierre con evidencia.\n\n"
             f"Tarea autónoma iniciada: `{task_id}`\n"
@@ -633,6 +650,7 @@ class TaskHandler:
         mode: str,
         job_id: str | None = None,
         resumed: bool = False,
+        slot_acquired: bool = False,
     ) -> None:
         goal_id = self._p0_goal_id_for_task(task_id, session_id=session_id, objective=objective, mode=mode)
         try:
@@ -1036,6 +1054,11 @@ class TaskHandler:
             with self._task_lock:
                 self._task_threads.pop(task_id, None)
                 self._cancelled_tasks.discard(task_id)
+                if slot_acquired:
+                    try:
+                        self._autonomous_slots.release()
+                    except ValueError:
+                        logger.warning("autonomous task slot release overflow for %s", task_id)
 
     def _precheck_worktree(self, *, task_id: str, mode: str) -> None:
         if mode != "coding" or self._workspace_root is None:
@@ -1135,6 +1158,109 @@ class TaskHandler:
         thread.join(timeout=timeout)
         return not thread.is_alive()
 
+    def _start_autonomous_thread(
+        self,
+        *,
+        session_id: str,
+        task_id: str,
+        objective: str,
+        mode: str,
+        job_id: str | None,
+        resumed: bool,
+        name: str,
+    ) -> bool:
+        with self._task_lock:
+            existing = self._task_threads.get(task_id)
+            if existing is not None and existing.is_alive():
+                return True
+            if len(self._task_threads) >= self._max_autonomous_workers:
+                return False
+            if not self._autonomous_slots.acquire(blocking=False):
+                return False
+            thread = threading.Thread(
+                target=self._run_autonomous_task,
+                args=(session_id, task_id, objective, mode, job_id, resumed),
+                kwargs={"slot_acquired": True},
+                daemon=True,
+                name=name,
+            )
+            self._task_threads[task_id] = thread
+            try:
+                thread.start()
+            except Exception:
+                self._task_threads.pop(task_id, None)
+                self._autonomous_slots.release()
+                raise
+            return True
+
+    def _mark_autonomous_task_queued_for_capacity(
+        self,
+        *,
+        session_id: str,
+        task_id: str,
+        objective: str,
+        mode: str,
+        job_id: str | None,
+        reason: str,
+    ) -> None:
+        checkpoint = {
+            "summary": f"Autonomous task queued by local worker limit: {objective[:180]}",
+            "verification_status": "queued",
+            "reason": "autonomous_worker_limit",
+            "task_id": task_id,
+            "max_autonomous_workers": self._max_autonomous_workers,
+        }
+        state = self._get_session_state(session_id)
+        active_object = dict(state.get("active_object") or {})
+        active_task = dict(active_object.get("active_task") or {})
+        if active_task.get("task_id") == task_id:
+            active_task["status"] = "queued"
+            active_task["queued_at"] = time.time()
+            active_task["queue_reason"] = "autonomous_worker_limit"
+            if job_id:
+                active_task["generic_job_id"] = job_id
+            active_object["active_task"] = active_task
+        queue = self.upsert_task_queue_entry(
+            state.get("task_queue") or [],
+            summary=objective,
+            mode=mode,
+            status="pending",
+            source="coordinator",
+            priority=0,
+            depends_on=self.derive_task_dependencies(state.get("task_queue") or [], summary=objective),
+        )
+        self._update_session_state(
+            session_id,
+            task_queue=queue,
+            verification_status="queued",
+            pending_action="",
+            last_checkpoint=checkpoint,
+            active_object=active_object,
+        )
+        if self.task_ledger is not None:
+            self.task_ledger.mark_running_checkpoint(
+                task_id,
+                summary=checkpoint["summary"],
+                verification_status="queued",
+                artifacts=self._pending_artifacts(
+                    task_id=task_id,
+                    session_id=session_id,
+                    checkpoint=checkpoint,
+                    verification_status="queued",
+                    response_preview="",
+                ),
+            )
+        self._emit(
+            "autonomous_task_backpressure",
+            {
+                "session_id": session_id,
+                "task_id": task_id,
+                "objective": objective,
+                "reason": reason,
+                "max_autonomous_workers": self._max_autonomous_workers,
+            },
+        )
+
     def resume_interrupted_autonomous_tasks(self, *, limit: int = 20) -> int:
         if self.task_ledger is None:
             return 0
@@ -1144,8 +1270,8 @@ class TaskHandler:
                 continue
             if self._has_live_task_thread(record.task_id):
                 continue
-            self._resume_autonomous_record(record, reason="startup_recovery")
-            count += 1
+            if self._resume_autonomous_record(record, reason="startup_recovery"):
+                count += 1
         return count
 
     def resume_idle_autonomous_task(self, session_id: str, task_id: str) -> dict[str, Any]:
@@ -1187,7 +1313,13 @@ class TaskHandler:
                 "reason": "already_running",
                 "message": f"task {task_id} is already running",
             }
-        self._resume_autonomous_record(record, reason="idle_executor", requested_by_session=session_id)
+        resumed = self._resume_autonomous_record(record, reason="idle_executor", requested_by_session=session_id)
+        if not resumed:
+            return {
+                "advanced": False,
+                "reason": "autonomous_worker_limit",
+                "message": f"La tarea `{task_id}` sigue en cola; el límite de tareas autónomas está activo.",
+            }
         return {
             "advanced": True,
             "reason": "resumed_by_idle_executor",
@@ -1207,7 +1339,9 @@ class TaskHandler:
             return f"task {task_id} is already running"
         if not self._is_resumable_record(record, automatic=False):
             return f"task {task_id} is not resumable"
-        self._resume_autonomous_record(record, reason="manual_resume", requested_by_session=session_id)
+        resumed = self._resume_autonomous_record(record, reason="manual_resume", requested_by_session=session_id)
+        if not resumed:
+            return f"La tarea `{task_id}` queda en cola; el límite de tareas autónomas está activo."
         return f"La retomé y queda corriendo de nuevo.\nTarea reanudada: `{task_id}`"
 
     def cancel_task_response(self, session_id: str, task_id: str) -> str:
@@ -1240,7 +1374,7 @@ class TaskHandler:
         *,
         reason: str,
         requested_by_session: str | None = None,
-    ) -> None:
+    ) -> bool:
         mode = record.mode or _infer_session_mode(record.objective)
         false_success = self._is_false_success_record(record)
         metadata = dict(record.metadata or {})
@@ -1357,30 +1491,35 @@ class TaskHandler:
                 active_task["p0_proposed_event_id"] = proposed_event_id
                 active_object["active_task"] = active_task
                 self._update_session_state(record.session_id, active_object=active_object)
-        thread = threading.Thread(
-            target=self._run_autonomous_task,
-            args=(
-                record.session_id,
-                record.task_id,
-                record.objective,
-                mode,
-                self._enqueue_autonomous_job(
-                    task_id=record.task_id,
-                    session_id=record.session_id,
-                    objective=record.objective,
-                    mode=mode,
-                    route=record.route,
-                    reason=reason,
-                    reclaim_running=True,
-                ),
-                True,
-            ),
-            daemon=True,
+        job_id = self._enqueue_autonomous_job(
+            task_id=record.task_id,
+            session_id=record.session_id,
+            objective=record.objective,
+            mode=mode,
+            route=record.route,
+            reason=reason,
+            reclaim_running=True,
+        )
+        started = self._start_autonomous_thread(
+            session_id=record.session_id,
+            task_id=record.task_id,
+            objective=record.objective,
+            mode=mode,
+            job_id=job_id,
+            resumed=True,
             name=f"autonomous-resume-{record.task_id[-8:]}",
         )
-        with self._task_lock:
-            self._task_threads[record.task_id] = thread
-        thread.start()
+        if not started:
+            self._mark_autonomous_task_queued_for_capacity(
+                session_id=record.session_id,
+                task_id=record.task_id,
+                objective=record.objective,
+                mode=mode,
+                job_id=job_id,
+                reason=reason,
+            )
+            return False
+        return True
 
     def _mark_cancelled_task_state(self, session_id: str, task_id: str, objective: str, *, reason: str) -> None:
         state = self._get_session_state(session_id)

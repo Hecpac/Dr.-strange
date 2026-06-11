@@ -12,6 +12,7 @@ from claw_v2.execution_environment import detect_execution_environment
 from claw_v2.runtime_handoff import (
     create_runtime_handoff,
     format_handoff_message,
+    load_runtime_handoff,
 )
 
 
@@ -71,6 +72,57 @@ class RuntimeHandoffTests(unittest.TestCase):
             data = json.loads(persisted.read_text())
             self.assertEqual(data["goal"], "ai_news_brief")
             self.assertEqual(data["session_id"], "s1")
+            self.assertEqual(data["signature_version"], "hmac-sha256-v1")
+            self.assertTrue(data["signature"])
+
+    def test_handoff_load_rejects_tampered_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            queue_root = Path(tmpdir) / "runtime_handoffs"
+            handoff = create_runtime_handoff(
+                goal="ai_news_brief",
+                session_id="s1",
+                queue_root=queue_root,
+                gateway_port=1,
+                signing_secret="test-secret",
+            )
+            path = Path(handoff.queue_path or "")
+            data = json.loads(path.read_text())
+            data["goal"] = "tampered"
+            path.write_text(json.dumps(data), encoding="utf-8")
+
+            with self.assertRaises(ValueError):
+                load_runtime_handoff(path, signing_secret="test-secret")
+
+    def test_handoff_round_trip_verifies_signature(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            handoff = create_runtime_handoff(
+                goal="x",
+                session_id="s1",
+                queue_root=Path(tmpdir),
+                gateway_port=1,
+                signing_secret="test-secret",
+            )
+
+            loaded = load_runtime_handoff(Path(handoff.queue_path or ""), signing_secret="test-secret")
+
+        self.assertEqual(loaded.handoff_id, handoff.handoff_id)
+        self.assertEqual(loaded.goal, "x")
+
+    def test_handoff_queue_files_are_private(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            queue_root = Path(tmpdir) / "runtime_handoffs"
+            handoff = create_runtime_handoff(
+                goal="x",
+                session_id="s1",
+                queue_root=queue_root,
+                gateway_port=1,
+                signing_secret="test-secret",
+            )
+            queue_mode = queue_root.stat().st_mode & 0o777
+            file_mode = Path(handoff.queue_path or "").stat().st_mode & 0o777
+
+        self.assertEqual(queue_mode, 0o700)
+        self.assertEqual(file_mode, 0o600)
 
     def test_handoff_message_when_queued_includes_restart_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -77,6 +77,27 @@ def _assert_not_brain_fallback(response: str | None, decisions: list[dict]) -> N
     ), decisions
 
 
+def _assert_no_imperative_receipt(response: str | None) -> None:
+    assert response
+    forbidden = (
+        "Intent:",
+        "Target:",
+        "Artifact:",
+        "Estado:",
+        "Task:",
+        "approval_id:",
+        "ui.open_app",
+        "ui.inspect_app",
+        "ui.paste_text",
+        "ui.submit_prompt",
+        "blocked_by_capability",
+        "partial_success",
+        "pending_approval",
+    )
+    for marker in forbidden:
+        assert marker not in response
+
+
 def _seed_codex_mission(bot, session_id: str = "tg-test") -> None:
     bot.brain.memory.update_session_state(
         session_id,
@@ -397,8 +418,8 @@ def test_contextual_cleanup_archives_stale_and_duplicate_approvals_not_brain(bot
     response, decisions, events = _drive(bot, "Limpia")
 
     assert response
-    assert "approvals.cleanup_stale_duplicates" in response
-    assert "Archivadas: 2" in response
+    assert "Archivé 2 aprobaciones" in response
+    _assert_no_imperative_receipt(response)
     assert bot.approvals.status(latest.approval_id) == "pending"
     assert bot.approvals.status(duplicate.approval_id) == "archived"
     assert bot.approvals.status(stale.approval_id) == "archived"
@@ -435,9 +456,10 @@ def test_clear_app_imperatives_route_to_result_not_brain(bot, text: str, expecte
     response, decisions, events = _drive(bot, text)
 
     assert response
-    assert expected_intent in response or "blocked_by_capability" in response or "Tarea" in response
+    _assert_no_imperative_receipt(response)
     assert "telegram_imperative_detected" in events
     assert "telegram_imperative_routed" in events or "telegram_imperative_blocked" in events
+    assert any(expected_intent in str(ev.get("reason") or "") for ev in decisions), decisions
     assert any(
         ev.get("handler") == "telegram_imperative" and ev.get("route") == "intercepted"
         for ev in decisions
@@ -465,12 +487,11 @@ def test_paste_prompt_is_paste_only_and_does_not_claim_clipboard_as_full_success
     response, decisions, events = _drive(bot, text)
 
     assert response
-    assert "ui.paste_text" in response or "ui.paste_clipboard" in response
-    assert "ui.submit_prompt" not in response
+    _assert_no_imperative_receipt(response)
     assert "mandado" not in response.lower()
     assert "enviado" not in response.lower()
-    assert "blocked_by_capability" in response or "partial_success" in response or "Tarea" in response
     assert "telegram_imperative_detected" in events
+    assert any("ui.paste_text" in str(ev.get("reason") or "") for ev in decisions), decisions
     _assert_not_brain_fallback(response, decisions)
 
 
@@ -481,9 +502,9 @@ def test_submit_prompt_is_distinct_from_paste(bot, text: str) -> None:
     response, decisions, _events = _drive(bot, text)
 
     assert response
-    assert "ui.submit_prompt" in response
-    assert "ui.paste_text" not in response
-    assert "approval" in response.lower() or "blocked_by_capability" in response
+    _assert_no_imperative_receipt(response)
+    assert "autoriz" in response.lower() or "control local" in response.lower()
+    assert any("ui.submit_prompt" in str(ev.get("reason") or "") for ev in decisions), decisions
     _assert_not_brain_fallback(response, decisions)
 
 
@@ -614,6 +635,35 @@ def test_continue_uses_recent_contextual_proposal_in_telegram(bot) -> None:
     ), decisions
 
 
+def test_dale_uses_recent_mi_voto_recommendation_in_telegram(bot) -> None:
+    bot.brain.memory.store_message(
+        "tg-test",
+        "assistant",
+        (
+            "Conclusión: el cuello de botella real sigue siendo de negocio.\n\n"
+            "¿Quieres que (a) persista esta reconciliación en `docs/audit/`, "
+            "(b) siga y barra los 5 highs restantes, o (c) volvamos al outreach?\n"
+            "Mi voto: persisto la nota (2 min) y pasamos al outreach, "
+            "que es lo que mueve plata."
+        ),
+    )
+
+    response, decisions, events = _drive(bot, "Dale")
+    state = bot.brain.memory.get_session_state("tg-test")
+
+    assert response
+    assert response == "BRAIN_FALLBACK_USED"
+    assert "qué acción concreta" not in response.lower()
+    assert "telegram_continuation_stateful_resolved" in events
+    assert "persisto la nota" in state["pending_action"]
+    assert any(
+        ev.get("handler") == "telegram_imperative"
+        and ev.get("route") == "brain_shortcut"
+        and ev.get("reason") == "telegram_imperative:task.continue_active_mission:stateful"
+        for ev in decisions
+    ), decisions
+
+
 def test_continue_uses_reply_context_markdown_pending_line(bot) -> None:
     reply_context = (
         "**Checkpoint:**\n"
@@ -650,8 +700,73 @@ def test_continue_uses_reply_context_markdown_pending_line(bot) -> None:
     ), decisions
 
 
+def test_unlock_notice_resumes_chatgpt_option_without_new_goal(bot) -> None:
+    bot.brain.memory.update_session_state(
+        "tg-test",
+        mode="browse",
+        current_goal="Generar grid en ChatGPT con la referencia guardada",
+        last_options=[
+            "Termina de entrar al escritorio y me avisas → voy por ChatGPT con la referencia.",
+            '"Dale con nano banana" → arranco ahora mismo.',
+        ],
+        active_object={
+            "last_options_meta": {
+                "created_at": time.time(),
+                "source": "assistant_numbered_options",
+                "topic": "ChatGPT bloqueado por pantalla de Mac",
+            }
+        },
+    )
+
+    response, decisions, events = _drive(bot, "Ya esta desbloqueada")
+    state = bot.brain.memory.get_session_state("tg-test")
+
+    assert response == "BRAIN_FALLBACK_USED"
+    assert state["current_goal"] == "Generar grid en ChatGPT con la referencia guardada"
+    assert "ChatGPT con la referencia" in state["pending_action"]
+    assert "stateful_continuation_sent_to_brain" in events
+    assert "pending_action_execution_started" in events
+    assert "actionable_task_router_skipped_semantic_continuation" in events
+    assert not any(
+        ev.get("handler") == "shortcut" and ev.get("route") == "intercepted"
+        for ev in decisions
+    ), decisions
+
+
+def test_nano_banana_textual_option_is_not_hijacked_by_pending_chatgpt(bot) -> None:
+    bot.brain.memory.update_session_state(
+        "tg-test",
+        mode="browse",
+        current_goal="Generar grid con la referencia guardada",
+        pending_action="Ir por ChatGPT cuando la Mac quede desbloqueada",
+        last_options=[
+            "Termina de entrar al escritorio y me avisas → voy por ChatGPT con la referencia.",
+            '"Dale con nano banana" → arranco ahora mismo.',
+        ],
+        active_object={
+            "last_options_meta": {
+                "created_at": time.time(),
+                "source": "assistant_numbered_options",
+                "topic": "ChatGPT bloqueado por pantalla de Mac",
+            }
+        },
+    )
+
+    response, decisions, events = _drive(bot, "Dale con nano banana")
+    state = bot.brain.memory.get_session_state("tg-test")
+
+    assert response == "BRAIN_FALLBACK_USED"
+    assert state["pending_action"] == '"Dale con nano banana" → arranco ahora mismo.'
+    assert "last_options_textual_selected" in events
+    assert not any(
+        ev.get("handler") == "shortcut" and ev.get("route") == "intercepted"
+        for ev in decisions
+    ), decisions
+
+
 def _assert_valid_continuation_output(response: str | None) -> None:
     assert response
+    _assert_no_imperative_receipt(response)
     lowered = response.lower()
     assert "¿qué acción concreta quieres que ejecute?" not in lowered
     assert "target: `desconocido`" not in lowered
@@ -735,8 +850,6 @@ def test_replay_pegalo_y_enviamelo_uses_active_prompt_or_blocks_explicitly(bot) 
         response, decisions, events = _drive(bot, "Pégalo y envíamelo aquí")
 
     _assert_valid_continuation_output(response)
-    assert "ui.paste_text" in response
-    assert "succeeded" in response
     assert "Texto pegado en `Claude` sin enviar." in response
     assert run.call_args_list[1].args[0] == ["pbcopy"]
     assert run.call_args_list[1].kwargs["input"] == "Construye el prototipo y devuelve el resultado."
@@ -748,9 +861,8 @@ def test_replay_revisa_en_google_cloud_has_explicit_target_blocker(bot) -> None:
     response, decisions, events = _drive(bot, "Revisa en Google Cloud")
 
     _assert_valid_continuation_output(response)
-    assert "ui.inspect_app" in response
     assert "Google Cloud" in response
-    assert "blocked_by_capability" in response
+    assert "control local" in response or "lectura local" in response
     assert "telegram_imperative_blocked" in events
     _assert_not_brain_fallback(response, decisions)
 
@@ -845,9 +957,7 @@ def test_open_app_imperative_uses_local_open_without_approval(bot) -> None:
         response, decisions, events = _drive(bot, "Abre Claude")
 
     assert response
-    assert "ui.open_app" in response
-    assert "succeeded" in response
-    assert "pending_approval" not in response
+    _assert_no_imperative_receipt(response)
     assert "Necesito tu autorización" not in response
     assert "`Claude` abierto/enfocado." in response
     run.assert_called_once_with(["open", "-a", "Claude"], capture_output=True, text=True, timeout=10)
@@ -899,10 +1009,7 @@ def test_paste_prompt_imperative_executes_local_paste_without_approval(bot) -> N
         response, decisions, events = _drive(bot, "Pégale el prompt")
 
     assert response
-    assert "ui.paste_text" in response
-    assert "ui.submit_prompt" not in response
-    assert "succeeded" in response
-    assert "pending_approval" not in response
+    _assert_no_imperative_receipt(response)
     assert "Texto pegado en `Codex` sin enviar." in response
     assert run.call_args_list[0].args[0] == ["open", "-a", "Codex"]
     assert run.call_args_list[1].args[0] == ["pbcopy"]
@@ -955,10 +1062,8 @@ def test_pegalo_uses_reply_context_prompt_not_brain(bot) -> None:
         response, decisions, events = _drive(bot, "Pégalo y veamos Que nos da y me lo envias Aqui en telegram")
 
     assert response
-    assert "ui.paste_text" in response
-    assert "succeeded" in response
+    _assert_no_imperative_receipt(response)
     assert "BRAIN_FALLBACK_USED" not in response
-    assert "pending_approval" not in response
     assert "Texto pegado en `Claude` sin enviar." in response
     assert run.call_args_list[0].args[0] == ["open", "-a", "Claude"]
     assert run.call_args_list[1].args[0] == ["pbcopy"]
@@ -994,7 +1099,7 @@ def test_inspect_app_imperative_uses_computer_read_when_available(bot) -> None:
         response, decisions, events = _drive(bot, "Revisa la app")
 
     assert response
-    assert "ui.inspect_app" in response
+    _assert_no_imperative_receipt(response)
     assert "Codex app is visible and idle." in response
     bot.computer.capture_screenshot.assert_called_once_with()
     mock_handle_message.assert_called_once()
@@ -1026,8 +1131,7 @@ def test_submit_imperative_uses_computer_approval_path_when_available(bot) -> No
     response, decisions, events = _drive(bot, "Dale enter")
 
     assert response
-    assert "ui.submit_prompt" in response
-    assert "pending_approval" in response
+    _assert_no_imperative_receipt(response)
     assert "Necesito tu autorización" in response
     assert bot.approvals.list_pending()
     assert "telegram_imperative_pending_approval" in events

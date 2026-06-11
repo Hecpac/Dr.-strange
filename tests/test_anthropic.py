@@ -12,6 +12,7 @@ from claw_v2.adapters.anthropic import (
     IDENTITY_OVERRIDE,
     SILENCE_DIRECTIVE,
     create_claude_sdk_executor,
+    _inline_browser_drive_reason,
     _safe_runtime_policy_reason,
     _tool_input_evidence,
     _tool_response_evidence,
@@ -450,6 +451,172 @@ class ExtendedThinkingWiringTests(unittest.IsolatedAsyncioTestCase):
                 {"type": "enabled", "budget_tokens": 4096},
             )
             self.assertEqual(options.kwargs["max_thinking_tokens"], 4096)
+
+
+class DelegationMcpServerTests(unittest.IsolatedAsyncioTestCase):
+    """The brain-lane delegate_task MCP server attach + tool body contract."""
+
+    def _fake_sdk(self) -> SimpleNamespace:
+        class FakeHookMatcher:
+            def __init__(self, *, hooks) -> None:
+                self.hooks = hooks
+
+        class FakeClaudeAgentOptions:
+            def __init__(self, **kwargs) -> None:
+                self.kwargs = kwargs
+
+        def fake_tool(name, description, schema):
+            def decorator(fn):
+                return SimpleNamespace(
+                    name=name, description=description, schema=schema, handler=fn
+                )
+
+            return decorator
+
+        return SimpleNamespace(
+            ClaudeAgentOptions=FakeClaudeAgentOptions,
+            HookMatcher=FakeHookMatcher,
+            AgentDefinition=lambda **kwargs: kwargs,
+            tool=fake_tool,
+            create_sdk_mcp_server=lambda **kwargs: SimpleNamespace(**kwargs),
+        )
+
+    def _make_request(self, *, lane: str, delegation_handler) -> LLMRequest:
+        return LLMRequest(
+            prompt="hello",
+            system_prompt="You are Claw.",
+            lane=lane,
+            provider="anthropic",
+            model="claude-opus-4-7",
+            effort="high",
+            session_id=None,
+            max_budget=0.5,
+            evidence_pack={"app_session_id": "tg-1"},
+            allowed_tools=None,
+            agents=None,
+            hooks=None,
+            timeout=30.0,
+            delegation_handler=delegation_handler,
+        )
+
+    async def test_brain_lane_with_delegation_handler_attaches_claw_mcp_server(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            executor = ClaudeSDKExecutor(make_config(Path(tmpdir)))
+            request = self._make_request(
+                lane="brain", delegation_handler=lambda payload: {"ack": "ok"}
+            )
+
+            options = executor._build_options(self._fake_sdk(), request)
+
+            server = options.kwargs["mcp_servers"]["claw"]
+            self.assertEqual(server.name, "claw")
+            self.assertEqual(len(server.tools), 1)
+            self.assertEqual(server.tools[0].name, "delegate_task")
+            self.assertEqual(server.tools[0].schema["required"], ["objective"])
+
+    async def test_mcp_server_not_attached_for_worker_lane_or_missing_handler(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            executor = ClaudeSDKExecutor(make_config(Path(tmpdir)))
+
+            worker_request = self._make_request(
+                lane="worker", delegation_handler=lambda payload: {"ack": "ok"}
+            )
+            worker_options = executor._build_options(self._fake_sdk(), worker_request)
+            self.assertNotIn("mcp_servers", worker_options.kwargs)
+
+            no_handler_request = self._make_request(lane="brain", delegation_handler=None)
+            no_handler_options = executor._build_options(self._fake_sdk(), no_handler_request)
+            self.assertNotIn("mcp_servers", no_handler_options.kwargs)
+
+    async def test_delegate_task_tool_invokes_handler_and_returns_ack(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            executor = ClaudeSDKExecutor(make_config(Path(tmpdir)))
+            calls: list[dict] = []
+
+            def handler(payload: dict) -> dict:
+                calls.append(payload)
+                return {"ok": True, "ack": "Tarea autónoma iniciada: `t-1`"}
+
+            request = self._make_request(lane="brain", delegation_handler=handler)
+            options = executor._build_options(self._fake_sdk(), request)
+            delegate = options.kwargs["mcp_servers"]["claw"].tools[0]
+
+            result = await delegate.handler(
+                {"objective": "Publica el grid", "mode": "publish", "reason": "long job"}
+            )
+            self.assertNotIn("is_error", result)
+            self.assertIn("Tarea autónoma iniciada", result["content"][0]["text"])
+            self.assertEqual(
+                calls,
+                [{"objective": "Publica el grid", "mode": "publish", "reason": "long job"}],
+            )
+
+            blank = await delegate.handler({"objective": "   "})
+            self.assertTrue(blank["is_error"])
+            self.assertEqual(len(calls), 1, "handler must not run for blank objectives")
+
+            bad_mode = await delegate.handler({"objective": "x", "mode": "warp"})
+            self.assertTrue(bad_mode["is_error"])
+            self.assertEqual(len(calls), 1)
+
+    async def test_delegate_task_tool_bounds_handler_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            executor = ClaudeSDKExecutor(make_config(Path(tmpdir)))
+
+            def handler(payload: dict) -> dict:
+                raise RuntimeError("ledger exploded " + "x" * 500)
+
+            request = self._make_request(lane="brain", delegation_handler=handler)
+            options = executor._build_options(self._fake_sdk(), request)
+            delegate = options.kwargs["mcp_servers"]["claw"].tools[0]
+
+            result = await delegate.handler({"objective": "do it"})
+            self.assertTrue(result["is_error"])
+            self.assertLess(len(result["content"][0]["text"]), 400)
+
+
+class InlineBrowserDriveGuardTests(unittest.TestCase):
+    """Backstop that keeps the brain from driving Chrome/CDP/desktop inline."""
+
+    def test_detects_direct_command_markers(self) -> None:
+        for command in (
+            "/opt/homebrew/bin/peekaboo image --app ChatGPT",
+            "curl -s http://localhost:9250/json/list",
+            "python3 -c \"import requests; requests.get('http://127.0.0.1:9222/json/version')\"",
+            "npx playwright open https://instagram.com",
+        ):
+            self.assertIsNotNone(
+                _inline_browser_drive_reason("Bash", {"command": command}), command
+            )
+
+    def test_detects_markers_inside_referenced_script(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            script = Path(tmpdir) / "_ig_publish.py"
+            script.write_text(
+                "import socket\nHOST, PORT = 'localhost', 9250\nWS = 'webSocketDebuggerUrl'\n",
+                encoding="utf-8",
+            )
+            reason = _inline_browser_drive_reason(
+                "Bash", {"command": f"/usr/bin/python3 {script}"}
+            )
+            self.assertIsNotNone(reason)
+
+    def test_ignores_benign_and_non_bash(self) -> None:
+        self.assertIsNone(_inline_browser_drive_reason("Bash", {"command": "git status"}))
+        self.assertIsNone(
+            _inline_browser_drive_reason("Bash", {"command": "grep -r TODO claw_v2/"})
+        )
+        self.assertIsNone(_inline_browser_drive_reason("Bash", {"command": ""}))
+        self.assertIsNone(
+            _inline_browser_drive_reason("Read", {"file_path": "/x/peekaboo.py"})
+        )
+
+    def test_missing_script_path_does_not_raise(self) -> None:
+        self.assertIsNone(
+            _inline_browser_drive_reason(
+                "Bash", {"command": "/usr/bin/python3 /nonexistent/run.py --flag"}
+            )
+        )
 
 
 if __name__ == "__main__":

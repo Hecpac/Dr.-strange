@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from claw_v2.subprocess_runner import run_subprocess_bounded
 
 
 @dataclass(slots=True)
@@ -204,9 +205,11 @@ class SocialPublisher:
 
 
 def _load_keychain_credential(service_name: str) -> str | None:
-    result = subprocess.run(
+    result = run_subprocess_bounded(
         ["security", "find-generic-password", "-s", service_name, "-w"],
-        capture_output=True, text=True, check=False,
+        check=False,
+        timeout_s=10,
+        kill_process_group=False,
     )
     if result.returncode != 0:
         return None

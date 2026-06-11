@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from claw_v2.bot_helpers import (
+    _build_coordinator_tasks,
     _chat_response_has_internal_leak,
     _extract_option_reference,
     _extract_ratio_context_from_text,
@@ -353,6 +354,42 @@ class BotHelperRegressionTests(unittest.TestCase):
         self.assertEqual(result.task_kind, "qts_lock_regeneration")
         self.assertFalse(result.allowed)
         self.assertTrue(any("poetry" in blocker for blocker in result.blockers))
+
+
+class CoordinatorTaskBuilderTests(unittest.TestCase):
+    def test_build_coordinator_tasks_ops_publish_browse_build_worker_implementation(self) -> None:
+        for mode in ("ops", "publish", "browse"):
+            research, implementation, verification = _build_coordinator_tasks(
+                mode, "Publica el grid en @pachanodesign"
+            )
+            self.assertEqual([task.lane for task in research], ["research"], mode)
+            self.assertIsNotNone(implementation, mode)
+            self.assertEqual(len(implementation), 1, mode)
+            self.assertEqual(implementation[0].lane, "worker", mode)
+            self.assertEqual(implementation[0].name, "execute_operation", mode)
+            self.assertIn("## Actions", implementation[0].instruction, mode)
+            self.assertIn("## Verify", implementation[0].instruction, mode)
+            self.assertIn("## Evidence", implementation[0].instruction, mode)
+            self.assertEqual(verification[0].lane, "verifier", mode)
+            self.assertIn("Verification Status:", verification[0].instruction, mode)
+
+    def test_build_coordinator_tasks_publish_mentions_approval_gate_discipline(self) -> None:
+        _, implementation, _ = _build_coordinator_tasks("publish", "Postea el reel")
+        self.assertIn("never bypass the gate", implementation[0].instruction)
+
+    def test_build_coordinator_tasks_research_and_coding_unchanged(self) -> None:
+        research, implementation, verification = _build_coordinator_tasks(
+            "research", "Investiga el tema"
+        )
+        self.assertIsNone(implementation)
+        self.assertEqual(len(research), 2)
+        self.assertEqual(verification[0].name, "verify_findings")
+
+        research, implementation, verification = _build_coordinator_tasks(
+            "coding", "Arregla el bug"
+        )
+        self.assertIsNotNone(implementation)
+        self.assertEqual(implementation[0].name, "implement_change")
 
 
 if __name__ == "__main__":

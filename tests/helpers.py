@@ -4,6 +4,7 @@ import hashlib
 import re
 from pathlib import Path
 
+from claw_v2.approval import APPROVAL_TTL_SECONDS
 from claw_v2.config import AppConfig
 
 
@@ -21,6 +22,7 @@ def make_config(root: Path) -> AppConfig:
         claude_cli_path="claude",
         claude_auth_mode="subscription",
         approval_secret="test-secret",
+        approval_ttl_seconds=APPROVAL_TTL_SECONDS,
         brain_provider="anthropic",
         brain_model="claude-opus-4-7",
         worker_provider="anthropic",
@@ -98,6 +100,7 @@ def make_config(root: Path) -> AppConfig:
         notebooklm_cli_timeout_seconds=120.0,
         notebooklm_cli_long_timeout_seconds=1200.0,
         computer_use_enabled=False,
+        computer_use_required=False,
         computer_auto_approve=False,
         computer_display_width=1280,
         computer_display_height=800,
@@ -116,6 +119,7 @@ def make_config(root: Path) -> AppConfig:
         morning_brief_calendar_command=None,
         evening_brief_enabled=True,
         evening_brief_hour=21,
+        max_autonomous_workers=4,
         telemetry_root=root / "telemetry",
     )
     config.validate()

@@ -9,12 +9,21 @@ import logging
 import mimetypes
 import os
 import re
+import shutil
+import subprocess
 import time
 from pathlib import Path
 from typing import IO, Any, Callable
 
+from asyncio import CancelledError as _AsyncioCancelledError
+from asyncio import create_task as _asyncio_create_task
+from asyncio import shield as _asyncio_shield
+from asyncio import sleep as _asyncio_sleep
+
 from telegram import LinkPreviewOptions, Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
+
+from claw_v2.subprocess_runner import run_subprocess_bounded_off_loop
 
 
 # --- P0 hotfix E: polling singleton lock keyed by token hash ---------------
@@ -145,13 +154,21 @@ logger = logging.getLogger(__name__)
 MAX_TELEGRAM_LEN = 4096
 MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024  # 20 MB
 DEFAULT_IMAGE_PROMPT = "El usuario envio esta imagen por Telegram. Analizala y responde de forma util."
+DEFAULT_VIDEO_PROMPT = "El usuario envio este video por Telegram. Analiza los frames adjuntos y responde de forma util."
 _IMAGES_DIR = Path.home() / ".claw" / "images"
+_VIDEOS_DIR = Path.home() / ".claw" / "videos"
 DEFAULT_CONNECTION_POOL_SIZE = 32
 DEFAULT_POOL_TIMEOUT = 30.0
 DEFAULT_REQUEST_TIMEOUT = 30.0
 DEFAULT_MEDIA_WRITE_TIMEOUT = 60.0
 DEFAULT_GET_UPDATES_POOL_SIZE = 8
 DEFAULT_CONCURRENT_UPDATES = 8
+DEFAULT_VIDEO_FRAME_COUNT = 4
+DEFAULT_VIDEO_FRAME_TIMEOUT_SECONDS = 90.0
+DEFAULT_TEXT_SEND_RETRIES = 1
+DEFAULT_TEXT_SEND_RETRY_DELAY = 1.0
+DEFAULT_TEXT_SEND_CONNECT_TIMEOUT = 5.0
+DEFAULT_LATE_DELIVERY_GRACE_SECONDS = 0.5
 
 # Slash commands allowed to bypass the per-chat ordering lock so the operator
 # can inspect, approve, or freeze the agent while a long turn is running.
@@ -195,6 +212,12 @@ _SEND_IMAGE_REQUEST_WORDS = (
 )
 _TELEGRAM_TARGET_WORDS = ("telegram", "aqui", "aquí", "chat")
 _NONFATAL_SEND_ERRORS = (BrokenPipeError, ConnectionResetError)
+_NONRETRYABLE_TEXT_SEND_ERRORS = {
+    "BadRequest",
+    "ChatMigrated",
+    "Forbidden",
+    "InvalidToken",
+}
 
 
 def _split_message(text: str, max_len: int = MAX_TELEGRAM_LEN) -> list[str]:
@@ -227,6 +250,15 @@ def _latest_existing_image_path(messages: list[dict[str, Any]]) -> Path | None:
 
 def _log_nonfatal_send_error(operation: str, exc: BaseException) -> None:
     logger.warning("%s failed with non-fatal stream error: %s", operation, exc)
+
+
+def _is_retryable_text_send_error(exc: BaseException) -> bool:
+    if isinstance(exc, _NONFATAL_SEND_ERRORS):
+        return True
+    name = type(exc).__name__
+    if name in _NONRETRYABLE_TEXT_SEND_ERRORS:
+        return False
+    return name in {"NetworkError", "RetryAfter", "TimedOut"}
 
 
 def _reply_context_metadata(update: Update) -> dict[str, Any] | None:
@@ -301,6 +333,52 @@ def _build_image_content_blocks(
     )
 
 
+def _build_video_content_blocks(
+    frame_paths: list[Path],
+    *,
+    caption: str | None,
+    durable_video_path: Path | None,
+    transcript: str | None,
+    audio_error: str | None,
+    duration_seconds: float | None,
+) -> tuple[list[dict[str, Any]], str]:
+    prompt_text = caption.strip() if caption and caption.strip() else DEFAULT_VIDEO_PROMPT
+    detail_lines = [
+        prompt_text,
+        "",
+        f"[Video adjunto: {len(frame_paths)} frames muestreados para inspeccion visual.]",
+    ]
+    if duration_seconds is not None and duration_seconds > 0:
+        detail_lines.append(f"[Duracion aproximada: {duration_seconds:.1f}s.]")
+    if transcript and transcript.strip():
+        detail_lines.extend(["", "[Audio transcrito]:", transcript.strip()[:8000]])
+    elif audio_error:
+        detail_lines.append("[Audio]: no disponible o no extraible; analiza visualmente los frames.")
+
+    memory_lines = [f"[Video adjunto] path: {durable_video_path}" if durable_video_path else "[Video adjunto]"]
+    if duration_seconds is not None and duration_seconds > 0:
+        memory_lines.append(f"duracion_aproximada={duration_seconds:.1f}s")
+    memory_lines.append("frames=" + ", ".join(str(path) for path in frame_paths))
+    if caption and caption.strip():
+        memory_lines.append(caption.strip())
+    if transcript and transcript.strip():
+        memory_lines.append("[Audio transcrito]: " + transcript.strip()[:8000])
+
+    blocks: list[dict[str, Any]] = [{"type": "text", "text": "\n".join(detail_lines)}]
+    for frame_path in frame_paths:
+        blocks.append(
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": _resolve_image_mime_type(frame_path, "image/jpeg"),
+                    "data": base64.b64encode(frame_path.read_bytes()).decode("ascii"),
+                },
+            }
+        )
+    return blocks, "\n".join(memory_lines)
+
+
 def _resolve_image_mime_type(image_path: Path, declared_mime_type: str | None) -> str:
     if declared_mime_type and declared_mime_type.startswith("image/"):
         return declared_mime_type
@@ -320,6 +398,119 @@ def _download_suffix(file_path: str | None, mime_type: str | None) -> str:
         if guessed_suffix:
             return guessed_suffix
     return ".jpg"
+
+
+def _safe_media_stem(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "media")).strip("._-")
+    return (cleaned or "media")[:80]
+
+
+def _video_frame_timestamps(duration_seconds: float, max_frames: int) -> list[float]:
+    if duration_seconds <= 0:
+        return []
+    if max_frames <= 1:
+        return [max(0.0, min(duration_seconds / 2.0, duration_seconds - 0.1))]
+    if duration_seconds < 2.0:
+        return [max(0.0, duration_seconds / 2.0)]
+    anchors = [0.08, 0.33, 0.66, 0.92]
+    if max_frames != len(anchors):
+        step = 1.0 / (max_frames + 1)
+        anchors = [step * index for index in range(1, max_frames + 1)]
+    return [max(0.0, min(duration_seconds - 0.25, duration_seconds * anchor)) for anchor in anchors[:max_frames]]
+
+
+async def _probe_video_duration_seconds(video_path: Path) -> float | None:
+    try:
+        result = await run_subprocess_bounded_off_loop(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(video_path),
+            ],
+            timeout_s=10.0,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        duration = float((result.stdout or "").strip())
+    except ValueError:
+        return None
+    return duration if duration > 0 else None
+
+
+async def _run_ffmpeg_silent(cmd: list[str], *, timeout_seconds: float) -> bool:
+    try:
+        result = await run_subprocess_bounded_off_loop(list(cmd), timeout_s=timeout_seconds)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+async def _extract_video_frame_paths(
+    video_path: Path,
+    *,
+    file_unique_id: str,
+    max_frames: int = DEFAULT_VIDEO_FRAME_COUNT,
+) -> tuple[list[Path], float | None]:
+    _IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+    stem = _safe_media_stem(file_unique_id)
+    duration_seconds = await _probe_video_duration_seconds(video_path)
+    frame_paths: list[Path] = []
+    if duration_seconds is not None:
+        for index, timestamp in enumerate(_video_frame_timestamps(duration_seconds, max_frames), start=1):
+            frame_path = _IMAGES_DIR / f"{stem}-frame-{index:02d}.jpg"
+            ok = await _run_ffmpeg_silent(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    str(video_path),
+                    "-ss",
+                    f"{timestamp:.2f}",
+                    "-frames:v",
+                    "1",
+                    "-q:v",
+                    "3",
+                    str(frame_path),
+                ],
+                timeout_seconds=DEFAULT_VIDEO_FRAME_TIMEOUT_SECONDS,
+            )
+            if ok and frame_path.exists() and frame_path.stat().st_size > 0:
+                frame_paths.append(frame_path)
+    if frame_paths:
+        return frame_paths, duration_seconds
+
+    pattern = _IMAGES_DIR / f"{stem}-frame-%03d.jpg"
+    ok = await _run_ffmpeg_silent(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(video_path),
+            "-vf",
+            "fps=1",
+            "-frames:v",
+            str(max_frames),
+            "-q:v",
+            "3",
+            str(pattern),
+        ],
+        timeout_seconds=DEFAULT_VIDEO_FRAME_TIMEOUT_SECONDS,
+    )
+    if ok:
+        frame_paths = [
+            path
+            for path in sorted(_IMAGES_DIR.glob(f"{stem}-frame-*.jpg"))
+            if path.exists() and path.stat().st_size > 0
+        ][:max_frames]
+    return frame_paths, duration_seconds
 
 
 _MAX_DOC_CHARS = 50_000
@@ -395,6 +586,19 @@ class TelegramTransport:
         # Per-chat ordering: agent turns for the same session run one at a
         # time even with concurrent update processing enabled.
         self._chat_locks: dict[str, asyncio.Lock] = {}
+        self._text_send_retries = max(1, _env_int("TELEGRAM_TEXT_SEND_RETRIES", DEFAULT_TEXT_SEND_RETRIES))
+        self._text_send_retry_delay = max(
+            0.0,
+            _env_float("TELEGRAM_TEXT_SEND_RETRY_DELAY", DEFAULT_TEXT_SEND_RETRY_DELAY),
+        )
+        self._text_send_connect_timeout = max(
+            1.0,
+            _env_float("TELEGRAM_TEXT_SEND_CONNECT_TIMEOUT", DEFAULT_TEXT_SEND_CONNECT_TIMEOUT),
+        )
+        self._late_delivery_grace_seconds = max(
+            0.0,
+            _env_float("TELEGRAM_LATE_DELIVERY_GRACE_SECONDS", DEFAULT_LATE_DELIVERY_GRACE_SECONDS),
+        )
         # P0 hotfix E: held for the lifetime of the polling loop.
         self._polling_lock_fh: IO[str] | None = None
 
@@ -473,6 +677,318 @@ class TelegramTransport:
         except Exception:
             logger.debug("Could not emit telegram latency", exc_info=True)
 
+    def _emit_outbound_text_event(
+        self,
+        event_type: str,
+        *,
+        session_id: str,
+        user_id: str,
+        message_kind: str,
+        method: str,
+        part_index: int,
+        part_count: int,
+        part_chars: int,
+        attempt: int | None = None,
+        error: BaseException | None = None,
+        message_id: int | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "session_id": session_id,
+            "user_id": user_id,
+            "message_kind": message_kind,
+            "method": method,
+            "part_index": part_index,
+            "part_count": part_count,
+            "part_chars": part_chars,
+        }
+        if attempt is not None:
+            payload["attempt"] = attempt
+        if message_id is not None:
+            payload["message_id"] = message_id
+        if error is not None:
+            payload["error_type"] = type(error).__name__
+            payload["error"] = str(error)[:300]
+        self._emit_transport_event(event_type, payload)
+
+    async def _sleep_before_text_send_retry(self, exc: BaseException, attempt: int) -> None:
+        retry_after = getattr(exc, "retry_after", None)
+        if isinstance(retry_after, (int, float)) and retry_after > 0:
+            delay = float(retry_after)
+        else:
+            delay = self._text_send_retry_delay * attempt
+        if delay > 0:
+            await asyncio.sleep(delay)
+
+    def _send_text_timeout_kwargs(self) -> dict[str, float]:
+        return {
+            "connect_timeout": self._text_send_connect_timeout,
+            "read_timeout": self._request_timeout,
+            "write_timeout": self._request_timeout,
+            "pool_timeout": self._pool_timeout,
+        }
+
+    async def _send_reply_text_parts(
+        self,
+        update: Update,
+        parts: list[str],
+        *,
+        session_id: str,
+        user_id: str,
+        message_kind: str,
+    ) -> tuple[int, bool]:
+        sent_parts = 0
+        part_count = len(parts)
+        for index, part in enumerate(parts, start=1):
+            sent = await self._send_reply_text_part(
+                update,
+                part,
+                session_id=session_id,
+                user_id=user_id,
+                message_kind=message_kind,
+                part_index=index,
+                part_count=part_count,
+            )
+            if not sent:
+                return sent_parts, False
+            sent_parts += 1
+        return sent_parts, True
+
+    async def _send_reply_text_part(
+        self,
+        update: Update,
+        part: str,
+        *,
+        session_id: str,
+        user_id: str,
+        message_kind: str,
+        part_index: int,
+        part_count: int,
+    ) -> bool:
+        timeout_kwargs = self._send_text_timeout_kwargs()
+        for attempt in range(1, self._text_send_retries + 1):
+            self._emit_outbound_text_event(
+                "telegram_outbound_attempt",
+                session_id=session_id,
+                user_id=user_id,
+                message_kind=message_kind,
+                method="reply_text",
+                part_index=part_index,
+                part_count=part_count,
+                part_chars=len(part),
+                attempt=attempt,
+            )
+            try:
+                result = await update.message.reply_text(
+                    part,
+                    link_preview_options=_NO_PREVIEW,
+                    **timeout_kwargs,
+                )
+            except Exception as exc:
+                retryable = _is_retryable_text_send_error(exc)
+                logger.warning(
+                    "Telegram reply_text failed%s",
+                    "; retrying" if retryable and attempt < self._text_send_retries else "",
+                    exc_info=True,
+                )
+                self._emit_outbound_text_event(
+                    "telegram_outbound_error",
+                    session_id=session_id,
+                    user_id=user_id,
+                    message_kind=message_kind,
+                    method="reply_text",
+                    part_index=part_index,
+                    part_count=part_count,
+                    part_chars=len(part),
+                    attempt=attempt,
+                    error=exc,
+                )
+                if not retryable:
+                    break
+                if attempt < self._text_send_retries:
+                    await self._sleep_before_text_send_retry(exc, attempt)
+            else:
+                message_id = getattr(result, "message_id", None)
+                self._emit_outbound_text_event(
+                    "telegram_outbound_sent",
+                    session_id=session_id,
+                    user_id=user_id,
+                    message_kind=message_kind,
+                    method="reply_text",
+                    part_index=part_index,
+                    part_count=part_count,
+                    part_chars=len(part),
+                    attempt=attempt,
+                    message_id=message_id if isinstance(message_id, int) else None,
+                )
+                return True
+
+        if self._app is None:
+            return False
+        chat_id = getattr(getattr(update, "effective_chat", None), "id", None)
+        if chat_id is None:
+            return False
+
+        # PTB reply_text and bot.send_message share the same httpx transport. If
+        # reply_text times out, try the stdlib Bot API path before spending more
+        # time in the same failing client stack.
+        if await self._send_text_direct_bot_api(
+            part,
+            chat_id=chat_id,
+            session_id=session_id,
+            user_id=user_id,
+            message_kind=message_kind,
+            part_index=part_index,
+            part_count=part_count,
+        ):
+            return True
+
+        for attempt in range(1, self._text_send_retries + 1):
+            self._emit_outbound_text_event(
+                "telegram_outbound_attempt",
+                session_id=session_id,
+                user_id=user_id,
+                message_kind=message_kind,
+                method="send_message_fallback",
+                part_index=part_index,
+                part_count=part_count,
+                part_chars=len(part),
+                attempt=attempt,
+            )
+            try:
+                result = await self._app.bot.send_message(
+                    chat_id=chat_id,
+                    text=part,
+                    link_preview_options=_NO_PREVIEW,
+                    **timeout_kwargs,
+                )
+            except Exception as exc:
+                retryable = _is_retryable_text_send_error(exc)
+                logger.warning(
+                    "Telegram send_message fallback failed%s",
+                    "; retrying" if retryable and attempt < self._text_send_retries else "",
+                    exc_info=True,
+                )
+                self._emit_outbound_text_event(
+                    "telegram_outbound_error",
+                    session_id=session_id,
+                    user_id=user_id,
+                    message_kind=message_kind,
+                    method="send_message_fallback",
+                    part_index=part_index,
+                    part_count=part_count,
+                    part_chars=len(part),
+                    attempt=attempt,
+                    error=exc,
+                )
+                if not retryable:
+                    return False
+                if attempt < self._text_send_retries:
+                    await self._sleep_before_text_send_retry(exc, attempt)
+                continue
+
+            message_id = getattr(result, "message_id", None)
+            self._emit_outbound_text_event(
+                "telegram_outbound_sent",
+                session_id=session_id,
+                user_id=user_id,
+                message_kind=message_kind,
+                method="send_message_fallback",
+                part_index=part_index,
+                part_count=part_count,
+                part_chars=len(part),
+                attempt=attempt,
+                message_id=message_id if isinstance(message_id, int) else None,
+            )
+            return True
+        return False
+
+    async def _send_text_direct_bot_api(
+        self,
+        part: str,
+        *,
+        chat_id: int | str,
+        session_id: str,
+        user_id: str,
+        message_kind: str,
+        part_index: int,
+        part_count: int,
+    ) -> bool:
+        if not self._token:
+            return False
+        self._emit_outbound_text_event(
+            "telegram_outbound_attempt",
+            session_id=session_id,
+            user_id=user_id,
+            message_kind=message_kind,
+            method="bot_api_direct_fallback",
+            part_index=part_index,
+            part_count=part_count,
+            part_chars=len(part),
+            attempt=1,
+        )
+        try:
+            message_id = await asyncio.to_thread(
+                self._send_text_direct_bot_api_sync,
+                chat_id=chat_id,
+                text=part,
+            )
+        except Exception as exc:
+            logger.warning("Telegram direct Bot API fallback failed", exc_info=True)
+            self._emit_outbound_text_event(
+                "telegram_outbound_error",
+                session_id=session_id,
+                user_id=user_id,
+                message_kind=message_kind,
+                method="bot_api_direct_fallback",
+                part_index=part_index,
+                part_count=part_count,
+                part_chars=len(part),
+                attempt=1,
+                error=exc,
+            )
+            return False
+        self._emit_outbound_text_event(
+            "telegram_outbound_sent",
+            session_id=session_id,
+            user_id=user_id,
+            message_kind=message_kind,
+            method="bot_api_direct_fallback",
+            part_index=part_index,
+            part_count=part_count,
+            part_chars=len(part),
+            attempt=1,
+            message_id=message_id if isinstance(message_id, int) else None,
+        )
+        return True
+
+    def _send_text_direct_bot_api_sync(self, *, chat_id: int | str, text: str) -> int | None:
+        import json
+        import urllib.parse
+        import urllib.request
+
+        if not self._token:
+            raise RuntimeError("telegram token unavailable")
+        body = urllib.parse.urlencode(
+            {
+                "chat_id": str(chat_id),
+                "text": text,
+                "disable_web_page_preview": "true",
+            }
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            f"https://api.telegram.org/bot{self._token}/sendMessage",
+            data=body,
+            method="POST",
+        )
+        timeout = self._text_send_connect_timeout
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        if not payload.get("ok"):
+            description = str(payload.get("description") or "unknown")[:300]
+            raise RuntimeError(f"telegram direct API failed: {description}")
+        message_id = payload.get("result", {}).get("message_id")
+        return message_id if isinstance(message_id, int) else None
+
     _PID_FILE = Path.home() / ".claw" / "telegram.pid"
 
     async def start(self) -> None:
@@ -482,13 +998,13 @@ class TelegramTransport:
         if self._PID_FILE.exists():
             try:
                 old_pid = int(self._PID_FILE.read_text().strip())
-                import os, signal, subprocess
+                import os, signal
                 if old_pid != os.getpid():
-                    proc = subprocess.run(
+                    proc = await run_subprocess_bounded_off_loop(
                         ["ps", "-p", str(old_pid), "-o", "command="],
-                        capture_output=True,
-                        text=True,
                         check=False,
+                        timeout_s=5,
+                        kill_process_group=False,
                     )
                     if "claw_v2.main" in proc.stdout:
                         os.kill(old_pid, signal.SIGTERM)
@@ -645,6 +1161,7 @@ class TelegramTransport:
         session_id = f"tg-{update.effective_chat.id}"
         text = update.message.text or ""
         started_at = time.perf_counter()
+        delivery_state = {"normal_send_started": False}
         await _maybe_send_chat_action(update.message, "typing")
         try:
             direct_response = await self._maybe_send_latest_generated_image(
@@ -656,12 +1173,26 @@ class TelegramTransport:
             if direct_response is not None:
                 response = direct_response
             else:
-                response = await self._handle_agent_text(
-                    user_id=user_id,
-                    session_id=session_id,
-                    text=text,
-                    context_metadata=_reply_context_metadata(update),
+                response_task = _asyncio_create_task(
+                    self._handle_agent_text(
+                        user_id=user_id,
+                        session_id=session_id,
+                        text=text,
+                        context_metadata=_reply_context_metadata(update),
+                    )
                 )
+                self._attach_late_text_delivery_guard(
+                    response_task,
+                    update=update,
+                    session_id=session_id,
+                    user_id=user_id,
+                    started_at=started_at,
+                    delivery_state=delivery_state,
+                )
+                response = await _asyncio_shield(response_task)
+        except _AsyncioCancelledError:
+            logger.warning("Telegram text handler cancelled before normal delivery; late delivery guard armed")
+            raise
         except Exception as exc:
             logger.exception("Error handling message")
             err_str = str(exc)
@@ -681,9 +1212,10 @@ class TelegramTransport:
             elif "API Error" in err_str or "invalid_request" in err_str:
                 short = err_str[:300] if len(err_str) > 300 else err_str
                 response = f"Error con la API: {short}"
+            elif "database is locked" in err_str.lower():
+                response = "El runtime local tuvo contención de base de datos. Intenta de nuevo en unos segundos."
             else:
-                short = err_str[:300] if len(err_str) > 300 else err_str
-                response = f"Error procesando tu mensaje: {short}"
+                response = "Error procesando tu mensaje. Intenta de nuevo."
         bot_done_at = time.perf_counter()
         if response is None:
             finished_at = time.perf_counter()
@@ -704,6 +1236,9 @@ class TelegramTransport:
         response = self._sanitize_outbound_response(session_id, response)
         parts = _split_message(response)
         voice_name = self._bot_service.is_voice_mode(session_id)
+        sent_parts = 0
+        delivery_ok = False
+        delivery_state["normal_send_started"] = True
         if voice_name and (self._voice_api_key or self._xai_api_key):
             try:
                 await _maybe_send_chat_action(update.message, "record_voice")
@@ -718,25 +1253,143 @@ class TelegramTransport:
                         await update.message.reply_voice(voice=f)
                 finally:
                     ogg_path.unlink(missing_ok=True)
+                sent_parts = len(parts)
+                delivery_ok = True
             except Exception:
                 logger.warning("TTS failed, falling back to text", exc_info=True)
-                delivered = await self._reply_parts(update, parts)
-            else:
-                delivered = True
+                sent_parts, delivery_ok = await self._send_reply_text_parts(
+                    update,
+                    parts,
+                    session_id=session_id,
+                    user_id=user_id,
+                    message_kind="text",
+                )
         else:
-            delivered = await self._reply_parts(update, parts)
+            sent_parts, delivery_ok = await self._send_reply_text_parts(
+                update,
+                parts,
+                session_id=session_id,
+                user_id=user_id,
+                message_kind="text",
+            )
         finished_at = time.perf_counter()
         self._emit_latency(
             session_id=session_id,
             user_id=user_id,
             message_kind="text",
-            status="ok" if delivered else "send_failed",
+            status="ok" if delivery_ok else "send_failed",
             bot_ms=(bot_done_at - started_at) * 1000,
             reply_ms=(finished_at - bot_done_at) * 1000,
             total_ms=(finished_at - started_at) * 1000,
-            response_parts=len(parts),
+            response_parts=sent_parts,
             response_chars=len(response),
         )
+
+    def _attach_late_text_delivery_guard(
+        self,
+        response_task: "asyncio.Task[str | None]",
+        *,
+        update: Update,
+        session_id: str,
+        user_id: str,
+        started_at: float,
+        delivery_state: dict[str, bool],
+    ) -> None:
+        def _schedule_late_delivery(task: "asyncio.Task[str | None]") -> None:
+            try:
+                _asyncio_create_task(
+                    self._late_deliver_text_response(
+                        task,
+                        update=update,
+                        session_id=session_id,
+                        user_id=user_id,
+                        started_at=started_at,
+                        delivery_state=delivery_state,
+                    )
+                )
+            except RuntimeError:
+                logger.warning("Could not schedule Telegram late delivery guard", exc_info=True)
+
+        response_task.add_done_callback(_schedule_late_delivery)
+
+    async def _late_deliver_text_response(
+        self,
+        response_task: "asyncio.Task[str | None]",
+        *,
+        update: Update,
+        session_id: str,
+        user_id: str,
+        started_at: float,
+        delivery_state: dict[str, bool],
+    ) -> None:
+        if self._late_delivery_grace_seconds > 0:
+            await _asyncio_sleep(self._late_delivery_grace_seconds)
+        if delivery_state.get("normal_send_started"):
+            return
+        if response_task.cancelled():
+            return
+        try:
+            response = response_task.result()
+        except Exception:
+            logger.debug("Telegram late delivery guard saw failed response task", exc_info=True)
+            return
+        if response is None or not str(response).strip():
+            return
+        response = self._sanitize_outbound_response(session_id, str(response))
+        parts = _split_message(response)
+        chat_id = getattr(getattr(update, "effective_chat", None), "id", None)
+        if chat_id is None:
+            return
+        sent_parts = 0
+        for index, part in enumerate(parts, start=1):
+            try:
+                message_id = await asyncio.to_thread(
+                    self._send_text_direct_bot_api_sync,
+                    chat_id=chat_id,
+                    text=part,
+                )
+            except Exception as exc:
+                logger.warning("Telegram late direct delivery failed", exc_info=True)
+                self._emit_outbound_text_event(
+                    "telegram_outbound_error",
+                    session_id=session_id,
+                    user_id=user_id,
+                    message_kind="text",
+                    method="bot_api_late_delivery",
+                    part_index=index,
+                    part_count=len(parts),
+                    part_chars=len(part),
+                    attempt=1,
+                    error=exc,
+                )
+                break
+            sent_parts += 1
+            self._emit_outbound_text_event(
+                "telegram_outbound_sent",
+                session_id=session_id,
+                user_id=user_id,
+                message_kind="text",
+                method="bot_api_late_delivery",
+                part_index=index,
+                part_count=len(parts),
+                part_chars=len(part),
+                attempt=1,
+                message_id=message_id if isinstance(message_id, int) else None,
+            )
+        finished_at = time.perf_counter()
+        if sent_parts:
+            self._emit_latency(
+                session_id=session_id,
+                user_id=user_id,
+                message_kind="text",
+                status="late_ok" if sent_parts == len(parts) else "late_partial",
+                bot_ms=0.0,
+                reply_ms=(finished_at - started_at) * 1000,
+                total_ms=(finished_at - started_at) * 1000,
+                response_parts=sent_parts,
+                response_chars=len(response),
+            )
+
 
     async def _maybe_send_latest_generated_image(
         self,
@@ -893,35 +1546,118 @@ class TelegramTransport:
             await update.message.reply_text("Video demasiado grande (máx 20 MB).")
             return
         await _maybe_send_chat_action(update.message, "typing")
+        user_id = str(update.effective_user.id)
+        session_id = f"tg-{update.effective_chat.id}"
+        started_at = time.perf_counter()
         tmp_video = Path(f"/tmp/claw-video-{video.file_unique_id}.mp4")
+        durable_video: Path | None = None
         try:
             file = await context.bot.get_file(video.file_id, read_timeout=60, connect_timeout=15)
             await file.download_to_drive(str(tmp_video))
+            _VIDEOS_DIR.mkdir(parents=True, exist_ok=True)
+            durable_video = _VIDEOS_DIR / f"{_safe_media_stem(video.file_unique_id)}.mp4"
+            shutil.copy2(str(tmp_video), str(durable_video))
         except Exception:
             logger.exception("Video download failed")
             await update.message.reply_text("No pude descargar el video. Intenta de nuevo.")
             return
         tmp_audio: Path | None = None
+        transcript: str | None = None
+        audio_error: str | None = None
         try:
-            tmp_audio = await extract_audio(tmp_video)
-            text = await transcribe(tmp_audio, api_key=self._voice_api_key)
-        except VoiceUnavailableError:
-            await update.message.reply_text("Voice not available — OPENAI_API_KEY not configured.")
-            return
-        except RuntimeError:
-            await update.message.reply_text("No pude extraer audio del video.")
-            return
-        except Exception:
-            logger.exception("Video transcription failed")
-            await update.message.reply_text("No pude transcribir el video.")
-            return
+            try:
+                tmp_audio = await extract_audio(tmp_video)
+                transcript = await transcribe(tmp_audio, api_key=self._voice_api_key)
+            except VoiceUnavailableError as exc:
+                audio_error = "voice_unavailable"
+                logger.debug("Video audio transcription unavailable; falling back to frames: %s", exc)
+            except RuntimeError as exc:
+                audio_error = "audio_extract_failed"
+                logger.debug("Video audio extraction failed; falling back to frames: %s", exc)
+            except Exception:
+                audio_error = "audio_transcription_failed"
+                logger.warning("Video transcription failed; falling back to frames", exc_info=True)
+
+            frame_paths, duration_seconds = await _extract_video_frame_paths(
+                tmp_video,
+                file_unique_id=str(video.file_unique_id),
+            )
+            caption = update.message.caption or ""
+            if frame_paths:
+                content_blocks, memory_text = _build_video_content_blocks(
+                    frame_paths,
+                    caption=caption,
+                    durable_video_path=durable_video,
+                    transcript=transcript,
+                    audio_error=audio_error,
+                    duration_seconds=duration_seconds,
+                )
+                try:
+                    response = await asyncio.to_thread(
+                        self._handle_agent_multimodal_sync,
+                        user_id=user_id,
+                        session_id=session_id,
+                        content_blocks=content_blocks,
+                        memory_text=memory_text,
+                    )
+                except Exception:
+                    logger.exception("Error handling video message")
+                    response = "Error procesando tu video. Intenta de nuevo."
+            elif transcript and transcript.strip():
+                prefix = f"{caption}\n[Video transcrito]: " if caption else "[Video transcrito]: "
+                try:
+                    response = await self._handle_agent_text(
+                        user_id=user_id,
+                        session_id=session_id,
+                        text=prefix + transcript,
+                    )
+                except Exception:
+                    logger.exception("Error handling video transcript")
+                    response = "Error procesando la transcripcion del video. Intenta de nuevo."
+            else:
+                response = "No pude extraer frames ni audio del video. Reenvialo como video corto o screenshot."
         finally:
             tmp_video.unlink(missing_ok=True)
             if tmp_audio:
                 tmp_audio.unlink(missing_ok=True)
-        caption = update.message.caption or ""
-        prefix = f"{caption}\n[Video transcrito]: " if caption else "[Video transcrito]: "
-        await self._handle_text_content(update, prefix + text)
+
+        bot_done_at = time.perf_counter()
+        if response is None:
+            self._emit_latency(
+                session_id=session_id,
+                user_id=user_id,
+                message_kind="video",
+                status="suppressed",
+                bot_ms=(bot_done_at - started_at) * 1000,
+                reply_ms=0.0,
+                total_ms=(bot_done_at - started_at) * 1000,
+                response_parts=0,
+                response_chars=0,
+            )
+            return
+        if not response.strip():
+            response = "(procesando... intenta de nuevo en unos segundos)"
+        response = self._sanitize_outbound_response(session_id, response)
+        parts = _split_message(response)
+        sent_parts, delivery_ok = await self._send_reply_text_parts(
+            update,
+            parts,
+            session_id=session_id,
+            user_id=user_id,
+            message_kind="video",
+        )
+        finished_at = time.perf_counter()
+        self._emit_latency(
+            session_id=session_id,
+            user_id=user_id,
+            message_kind="video",
+            status="ok" if delivery_ok else "send_failed",
+            bot_ms=(bot_done_at - started_at) * 1000,
+            reply_ms=(finished_at - bot_done_at) * 1000,
+            total_ms=(finished_at - started_at) * 1000,
+            response_parts=sent_parts,
+            response_chars=len(response),
+        )
 
     async def _handle_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_authorized(update):

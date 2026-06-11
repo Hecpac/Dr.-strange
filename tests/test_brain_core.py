@@ -129,6 +129,29 @@ class HandleMessageTests(unittest.TestCase):
             system_prompt="You are Claw.",
         )
 
+    def test_handle_message_passes_delegation_handler_and_contract_only_when_factory_present(self) -> None:
+        self.router.ask.return_value = LLMResponse(
+            content="<response>ok</response>",
+            lane="brain",
+            provider="anthropic",
+            model="claude-opus-4-7",
+        )
+
+        self.brain.handle_message("tg-1", "hola")
+        kwargs = self.router.ask.call_args.kwargs
+        self.assertIsNone(kwargs["delegation_handler"])
+        self.assertNotIn("mcp__claw__delegate_task", kwargs["system_prompt"])
+
+        def handler(payload: dict) -> dict:
+            return {"ok": True, "ack": "started"}
+
+        self.brain.delegation_handler_factory = lambda session_id: handler
+        self.brain.handle_message("tg-1", "hola de nuevo")
+        kwargs = self.router.ask.call_args.kwargs
+        self.assertIs(kwargs["delegation_handler"], handler)
+        self.assertIn("mcp__claw__delegate_task", kwargs["system_prompt"])
+        self.assertIn("# Delegation contract", kwargs["system_prompt"])
+
     def test_stores_user_and_assistant_messages(self) -> None:
         self.router.ask.return_value = LLMResponse(
             content="<response>Hola Hector</response>",

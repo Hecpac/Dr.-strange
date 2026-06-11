@@ -358,6 +358,10 @@ class BrainToolUseLedgerTests(unittest.TestCase):
         # unverified until a verifier promotes it to passed success.
         self.assertEqual(task.status, "completed_unverified")
         self.assertEqual(task.verification_status, "needs_verification")
+        outcome = task.artifacts["outcome_manifest"]
+        self.assertEqual(outcome["final_outcome"], "needs_verification")
+        self.assertEqual(outcome["pending_async_jobs"], [])
+        self.assertEqual(outcome["blockers"], [])
         events = [name for name, _ in observe.events]
         self.assertIn("brain_tooluse_ledger_needs_verification", events)
 
@@ -386,9 +390,53 @@ class BrainToolUseLedgerTests(unittest.TestCase):
         manifest = task.artifacts["evidence_manifest"]
         self.assertEqual(manifest["verification_result"], "blocked")
         self.assertIn("passed_verification_missing_for_action", manifest["blockers"])
+        outcome = task.artifacts["outcome_manifest"]
+        self.assertEqual(outcome["final_outcome"], "blocked")
+        self.assertIn("passed_verification_missing_for_action", outcome["blockers"])
         events = [name for name, _ in observe.events]
         self.assertIn("brain_tooluse_ledger_blocked_unverified_action", events)
         self.assertNotIn("brain_tooluse_ledger_needs_verification", events)
+
+    def test_telegram_runtime_defers_brain_tooluse_ledger_before_delivery(self) -> None:
+        observe = _RecordingObserve()
+        bot = _make_bot(observe, self.ledger)
+        started: list[dict[str, Any]] = []
+
+        class _FakeThread:
+            def __init__(self, *, target, name: str, daemon: bool) -> None:
+                self.target = target
+                self.name = name
+                self.daemon = daemon
+
+            def start(self) -> None:
+                started.append({"name": self.name, "daemon": self.daemon})
+
+        with patch("claw_v2.bot.threading.Thread", _FakeThread):
+            deferred = bot._defer_brain_tool_use_ledger(
+                session_id="tg-test",
+                response=_StubResponse(artifacts={"trace_id": "trace-X"}),
+                source_text="Haz un repaso por X",
+                runtime_channel="telegram",
+            )
+
+        self.assertTrue(deferred)
+        self.assertEqual(started, [{"name": "brain-tooluse-ledger-trace-X", "daemon": True}])
+        self.assertEqual(self.ledger.list(limit=10), [])
+        events = [name for name, _ in observe.events]
+        self.assertIn("brain_tooluse_ledger_deferred", events)
+
+    def test_non_telegram_runtime_keeps_brain_tooluse_ledger_inline(self) -> None:
+        observe = _RecordingObserve()
+        bot = _make_bot(observe, self.ledger)
+
+        deferred = bot._defer_brain_tool_use_ledger(
+            session_id="web-test",
+            response=_StubResponse(artifacts={"trace_id": "trace-X"}),
+            source_text="Haz un repaso por X",
+            runtime_channel="web",
+        )
+
+        self.assertFalse(deferred)
 
     def test_g4_external_status_check_without_verifier_blocks_even_with_read_tool(self) -> None:
         observe = _RecordingObserve()
@@ -491,6 +539,7 @@ class BrainToolUseLedgerTests(unittest.TestCase):
         task = self.ledger.list(limit=10)[0]
         self.assertEqual(task.status, "completed_unverified")
         self.assertEqual(task.verification_status, "needs_verification")
+        self.assertEqual(task.artifacts["outcome_manifest"]["final_outcome"], "needs_verification")
 
     def test_b1_on_passed_closes_succeeded_for_mutation(self) -> None:
         observe = _RecordingObserve()
@@ -521,6 +570,14 @@ class BrainToolUseLedgerTests(unittest.TestCase):
         self.assertEqual(task.status, "succeeded")
         self.assertEqual(task.verification_status, "passed")
         self.assertEqual(task.artifacts["evidence_manifest"]["verification_result"], "passed")
+        outcome = task.artifacts["outcome_manifest"]
+        self.assertEqual(outcome["final_outcome"], "passed")
+        self.assertEqual(outcome["blockers"], [])
+        self.assertEqual(outcome["pending_async_jobs"], [])
+        self.assertIn(
+            {"kind": "brain_tooluse_verifier", "result": "passed"},
+            outcome["verifications"],
+        )
         events = [name for name, _ in observe.events]
         self.assertIn("brain_tooluse_ledger_verified", events)
 

@@ -798,5 +798,71 @@ class LLMRouterTests(unittest.TestCase):
             self.assertEqual(window.freeze_reason, "circuit_breaker:cost_per_hour")
 
 
+class DelegationHandlerThreadingTests(unittest.TestCase):
+    def test_brain_lane_threads_delegation_handler_to_request(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            recorded: dict[str, object] = {}
+
+            def responder(request: LLMRequest) -> LLMResponse:
+                recorded["delegation_handler"] = request.delegation_handler
+                return echo_response("anthropic")(request)
+
+            router = LLMRouter(
+                config=config,
+                adapters={"anthropic": StaticAdapter("anthropic", tool_capable=True, responder=responder)},
+            )
+
+            def handler(payload: dict) -> dict:
+                return {"ok": True, "ack": "started"}
+
+            router.ask("hazlo", lane="brain", delegation_handler=handler)
+            self.assertIs(recorded["delegation_handler"], handler)
+
+    def test_advisory_lane_rejects_delegation_handler(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            router = LLMRouter(
+                config=config,
+                adapters={"anthropic": StaticAdapter("anthropic", tool_capable=True, responder=echo_response("anthropic"))},
+            )
+            with self.assertRaises(ValueError):
+                router.ask(
+                    "verify",
+                    lane="verifier",
+                    evidence_pack={"diff": "x"},
+                    delegation_handler=lambda payload: {"ack": "no"},
+                )
+
+    def test_fallback_request_preserves_closure_delegation_handler(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            recorded: dict[str, object] = {}
+
+            def failing(_: LLMRequest) -> LLMResponse:
+                raise AdapterUnavailableError("provider unavailable")
+
+            def fallback(request: LLMRequest) -> LLMResponse:
+                recorded["delegation_handler"] = request.delegation_handler
+                return echo_response("openai")(request)
+
+            router = LLMRouter(
+                config=config,
+                adapters={
+                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=failing),
+                    "openai": StaticAdapter("openai", tool_capable=True, responder=fallback),
+                },
+            )
+
+            def handler(payload: dict) -> dict:
+                return {"ok": True, "ack": "started"}
+
+            response = router.ask("hazlo", lane="brain", delegation_handler=handler)
+            self.assertEqual(response.provider, "openai")
+            handed = recorded["delegation_handler"]
+            self.assertTrue(callable(handed))
+            self.assertEqual(handed({"objective": "x"}), {"ok": True, "ack": "started"})
+
+
 if __name__ == "__main__":
     unittest.main()

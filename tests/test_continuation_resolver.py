@@ -5,7 +5,7 @@ import time
 import unittest
 from pathlib import Path
 
-from claw_v2.bot_helpers import _looks_like_proceed_request
+from claw_v2.bot_helpers import _extract_pending_action_from_reply, _looks_like_proceed_request
 from claw_v2.memory import MemoryStore
 from claw_v2.state_handler import StateHandler, _BrainShortcut
 
@@ -114,6 +114,11 @@ class ContinuationResolverTests(unittest.TestCase):
             "Adelante",
             "continúa",
             "continua",
+            "Ármalo",
+            "Armalo",
+            "Ya esta desbloqueada",
+            "Ya está desbloqueada",
+            "Ya entré al escritorio",
         ):
             with self.subTest(word=word):
                 self.assertTrue(
@@ -131,6 +136,7 @@ class ContinuationResolverTests(unittest.TestCase):
             "Sí.",
             "Vale.",
             "Adelante!",
+            "Go",
         ):
             with self.subTest(word=word):
                 self.assertTrue(
@@ -155,6 +161,30 @@ class ContinuationResolverTests(unittest.TestCase):
         assert isinstance(shortcut, _BrainShortcut)
         self.assertIn("smoke test de Inworld", shortcut.text)
         self.assertIn("recent_assistant", shortcut.text)
+
+    def test_dale_resolves_recent_mi_voto_recommendation(self) -> None:
+        memory, handler = self._handler()
+        memory.store_message(
+            "s1",
+            "assistant",
+            (
+                "Conclusión: la seguridad ya no es el bloqueador.\n\n"
+                "¿Quieres que (a) persista esta reconciliación en `docs/audit/`, "
+                "(b) siga y barra los 5 highs restantes, o (c) volvamos al outreach?\n"
+                "Mi voto: persisto la nota (2 min) y pasamos al outreach, "
+                "que es lo que mueve plata."
+            ),
+        )
+
+        shortcut = handler.maybe_resolve_stateful_followup("Dale", session_id="s1")
+        state = memory.get_session_state("s1")
+
+        self.assertIsInstance(shortcut, _BrainShortcut)
+        assert isinstance(shortcut, _BrainShortcut)
+        self.assertIn("acción propuesta previamente", shortcut.text)
+        self.assertIn("persisto la nota", shortcut.text)
+        self.assertIn("recent_assistant", shortcut.text)
+        self.assertIn("persisto la nota", state["pending_action"])
 
     def test_resolves_markdown_pending_line_from_reply_context(self) -> None:
         memory, handler = self._handler()
@@ -182,6 +212,97 @@ class ContinuationResolverTests(unittest.TestCase):
         self.assertIn("acción propuesta previamente", shortcut.text)
         self.assertIn("validacion de la rama nueva", shortcut.text)
         self.assertNotIn("requiere un", shortcut.text)
+
+    def test_armalo_resolves_dime_y_lo_armo_reply_context(self) -> None:
+        memory, handler = self._handler()
+        memory.update_session_state(
+            "s1",
+            active_object={
+                "reply_context": {
+                    "source": "telegram_reply",
+                    "text": (
+                        "Si quieres, convierto el bloque \"skills are the prompts + loop engineering\" "
+                        "en el primer post de tu cadena semanal. Dime y lo armo."
+                    ),
+                    "created_at": time.time(),
+                }
+            },
+        )
+
+        shortcut = handler.maybe_resolve_stateful_followup("Ármalo", session_id="s1")
+        state = memory.get_session_state("s1")
+
+        self.assertIsInstance(shortcut, _BrainShortcut)
+        assert isinstance(shortcut, _BrainShortcut)
+        self.assertIn("acción propuesta previamente", shortcut.text)
+        self.assertIn("primer post de tu cadena semanal", shortcut.text)
+        self.assertNotIn("Dime y lo armo", shortcut.text)
+        self.assertIn("primer post de tu cadena semanal", state["pending_action"])
+
+    def test_unlock_notice_resolves_chatgpt_option(self) -> None:
+        memory, handler = self._handler()
+        memory.update_session_state(
+            "s1",
+            last_options=[
+                "Termina de entrar al escritorio y me avisas → voy por ChatGPT con la referencia.",
+                '"Dale con nano banana" → arranco ahora mismo.',
+            ],
+            active_object={
+                "last_options_meta": {
+                    "created_at": time.time(),
+                    "source": "assistant_numbered_options",
+                    "topic": "ChatGPT bloqueado por pantalla",
+                }
+            },
+        )
+
+        shortcut = handler.maybe_resolve_stateful_followup("Ya esta desbloqueada", session_id="s1")
+
+        self.assertIsInstance(shortcut, _BrainShortcut)
+        assert isinstance(shortcut, _BrainShortcut)
+        self.assertIn("ChatGPT con la referencia", shortcut.text)
+        self.assertIn("last_options_unlock_ready", shortcut.text)
+        self.assertNotIn("nano banana", shortcut.text)
+
+    def test_textual_option_selection_beats_generic_dale_pending_action(self) -> None:
+        memory, handler = self._handler()
+        memory.update_session_state(
+            "s1",
+            pending_action="Ir por ChatGPT cuando la Mac quede desbloqueada",
+            last_options=[
+                "Termina de entrar al escritorio y me avisas → voy por ChatGPT con la referencia.",
+                '"Dale con nano banana" → arranco ahora mismo.',
+            ],
+            active_object={
+                "last_options_meta": {
+                    "created_at": time.time(),
+                    "source": "assistant_numbered_options",
+                    "topic": "ChatGPT bloqueado por pantalla",
+                }
+            },
+        )
+
+        shortcut = handler.maybe_resolve_stateful_followup("Dale con nano banana", session_id="s1")
+        state = memory.get_session_state("s1")
+
+        self.assertIsInstance(shortcut, _BrainShortcut)
+        assert isinstance(shortcut, _BrainShortcut)
+        self.assertIn("Opción elegida (2)", shortcut.text)
+        self.assertIn("nano banana", shortcut.text)
+        self.assertEqual(state["pending_action"], '"Dale con nano banana" → arranco ahora mismo.')
+
+    def test_extracts_unlock_resume_action_from_assistant_reply(self) -> None:
+        reply = (
+            "Apenas la desbloquees, ejecuto solo: chat nuevo en ChatGPT → "
+            "pego tu imagen de referencia → genero el tile hero."
+        )
+
+        pending = _extract_pending_action_from_reply(reply)
+
+        self.assertEqual(
+            pending,
+            "chat nuevo en ChatGPT → pego tu imagen de referencia → genero el tile hero.",
+        )
 
 
 if __name__ == "__main__":

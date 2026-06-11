@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock
 
 from claw_v2.agent_runtime import AgentRuntime, ChannelRoute
 from claw_v2.memory import MemoryStore
@@ -88,6 +89,22 @@ class AgentRuntimeTests(unittest.TestCase):
         )
 
         self.assertEqual(session_id, "discord-abc")
+
+    def test_observe_emit_failure_does_not_drop_response(self) -> None:
+        observe = MagicMock()
+        observe.emit.side_effect = RuntimeError("database is locked")
+        runtime = AgentRuntime(bot_service=_StubBotService(), observe=observe)
+
+        response = runtime.handle_text(
+            channel="telegram",
+            external_user_id="123",
+            external_session_id="456",
+            text="hola",
+        )
+
+        self.assertEqual(response.session_id, "tg-456")
+        self.assertEqual(response.text, "text:123:tg-456:hola")
+        self.assertGreaterEqual(observe.emit.call_count, 2)
 
 
 if __name__ == "__main__":

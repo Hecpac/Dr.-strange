@@ -5,6 +5,7 @@ import base64
 import fcntl
 import hashlib
 import logging
+import os
 import shutil
 import subprocess
 import tempfile
@@ -14,16 +15,63 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
-
-import pyautogui
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
-pyautogui.FAILSAFE = True
-pyautogui.PAUSE = 0.3
+pyautogui: Any | None = None
 
 LOCK_PATH = Path.home() / ".claw" / "computer_use.lock"
 TERMINAL_APPS = {"Terminal", "iTerm2", "Alacritty", "kitty", "Warp", "WezTerm"}
+
+
+class ComputerUseUnavailable(RuntimeError):
+    pass
+
+
+class BrowserUsePolicyInterrupt(RuntimeError):
+    """Raised when browser_use proposes an action that needs explicit approval."""
+
+    def __init__(
+        self,
+        *,
+        action_name: str,
+        params: dict[str, Any],
+        url: str | None,
+        risk: str,
+        approved_domains: list[str] | None = None,
+    ) -> None:
+        super().__init__(f"browser_use action requires approval: {action_name}")
+        self.action_name = action_name
+        self.params = params
+        self.url = url
+        self.risk = risk
+        self.approved_domains = list(approved_domains or [])
+
+
+def _load_pyautogui() -> Any:
+    global pyautogui
+    if pyautogui is not None:
+        return pyautogui
+    try:
+        import pyautogui as imported_pyautogui
+    except Exception as exc:
+        raise ComputerUseUnavailable(str(exc)) from exc
+    imported_pyautogui.FAILSAFE = True
+    imported_pyautogui.PAUSE = 0.1
+    pyautogui = imported_pyautogui
+    return imported_pyautogui
+
+
+@contextmanager
+def _preserve_browser_use_import_env():
+    """browser_use imports load .env and mutate os.environ; keep Claw's env stable."""
+    snapshot = dict(os.environ)
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(snapshot)
 
 
 @dataclass
@@ -36,6 +84,7 @@ class ComputerSession:
     max_iterations: int = 30
     iteration: int = 0
     current_url: str | None = None
+    previous_response_id: str | None = None
     visual_checks: int = 0
     last_screenshot_hash: str | None = None
     last_visual_changed: bool | None = None
@@ -258,59 +307,60 @@ class ComputerUseService:
         action_type = action.get("action") or action.get("type", "")
         if action_type == "screenshot":
             return self.capture_screenshot()
+        pag = _load_pyautogui()
         # OpenAI format: click with button field
         if action_type == "click":
             x, y = self._scale_coords([action.get("x", 0), action.get("y", 0)])
             button = action.get("button", "left")
             if button == "right":
-                pyautogui.rightClick(x, y)
+                pag.rightClick(x, y)
             elif button == "middle":
-                pyautogui.middleClick(x, y)
+                pag.middleClick(x, y)
             else:
-                pyautogui.click(x, y)
+                pag.click(x, y)
         elif action_type == "double_click":
             coord = action.get("coordinate") or [action.get("x", 0), action.get("y", 0)]
             x, y = self._scale_coords(coord)
-            pyautogui.doubleClick(x, y)
+            pag.doubleClick(x, y)
         # Anthropic format: left_click with coordinate
         elif action_type == "left_click":
             x, y = self._scale_coords(action["coordinate"])
-            pyautogui.click(x, y)
+            pag.click(x, y)
         elif action_type == "right_click":
             x, y = self._scale_coords(action["coordinate"])
-            pyautogui.rightClick(x, y)
+            pag.rightClick(x, y)
         elif action_type == "middle_click":
             x, y = self._scale_coords(action["coordinate"])
-            pyautogui.middleClick(x, y)
+            pag.middleClick(x, y)
         elif action_type == "type":
-            pyautogui.typewrite(action.get("text", ""), interval=0.02)
+            pag.typewrite(action.get("text", ""), interval=0.02)
         elif action_type in ("key", "keypress"):
             keys = action.get("text") or action.get("keys", "")
             key_list = keys.split("+") if isinstance(keys, str) else keys
             if len(key_list) > 1:
-                pyautogui.hotkey(*key_list)
+                pag.hotkey(*key_list)
             else:
-                pyautogui.press(key_list[0])
+                pag.press(key_list[0])
         elif action_type in ("mouse_move", "move"):
             x, y = self._scale_coords(
                 action.get("coordinate") or [action.get("x", 0), action.get("y", 0)]
             )
-            pyautogui.moveTo(x, y)
+            pag.moveTo(x, y)
         elif action_type == "scroll":
             coord = action.get("coordinate") or [action.get("x", 0), action.get("y", 0)]
             x, y = self._scale_coords(coord)
-            pyautogui.moveTo(x, y)
+            pag.moveTo(x, y)
             direction = action.get("scroll_direction", action.get("direction", "down"))
             amount = action.get("scroll_amount", action.get("amount", 3))
             scroll_val = -amount if direction == "down" else amount
-            pyautogui.scroll(scroll_val)
+            pag.scroll(scroll_val)
         elif action_type in ("left_click_drag", "drag"):
             start = action.get("start_coordinate") or [action.get("start_x", 0), action.get("start_y", 0)]
             end = action.get("coordinate") or [action.get("x", 0), action.get("y", 0)]
             sx, sy = self._scale_coords(start)
             ex, ey = self._scale_coords(end)
-            pyautogui.moveTo(sx, sy)
-            pyautogui.drag(ex - sx, ey - sy)
+            pag.moveTo(sx, sy)
+            pag.drag(ex - sx, ey - sy)
         elif action_type == "wait":
             time.sleep(action.get("ms", 1000) / 1000.0)
             return None
@@ -327,6 +377,7 @@ class ComputerUseService:
         gate: Any,
         model: str = "gpt-5.4",
         system_prompt: str | None = None,
+        current_url_resolver: Callable[[], str | None] | None = None,
     ) -> str:
         if self.codex_backend is not None:
             return self._run_codex_agent_loop(session)
@@ -338,6 +389,7 @@ class ComputerUseService:
                 return self._run_loop(
                     session=session, client=client, gate=gate,
                     model=model, system_prompt=system_prompt,
+                    current_url_resolver=current_url_resolver,
                 )
         finally:
             esc_listener.stop()
@@ -350,6 +402,7 @@ class ComputerUseService:
         gate: Any,
         model: str,
         system_prompt: str | None,
+        current_url_resolver: Callable[[], str | None] | None,
     ) -> str:
         tools = [{
             "type": "computer_use_preview",
@@ -376,7 +429,7 @@ class ComputerUseService:
             session.pending_action = None
             session.status = "running"
 
-        previous_response_id = None
+        previous_response_id = session.previous_response_id
 
         while session.iteration < session.max_iterations:
             if session._cancelled:
@@ -398,6 +451,7 @@ class ComputerUseService:
 
             response = client.responses.create(**kwargs)
             previous_response_id = response.id
+            session.previous_response_id = response.id
 
             # Extract computer_call items and text from output
             computer_calls = [item for item in response.output if item.type == "computer_call"]
@@ -414,6 +468,14 @@ class ComputerUseService:
 
                 action = call.action
                 action_dict = action.model_dump() if hasattr(action, "model_dump") else dict(action)
+                if current_url_resolver is not None:
+                    try:
+                        resolved_url = current_url_resolver()
+                    except Exception:
+                        logger.debug("computer current_url resolver failed", exc_info=True)
+                    else:
+                        if isinstance(resolved_url, str) and resolved_url.strip():
+                            session.current_url = resolved_url.strip()
                 verdict = gate.classify_desktop_action(action_dict, url=session.current_url)
 
                 if verdict.value == "needs_approval":
@@ -553,26 +615,52 @@ class BrowserUseService:
         save_conversation: str | None = None,
         artifact_dir: str | Path | None = None,
         timeout: float | None = None,
+        action_gate: Any | None = None,
+        sensitive_urls: list[str] | None = None,
+        allowed_domains: list[str] | None = None,
+        prohibited_domains: list[str] | None = None,
+        allow_high_risk_actions: bool = False,
     ) -> str:
-        import os
-        from browser_use import Agent, BrowserSession, ChatOpenAI
+        with _preserve_browser_use_import_env():
+            from browser_use import Agent, BrowserSession, ChatOpenAI
 
         self.last_artifact_path = None
+        normalized_allowed = _normalize_domain_patterns(allowed_domains)
+        normalized_prohibited = _normalize_domain_patterns(prohibited_domains or sensitive_urls)
         browser = BrowserSession(
             cdp_url=self.cdp_url,
             headless=self.headless,
+            allowed_domains=normalized_allowed or None,
+            prohibited_domains=normalized_prohibited or None,
         )
         llm = ChatOpenAI(
             model=model,
             api_key=os.environ.get("OPENAI_API_KEY"),
         )
+        tools = None
+        policy_interrupt: BrowserUsePolicyInterrupt | None = None
+        if action_gate is not None:
+            tools, policy_state = self._guarded_browser_tools(
+                action_gate=action_gate,
+                approved_domains=normalized_allowed,
+                allow_high_risk_actions=allow_high_risk_actions,
+            )
+
+            async def _should_stop() -> bool:
+                return bool(policy_state.get("should_stop"))
+
+        else:
+            policy_state = {}
+            _should_stop = None
         agent = Agent(
             task=task,
             llm=llm,
             browser_session=browser,
+            tools=tools,
             max_actions_per_step=max_actions_per_step,
             use_vision=use_vision,
             save_conversation_path=save_conversation,
+            register_should_stop_callback=_should_stop,
         )
         artifact_path: Path | None = None
         try:
@@ -584,6 +672,9 @@ class BrowserUseService:
                 result = await asyncio.wait_for(agent.run(), timeout=timeout)
             else:
                 result = await agent.run()
+            policy_interrupt = policy_state.get("interrupt") if isinstance(policy_state, dict) else None
+            if policy_interrupt is not None:
+                raise policy_interrupt
             artifact_path = await self._capture_page_artifact(browser, artifact_dir)
         finally:
             await browser.stop()
@@ -597,6 +688,49 @@ class BrowserUseService:
             self.last_artifact_path = str(artifact_path)
             return f"{text}\n\n[Captura guardada: {artifact_path}]"
         return text
+
+    def _guarded_browser_tools(
+        self,
+        *,
+        action_gate: Any,
+        approved_domains: list[str],
+        allow_high_risk_actions: bool,
+    ) -> tuple[Any, dict[str, Any]]:
+        with _preserve_browser_use_import_env():
+            from browser_use.agent.views import ActionResult
+            from browser_use.tools.service import Tools
+
+        state: dict[str, Any] = {"should_stop": False, "interrupt": None}
+
+        class GuardedBrowserTools(Tools):
+            async def act(self, action, browser_session, **kwargs):  # type: ignore[override]
+                action_name, params = _browser_use_action_parts(action)
+                current_url = await _browser_use_current_url(browser_session)
+                risk = action_gate.risk_browser_use_action(action_name, params, url=current_url)
+                risk_value = str(getattr(risk, "value", risk))
+                if risk_value == "high" and not _browser_use_high_risk_allowed(
+                    url=current_url,
+                    params=params,
+                    approved_domains=approved_domains,
+                    allow_high_risk_actions=allow_high_risk_actions,
+                ):
+                    interrupt = BrowserUsePolicyInterrupt(
+                        action_name=action_name,
+                        params=params,
+                        url=current_url,
+                        risk=risk_value,
+                        approved_domains=_browser_use_interrupt_domains(
+                            current_url=current_url,
+                            params=params,
+                            fallback_domains=approved_domains,
+                        ),
+                    )
+                    state["interrupt"] = interrupt
+                    state["should_stop"] = True
+                    return ActionResult(error=str(interrupt))
+                return await super().act(action=action, browser_session=browser_session, **kwargs)
+
+        return GuardedBrowserTools(), state
 
     async def _capture_page_artifact(
         self, browser: Any, artifact_dir: str | Path | None
@@ -634,7 +768,8 @@ class BrowserUseService:
 
     async def quick_screenshot(self, url: str, output_path: str | None = None) -> str:
         """Take a screenshot of a URL, return base64 or save to path."""
-        from browser_use import BrowserSession
+        with _preserve_browser_use_import_env():
+            from browser_use import BrowserSession
 
         browser = BrowserSession(
             cdp_url=self.cdp_url,
@@ -649,6 +784,102 @@ class BrowserUseService:
                 return output_path
             raw = await page.screenshot(full_page=True)
             return base64.b64encode(raw).decode("ascii")
+
+
+def _normalize_domain_patterns(values: list[str] | None) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in values or []:
+        text = str(value or "").strip().lower()
+        if not text:
+            continue
+        if "://" in text:
+            host = urlparse(text).hostname or text
+        else:
+            host = text.strip("/")
+        if not host:
+            continue
+        if host not in seen:
+            seen.add(host)
+            normalized.append(host)
+    return normalized
+
+
+def _browser_use_action_parts(action: Any) -> tuple[str, dict[str, Any]]:
+    try:
+        action_data = action.model_dump(exclude_unset=True)
+    except TypeError:
+        action_data = action.model_dump()
+    except AttributeError:
+        action_data = dict(action or {})
+    if not isinstance(action_data, dict) or not action_data:
+        return "unknown", {}
+    action_name = str(next(iter(action_data.keys())))
+    params = action_data.get(action_name) or {}
+    return action_name, params if isinstance(params, dict) else {"value": params}
+
+
+async def _browser_use_current_url(browser_session: Any) -> str | None:
+    try:
+        value = await browser_session.get_current_page_url()
+    except Exception:
+        return None
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _browser_use_high_risk_allowed(
+    *,
+    url: str | None,
+    params: dict[str, Any],
+    approved_domains: list[str],
+    allow_high_risk_actions: bool,
+) -> bool:
+    if not allow_high_risk_actions:
+        return False
+    if not approved_domains:
+        return False
+    urls = [url, str(params.get("url") or "").strip() or None]
+    return any(_url_matches_domains(candidate, approved_domains) for candidate in urls if candidate)
+
+
+def _browser_use_interrupt_domains(
+    *,
+    current_url: str | None,
+    params: dict[str, Any],
+    fallback_domains: list[str],
+) -> list[str]:
+    domains = list(fallback_domains)
+    for value in (current_url, str(params.get("url") or "").strip() or None):
+        host = _host_from_url(value)
+        if host and host not in domains:
+            domains.append(host)
+    return domains
+
+
+def _url_matches_domains(url: str | None, domains: list[str]) -> bool:
+    host = _host_from_url(url)
+    if not host:
+        return False
+    for domain in domains:
+        normalized = domain.lower().lstrip("*.").strip()
+        if host == normalized or host.endswith("." + normalized):
+            return True
+    return False
+
+
+def _host_from_url(url: str | None) -> str | None:
+    if not url:
+        return None
+    text = str(url).strip()
+    if not text:
+        return None
+    if "://" not in text:
+        text = "https://" + text
+    try:
+        host = urlparse(text).hostname
+    except Exception:
+        return None
+    return host.lower() if host else None
 
 
 def _resolve_api_key() -> str | None:
