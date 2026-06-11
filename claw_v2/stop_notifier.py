@@ -41,6 +41,27 @@ _TELEGRAM_API_URL = "https://api.telegram.org/bot{token}/sendMessage"
 _NOTIFY_TIMEOUT_SEC = 15.0
 
 
+def send_telegram_message(token: str, chat_id: str, text: str) -> None:
+    """Synchronously POST a plain-text message to a Telegram chat.
+
+    Self-contained (stdlib urllib, no event loop) so background-thread callers
+    like the recovery-job drainer can notify the operator directly. Raises on a
+    missing token/chat or any transport failure — callers that must not lose a
+    promise (notify-then-act) rely on the raise to retry later.
+    """
+    if not token or not chat_id:
+        raise ValueError("Telegram token and chat_id are required to send a message")
+    url = _TELEGRAM_API_URL.format(token=token)
+    payload = json.dumps(
+        {"chat_id": chat_id, "text": text, "disable_web_page_preview": True}
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        url, data=payload, headers={"Content-Type": "application/json"}
+    )
+    with urllib.request.urlopen(request, timeout=_NOTIFY_TIMEOUT_SEC) as response:
+        response.read()
+
+
 @dataclass(slots=True)
 class StopNotifier:
     """Pushes a one-line stop notification to Telegram when an autonomous task ends.

@@ -13,10 +13,12 @@ from claw_v2.daemon import (
     PENDING_VERIFICATION_RECONCILIATION_RESUME_KEY,
     ClawDaemon,
     PendingVerificationReconciliationJobRunner,
+    RecoveryJobDrainRunner,
     TickResult,
 )
 from claw_v2.heartbeat import HeartbeatSnapshot
 from claw_v2.jobs import JobService
+from claw_v2.memory import MemoryStore
 from claw_v2.task_ledger import TaskLedger
 
 
@@ -476,6 +478,56 @@ class DaemonTickTests(unittest.TestCase):
                 "daemon_job_reconciliation",
                 payload={"cancelled_orphan_jobs": 1},
             )
+
+
+class RecoveryJobDrainRunnerTests(unittest.TestCase):
+    """C1 (2026-06-10 audit): recovery_jobs accumulated forever because
+    resolve_recovery_job had no runtime caller — a false promise of continuity.
+    The off-tick drainer surfaces each promised-but-abandoned request to the
+    operator and marks it resolved, idempotently."""
+
+    def _store(self) -> MemoryStore:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        return MemoryStore(Path(tmp.name) / "claw.db")
+
+    def test_notifies_and_resolves_each_pending_job(self) -> None:
+        store = self._store()
+        store.create_recovery_job(
+            "sess-1",
+            turn_id=None,
+            failure_reason="image_error",
+            original_request_sanitized="arregla el deploy de producción",
+        )
+        sent: list[str] = []
+        drainer = RecoveryJobDrainRunner(memory=store, notifier=sent.append)
+
+        self.assertEqual(drainer.run_once(), 1)
+        self.assertEqual(len(sent), 1)
+        self.assertIn("arregla el deploy", sent[0])
+        self.assertEqual(store.list_pending_recovery_jobs(), [])
+        # Idempotent: the cemetery is drained, so a second pass does nothing and
+        # never re-notifies.
+        self.assertEqual(drainer.run_once(), 0)
+        self.assertEqual(len(sent), 1)
+
+    def test_keeps_job_pending_when_notify_fails(self) -> None:
+        # notify-then-resolve: if the operator notification fails, the job must
+        # stay pending so the next cycle retries it — never silently dropped.
+        store = self._store()
+        store.create_recovery_job(
+            "sess-1",
+            turn_id=None,
+            failure_reason="x",
+            original_request_sanitized="haz la tarea pendiente",
+        )
+
+        def boom(_message: str) -> None:
+            raise RuntimeError("telegram unreachable")
+
+        drainer = RecoveryJobDrainRunner(memory=store, notifier=boom)
+        self.assertEqual(drainer.run_once(), 0)
+        self.assertEqual(len(store.list_pending_recovery_jobs()), 1)
 
 
 class DaemonRunLoopTests(unittest.IsolatedAsyncioTestCase):

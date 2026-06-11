@@ -539,6 +539,72 @@ class PendingVerificationReconciliationJobRunner:
         self.observe.emit(event_type, payload=payload)
 
 
+class RecoveryJobDrainRunner:
+    """Drains pending ``recovery_jobs`` off-tick (2026-06-10 audit C1).
+
+    ``recovery_jobs`` accumulated forever because ``resolve_recovery_job`` had
+    no runtime caller — a false promise of continuity (the agent told the user
+    it would resume a request, then never did). This runner surfaces each
+    abandoned request to the operator and marks it resolved.
+
+    Notify-and-close MVP: it NEVER re-executes the request (auto-replay would
+    be a separate opt-in evolution). notify-then-resolve ordering means a failed
+    notification leaves the job pending for the next cycle rather than silently
+    dropping it — we would rather double-notify than lose the promise.
+    """
+
+    def __init__(
+        self,
+        *,
+        memory: Any,
+        notifier: Callable[[str], object],
+        observe: ObserveStream | None = None,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> None:
+        self.memory = memory
+        self.notifier = notifier
+        self.observe = observe
+        self.should_stop = should_stop
+
+    def run_once(self) -> int:
+        if self.should_stop is not None and self.should_stop():
+            return 0
+        drained = 0
+        for job in self.memory.list_pending_recovery_jobs():
+            try:
+                self.notifier(self._format(job))
+            except Exception:
+                # Leave the job pending so the next cycle retries the notify;
+                # never resolve a job the operator was not told about.
+                logger.exception(
+                    "recovery job drain notification failed for job %s",
+                    job.get("id"),
+                )
+                continue
+            self.memory.resolve_recovery_job(job["id"], status="resolved")
+            drained += 1
+            if self.observe is not None:
+                self.observe.emit(
+                    "recovery_job_drained",
+                    payload={
+                        "recovery_job_id": job.get("id"),
+                        "session_id": job.get("session_id"),
+                        "failure_reason": job.get("failure_reason"),
+                    },
+                )
+        return drained
+
+    @staticmethod
+    def _format(job: dict[str, Any]) -> str:
+        request = (job.get("original_request_sanitized") or "").strip()
+        reason = job.get("failure_reason") or "desconocido"
+        return (
+            "Tenía una petición que prometí retomar y no completé "
+            f"(motivo: {reason}): «{request}». "
+            "La marqué como cerrada — vuelve a pedírmela si todavía la necesitas."
+        )
+
+
 def _compact_drain_result(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return dict(value)
