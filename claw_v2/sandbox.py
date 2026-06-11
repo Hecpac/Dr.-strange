@@ -115,10 +115,10 @@ GIT_CONFIG_EXEC_SINK_KEYS = frozenset(
     }
 )
 # Suffixes of git config sub-keys that name a program git later executes:
-# `<tool>.cmd` (difftool/mergetool/man/browser), `filter.<d>.process/.clean/
-# .smudge`, `credential[.<url>].helper`, `diff.<d>.command`/`trailer.<t>.command`,
-# `merge.<d>.driver`.
-GIT_CONFIG_EXEC_SINK_SUFFIXES = (".cmd", ".process", ".helper", ".command", ".driver", ".clean", ".smudge")
+# `<tool>.cmd` and `<tool>.path` (difftool/mergetool/man/browser/guitool),
+# `filter.<d>.process/.clean/.smudge`, `credential[.<url>].helper`,
+# `diff.<d>.command`/`trailer.<t>.command`, `merge.<d>.driver`.
+GIT_CONFIG_EXEC_SINK_SUFFIXES = (".cmd", ".process", ".helper", ".command", ".driver", ".clean", ".smudge", ".path")
 # git reads these from the environment straight into runtime config / exec
 # hooks, so an `env VAR=val git ...` (or inline-prefixed) call is the same
 # exec-sink escape as `git -c`/`git config`, just routed through the shell env

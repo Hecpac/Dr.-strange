@@ -52,6 +52,13 @@ class RedactSensitiveTests(unittest.TestCase):
         self.assertNotIn("eyJpc3MiOiJyZWdyaWQ", result)
         self.assertIn("[REDACTED]", result)
 
+    def test_redacts_truncated_jwt_with_short_third_segment(self) -> None:
+        # PR #89 review round 6 (gemini medium): two long segments already
+        # identify a JWT, so a short trailing 3rd segment must be fully redacted
+        # rather than left as "[REDACTED].ab".
+        token = "eyJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJyZWdyaWQuY29tIiwiaWF0IjoxNzgwOTQ0MjM5.ab"
+        self.assertEqual(redact_sensitive(f"tok {token}"), "tok [REDACTED]")
+
     def test_keeps_short_two_segment_base64_pair(self) -> None:
         # PR #89 review round 4 (gemini medium): the truncated-JWT fallback now
         # requires >=10-char payload/signature segments (matching the 3-part

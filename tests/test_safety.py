@@ -310,6 +310,10 @@ class SafetyTests(unittest.TestCase):
                 "git config merge.evil.driver '/tmp/evil.sh %O %A %B'",
                 "git config filter.evil.clean /tmp/evil.sh",
                 "git config filter.evil.smudge /tmp/evil.sh",
+                # .path points git's diff/merge/browser tools at an executable
+                # (PR #89 round 6, gemini).
+                "git config mergetool.evil.path /tmp/evil.sh",
+                "git config difftool.evil.path /tmp/evil.sh",
             ):
                 with self.subTest(command=cmd):
                     self.assertIsNotNone(check_command(cmd, policy), f"should block: {cmd}")
