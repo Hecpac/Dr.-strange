@@ -138,6 +138,7 @@ GIT_ENV_EXEC_SINK_VARS = frozenset(
         "GIT_CONFIG_GLOBAL",
         "GIT_CONFIG_SYSTEM",
         "GIT_CONFIG_COUNT",
+        "GIT_EXEC_PATH",
     }
 )
 _GIT_CONFIG_ENV_KV_RE = re.compile(r"^GIT_CONFIG_(?:KEY|VALUE)_\d+$")
@@ -387,6 +388,10 @@ def _check_git_invocation(tokens: list[str]) -> str | None:
             return "inline git config (-c/--config-env) is not allowed; it can execute arbitrary commands"
         if arg.startswith("--config-env"):
             return "inline git config (-c/--config-env) is not allowed; it can execute arbitrary commands"
+        # `git --exec-path=<dir>` redirects where git looks for its git-*
+        # subprograms, so a planted git-remote-https/etc. runs on the next op.
+        if arg == "--exec-path" or arg.startswith("--exec-path="):
+            return "git --exec-path is not allowed; it can execute arbitrary commands"
         # `config` may appear AFTER global options (`-C <path>`, `--git-dir=`,
         # `--work-tree=`, ...), so match it in any position, not just index 0.
         if arg == "config" and config_index is None:
@@ -406,7 +411,7 @@ def _check_git_invocation(tokens: list[str]) -> str | None:
                 return "git config of a command-execution sink (core.pager, sshCommand, *.cmd, ...) is not allowed"
             # `git config alias.X '!<shell>'` runs an arbitrary shell command
             # when the alias is later invoked via `git X`.
-            if key.startswith("alias.") and index + 1 < len(operands) and operands[index + 1].startswith("!"):
+            if key.startswith("alias.") and index + 1 < len(operands) and operands[index + 1].lstrip().startswith("!"):
                 return "git alias with a shell escape (!) is not allowed; it can execute arbitrary commands"
     return None
 

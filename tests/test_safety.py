@@ -334,6 +334,32 @@ class SafetyTests(unittest.TestCase):
                 with self.subTest(command=cmd):
                     self.assertIsNotNone(check_command(cmd, policy), f"should block: {cmd}")
 
+    def test_git_exec_path_redirection_blocked(self) -> None:
+        # PR #89 review round 3 (gemini critical x2): GIT_EXEC_PATH / --exec-path
+        # point git at an attacker dir for its git-* subprograms, so a planted
+        # git-remote-https (etc.) runs on the next git op.
+        with tempfile.TemporaryDirectory() as workspace_str:
+            policy = SandboxPolicy(workspace_root=Path(workspace_str))
+            for cmd in (
+                "env GIT_EXEC_PATH=/tmp/evil git status",
+                "git --exec-path=/tmp/evil status",
+                "git --exec-path status",
+            ):
+                with self.subTest(command=cmd):
+                    self.assertIsNotNone(check_command(cmd, policy), f"should block: {cmd}")
+
+    def test_git_alias_shell_escape_with_leading_space_blocked(self) -> None:
+        # PR #89 review round 3 (gemini high): git ignores leading whitespace
+        # before the `!` shell-escape marker in an alias value.
+        with tempfile.TemporaryDirectory() as workspace_str:
+            policy = SandboxPolicy(workspace_root=Path(workspace_str))
+            for cmd in (
+                "git config alias.boom ' !touch /tmp/pwned'",
+                "git config --type string alias.boom '  !id'",
+            ):
+                with self.subTest(command=cmd):
+                    self.assertIsNotNone(check_command(cmd, policy), f"should block: {cmd}")
+
     def test_git_benign_env_prefix_still_allowed(self) -> None:
         # Guard against over-blocking: non-sink env prefixes on git stay fine.
         with tempfile.TemporaryDirectory() as workspace_str:

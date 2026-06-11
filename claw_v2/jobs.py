@@ -489,11 +489,17 @@ class JobService:
                     f"UPDATE agent_jobs SET {', '.join(assignments)} WHERE job_id = ?",
                     params,
                 )
+                # Read the fresh row inside the same locked transaction: a later
+                # self.get() would re-acquire the lock and reopen a window for a
+                # sibling connection to mutate the row before we read it back.
+                updated = self._conn.execute(
+                    "SELECT * FROM agent_jobs WHERE job_id = ?", (job_id,)
+                ).fetchone()
                 self._conn.commit()
             except Exception:
                 self._conn.rollback()
                 raise
-        record = self.get(job_id)
+        record = self._row_to_record(updated) if updated is not None else None
         if record is not None:
             self._emit(event_type, record)
         return record
