@@ -26,6 +26,30 @@ class CheckpointCreateTests(unittest.TestCase):
         self.assertEqual(len(ckpt_id), 13)
         self.assertTrue(all(c in "0123456789abcdef" for c in ckpt_id[5:]))
 
+    def test_create_handles_special_chars_in_db_path(self) -> None:
+        # PR #91 review (gemini + codex P2): a '?' / '#' in the DB path must be
+        # percent-encoded, not truncate the file: URI. With the raw
+        # `file:{path}?mode=ro` interpolation the '?' starts the query early, so
+        # SQLite opens a DIFFERENT (empty) db and the snapshot silently copies
+        # the wrong/empty database — a corrupt checkpoint. Assert the snapshot
+        # carries the LIVE data, not just that a file exists.
+        tmp = Path(tempfile.mkdtemp())
+        store = MemoryStore(tmp / "weird?name.db")
+        store.store_fact("marker", "live-data", source="test")
+        service = CheckpointService(memory=store, snapshots_dir=tmp / "snaps")
+
+        ckpt_id = service.create(trigger_reason="test")
+
+        snap_conn = sqlite3.connect(tmp / "snaps" / f"{ckpt_id}.db")
+        try:
+            row = snap_conn.execute(
+                "SELECT value FROM facts WHERE key = 'marker'"
+            ).fetchone()
+            self.assertIsNotNone(row, "snapshot copied the wrong/empty database")
+            self.assertEqual(row[0], "live-data")
+        finally:
+            snap_conn.close()
+
     def test_create_writes_snapshot_file_to_disk(self) -> None:
         ckpt_id = self.service.create(trigger_reason="test")
         expected = self.snapshots_dir / f"{ckpt_id}.db"

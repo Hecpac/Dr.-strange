@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -615,6 +616,27 @@ class RecoveryJobDrainRunnerTests(unittest.TestCase):
         self.assertEqual(len(sent), 2)
         self.assertEqual(len(slept), 1)  # one pace between the two sends
         self.assertEqual(len(store.list_pending_recovery_jobs()), 1)  # 1 left for next cycle
+
+
+class DaemonOffLoopEmitTests(unittest.IsolatedAsyncioTestCase):
+    """PR #91 review (gemini): the M3 fix offloads diagnostic emits to a thread
+    via asyncio.to_thread. If the emit raises (the very SQLite contention M3/M4
+    address), the exception propagates out of `await` and TERMINATES the daemon
+    loop. The offloaded emit must swallow failures so the loop survives."""
+
+    async def test_emit_off_loop_swallows_emit_failure(self) -> None:
+        observe = MagicMock()
+        observe.emit.side_effect = sqlite3.OperationalError("database is locked")
+        daemon = ClawDaemon(scheduler=CronScheduler(), heartbeat=MagicMock(), observe=observe)
+
+        # Must NOT raise even though the underlying emit fails.
+        await daemon._emit_off_loop("daemon_tick_error", payload={"x": 1})
+
+        observe.emit.assert_called_once_with("daemon_tick_error", payload={"x": 1})
+
+    async def test_emit_off_loop_noop_without_observe(self) -> None:
+        daemon = ClawDaemon(scheduler=CronScheduler(), heartbeat=MagicMock(), observe=None)
+        await daemon._emit_off_loop("daemon_tick_error", payload={"x": 1})  # no raise
 
 
 class DaemonRunLoopTests(unittest.IsolatedAsyncioTestCase):

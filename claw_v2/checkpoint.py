@@ -154,8 +154,13 @@ class CheckpointService:
         mode=ro guarantees the backup can never write the live DB; the 15s
         timeout matches the runtime busy_timeout so the copy waits out
         contention instead of failing fast with "database is locked".
+
+        Build the file: URI via Path.as_uri() so a path containing URI
+        delimiters (a `?` or `#`, or Windows backslashes) is percent-encoded
+        instead of truncating the URI and silently opening the wrong database.
         """
-        return sqlite3.connect(f"file:{self.memory.db_path}?mode=ro", uri=True, timeout=15.0)
+        db_uri = f"{Path(self.memory.db_path).absolute().as_uri()}?mode=ro"
+        return sqlite3.connect(db_uri, uri=True, timeout=15.0)
 
     def list(self) -> list[dict]:
         rows = self.memory._conn.execute(
