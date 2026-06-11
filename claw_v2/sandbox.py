@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -104,11 +105,42 @@ GIT_CONFIG_EXEC_SINK_KEYS = frozenset(
         "core.fsmonitor",
         "core.editor",
         "core.hookspath",
+        "core.askpass",
         "sequence.editor",
         "protocol.ext.allow",
         "uploadpack.packobjectshook",
+        "diff.external",
+        "gpg.program",
+        "gpg.ssh.program",
+        "gpg.x509.program",
     }
 )
+# Suffixes of git config sub-keys that name a program git later executes:
+# `<tool>.cmd` (difftool/mergetool/man/browser), `filter.<d>.process/.clean/
+# .smudge`, `credential[.<url>].helper`, `diff.<d>.command`/`trailer.<t>.command`,
+# `merge.<d>.driver`.
+GIT_CONFIG_EXEC_SINK_SUFFIXES = (".cmd", ".process", ".helper", ".command", ".driver", ".clean", ".smudge")
+# git reads these from the environment straight into runtime config / exec
+# hooks, so an `env VAR=val git ...` (or inline-prefixed) call is the same
+# exec-sink escape as `git -c`/`git config`, just routed through the shell env
+# that _unwrap_command_tokens strips before the git check.
+GIT_ENV_EXEC_SINK_VARS = frozenset(
+    {
+        "GIT_SSH",
+        "GIT_SSH_COMMAND",
+        "GIT_PROXY_COMMAND",
+        "GIT_EXTERNAL_DIFF",
+        "GIT_PAGER",
+        "GIT_EDITOR",
+        "GIT_SEQUENCE_EDITOR",
+        "GIT_ASKPASS",
+        "GIT_CONFIG",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_SYSTEM",
+        "GIT_CONFIG_COUNT",
+    }
+)
+_GIT_CONFIG_ENV_KV_RE = re.compile(r"^GIT_CONFIG_(?:KEY|VALUE)_\d+$")
 VERSION_OR_HELP_FLAGS = frozenset({"--version", "-V", "-VV", "--help", "-h"})
 VERSION_OR_HELP_ONLY_BINARIES = frozenset({"claude", "codex"})
 WORKSPACE_SCRIPT_SUFFIXES = (".sh",)
@@ -224,9 +256,19 @@ def check_command(command: str, policy: SandboxPolicy) -> str | None:
         return "unparseable command"
     if not tokens:
         return None
+    # Scan for git exec-sink env injection on the raw tokens (catches
+    # `env VAR=val git ...` and inline `VAR=val git ...`, where _unwrap strips
+    # the assignments) and again post-unwrap (catches `bash -c '... git ...'`,
+    # where they survive inside the -c string).
+    env_sink = _check_git_env_injection(tokens)
+    if env_sink is not None:
+        return env_sink
     tokens = _unwrap_command_tokens(tokens)
     if not tokens:
         return "unparseable command"
+    env_sink = _check_git_env_injection(tokens)
+    if env_sink is not None:
+        return env_sink
     if "xargs" in [Path(token).name for token in tokens]:
         return "xargs is not allowed"
     base_cmd = Path(tokens[0]).name
@@ -319,6 +361,19 @@ def _check_node_invocation(tokens: list[str], policy: SandboxPolicy) -> str | No
     return None
 
 
+def _check_git_env_injection(tokens: list[str]) -> str | None:
+    for token in tokens:
+        if token.startswith("-") or "=" not in token:
+            continue
+        name = token.split("=", 1)[0]
+        if name in GIT_ENV_EXEC_SINK_VARS or _GIT_CONFIG_ENV_KV_RE.match(name):
+            return (
+                "git exec-sink environment variables (GIT_CONFIG_*, GIT_SSH_COMMAND, "
+                "GIT_EXTERNAL_DIFF, GIT_PAGER, ...) are not allowed"
+            )
+    return None
+
+
 def _check_git_invocation(tokens: list[str]) -> str | None:
     args = tokens[1:]
     config_index: int | None = None
@@ -347,7 +402,7 @@ def _check_git_invocation(tokens: list[str]) -> str | None:
             # for later runs (a subsequent `git log`/`git diff` shells out to
             # it); *.helper covers credential[.<url>].helper, whose `!` values
             # are documented shell snippets.
-            if key in GIT_CONFIG_EXEC_SINK_KEYS or key.endswith((".cmd", ".process", ".helper")):
+            if key in GIT_CONFIG_EXEC_SINK_KEYS or key.endswith(GIT_CONFIG_EXEC_SINK_SUFFIXES):
                 return "git config of a command-execution sink (core.pager, sshCommand, *.cmd, ...) is not allowed"
             # `git config alias.X '!<shell>'` runs an arbitrary shell command
             # when the alias is later invoked via `git X`.

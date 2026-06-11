@@ -294,6 +294,57 @@ class SafetyTests(unittest.TestCase):
                 with self.subTest(command=cmd):
                     self.assertIsNotNone(check_command(cmd, policy), f"should block: {cmd}")
 
+    def test_git_config_additional_exec_sinks_blocked(self) -> None:
+        # PR #89 review round 2 (gemini high x2): more documented git exec
+        # sinks — askpass/gpg program paths, diff.external, and the custom
+        # diff/merge/filter driver commands (.command/.driver/.clean/.smudge).
+        with tempfile.TemporaryDirectory() as workspace_str:
+            policy = SandboxPolicy(workspace_root=Path(workspace_str))
+            for cmd in (
+                "git config core.askpass /tmp/evil.sh",
+                "git config gpg.program /tmp/evil.sh",
+                "git config gpg.ssh.program /tmp/evil.sh",
+                "git config gpg.x509.program /tmp/evil.sh",
+                "git config diff.external /tmp/evil.sh",
+                "git config diff.evil.command /tmp/evil.sh",
+                "git config merge.evil.driver '/tmp/evil.sh %O %A %B'",
+                "git config filter.evil.clean /tmp/evil.sh",
+                "git config filter.evil.smudge /tmp/evil.sh",
+            ):
+                with self.subTest(command=cmd):
+                    self.assertIsNotNone(check_command(cmd, policy), f"should block: {cmd}")
+
+    def test_git_config_env_injection_blocked(self) -> None:
+        # PR #89 review round 2 (codex P1): git reads GIT_CONFIG_COUNT +
+        # GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n> from the environment into
+        # runtime config, and GIT_SSH_COMMAND/GIT_EXTERNAL_DIFF/... are exec
+        # sinks too. `env`/inline assignments get stripped before the git
+        # check, so an env-wrapped (or bash -c wrapped) git call escaped C2.
+        with tempfile.TemporaryDirectory() as workspace_str:
+            policy = SandboxPolicy(workspace_root=Path(workspace_str))
+            for cmd in (
+                "env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0=id git log",
+                "env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.pwn GIT_CONFIG_VALUE_0=evil git pwn",
+                "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0=id git log",
+                "env GIT_SSH_COMMAND=id git fetch origin",
+                "env GIT_EXTERNAL_DIFF=id git diff",
+                "env GIT_PAGER=id git log",
+                "bash -c 'env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0=id git log'",
+            ):
+                with self.subTest(command=cmd):
+                    self.assertIsNotNone(check_command(cmd, policy), f"should block: {cmd}")
+
+    def test_git_benign_env_prefix_still_allowed(self) -> None:
+        # Guard against over-blocking: non-sink env prefixes on git stay fine.
+        with tempfile.TemporaryDirectory() as workspace_str:
+            policy = SandboxPolicy(workspace_root=Path(workspace_str))
+            for cmd in (
+                "env GIT_AUTHOR_NAME=hector git status",
+                "env LANG=C git log --oneline",
+            ):
+                with self.subTest(command=cmd):
+                    self.assertIsNone(check_command(cmd, policy), f"should allow: {cmd}")
+
     def test_python_module_path_args_cannot_escape_workspace(self) -> None:
         # PR #89 review (gemini high + codex P1): option-embedded values
         # (--start-directory=/tmp) were skipped wholesale, and slash-less
