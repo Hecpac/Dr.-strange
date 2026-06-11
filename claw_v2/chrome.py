@@ -43,14 +43,28 @@ class ManagedChrome:
     def start(self, *, headless: bool = True) -> None:
         """Start or attach to a Chrome CDP process without corrupting profiles."""
         pids = _check_port_pids(self.port)
+        profile_pids = set(_profile_user_data_pids(self.profile_dir)) if pids else set()
         if pids and _is_cdp_ready(self.port, timeout=1):
             if all(any(cn in name.lower() for cn in _CHROME_NAMES) for _, name in pids):
+                matching_profile_pids = [pid for pid, _name in pids if pid in profile_pids]
+                if not matching_profile_pids:
+                    raise ChromeStartError(
+                        f"Port {self.port} has a ready Chrome CDP process, but it is "
+                        f"not using managed profile {self.profile_dir} (different profile). "
+                        f"Stop that Chrome or set CLAW_CHROME_PORT to a different port."
+                    )
                 self._process = None
-                self._attached_pid = pids[0][0]
+                self._attached_pid = matching_profile_pids[0]
                 logger.info("ManagedChrome reusing existing CDP Chrome on port %d (PID %d)", self.port, self._attached_pid)
                 return
         for pid, name in pids:
             if any(cn in name.lower() for cn in _CHROME_NAMES):
+                if pid not in profile_pids:
+                    raise ChromeStartError(
+                        f"Port {self.port} occupied by Chrome PID {pid}, but it is "
+                        f"not using managed profile {self.profile_dir} (different profile). "
+                        f"Stop that Chrome or set CLAW_CHROME_PORT to use a different port."
+                    )
                 logger.info("Killing stale Chrome (PID %d) on port %d", pid, self.port)
                 _kill_pid(pid)
             else:

@@ -50,6 +50,7 @@ class ManagedChromeTests(unittest.TestCase):
     @patch("claw_v2.chrome._wait_for_cdp_ready")
     def test_start_kills_existing_chrome(self, mock_ready, mock_popen, mock_wait, mock_kill, mock_pids) -> None:
         mock_pids.return_value = [(1234, "Google Chrome")]
+        self.mock_profile_user_data_pids.side_effect = [[1234], [], []]
         proc = MagicMock()
         proc.poll.return_value = None
         mock_popen.return_value = proc
@@ -111,11 +112,41 @@ class ManagedChromeTests(unittest.TestCase):
     @patch("subprocess.Popen")
     def test_start_reuses_existing_ready_cdp_chrome(self, mock_popen, mock_pids) -> None:
         mock_pids.return_value = [(1234, "Google Chrome")]
+        self.mock_profile_user_data_pids.return_value = [1234]
         self.mock_cdp_ready.return_value = True
         mc = ManagedChrome(port=9250, profile_dir="/tmp/test-profile")
         mc.start()
         mock_popen.assert_not_called()
         self.assertIsNone(mc._process)
+
+    @patch("claw_v2.chrome._check_port_pids")
+    @patch("subprocess.Popen")
+    def test_start_refuses_ready_cdp_chrome_with_different_profile(self, mock_popen, mock_pids) -> None:
+        mock_pids.return_value = [(1234, "Google Chrome")]
+        self.mock_profile_user_data_pids.return_value = []
+        self.mock_cdp_ready.return_value = True
+        mc = ManagedChrome(port=9250, profile_dir="/tmp/test-profile")
+
+        with self.assertRaises(ChromeStartError) as ctx:
+            mc.start()
+
+        self.assertIn("different profile", str(ctx.exception))
+        self.assertIn("/tmp/test-profile", str(ctx.exception))
+        mock_popen.assert_not_called()
+
+    @patch("claw_v2.chrome._check_port_pids")
+    @patch("claw_v2.chrome._kill_pid")
+    def test_start_refuses_to_kill_chrome_with_different_profile(self, mock_kill, mock_pids) -> None:
+        mock_pids.return_value = [(1234, "Google Chrome")]
+        self.mock_profile_user_data_pids.return_value = []
+        mc = ManagedChrome(port=9250, profile_dir="/tmp/test-profile")
+
+        with self.assertRaises(ChromeStartError) as ctx:
+            mc.start()
+
+        self.assertIn("different profile", str(ctx.exception))
+        self.assertIn("9250", str(ctx.exception))
+        mock_kill.assert_not_called()
 
     @patch("claw_v2.chrome._check_port_pids")
     @patch("claw_v2.chrome._wait_for_profile_free")
@@ -176,6 +207,7 @@ class ManagedChromeAttachStopTests(unittest.TestCase):
             with (
                 patch("claw_v2.chrome._check_port_pids", return_value=[(9999, "Google Chrome")]),
                 patch("claw_v2.chrome._is_cdp_ready", return_value=True),
+                patch("claw_v2.chrome._profile_user_data_pids", return_value=[9999]),
             ):
                 mc.start()
             self.assertIsNone(mc._process)
@@ -200,6 +232,7 @@ class ManagedChromeAttachStopTests(unittest.TestCase):
             with (
                 patch("claw_v2.chrome._check_port_pids", return_value=[(1234, "Google Chrome")]),
                 patch("claw_v2.chrome._is_cdp_ready", return_value=True),
+                patch("claw_v2.chrome._profile_user_data_pids", return_value=[1234]),
             ):
                 mc.start()
             self.assertEqual(mc._attached_pid, 1234)
