@@ -98,6 +98,23 @@ PYTHON_SAFE_MODULES = frozenset(
     }
 )
 NODE_INTERPRETERS = frozenset({"node"})
+GIT_INTERPRETERS = frozenset({"git"})
+# git config keys that are documented command-execution sinks: setting any of
+# these (via `-c key=val`, `--config-env`, or a `git config` write) makes a
+# later git operation shell out to an attacker-chosen command. Deny them so a
+# Bash caller cannot escape the binary allowlist through git's own config.
+GIT_CONFIG_EXEC_SINK_KEYS = frozenset(
+    {
+        "core.pager",
+        "core.sshcommand",
+        "core.fsmonitor",
+        "core.editor",
+        "core.hookspath",
+        "sequence.editor",
+        "protocol.ext.allow",
+        "uploadpack.packobjectshook",
+    }
+)
 VERSION_OR_HELP_FLAGS = frozenset({"--version", "-V", "-VV", "--help", "-h"})
 VERSION_OR_HELP_ONLY_BINARIES = frozenset({"claude", "codex"})
 WORKSPACE_SCRIPT_SUFFIXES = (".sh",)
@@ -240,6 +257,8 @@ def _check_interpreter_invocation(base_cmd: str, tokens: list[str], policy: Sand
         return _check_python_invocation(tokens, policy)
     if base_cmd in NODE_INTERPRETERS:
         return _check_node_invocation(tokens, policy)
+    if base_cmd in GIT_INTERPRETERS:
+        return _check_git_invocation(tokens)
     return None
 
 
@@ -294,6 +313,27 @@ def _check_node_invocation(tokens: list[str], policy: SandboxPolicy) -> str | No
         return "node execution is limited to explicit .js, .mjs, or .cjs scripts"
     if not _script_path_within_policy(script, policy):
         return "node script path outside allowed boundaries"
+    return None
+
+
+def _check_git_invocation(tokens: list[str]) -> str | None:
+    args = tokens[1:]
+    for index, arg in enumerate(args):
+        # `git -c key=val` / `-ckey=val` / `--config-env=key=ENV` inject config
+        # for this invocation; the exec-sink keys turn into arbitrary command
+        # execution. No legitimate runtime caller passes inline git config, so
+        # deny the whole option rather than allowlisting individual keys.
+        if arg in {"-c", "--config-env"}:
+            return "inline git config (-c/--config-env) is not allowed; it can execute arbitrary commands"
+        if arg.startswith("-c") and len(arg) > 2:
+            return "inline git config (-c/--config-env) is not allowed; it can execute arbitrary commands"
+        if arg.startswith("--config-env"):
+            return "inline git config (-c/--config-env) is not allowed; it can execute arbitrary commands"
+        # `git config <sink-key> <cmd>` persists the same sink for later runs.
+        if index == 0 and arg == "config":
+            key = next((a.lower() for a in args[1:] if not a.startswith("-")), "")
+            if key in GIT_CONFIG_EXEC_SINK_KEYS or key.endswith((".cmd", ".process")):
+                return "git config of a command-execution sink (core.pager, sshCommand, *.cmd, ...) is not allowed"
     return None
 
 

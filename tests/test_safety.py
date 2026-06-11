@@ -215,6 +215,42 @@ class SafetyTests(unittest.TestCase):
             policy = SandboxPolicy(workspace_root=workspace)
             self.assertIsNotNone(check_command("echo $(cat ~/.netrc)", policy))
 
+    def test_sandbox_blocks_git_config_exec_sink(self) -> None:
+        # 2026-06-10 audit (C2): `git` is in the lowest-privilege allowlist, but
+        # `git -c core.pager=<cmd>` (and sshCommand/fsmonitor/protocol.ext) makes
+        # git shell out to an attacker-chosen command -> ACE past the binary
+        # allowlist, with no shell metachar to trip _SHELL_OPERATORS_RE.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            policy = SandboxPolicy(workspace_root=workspace)
+            for command in (
+                "git -c core.pager=id log",
+                "git -c core.sshCommand=id ls-remote origin",
+                "git -c core.fsmonitor=/tmp/evil.sh status",
+                "git -c protocol.ext.allow=always clone ext::sh -c id",
+                "git -ccore.pager=id log",
+                "git config core.pager id",
+            ):
+                with self.subTest(command=command):
+                    self.assertIsNotNone(check_command(command, policy), msg=command)
+
+    def test_sandbox_allows_legitimate_git(self) -> None:
+        # Guard against over-blocking: real runtime git calls (incl. the
+        # self-improve worktree flow that uses `-C <repo>`) must stay allowed.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            policy = SandboxPolicy(workspace_root=workspace)
+            for command in (
+                "git status",
+                "git -C /some/repo status",
+                "git diff -- .",
+                "git add --all -- .",
+            ):
+                with self.subTest(command=command):
+                    self.assertIsNone(check_command(command, policy), msg=command)
+
     def test_sandbox_allows_regex_dollar_anchor(self) -> None:
         # Guard against over-blocking: a `$` end-of-line regex anchor inside
         # single quotes is a literal, not a variable expansion, and must stay
