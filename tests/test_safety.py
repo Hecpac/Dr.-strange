@@ -356,6 +356,9 @@ class SafetyTests(unittest.TestCase):
             for cmd in (
                 "git config alias.boom ' !touch /tmp/pwned'",
                 "git config --type string alias.boom '  !id'",
+                # value-taking option BETWEEN the key and value shifts the `!`
+                # value off the immediate-next operand (PR #89 round 5, gemini).
+                "git config alias.boom --type string '  !id'",
             ):
                 with self.subTest(command=cmd):
                     self.assertIsNotNone(check_command(cmd, policy), f"should block: {cmd}")

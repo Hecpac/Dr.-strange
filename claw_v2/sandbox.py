@@ -425,7 +425,7 @@ def _check_git_invocation(tokens: list[str]) -> str | None:
         # key's position, so screen every operand as a potential key instead of
         # sniffing only the first.
         operands = [a for a in args[config_index + 1 :] if not a.startswith("-")]
-        for index, operand in enumerate(operands):
+        for operand in operands:
             key = operand.lower()
             # `git config <sink-key> <cmd>` persists a command-execution sink
             # for later runs (a subsequent `git log`/`git diff` shells out to
@@ -433,10 +433,16 @@ def _check_git_invocation(tokens: list[str]) -> str | None:
             # are documented shell snippets.
             if key in GIT_CONFIG_EXEC_SINK_KEYS or key.endswith(GIT_CONFIG_EXEC_SINK_SUFFIXES):
                 return "git config of a command-execution sink (core.pager, sshCommand, *.cmd, ...) is not allowed"
-            # `git config alias.X '!<shell>'` runs an arbitrary shell command
-            # when the alias is later invoked via `git X`.
-            if key.startswith("alias.") and index + 1 < len(operands) and operands[index + 1].lstrip().startswith("!"):
-                return "git alias with a shell escape (!) is not allowed; it can execute arbitrary commands"
+        # `git config alias.X '!<shell>'` runs an arbitrary shell command when
+        # the alias is later invoked via `git X`. Value-taking options
+        # (`--type string`, `--file <f>`) can sit between the key and the value,
+        # so don't rely on key/value adjacency: a `!` value anywhere in an alias
+        # write is the escape. A bare `git config --get alias.x` read has no `!`
+        # operand, so it stays allowed.
+        if any(op.lower().startswith("alias.") for op in operands) and any(
+            op.lstrip().startswith("!") for op in operands
+        ):
+            return "git alias with a shell escape (!) is not allowed; it can execute arbitrary commands"
     return None
 
 
