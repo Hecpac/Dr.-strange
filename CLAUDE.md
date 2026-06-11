@@ -33,12 +33,13 @@ uvx ruff format --check claw_v2 tests
 uvx mypy <changed_files>            # advisory only — does not gate
 
 # Observability — "see how it thinks" without opening SQLite
-python -m claw_v2.cli.think tail --limit 20            # latest events
-python -m claw_v2.cli.think tail --type dispatch_decision
-python -m claw_v2.cli.think trace <trace_id>
-python -m claw_v2.cli.think replay <session_id>        # session reasoning chain
-python -m claw_v2.cli.think spending                   # cost rollup today
-python -m claw_v2.cli.think circuit                    # observation-window state
+.venv/bin/python -m claw_v2.cli.think tail --limit 20  # latest events
+.venv/bin/python -m claw_v2.cli.think tail --type dispatch_decision
+.venv/bin/python -m claw_v2.cli.think trace <trace_id>
+.venv/bin/python -m claw_v2.cli.think replay <session_id>  # session reasoning chain
+.venv/bin/python -m claw_v2.cli.think spending         # cost rollup today
+.venv/bin/python -m claw_v2.cli.think circuit          # observation-window state
+.venv/bin/python -m claw_v2.cli.think failures         # aggregate failures by tool+error
 ```
 
 There is no Makefile and no console-script entry point; the module forms above
@@ -70,14 +71,24 @@ channel → 15 pre-brain dispatchers (§5.1)   # capture only when target is
    ↓        (CircuitBreaker, anthropic↔openai fallback, ObservationWindow gate)
    tool calls → ToolRegistry.execute         # triple-AND gating (below)
    ↓
-   heavy work → TaskHandler → CoordinatorService (research→synthesis→impl→verify)
-                wrapped by AgentLoop (plan/execute/observe/verify/critique/replan)
+   heavy work → delegate_task → TaskHandler → CoordinatorService
+                (research→synthesis→impl→verify), wrapped by AgentLoop
+                (plan/execute/observe/verify/critique/replan)
 ```
 
 Default route for every message is the **brain**. Pre-brain dispatchers are
 exceptions; conversational continuations ("continúa", "procede", numbered
 picks, quoted replies) MUST fall through to the brain, which has the session
 state to resolve them (see `AGENTS.md` Routing Contract).
+
+**Heavy work never runs inline in the brain's chat turn** (300s wall). The
+brain delegates via `mcp__claw__delegate_task` →
+`TaskHandler.start_autonomous_task` → CoordinatorService: the turn returns an
+ack and the result is delivered later as a task-completion notification. The
+tool's policy allows context `[brain]` only, so coordinator workers cannot
+re-delegate. A PreToolUse backstop additionally denies brain-lane Bash that
+drives Chrome/CDP/computer-use, nudging toward delegation; worker lanes are
+not gated (delegated coordinator work legitimately drives CDP).
 
 **Triple-AND tool gating** — the core safety invariant. A tool runs only when
 *all three* independent authorizations pass (single-flag bypass is impossible
@@ -188,5 +199,5 @@ Antes de refactorear dispatchers (`bot.py:handle_text`), brain/verifier
 abiertos por ola (§7). Tras un cambio que toque algo descrito ahí, actualizar
 `describes_commit` y `last_verified` en el mismo commit.
 
-Para "ver cómo piensa" sin abrir SQLite: `python -m claw_v2.cli.think
-tail|trace|spending|circuit|replay`.
+Para "ver cómo piensa" sin abrir SQLite: `.venv/bin/python -m
+claw_v2.cli.think tail|trace|spending|circuit|replay|failures`.

@@ -406,6 +406,16 @@ class BrainService:
             turn_id=trace.get("trace_id"),
             failure_reason=failure_reason,
             original_request_sanitized=sanitized,
+            metadata={
+                "schema_version": "recovery_metadata.v1",
+                "trace_id": trace.get("trace_id"),
+                "root_trace_id": trace.get("root_trace_id"),
+                "span_id": trace.get("span_id"),
+                "parent_span_id": trace.get("parent_span_id"),
+                "artifact_id": trace.get("artifact_id"),
+                "tools_executed": tools_executed_before_failure(exc),
+                "error": str(exc)[:500],
+            },
         )
         if self.observe is not None:
             self.observe.emit(
@@ -433,6 +443,7 @@ class BrainService:
             artifacts={
                 "recovery_job_id": job_id,
                 "recovery_failure_reason": failure_reason,
+                "trace_id": trace.get("trace_id"),
             },
         )
 
@@ -1626,6 +1637,17 @@ def _extract_visible_brain_response(response: LLMResponse) -> LLMResponse:
             response.content = INTERNAL_TOOL_TRACE_FALLBACK
         elif _looks_like_internal_prompt_echo(stripped):
             response.content = _suppress_internal_prompt_echo(response, stripped)
+        elif (tail := _content_after_last_open_response(content)) is not None:
+            # Truncated mid-reply: an opening <response> with no closing tag
+            # (e.g. near the 300s brain-lane timeout). Ship only the post-tag
+            # tail; the pre-response narration before it is internal. Reached
+            # users raw on 2026-06-10 before this guard.
+            response.artifacts["raw_response"] = content
+            response.artifacts["contract_violation"] = "unclosed_response_tag"
+            response.artifacts["reasoning_trace"] = (
+                f"Unclosed <response> tag; delivered post-tag tail. Raw SDK output: {stripped}"
+            )
+            response.content = tail.strip()
         else:
             response.artifacts["reasoning_trace"] = f"Unwrapped SDK output: {stripped}"
             response.artifacts["contract_violation"] = "missing_response_tags"
@@ -1645,6 +1667,24 @@ def _split_trace_response(content: str) -> tuple[str, str | None]:
         # Telegram should receive the final substantive block, not only "ejecutando...".
         return trace, visible_blocks[-1]
     return trace, None
+
+
+_OPEN_RESPONSE_TAG = re.compile(r"<response\b[^>]*>", re.IGNORECASE)
+
+
+def _content_after_last_open_response(content: str) -> str | None:
+    """Tail after the last opening <response> tag when no closing tag pairs it.
+
+    Truncated SDK output (e.g. near the 300s brain-lane timeout) can emit an
+    opening <response> with the closing tag cut off, so `_split_trace_response`
+    finds no complete pair. The visible reply is everything after that opening
+    tag; the pre-response narration before it is internal and must not ship.
+    Returns None when no opening tag is present.
+    """
+    matches = list(_OPEN_RESPONSE_TAG.finditer(content))
+    if not matches:
+        return None
+    return content[matches[-1].end() :]
 
 
 def _looks_like_runtime_preamble(content: str) -> bool:

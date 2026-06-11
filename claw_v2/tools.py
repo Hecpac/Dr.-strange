@@ -1410,26 +1410,45 @@ class ToolRegistry:
         def instagram_publish(args: dict) -> dict:
             from claw_v2.instagram_publish import InstagramPublishService
 
+            media_type = (args.get("media_type") or "").strip().lower()
+            photo_path = (args.get("photo_path") or "").strip()
             video_path = (args.get("video_path") or "").strip()
+            media_path = (args.get("media_path") or "").strip()
             caption = args.get("caption") or ""
-            if not video_path:
-                raise ValueError("video_path is required")
+            if not media_type:
+                media_type = "photo" if photo_path else "reel"
+            if media_type not in {"reel", "photo"}:
+                raise ValueError("media_type must be 'reel' or 'photo'")
             svc = InstagramPublishService()
-            result = svc.publish_reel(
-                video_path=video_path,
-                caption=caption,
-                expected_account=args.get("account"),
-            )
+            if media_type == "photo":
+                target = photo_path or media_path
+                if not target:
+                    raise ValueError("photo_path or media_path is required for media_type=photo")
+                result = svc.publish_photo(
+                    photo_path=target,
+                    caption=caption,
+                    expected_account=args.get("account"),
+                )
+            else:
+                target = video_path or media_path
+                if not target:
+                    raise ValueError("video_path or media_path is required for media_type=reel")
+                result = svc.publish_reel(
+                    video_path=target,
+                    caption=caption,
+                    expected_account=args.get("account"),
+                )
             return result.to_dict()
 
         registry.register(ToolDefinition(
             name="InstagramPublish",
             description=(
-                "Publish a local video as an Instagram Reel via the logged-in "
-                "CDP Chrome session: create flow, upload, caption, share, then "
-                "verify via Instagram's share-confirmation modal. "
-                "Args: video_path (str, required), caption (str, optional), "
-                "account (str, optional - expected handle, guards against "
+                "Publish a local video Reel or photo post via the logged-in "
+                "Instagram CDP Chrome session: create flow, upload, caption, "
+                "share, then verify via Instagram's share confirmation. "
+                "Photo posts also verify profile/top-post change. "
+                "Args: media_type (reel|photo), video_path/photo_path/media_path, "
+                "caption (str, optional), account (str, optional - expected handle, guards against "
                 "posting from the wrong account). Tier 3: external publication."
             ),
             allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["InstagramPublish"],
@@ -1441,10 +1460,13 @@ class ToolRegistry:
                 "type": "object",
                 "properties": {
                     "video_path": {"type": "string"},
+                    "photo_path": {"type": "string"},
+                    "media_path": {"type": "string"},
+                    "media_type": {"type": "string", "enum": ["reel", "photo"]},
                     "caption": {"type": "string"},
                     "account": {"type": "string"},
                 },
-                "required": ["video_path"],
+                "required": [],
             },
         ))
 

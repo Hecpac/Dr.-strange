@@ -24,6 +24,7 @@ confirmation modal text (matched case-insensitively — the modal capitalizes
 from __future__ import annotations
 
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -61,6 +62,13 @@ CAPTION_SELECTORS = (
 )
 
 
+def _norm_text(text: str) -> str:
+    return "".join(
+        ch for ch in unicodedata.normalize("NFD", text or "")
+        if unicodedata.category(ch) != "Mn"
+    ).lower()
+
+
 def is_share_success(page_text: str) -> bool:
     """True when Instagram has shown a reel/post share-confirmation message.
 
@@ -68,8 +76,8 @@ def is_share_success(page_text: str) -> bool:
     with a capital S; matching lowercase only (the original bug) returns False
     even though the post shipped.
     """
-    low = (page_text or "").lower()
-    return any(phrase in low for phrase in SHARE_SUCCESS_PHRASES)
+    low = _norm_text(page_text or "")
+    return any(_norm_text(phrase) in low for phrase in SHARE_SUCCESS_PHRASES)
 
 
 @dataclass(slots=True)
@@ -80,6 +88,13 @@ class PublishResult:
     verified: bool = False
     caption_chars: int = 0
     video_path: str | None = None
+    media_path: str | None = None
+    media_kind: str = "reel"
+    profile_verified: bool = False
+    profile_count_before: str | None = None
+    profile_count_after: str | None = None
+    top_post_before: str | None = None
+    top_post_after: str | None = None
     screenshots: list[str] = field(default_factory=list)
     reason: str | None = None
 
@@ -91,6 +106,13 @@ class PublishResult:
             "verified": self.verified,
             "caption_chars": self.caption_chars,
             "video_path": self.video_path,
+            "media_path": self.media_path,
+            "media_kind": self.media_kind,
+            "profile_verified": self.profile_verified,
+            "profile_count_before": self.profile_count_before,
+            "profile_count_after": self.profile_count_after,
+            "top_post_before": self.top_post_before,
+            "top_post_after": self.top_post_after,
             "screenshots": list(self.screenshots),
             "reason": self.reason,
         }
@@ -129,6 +151,54 @@ class InstagramPublishService:
                 continue
         return False
 
+    @staticmethod
+    def _click_instagram_create(page: Any, timeout: int = 6000) -> bool:
+        if InstagramPublishService._click_any_role(page, CREATE_LABELS, timeout):
+            return True
+        try:
+            clicked = page.evaluate(
+                """
+                () => {
+                  window.__clawClickInstagramCreate = true;
+                  const visible = el => {
+                    const r = el.getBoundingClientRect();
+                    return !!(r.width && r.height);
+                  };
+                  const norm = s => (s || '')
+                    .normalize('NFD').replace(/[\\u0300-\\u036f]/g, '')
+                    .trim().toLowerCase();
+                  const isCreateLabel = s => /^(crear|create)$/.test(norm(s));
+                  const iconRe = /nueva publicaci|new post|crear|create/i;
+                  for (const el of document.querySelectorAll('a,button,[role=button],[role=link]')) {
+                    if (!visible(el)) continue;
+                    if (isCreateLabel(el.textContent) || iconRe.test(el.getAttribute('aria-label') || '')) {
+                      el.click();
+                      return true;
+                    }
+                  }
+                  for (const svg of document.querySelectorAll('svg[aria-label]')) {
+                    if (!visible(svg)) continue;
+                    if (!iconRe.test(svg.getAttribute('aria-label') || '')) continue;
+                    const target = svg.closest('a,button,[role=button],[role=link]') || svg.parentElement;
+                    if (target) {
+                      target.click();
+                      return true;
+                    }
+                  }
+                  return false;
+                }
+                """
+            )
+            if clicked:
+                return True
+        except Exception:
+            pass
+        try:
+            page.locator('svg[aria-label="Nueva publicación"], svg[aria-label="New post"]').first.click(timeout=timeout)
+            return True
+        except Exception:
+            return False
+
     def _detect_account(self, page: Any) -> str | None:
         try:
             hrefs = page.evaluate(
@@ -143,6 +213,93 @@ class InstagramPublishService:
                 return h.strip("/")
         return None
 
+    def _profile_snapshot(self, page: Any, account: str) -> tuple[str | None, str | None]:
+        try:
+            page.goto(f"https://www.instagram.com/{account}/", wait_until="domcontentloaded", timeout=45000)
+            page.wait_for_timeout(6000)
+        except Exception:
+            # Navigation failed: evaluating whatever page is still loaded would
+            # read counts/links from the wrong page and fake a profile change.
+            return None, None
+        try:
+            count = page.evaluate(
+                """
+                () => {
+                  const m = (document.body.innerText || '').match(/([\\d.,]+)\\s+(?:publicaciones|posts)/i);
+                  return m ? m[1] : null;
+                }
+                """
+            )
+        except Exception:
+            count = None
+        try:
+            top_post = page.evaluate(
+                """
+                () => {
+                  const links = Array.from(
+                    document.querySelectorAll('main a[href*="/p/"], article a[href*="/p/"]')
+                  ).map(e => e.getAttribute('href'));
+                  return links[0] || null;
+                }
+                """
+            )
+        except Exception:
+            top_post = None
+        return count, top_post
+
+    @staticmethod
+    def _profile_changed(
+        before_count: str | None,
+        after_count: str | None,
+        before_top: str | None,
+        after_top: str | None,
+    ) -> bool:
+        def as_int(value: str | None) -> int | None:
+            if not value:
+                return None
+            digits = "".join(ch for ch in value if ch.isdigit())
+            return int(digits) if digits else None
+
+        before = as_int(before_count)
+        after = as_int(after_count)
+        if before is not None and after is not None and after > before:
+            return True
+        return bool(before_top and after_top and before_top != after_top)
+
+    def _set_original_crop(self, page: Any, shots: list[str]) -> bool:
+        try:
+            crop_opened = page.evaluate(
+                """
+                () => {
+                  const iconRe = /recorte|crop/i;
+                  for (const svg of document.querySelectorAll('svg[aria-label]')) {
+                    if (!iconRe.test(svg.getAttribute('aria-label') || '')) continue;
+                    const target = svg.closest('button,[role=button],div[role=button]') || svg.parentElement;
+                    if (target) {
+                      target.click();
+                      return true;
+                    }
+                  }
+                  return false;
+                }
+                """
+            )
+        except Exception:
+            crop_opened = False
+        if not crop_opened:
+            return False
+        page.wait_for_timeout(1200)
+        self._shot(page, "02b_cropmenu", shots)
+        if self._click_any_role(page, ("Original",), 3000):
+            page.wait_for_timeout(1200)
+            return True
+        try:
+            clicked = page.get_by_text("Original", exact=True).first.click(timeout=3000)
+            page.wait_for_timeout(1200)
+            return clicked is None or True
+        except Exception:
+            return False
+
     # -- main flow ---------------------------------------------------------
     def publish_reel(
         self,
@@ -150,21 +307,67 @@ class InstagramPublishService:
         caption: str,
         expected_account: str | None = None,
     ) -> PublishResult:
+        return self._publish_media(
+            media_path=video_path,
+            caption=caption,
+            expected_account=expected_account,
+            media_kind="reel",
+            require_profile_verification=False,
+            require_original_crop=False,
+        )
+
+    def publish_photo(
+        self,
+        photo_path: str,
+        caption: str,
+        expected_account: str | None = None,
+    ) -> PublishResult:
+        return self._publish_media(
+            media_path=photo_path,
+            caption=caption,
+            expected_account=expected_account,
+            media_kind="photo",
+            require_profile_verification=True,
+            require_original_crop=True,
+        )
+
+    def _publish_media(
+        self,
+        *,
+        media_path: str,
+        caption: str,
+        expected_account: str | None,
+        media_kind: str,
+        require_profile_verification: bool,
+        require_original_crop: bool,
+    ) -> PublishResult:
         from playwright.sync_api import sync_playwright
 
-        vp = Path(video_path)
+        vp = Path(media_path)
         account = expected_account or "unknown"
         shots: list[str] = []
         if not vp.exists():
-            return PublishResult(ok=False, account=account, video_path=video_path,
-                                 reason="video_not_found")
+            return PublishResult(
+                ok=False,
+                account=account,
+                video_path=media_path if media_kind == "reel" else None,
+                media_path=media_path,
+                media_kind=media_kind,
+                reason="video_not_found" if media_kind == "reel" else "media_not_found",
+            )
 
         with sync_playwright() as pw:
             try:
                 browser = pw.chromium.connect_over_cdp(self.cdp_url)
             except Exception as e:
-                return PublishResult(ok=False, account=account, video_path=video_path,
-                                     reason=f"cdp_unavailable:{type(e).__name__}")
+                return PublishResult(
+                    ok=False,
+                    account=account,
+                    video_path=media_path if media_kind == "reel" else None,
+                    media_path=media_path,
+                    media_kind=media_kind,
+                    reason=f"cdp_unavailable:{type(e).__name__}",
+                )
             ctx = browser.contexts[0]
             page = ctx.new_page()
             page.goto("https://www.instagram.com/", wait_until="domcontentloaded", timeout=45000)
@@ -174,8 +377,14 @@ class InstagramPublishService:
                 "() => !!document.querySelector('input[name=username], input[name=password]')"
             )
             if logged_out:
-                return PublishResult(ok=False, account=account, video_path=video_path,
-                                     reason="not_logged_in")
+                return PublishResult(
+                    ok=False,
+                    account=account,
+                    video_path=media_path if media_kind == "reel" else None,
+                    media_path=media_path,
+                    media_kind=media_kind,
+                    reason="not_logged_in",
+                )
             detected = self._detect_account(page)
             if detected:
                 account = detected
@@ -184,15 +393,32 @@ class InstagramPublishService:
             # href) must NOT fall through to publishing on whatever IG account
             # the shared CDP session happens to be logged into.
             if expected_account and (not detected or expected_account.lower() != detected.lower()):
-                return PublishResult(ok=False, account=detected or account, video_path=video_path,
-                                     reason="wrong_account" if detected else "account_unverified")
+                return PublishResult(
+                    ok=False,
+                    account=detected or account,
+                    video_path=media_path if media_kind == "reel" else None,
+                    media_path=media_path,
+                    media_kind=media_kind,
+                    reason="wrong_account" if detected else "account_unverified",
+                )
 
-            if not self._click_any_role(page, CREATE_LABELS, 6000):
-                try:
-                    page.locator('svg[aria-label="Nueva publicación"], svg[aria-label="New post"]').first.click(timeout=6000)
-                except Exception:
-                    return PublishResult(ok=False, account=account, video_path=video_path,
-                                         reason="create_button_not_found")
+            before_count = before_top = None
+            if require_profile_verification:
+                before_count, before_top = self._profile_snapshot(page, account)
+                page.goto("https://www.instagram.com/", wait_until="domcontentloaded", timeout=45000)
+                page.wait_for_timeout(2500)
+
+            if not self._click_instagram_create(page, 6000):
+                return PublishResult(
+                    ok=False,
+                    account=account,
+                    video_path=media_path if media_kind == "reel" else None,
+                    media_path=media_path,
+                    media_kind=media_kind,
+                    profile_count_before=before_count,
+                    top_post_before=before_top,
+                    reason="create_button_not_found",
+                )
             page.wait_for_timeout(2000)
             self._shot(page, "01_menu", shots)
 
@@ -220,13 +446,37 @@ class InstagramPublishService:
                     pass
             if not file_set:
                 self._shot(page, "fail_upload", shots)
-                return PublishResult(ok=False, account=account, video_path=video_path,
-                                     screenshots=shots, reason="file_upload_failed")
+                return PublishResult(
+                    ok=False,
+                    account=account,
+                    video_path=media_path if media_kind == "reel" else None,
+                    media_path=media_path,
+                    media_kind=media_kind,
+                    profile_count_before=before_count,
+                    top_post_before=before_top,
+                    screenshots=shots,
+                    reason="file_upload_failed",
+                )
             page.wait_for_timeout(9000)
             self._shot(page, "02_uploaded", shots)
 
-            self._click_any_role(page, OK_LABELS, 3000)
-            page.wait_for_timeout(2000)
+            if require_original_crop:
+                if not self._set_original_crop(page, shots):
+                    self._shot(page, "fail_crop", shots)
+                    return PublishResult(
+                        ok=False,
+                        account=account,
+                        video_path=media_path if media_kind == "reel" else None,
+                        media_path=media_path,
+                        media_kind=media_kind,
+                        profile_count_before=before_count,
+                        top_post_before=before_top,
+                        screenshots=shots,
+                        reason="crop_original_not_confirmed",
+                    )
+            else:
+                self._click_any_role(page, OK_LABELS, 3000)
+                page.wait_for_timeout(2000)
 
             for _ in range(3):
                 try:
@@ -256,8 +506,17 @@ class InstagramPublishService:
             page.wait_for_timeout(1500)
             self._shot(page, "03_caption", shots)
             if not cap_filled:
-                return PublishResult(ok=False, account=account, video_path=video_path,
-                                     screenshots=shots, reason="caption_box_not_found")
+                return PublishResult(
+                    ok=False,
+                    account=account,
+                    video_path=media_path if media_kind == "reel" else None,
+                    media_path=media_path,
+                    media_kind=media_kind,
+                    profile_count_before=before_count,
+                    top_post_before=before_top,
+                    screenshots=shots,
+                    reason="caption_box_not_found",
+                )
 
             shared_click = self._click_any_role(page, SHARE_LABELS, 5000)
             if not shared_click:
@@ -268,8 +527,17 @@ class InstagramPublishService:
                     pass
             if not shared_click:
                 self._shot(page, "fail_share", shots)
-                return PublishResult(ok=False, account=account, video_path=video_path,
-                                     screenshots=shots, reason="share_button_not_found")
+                return PublishResult(
+                    ok=False,
+                    account=account,
+                    video_path=media_path if media_kind == "reel" else None,
+                    media_path=media_path,
+                    media_kind=media_kind,
+                    profile_count_before=before_count,
+                    top_post_before=before_top,
+                    screenshots=shots,
+                    reason="share_button_not_found",
+                )
 
             verified = False
             deadline = time.time() + self.share_confirm_timeout
@@ -284,13 +552,35 @@ class InstagramPublishService:
                     break
             self._shot(page, "04_after_share", shots)
 
+            after_count = after_top = None
+            profile_verified = False
+            if require_profile_verification:
+                after_count, after_top = self._profile_snapshot(page, account)
+                self._shot(page, "05_profile", shots)
+                profile_verified = self._profile_changed(before_count, after_count, before_top, after_top)
+
+            ok = verified and (profile_verified if require_profile_verification else True)
+            if not verified:
+                reason = "share_not_confirmed"
+            elif require_profile_verification and not profile_verified:
+                reason = "profile_not_verified"
+            else:
+                reason = None
+
             return PublishResult(
-                ok=verified,
+                ok=ok,
                 account=account,
                 shared=shared_click,
                 verified=verified,
                 caption_chars=len(caption),
-                video_path=video_path,
+                video_path=media_path if media_kind == "reel" else None,
+                media_path=media_path,
+                media_kind=media_kind,
+                profile_verified=profile_verified,
+                profile_count_before=before_count,
+                profile_count_after=after_count,
+                top_post_before=before_top,
+                top_post_after=after_top,
                 screenshots=shots,
-                reason=None if verified else "share_not_confirmed",
+                reason=reason,
             )

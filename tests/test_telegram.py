@@ -5,6 +5,7 @@ import base64
 import contextlib
 import sqlite3
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,7 +13,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from telegram.error import TimedOut
 
+import claw_v2.observe as observe_module
 from claw_v2.memory import MemoryStore
+from claw_v2.observe import ObserveStream
 from claw_v2.telegram import TelegramTransport, _polling_lock_path, _split_message
 
 
@@ -1093,6 +1096,117 @@ class SendPhotoTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("tg-574707975", sent_text)
         self.assertNotIn("runtime lost authoritative backing state", sent_text)
         self.assertIn("se perdio el estado ejecutable", sent_text)
+
+
+class ObserveEmitOffloadTests(unittest.IsolatedAsyncioTestCase):
+    """The transport persists diagnostic observe events on the event loop while
+    handling Telegram traffic. ObserveStream._persist_event retries
+    locked-SQLite writes with a synchronous time.sleep (up to ~0.3s), so doing
+    that work inline on the loop thread stutters all Telegram handling during a
+    lock storm (2026-06-10 incident). The async emit path must offload the
+    blocking write to a worker thread."""
+
+    def _locked_observe_stream(self) -> ObserveStream:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        stream = ObserveStream(Path(tmp.name) / "observe.db")
+        # Close the real connection we are about to orphan, then force every
+        # persist to take the locked-retry-then-drop branch so the time.sleep
+        # in _persist_event actually runs.
+        stream._conn.close()
+        fake_conn = MagicMock()
+        fake_conn.execute.side_effect = sqlite3.OperationalError("database is locked")
+        stream._conn = fake_conn
+        return stream
+
+    async def test_async_outbound_emit_does_not_sleep_on_loop_thread(self) -> None:
+        stream = self._locked_observe_stream()
+        bot_service = MagicMock()
+        bot_service.observe = stream
+        transport = TelegramTransport(bot_service=bot_service, token="t")
+        self.addAsyncCleanup(transport.stop)
+
+        loop_thread_id = threading.get_ident()
+        sleep_threads: list[int] = []
+
+        def _recording_sleep(_seconds: float) -> None:
+            # Record which thread paid the retry sleep; never actually block.
+            sleep_threads.append(threading.get_ident())
+
+        update = MagicMock()
+        update.message.reply_text = AsyncMock()
+
+        with patch.object(observe_module.time, "sleep", _recording_sleep):
+            await transport._send_reply_text_part(
+                update,
+                "hola",
+                session_id="tg-1",
+                user_id="1",
+                message_kind="text",
+                part_index=1,
+                part_count=1,
+            )
+
+        # The locked-retry sleep must have run (otherwise we never exercised the
+        # blocking path and the assertion below would pass vacuously)...
+        self.assertTrue(
+            sleep_threads,
+            "expected ObserveStream locked-retry time.sleep to run",
+        )
+        # ...but it must never run on the event-loop thread.
+        self.assertNotIn(
+            loop_thread_id,
+            sleep_threads,
+            "observe locked-retry time.sleep ran on the event-loop thread",
+        )
+
+    async def test_emit_after_stop_runs_inline_without_new_executor(self) -> None:
+        bot_service = MagicMock()
+        transport = TelegramTransport(bot_service=bot_service, token="t")
+        await transport.stop()  # never started: _app stays None, executor closed
+
+        await transport._aemit_transport_event("telegram_outbound_text", {"k": "v"})
+
+        # A shutdown-tail emit must not resurrect an executor nobody will shut
+        # down again...
+        self.assertIsNone(transport._observe_executor)
+        # ...but the audit event itself must still land (inline fallback).
+        bot_service.observe.emit.assert_called_once_with(
+            "telegram_outbound_text", payload={"k": "v"}
+        )
+
+    async def test_async_latency_emit_does_not_sleep_on_loop_thread(self) -> None:
+        stream = self._locked_observe_stream()
+        bot_service = MagicMock()
+        bot_service.observe = stream
+        transport = TelegramTransport(bot_service=bot_service, token="t")
+        self.addAsyncCleanup(transport.stop)
+
+        loop_thread_id = threading.get_ident()
+        sleep_threads: list[int] = []
+
+        def _recording_sleep(_seconds: float) -> None:
+            sleep_threads.append(threading.get_ident())
+
+        with patch.object(observe_module.time, "sleep", _recording_sleep):
+            await transport._emit_latency(
+                session_id="tg-1",
+                user_id="1",
+                message_kind="text",
+                status="ok",
+                bot_ms=1.0,
+                reply_ms=1.0,
+                total_ms=2.0,
+                response_parts=1,
+                response_chars=4,
+            )
+
+        self.assertTrue(sleep_threads, "expected latency emit to reach the retry path")
+        self.assertNotIn(
+            loop_thread_id,
+            sleep_threads,
+            "latency emit locked-retry time.sleep ran on the event-loop thread",
+        )
 
 
 if __name__ == "__main__":

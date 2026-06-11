@@ -5538,6 +5538,37 @@ class BotService:
                 except Exception:
                     logger.debug("brain_tooluse_ledger_verification_failed emit failed", exc_info=True)
                 return
+        if self._brain_tooluse_has_verified_readonly_browser_evidence(
+            source_summary,
+            response=response,
+            tools_run=tools_run,
+            files_read=files_read,
+            files_written=files_written,
+            commands_run=commands_run,
+        ):
+            evidence_manifest["completed_at"] = time.time()
+            evidence_manifest["verification_result"] = "passed_readonly"
+            _finish_outcome("passed", verification_result="passed_readonly")
+            self.task_ledger.mark_terminal(
+                task_id,
+                status="succeeded",
+                summary=f"brain read-only browser review verified: {len(tool_events)} tool calls",
+                verification_status="passed",
+                artifacts=brain_artifacts,
+            )
+            try:
+                self.observe.emit(
+                    "brain_tooluse_ledger_verified_readonly_browser",
+                    payload={
+                        "task_id": task_id,
+                        "task_status": "succeeded",
+                        "verification_status": "passed",
+                        "tools_count": len(tool_events),
+                    },
+                )
+            except Exception:
+                logger.debug("brain_tooluse_ledger_verified_readonly_browser emit failed", exc_info=True)
+            return
         # Tools ran without failure, but no verifier has passed yet.
         # PR2 Checkpoint B: block on executed mutation (files_written /
         # commands_run), not only on the 6 request-text regex. A Write/Edit/Bash
@@ -5628,6 +5659,88 @@ class BotService:
         if content.strip(" .,…!¡?¿-_") == "":
             return False
         return len(content) >= 20
+
+    @classmethod
+    def _brain_tooluse_has_verified_readonly_browser_evidence(
+        cls,
+        source_text: str,
+        *,
+        response: Any,
+        tools_run: list[str],
+        files_read: set[str],
+        files_written: set[str],
+        commands_run: list[str],
+    ) -> bool:
+        """Allow read-only Instagram/browser research to close as verified.
+
+        The mutation blocker intentionally treats Bash as risky by default.
+        This carve-out is narrow: it requires an Instagram review/research
+        request, concrete screenshot/JSON evidence, no written files, and no
+        shell command shaped like publish/upload/delete/write.
+        """
+        normalized = _normalize_command_text(source_text or "")
+        if "instagram" not in normalized and "insta" not in normalized:
+            return False
+        publish_markers = (
+            "publica",
+            "publicaste",
+            "postea",
+            "sube",
+            "subelo",
+            "súbelo",
+            "compart",
+            "publish",
+            "share",
+            "upload",
+        )
+        if any(marker in normalized for marker in publish_markers):
+            return False
+        review_markers = (
+            "revisa",
+            "repaso",
+            "busca",
+            "investiga",
+            "tips",
+            "tendencia",
+            "trending",
+            "feed",
+            "perfil",
+            "link",
+        )
+        if not any(marker in normalized for marker in review_markers):
+            return False
+        if not cls._brain_response_has_useful_result(response):
+            return False
+        if files_written:
+            return False
+        dangerous_command_markers = (
+            "publish",
+            "share",
+            "upload",
+            "send",
+            "rm ",
+            "mv ",
+            "cp ",
+            "touch ",
+            "mkdir ",
+            "write",
+            "_publish",
+            "_share",
+        )
+        for command in commands_run:
+            low = command.lower()
+            if any(marker in low for marker in dangerous_command_markers):
+                return False
+        evidence_paths = [p.lower() for p in files_read]
+        has_instagram_artifact = any(
+            ("artifacts/ig_feed/" in path or "artifacts/instagram/" in path)
+            and (path.endswith(".png") or path.endswith(".jpg") or path.endswith(".jpeg") or path.endswith(".json"))
+            for path in evidence_paths
+        )
+        if not has_instagram_artifact:
+            return False
+        allowed_tools = {"Read", "Grep", "Glob", "Bash"}
+        return bool(tools_run) and set(tools_run).issubset(allowed_tools)
 
     @staticmethod
     def _brain_tooluse_requires_verified_completion(source_text: str) -> bool:

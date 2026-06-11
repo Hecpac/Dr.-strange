@@ -1439,6 +1439,10 @@ def _sanitize_chat_response(text: str) -> str:
     sanitized = re.sub(r"\[redacted:\s*system-reminder\]", "[redacted: internal marker]", sanitized, flags=re.IGNORECASE)
     sanitized = re.sub(r"&lt;/?\s*system-reminder\s*&gt;", "[redacted: internal marker]", sanitized, flags=re.IGNORECASE)
     sanitized = re.sub(r"</?\s*system-reminder\s*>", "[redacted: internal marker]", sanitized, flags=re.IGNORECASE)
+    # Defense-in-depth: a leaked <response>/</response> contract wrapper must
+    # never egress (2026-06-10 incident, unclosed-tag truncation). Strip the
+    # bare tag to empty — it is a wrapper, not user-visible content.
+    sanitized = re.sub(r"</?\s*response\b[^>]*>", "", sanitized, flags=re.IGNORECASE)
     sanitized = re.sub(
         r"\bbrain-tooluse:[^\s`]+",
         "tarea local",

@@ -1,12 +1,13 @@
-"""CLI: publish a local video as an Instagram Reel over the CDP Chrome session.
+"""CLI: publish Instagram media over the CDP Chrome session.
 
 Usage:
-    python -m claw_v2.cli.instagram_publish <video_path> --caption "..." \\
+    python -m claw_v2.cli.instagram_publish <media_path> --caption "..." \\
+        [--media-type reel|photo] \\
         [--account pachanodesign]
 
 The caption may also be read from a file with --caption-file. Verification is
-done in-flow via Instagram's share-confirmation modal; exit code 0 only when
-the reel is verified as shared.
+done in-flow via Instagram's share-confirmation modal; photo posts also verify
+the profile changed. Exit code 0 only when the media is verified as shared.
 """
 from __future__ import annotations
 
@@ -20,7 +21,13 @@ from claw_v2.instagram_publish import InstagramPublishService
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("video_path", help="Absolute path to the .mp4 to publish")
+    parser.add_argument("media_path", help="Absolute path to the media to publish")
+    parser.add_argument(
+        "--media-type",
+        choices=("reel", "photo"),
+        default="reel",
+        help="Publish flow to use. Defaults to reel for backward compatibility.",
+    )
     parser.add_argument("--caption", default="", help="Reel caption text")
     parser.add_argument("--caption-file", default=None, help="Read caption from a file")
     parser.add_argument("--account", default=None,
@@ -32,11 +39,18 @@ def main(argv: list[str] | None = None) -> int:
         caption = Path(args.caption_file).read_text(encoding="utf-8")
 
     svc = InstagramPublishService()
-    result = svc.publish_reel(
-        video_path=args.video_path,
-        caption=caption,
-        expected_account=args.account,
-    )
+    if args.media_type == "photo":
+        result = svc.publish_photo(
+            photo_path=args.media_path,
+            caption=caption,
+            expected_account=args.account,
+        )
+    else:
+        result = svc.publish_reel(
+            video_path=args.media_path,
+            caption=caption,
+            expected_account=args.account,
+        )
     print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False, default=str))
     return 0 if result.ok else 1
 

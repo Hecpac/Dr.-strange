@@ -460,6 +460,31 @@ class BrainToolUseLedgerTests(unittest.TestCase):
             ["passed_verification_missing_for_action"],
         )
 
+    def test_instagram_readonly_review_with_browser_evidence_closes_verified_readonly(self) -> None:
+        observe = _RecordingObserve()
+        observe.canned_trace_events = [
+            _tool_event("Bash", tool_input={"command": "python3 artifacts/ig_feed/_ig_feed_sweep.py"}),
+            _tool_event("Read", tool_input={"file_path": "artifacts/ig_feed/ig_feed_1780891885_top.png"}),
+            _tool_event("Read", tool_input={"file_path": "artifacts/ig_feed/ig_feed_1780891885.json"}),
+        ]
+        bot = _make_bot(observe, self.ledger)
+
+        bot._attach_brain_tool_use_ledger(
+            session_id="tg-test",
+            response=_StubResponse(
+                content="Revisé el feed y extraje evidencia visible con screenshot y DOM.",
+                artifacts={"trace_id": "trace-X"},
+            ),
+            source_text="Abre Instagram y dale un repaso por el feed y consigue tips para mejorar el setup",
+            runtime_channel="telegram",
+        )
+
+        task = self.ledger.list(limit=10)[0]
+        self.assertEqual(task.status, "succeeded")
+        self.assertEqual(task.verification_status, "passed")
+        self.assertEqual(task.artifacts["evidence_manifest"]["verification_result"], "passed_readonly")
+        self.assertEqual(task.artifacts["outcome_manifest"]["final_outcome"], "passed")
+
     def test_b_mutation_without_action_text_blocks_even_with_verifier_off(self) -> None:
         # PR2 Checkpoint B: the blocker now fires on executed mutation
         # (files_written / commands_run), not only on the 6 request-text regex.
