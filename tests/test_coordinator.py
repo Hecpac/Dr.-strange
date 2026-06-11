@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from contextvars import copy_context
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -78,6 +79,24 @@ class DispatchParallelTests(unittest.TestCase):
             self.assertIsNotNone(result)
             assert result is not None
             self.assertTrue(result[CONTRACT_REQUIRED_KEY])
+        finally:
+            reset_tool_artifact_result()
+
+    def test_reset_tool_artifact_result_isolates_copied_contexts(self) -> None:
+        from claw_v2.turn_context import (
+            current_tool_artifact_result,
+            record_tool_artifact_result,
+            reset_tool_artifact_result,
+        )
+        from claw_v2.verification.local_tool_runner import CONTRACT_REQUIRED_KEY
+
+        reset_tool_artifact_result()
+        stale_context = copy_context()
+        reset_tool_artifact_result()
+        try:
+            stale_context.run(record_tool_artifact_result, {CONTRACT_REQUIRED_KEY: True})
+
+            self.assertIsNone(current_tool_artifact_result())
         finally:
             reset_tool_artifact_result()
 

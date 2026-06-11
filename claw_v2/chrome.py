@@ -29,7 +29,7 @@ class ManagedChrome:
         observe: Callable[[str, dict], None] | None = None,
     ) -> None:
         self.port = port
-        self.profile_dir = str(Path(profile_dir).expanduser())
+        self.profile_dir = str(Path(profile_dir).expanduser().resolve(strict=False))
         self._process: subprocess.Popen | None = None
         self._attached_pid: int | None = None
         # P0 hotfix C: callback for cdp_unavailable observability events.
@@ -156,6 +156,7 @@ class ManagedChrome:
             # page is on screen instead of macOS restoring a tiny last-used size.
             cmd.append("--start-maximized")
             cmd.append("--window-position=0,0")
+            cmd.append("--window-size=1512,982")
 
         self._process = subprocess.Popen(
             cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,

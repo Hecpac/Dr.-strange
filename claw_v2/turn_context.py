@@ -94,15 +94,12 @@ def current_turn_id() -> str | None:
 def reset_tool_artifact_result() -> None:
     """Clear the per-task contract artifact bucket.
 
-    The bucket value is mutable on purpose: coordinator worker threads receive
-    a copied context that still points at the same list, so tool calls made in
-    those workers can append results for the parent task thread to read.
+    Bind a fresh mutable bucket for the current context. Coordinator worker
+    threads copy the context after this reset, so they still share the copied
+    list for a single task, while late appends from older copied contexts cannot
+    contaminate the next task.
     """
-    bucket = _TOOL_ARTIFACT_RESULT_CONTEXT.get()
-    if bucket is None:
-        _TOOL_ARTIFACT_RESULT_CONTEXT.set([])
-    else:
-        bucket.clear()
+    _TOOL_ARTIFACT_RESULT_CONTEXT.set([])
 
 
 def record_tool_artifact_result(result: Mapping[str, Any]) -> None:

@@ -39,7 +39,7 @@ class ManagedChromeTests(unittest.TestCase):
         mc.start()
         args = mock_popen.call_args[0][0]
         self.assertIn("--remote-debugging-port=9250", args)
-        self.assertIn("--user-data-dir=/tmp/test-profile", args)
+        self.assertIn(f"--user-data-dir={Path('/tmp/test-profile').resolve(strict=False)}", args)
         self.assertIn("--headless=new", args)
         self.assertIn("--no-first-run", args)
 
@@ -94,6 +94,17 @@ class ManagedChromeTests(unittest.TestCase):
         mc = ManagedChrome(port=9999, profile_dir="/tmp/p")
         self.assertEqual(mc.cdp_url, "http://localhost:9999")
 
+    def test_profile_dir_is_canonicalized(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            real_profile = Path(tmpdir) / "real-profile"
+            symlink_profile = Path(tmpdir) / "linked-profile"
+            real_profile.mkdir()
+            symlink_profile.symlink_to(real_profile, target_is_directory=True)
+
+            mc = ManagedChrome(port=9250, profile_dir=str(symlink_profile))
+
+            self.assertEqual(mc.profile_dir, str(real_profile.resolve(strict=False)))
+
     @patch("claw_v2.chrome._check_port_pids")
     @patch("claw_v2.chrome._wait_for_port_free")
     @patch("subprocess.Popen")
@@ -107,6 +118,8 @@ class ManagedChromeTests(unittest.TestCase):
         mc.start(headless=False)
         args = mock_popen.call_args[0][0]
         self.assertNotIn("--headless=new", args)
+        self.assertIn("--start-maximized", args)
+        self.assertIn("--window-size=1512,982", args)
 
     @patch("claw_v2.chrome._check_port_pids")
     @patch("subprocess.Popen")

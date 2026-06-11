@@ -1611,7 +1611,7 @@ class BotService:
                     "reason": reason,
                     "captured": captured,
                     "matched_pattern": matched_pattern,
-                    "text_preview": redact_text(text)[:80],
+                    "text_preview": redact_text(text[:256])[:80],
                     "text_len": len(text),
                     # legacy alias kept so existing dashboards keep parsing
                     "text_length": len(text),
@@ -1653,7 +1653,7 @@ class BotService:
                     "decision": decision,
                     "output_kind": output_kind,
                     "leaked_internal_labels": leaked,
-                    "text_preview": redact_text(text)[:80],
+                    "text_preview": redact_text(text[:256])[:80],
                     "text_len": len(text),
                     "reasons": list(semantic_turn.reasons),
                 },

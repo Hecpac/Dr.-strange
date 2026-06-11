@@ -655,6 +655,7 @@ class TaskHandler:
         resumed: bool = False,
         slot_acquired: bool = False,
     ) -> None:
+        reset_tool_artifact_result()
         goal_id = self._p0_goal_id_for_task(task_id, session_id=session_id, objective=objective, mode=mode)
         try:
             if self._is_cancelled(task_id):
