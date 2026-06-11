@@ -8,6 +8,7 @@ import logging
 import secrets
 import shutil
 import sqlite3
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -29,6 +30,12 @@ class CheckpointService:
         self.snapshots_dir = Path(snapshots_dir)
         self.ring_size = ring_size
         self.snapshots_dir.mkdir(parents=True, exist_ok=True)
+        # Serializes the metadata+backup+rotation lifecycle among concurrent
+        # create() calls WITHOUT holding memory._lock during the copy: an
+        # overlapping create's ring rotation could otherwise purge the
+        # in-flight snapshot (its metadata row is visible before its file
+        # finishes writing).
+        self._create_lock = threading.Lock()
 
     def create(
         self,
@@ -39,6 +46,24 @@ class CheckpointService:
     ) -> str:
         ckpt_id = f"ckpt_{secrets.token_hex(4)}"
         file_path = self.snapshots_dir / f"{ckpt_id}.db"
+        with self._create_lock:
+            return self._create_locked(
+                ckpt_id=ckpt_id,
+                file_path=file_path,
+                trigger_reason=trigger_reason,
+                session_id=session_id,
+                consecutive_failures=consecutive_failures,
+            )
+
+    def _create_locked(
+        self,
+        *,
+        ckpt_id: str,
+        file_path: Path,
+        trigger_reason: str,
+        session_id: str | None,
+        consecutive_failures: int,
+    ) -> str:
         with self.memory._lock:
             # Insert the metadata row FIRST and commit so the row is visible
             # to the subsequent backup() — snapshot must be self-describing.
@@ -49,12 +74,30 @@ class CheckpointService:
                 (ckpt_id, trigger_reason, session_id, consecutive_failures, str(file_path)),
             )
             self.memory._conn.commit()
-            target_conn: sqlite3.Connection | None = None
-            try:
-                target_conn = sqlite3.connect(file_path)
-                self.memory._conn.backup(target_conn, pages=100, sleep=0.001)
-            except Exception:
-                # Roll back the metadata row so the DB stays clean.
+        # Copy WITHOUT holding memory._lock and on a dedicated source
+        # connection: WAL gives it a consistent snapshot, and a single-pass
+        # backup leaves no between-step window for concurrent writers
+        # (observe/jobs/ledger) to trigger restarts. The previous incremental
+        # backup on the live connection held the memory lock for the whole
+        # copy and restarted on every external write — under load the hot
+        # path froze until "database is locked" surfaced to the user.
+        # Write to a staging file and rename only after the copy completes:
+        # the committed row's file_path must not exist until the snapshot is
+        # whole, or a concurrent /rollback (or a crash mid-copy) could restore
+        # a partial/truncated database (PR #91 review, codex P2).
+        tmp_path = file_path.with_name(file_path.name + ".tmp")
+        source_conn: sqlite3.Connection | None = None
+        target_conn: sqlite3.Connection | None = None
+        try:
+            source_conn = self._open_backup_source()
+            target_conn = sqlite3.connect(tmp_path)
+            source_conn.backup(target_conn)
+            target_conn.close()
+            target_conn = None
+            tmp_path.replace(file_path)  # atomic publish (same dir/filesystem)
+        except Exception:
+            # Roll back the metadata row so the DB stays clean.
+            with self.memory._lock:
                 try:
                     self.memory._conn.execute(
                         "DELETE FROM checkpoints WHERE ckpt_id = ?", (ckpt_id,),
@@ -65,20 +108,24 @@ class CheckpointService:
                         "Checkpoint rollback: DELETE failed for %s", ckpt_id,
                         exc_info=True,
                     )
-                if target_conn is not None:
+            if target_conn is not None:
+                try:
+                    target_conn.close()
+                except Exception:
+                    pass
+                target_conn = None
+            tmp_path.unlink(missing_ok=True)
+            file_path.unlink(missing_ok=True)
+            raise
+        finally:
+            for conn in (source_conn, target_conn):
+                if conn is not None:
                     try:
-                        target_conn.close()
-                    except Exception:
-                        pass
-                file_path.unlink(missing_ok=True)
-                raise
-            finally:
-                if target_conn is not None:
-                    try:
-                        target_conn.close()
+                        conn.close()
                     except Exception:
                         pass
 
+        with self.memory._lock:
             # Ring rotation (unchanged from CP3)
             try:
                 rows_to_purge = self.memory._conn.execute(
@@ -109,6 +156,27 @@ class CheckpointService:
             except Exception:
                 logger.warning("Checkpoint rotation encountered an error", exc_info=True)
         return ckpt_id
+
+    def _open_backup_source(self) -> sqlite3.Connection:
+        """Dedicated read-only connection for backups (overridable in tests).
+
+        mode=ro guarantees the backup can never write the live DB; the 15s
+        timeout matches the runtime busy_timeout so the copy waits out
+        contention instead of failing fast with "database is locked".
+
+        Build the file: URI via Path.as_uri() so a path containing URI
+        delimiters (a `?` or `#`, or Windows backslashes) is percent-encoded
+        instead of truncating the URI and silently opening the wrong database.
+        """
+        raw = str(self.memory.db_path)
+        if raw == ":memory:" or "mode=memory" in raw:
+            # An in-memory db has no file to copy via a read-only file: URI;
+            # as_uri() would silently create a file literally named ":memory:".
+            raise ValueError(
+                "checkpoint backup requires a file-backed database, not an in-memory db"
+            )
+        db_uri = f"{Path(self.memory.db_path).absolute().as_uri()}?mode=ro"
+        return sqlite3.connect(db_uri, uri=True, timeout=15.0)
 
     def list(self) -> list[dict]:
         rows = self.memory._conn.execute(

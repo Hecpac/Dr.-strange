@@ -26,6 +26,74 @@ class CheckpointCreateTests(unittest.TestCase):
         self.assertEqual(len(ckpt_id), 13)
         self.assertTrue(all(c in "0123456789abcdef" for c in ckpt_id[5:]))
 
+    def test_create_handles_special_chars_in_db_path(self) -> None:
+        # PR #91 review (gemini + codex P2): a '?' / '#' in the DB path must be
+        # percent-encoded, not truncate the file: URI. With the raw
+        # `file:{path}?mode=ro` interpolation the '?' starts the query early, so
+        # SQLite opens a DIFFERENT (empty) db and the snapshot silently copies
+        # the wrong/empty database — a corrupt checkpoint. Assert the snapshot
+        # carries the LIVE data, not just that a file exists.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            store = MemoryStore(tmp / "weird?name.db")
+            store.store_fact("marker", "live-data", source="test")
+            service = CheckpointService(memory=store, snapshots_dir=tmp / "snaps")
+
+            ckpt_id = service.create(trigger_reason="test")
+
+            snap_conn = sqlite3.connect(tmp / "snaps" / f"{ckpt_id}.db")
+            try:
+                row = snap_conn.execute(
+                    "SELECT value FROM facts WHERE key = 'marker'"
+                ).fetchone()
+                self.assertIsNotNone(row, "snapshot copied the wrong/empty database")
+                self.assertEqual(row[0], "live-data")
+            finally:
+                snap_conn.close()
+
+    def test_final_snapshot_path_absent_until_backup_completes(self) -> None:
+        # PR #91 review round 2 (codex P2): M4 commits the row and releases
+        # memory._lock before the backup finishes, so a concurrent /rollback (or
+        # a crash) could see the committed row and a partially-written file_path.
+        # The final .db must be published atomically (temp + rename), so it is
+        # never visible at its final path mid-backup.
+        observed: dict = {}
+        real_open = self.service._open_backup_source
+
+        class _BackupSpyConn:
+            def __init__(self, inner, snapshots_dir):
+                self._inner = inner
+                self._snapshots_dir = snapshots_dir
+
+            def backup(self, target, **kwargs):
+                observed["final_dbs_mid_backup"] = sorted(
+                    p.name for p in self._snapshots_dir.glob("*.db")
+                )
+                return self._inner.backup(target, **kwargs)
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+        with patch.object(
+            self.service,
+            "_open_backup_source",
+            lambda: _BackupSpyConn(real_open(), self.snapshots_dir),
+        ):
+            ckpt_id = self.service.create(trigger_reason="test")
+
+        # No final `<ckpt>.db` may exist while the copy is still running.
+        self.assertEqual(observed["final_dbs_mid_backup"], [])
+        # ...but once create() returns, the snapshot is published.
+        self.assertTrue((self.snapshots_dir / f"{ckpt_id}.db").exists())
+
+    def test_open_backup_source_rejects_in_memory_db(self) -> None:
+        # PR #91 review round 2 (gemini): an in-memory db has no file to copy via
+        # a read-only file: URI; fail fast instead of silently creating a file
+        # literally named ":memory:".
+        self.store.db_path = Path(":memory:")
+        with self.assertRaises(ValueError):
+            self.service._open_backup_source()
+
     def test_create_writes_snapshot_file_to_disk(self) -> None:
         ckpt_id = self.service.create(trigger_reason="test")
         expected = self.snapshots_dir / f"{ckpt_id}.db"
@@ -66,37 +134,75 @@ class CheckpointCreateTests(unittest.TestCase):
         finally:
             snap_conn.close()
 
-    def test_backup_invoked_with_expected_args(self) -> None:
+    def test_backup_runs_on_dedicated_connection_without_memory_lock(self) -> None:
+        # 2026-06-10 audit M4: the copy must not run on the live connection
+        # nor hold memory._lock (the hot path froze for the whole backup and
+        # external writes restarted it, surfacing "database is locked").
         captured = {}
-        real_conn = self.store._conn
+        real_open = self.service._open_backup_source
 
-        class ConnProxy:
-            def __init__(self, inner):
-                self._inner = inner
-            def backup(self, target, **kwargs):
-                captured["pages"] = kwargs.get("pages")
-                captured["sleep"] = kwargs.get("sleep")
-                return self._inner.backup(target, **kwargs)
-            def __getattr__(self, name):
-                return getattr(self._inner, name)
+        def tracking_open():
+            import threading
 
-        with patch.object(self.store, "_conn", ConnProxy(real_conn)):
+            probe_result = {}
+
+            def probe():
+                acquired = self.store._lock.acquire(blocking=False)
+                probe_result["free"] = acquired
+                if acquired:
+                    self.store._lock.release()
+
+            probe_thread = threading.Thread(target=probe)
+            probe_thread.start()
+            probe_thread.join()
+            captured["locked_during_backup"] = not probe_result["free"]
+            conn = real_open()
+            captured["dedicated"] = conn is not self.store._conn
+            return conn
+
+        with patch.object(self.service, "_open_backup_source", tracking_open):
             self.service.create(trigger_reason="test")
-        self.assertEqual(captured["pages"], 100)
-        self.assertEqual(captured["sleep"], 0.001)
+        self.assertFalse(captured["locked_during_backup"])
+        self.assertTrue(captured["dedicated"])
+
+    def test_concurrent_creates_do_not_purge_in_flight_snapshot(self) -> None:
+        # PR #84 review (codex P2): with the ring at capacity, an overlapping
+        # create's rotation could unlink the snapshot another create was
+        # still writing. The service-level mutex serializes the lifecycle.
+        import threading
+
+        service = CheckpointService(
+            memory=self.store, snapshots_dir=self.snapshots_dir, ring_size=1,
+        )
+        errors: list[Exception] = []
+
+        def worker() -> None:
+            try:
+                service.create(trigger_reason="race")
+            except Exception as exc:  # pragma: no cover - failure mode under test
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(errors, [])
+        latest = service.latest()
+        self.assertIsNotNone(latest)
+        self.assertTrue(Path(latest["file_path"]).exists())
+        self.assertEqual(len(list(self.snapshots_dir.glob("ckpt_*.db"))), 1)
 
     def test_create_failure_cleans_up_file(self) -> None:
-        real_conn = self.store._conn
-
-        class FailingConnProxy:
-            def __init__(self, inner):
-                self._inner = inner
+        class FailingSource:
             def backup(self, target, **kwargs):
                 raise sqlite3.OperationalError("simulated failure")
-            def __getattr__(self, name):
-                return getattr(self._inner, name)
 
-        with patch.object(self.store, "_conn", FailingConnProxy(real_conn)):
+            def close(self) -> None:
+                pass
+
+        with patch.object(self.service, "_open_backup_source", lambda: FailingSource()):
             with self.assertRaises(sqlite3.OperationalError):
                 self.service.create(trigger_reason="test")
         self.assertEqual(list(self.snapshots_dir.glob("ckpt_*.db")), [])

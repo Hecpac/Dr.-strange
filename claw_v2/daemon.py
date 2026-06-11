@@ -260,7 +260,11 @@ class ClawDaemon:
                 except Exception as exc:
                     if self.observe is not None:
                         trace = new_trace_context(artifact_id="daemon_tick")
-                        self.observe.emit(
+                        # A contended SQLite write here (synchronous INSERT +
+                        # COMMIT with a 15s busy_timeout) must not stall the
+                        # event loop — Telegram polling and replies share it —
+                        # nor kill this loop if the emit itself fails.
+                        await self._emit_off_loop(
                             "daemon_tick_error",
                             trace_id=trace["trace_id"],
                             root_trace_id=trace["root_trace_id"],
@@ -282,6 +286,20 @@ class ClawDaemon:
                 except asyncio.CancelledError:
                     pass
 
+    async def _emit_off_loop(self, event_type: str, **kwargs: Any) -> None:
+        """Offload a diagnostic emit to a thread, swallowing failures.
+
+        A contended SQLite write (the very thing M3/M4 address) must neither
+        stall the event loop nor — if the emit itself raises — propagate out of
+        `await` and terminate the daemon loop. Diagnostic emits are best-effort.
+        """
+        if self.observe is None:
+            return
+        try:
+            await asyncio.to_thread(self.observe.emit, event_type, **kwargs)
+        except Exception:
+            logger.warning("off-loop emit of %s failed", event_type, exc_info=True)
+
     async def _run_liveness_heartbeat_loop(
         self,
         shutdown: asyncio.Event,
@@ -289,23 +307,18 @@ class ClawDaemon:
         interval: float,
     ) -> None:
         while not shutdown.is_set():
-            self._emit_liveness_heartbeat()
+            await self._emit_off_loop(
+                "daemon_heartbeat",
+                payload={
+                    "pid": os.getpid(),
+                    "ts": time.time(),
+                    "source": "daemon_liveness_loop",
+                },
+            )
             try:
                 await asyncio.wait_for(shutdown.wait(), timeout=interval)
             except asyncio.TimeoutError:
                 pass
-
-    def _emit_liveness_heartbeat(self) -> None:
-        if self.observe is None:
-            return
-        self.observe.emit(
-            "daemon_heartbeat",
-            payload={
-                "pid": os.getpid(),
-                "ts": time.time(),
-                "source": "daemon_liveness_loop",
-            },
-        )
 
     async def _run_pending_verification_reconciliation_job_loop(
         self,
@@ -326,11 +339,10 @@ class ClawDaemon:
                 await asyncio.to_thread(runner.run_available, limit=1)
             except Exception as exc:
                 logger.exception("pending verification reconciliation runner failed")
-                if self.observe is not None:
-                    self.observe.emit(
-                        "pending_verification_reconciliation_runner_error",
-                        payload={"error": str(exc)},
-                    )
+                await self._emit_off_loop(
+                    "pending_verification_reconciliation_runner_error",
+                    payload={"error": str(exc)},
+                )
             try:
                 await asyncio.wait_for(shutdown.wait(), timeout=interval)
             except asyncio.TimeoutError:
@@ -347,11 +359,10 @@ class ClawDaemon:
                 await asyncio.to_thread(runner.handler)
             except Exception as exc:
                 logger.exception("daemon background job runner failed: %s", runner.name)
-                if self.observe is not None:
-                    self.observe.emit(
-                        "daemon_background_job_runner_error",
-                        payload={"runner": runner.name, "error": _safe_error_preview(exc)},
-                    )
+                await self._emit_off_loop(
+                    "daemon_background_job_runner_error",
+                    payload={"runner": runner.name, "error": _safe_error_preview(exc)},
+                )
             try:
                 await asyncio.wait_for(shutdown.wait(), timeout=runner.interval)
             except asyncio.TimeoutError:
