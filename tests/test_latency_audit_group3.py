@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import tempfile
 import unittest
 from pathlib import Path
@@ -203,6 +204,18 @@ class TelegramChatLockTests(unittest.IsolatedAsyncioTestCase):
 
         bot.release.set()
         self.assertEqual(await long_turn, "ok:turno-largo")
+
+    def test_video_multimodal_turn_runs_under_chat_lock(self) -> None:
+        # AH7/M19 (2026-06-11): video turns must hold the same per-chat lock
+        # as text (2052), image (1813) and document (1878) turns; with
+        # concurrent_updates a video+text pair in the same chat otherwise
+        # races the session-state read-modify-write (lost update).
+        source = inspect.getsource(TelegramTransport._handle_video)
+        lock_idx = source.find("async with self._chat_lock(session_id):")
+        call_idx = source.find("self._handle_agent_multimodal_sync")
+        self.assertNotEqual(lock_idx, -1, "video handler must take the chat lock")
+        self.assertNotEqual(call_idx, -1)
+        self.assertLess(lock_idx, call_idx, "the lock must wrap the multimodal turn")
 
 
 if __name__ == "__main__":

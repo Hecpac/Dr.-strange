@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+from datetime import datetime
 from typing import Any, Callable
 
 from claw_v2.jobs import JobService
@@ -35,9 +36,35 @@ LEARNING_CONSOLIDATE_JOB_KIND = "scheduler.learning_consolidate"
 LEARNING_CONSOLIDATE_RESUME_KEY = "scheduler:learning_consolidate"
 LEARNING_SOUL_SUGGESTIONS_JOB_KIND = "scheduler.learning_soul_suggestions"
 LEARNING_SOUL_SUGGESTIONS_RESUME_KEY = "scheduler:learning_soul_suggestions"
+DAEMON_HEALTH_CHECK_JOB_KIND = "scheduler.daemon_health_check"
+DAEMON_HEALTH_CHECK_RESUME_KEY = "scheduler:daemon_health_check"
 SCHEDULED_BACKGROUND_STALE_RUNNING_SECONDS = 60 * 60
 _ERROR_PREVIEW_LIMIT = 200
 _RESULT_STRING_LIMIT = 200
+
+
+def daemon_health_check_due(
+    now: datetime,
+    last_fire_day_key: str,
+    *,
+    hour: int = 20,
+    minute: int = 58,
+    window_seconds: float = 900.0,
+) -> str | None:
+    """Day key when the daily health check should fire, else None.
+
+    AH5 (2026-06-11): the old guard matched ``minute != 58`` exactly, so a
+    daemon tick that took >60s skipped the match and lost the day's check.
+    A window after the target keeps the check at-most-once per day without
+    depending on tick punctuality.
+    """
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if now < target or (now - target).total_seconds() > window_seconds:
+        return None
+    day_key = now.strftime("%Y-%m-%d")
+    if last_fire_day_key == day_key:
+        return None
+    return day_key
 
 
 def enqueue_scheduled_background_job(

@@ -2009,17 +2009,26 @@ def _coordinator_result_to_structured(
 
     evidence: list[dict[str, str]] = []
     if verification_status == "passed" and not implementation_error:
-        # Only implementation phase counts as concrete evidence.
-        # Verification phase output is a check, not the artifact itself —
-        # treat it as a verification check, not evidence.
-        for item in result.phase_results.get("implementation", []):
-            if item.error or not getattr(item, "content", None):
-                continue
-            evidence.append({
-                "type": "implementation",
-                "name": str(getattr(item, "task_name", "implementation")),
-                "value": str(item.content)[:500],
-            })
+        # Implementation phase counts as concrete evidence; verification
+        # phase output is a check, not the artifact itself. AH6 (2026-06-11):
+        # research-mode runs have no implementation phase at all — there the
+        # research findings ARE the deliverable, so they count as evidence;
+        # otherwise a verifier-passed research task never reaches terminal
+        # success (passed_verification_requires_evidence demotes it forever).
+        evidence_phases = (
+            ("implementation",)
+            if result.phase_results.get("implementation") is not None
+            else ("research",)
+        )
+        for phase in evidence_phases:
+            for item in result.phase_results.get(phase, []):
+                if item.error or not getattr(item, "content", None):
+                    continue
+                evidence.append({
+                    "type": phase,
+                    "name": str(getattr(item, "task_name", phase)),
+                    "value": str(item.content)[:500],
+                })
 
     blockers: list[str] = []
     if result.error:

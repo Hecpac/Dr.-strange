@@ -180,6 +180,28 @@ class LLMRouter:
                     request=request,
                     metadata={"provider": request.provider, "model": request.model, "aborted": True},
                 )
+            # AH8 (2026-06-11): an aborted billable turn already spent real
+            # money (budget_exceeded carries cost_usd) but no llm_response
+            # event will record it. Emit the spend so total_cost_today and
+            # the daily gate see it instead of leaking one round per abort.
+            failed_cost = 0.0
+            if isinstance(exc.metadata, dict):
+                try:
+                    failed_cost = float(exc.metadata.get("cost_usd") or 0.0)
+                except (TypeError, ValueError):
+                    failed_cost = 0.0
+            if failed_cost > 0.0:
+                self._audit_event(
+                    "llm_failed_spend",
+                    request=request,
+                    metadata={
+                        "provider": request.provider,
+                        "model": request.model,
+                        "reason": str(exc.metadata.get("reason") or "adapter_error"),
+                        "cost_usd": failed_cost,
+                    },
+                    cost_estimate=failed_cost,
+                )
             fallback_provider = self._pick_fallback(request.provider, lane)
             if fallback_provider is None:
                 raise
@@ -217,6 +239,30 @@ class LLMRouter:
                 )
             _validate_provider_model_pair(fallback_request.provider, fallback_request.model)
             fallback_request.validate()
+            # AH3 (2026-06-11): re-run pre-hooks against the fallback request.
+            # Pre-hooks ran once against the primary, which may be
+            # non-billable (anthropic under subscription) and pass the daily
+            # cost gate; the fallback provider bills per token and must clear
+            # the same gates before any spend.
+            for hook in self.pre_hooks:
+                hook_result = hook(fallback_request)
+                if hook_result is None:
+                    hook_name = getattr(hook, "__name__", "pre_hook")
+                    block_reason = getattr(hook, "block_reason", None) or "no_reason_provided"
+                    self._audit_event(
+                        "llm_fallback_blocked_by_pre_hook",
+                        request=fallback_request,
+                        metadata={
+                            "requested_provider": request.provider,
+                            "fallback_provider": fallback_provider,
+                            "blocked_by": hook_name,
+                            "block_reason": block_reason,
+                        },
+                    )
+                    raise
+                fallback_request = hook_result
+                fallback_request.validate()
+                _validate_provider_model_pair(fallback_request.provider, fallback_request.model)
             self._observation_before_llm_request(fallback_request)
             response = self._complete_with_circuit(fb_adapter, fallback_request)
             _suppress_corrupt_provider_content(response)
@@ -395,14 +441,16 @@ class LLMRouter:
         except Exception:
             return
 
-    def _audit_event(self, action: str, *, request: LLMRequest, metadata: dict) -> None:
+    def _audit_event(
+        self, action: str, *, request: LLMRequest, metadata: dict, cost_estimate: float = 0.0
+    ) -> None:
         trace = request.evidence_pack or {}
         event = {
             "action": action,
             "lane": request.lane,
             "provider": request.provider,
             "model": request.model,
-            "cost_estimate": 0.0,
+            "cost_estimate": float(cost_estimate),
             "confidence": 0.0,
             "degraded_mode": False,
             "metadata": {

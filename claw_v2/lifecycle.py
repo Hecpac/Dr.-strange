@@ -551,26 +551,10 @@ async def run() -> int:
             "daemon_health_check_notification", _daemon_health_consumer
         )
 
-        _health_check_state = {"last_fire_minute_key": ""}
-
-        def _daemon_health_guard() -> None:
-            now = datetime.now()
-            if now.hour != 20 or now.minute != 58:
-                return
-            minute_key = now.strftime("%Y-%m-%dT%H:%M")
-            if _health_check_state["last_fire_minute_key"] == minute_key:
-                return
-            _health_check_state["last_fire_minute_key"] = minute_key
-            try:
-                runtime.kairos.run_health_check()
-            except Exception:
-                logger.exception("daemon health guard run_health_check raised")
-
-        runtime.scheduler.register(_SJ(
-            name="daemon_health_check_guard",
-            interval_seconds=60,
-            handler=_daemon_health_guard,
-        ))
+        # AH5 (2026-06-11): the 20:58 guard and its off-tick runner are
+        # registered in main.build_runtime (next to kairos_tick), so the
+        # architecture-invariant sweep covers them. Only the notification
+        # consumer lives here.
 
         def _emit_daemon_heartbeat() -> None:
             web_serving = (

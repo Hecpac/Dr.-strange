@@ -629,7 +629,7 @@ class ObservationWindowState:
         totals = self._token_window_totals_locked()
         if totals["total_tokens"] >= self._token_hard_threshold():
             return False
-        if not self._llm_tokens and self._token_window_freeze_age_seconds(now) <= self.config.token_window_seconds:
+        if not self._llm_tokens and self._freeze_age_seconds_locked(now) <= self.config.token_window_seconds:
             return False
         self._frozen = False
         self._freeze_reason = ""
@@ -653,6 +653,13 @@ class ObservationWindowState:
         cost_per_hour = sum(item_cost for _, item_cost in self._llm_costs)
         if cost_per_hour > self.config.cost_per_hour_threshold:
             return False
+        # AH4 (2026-06-11): _llm_costs is in-memory only — after a restart it
+        # is empty, which read as "cost decayed" and evaporated a persisted
+        # freeze on the first call. Mirror the token-window restart guard:
+        # with no evidence and a freeze younger than the rolling hour, honor
+        # the persisted freeze.
+        if not self._llm_costs and self._freeze_age_seconds_locked(now) <= 3600.0:
+            return False
         self._frozen = False
         self._freeze_reason = ""
         self._freeze_actor = "auto_clear_cost_per_hour"
@@ -666,7 +673,7 @@ class ObservationWindowState:
             return float(self.config.token_window_seconds)
         return self.config.stale_freeze_seconds
 
-    def _token_window_freeze_age_seconds(self, now: float) -> float:
+    def _freeze_age_seconds_locked(self, now: float) -> float:
         if self._freeze_updated_at is None:
             return float("inf")
         return max(now - self._freeze_updated_at, 0.0)

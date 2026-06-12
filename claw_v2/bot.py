@@ -6246,6 +6246,14 @@ class BotService:
         elif status != "approved":
             self._clear_pending_tool_approval(session_id, approval_id)
             return f"La aprobación `{approval_id}` está en estado `{status}`. Reenvíame el objetivo si quieres intentarlo de nuevo."
+        elif not self.approvals.verify_resolution(approval_payload):
+            # AH1 (2026-06-11): the record file lives under a writable root —
+            # "approved" on disk only counts if the manager stamped it.
+            self._clear_pending_tool_approval(session_id, approval_id)
+            return (
+                f"La aprobación `{approval_id}` figura aprobada pero no pasó la validación de integridad. "
+                "Usa `/approve <id> <token>` con el token original."
+            )
         self._clear_pending_tool_approval(session_id, approval_id)
         with approved_tool_invocation(
             tool=tool,

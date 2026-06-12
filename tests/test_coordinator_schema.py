@@ -200,6 +200,39 @@ class CheckpointIntegrationTests(unittest.TestCase):
         self.assertIn("coordinator_semantic_errors", checkpoint)
         self.assertEqual(checkpoint["verification_status"], "pending")
 
+    def test_research_mode_passed_counts_research_as_evidence(self) -> None:
+        # AH6 (2026-06-11): research-mode runs have no implementation phase at
+        # all — the findings are the deliverable. A verifier-passed research
+        # task must reach terminal success instead of being demoted to
+        # pending forever (zombie re-execution loop).
+        from claw_v2.bot_helpers import _coordinator_checkpoint
+        from claw_v2.coordinator import CoordinatorResult, WorkerResult
+
+        result = CoordinatorResult(
+            task_id="task-r",
+            phase_results={
+                "research": [
+                    WorkerResult(
+                        task_name="investigate_topic",
+                        content="Findings: X is caused by Y (sources: a, b).",
+                        duration_seconds=0.1,
+                    ),
+                ],
+                "verification": [
+                    WorkerResult(task_name="verify_findings", content="Verification Status: passed", duration_seconds=0.1),
+                ],
+            },
+            synthesis="Findings synthesized",
+        )
+
+        checkpoint = _coordinator_checkpoint(result, objective="research topic")
+
+        self.assertEqual(checkpoint["verification_status"], "passed")
+        structured = checkpoint["coordinator_result"]
+        self.assertNotIn("coordinator_semantic_errors", checkpoint)
+        self.assertTrue(structured["evidence"])
+        self.assertEqual(structured["evidence"][0]["type"], "research")
+
     def test_passed_with_implementation_evidence_stays_passed(self) -> None:
         from claw_v2.bot_helpers import _coordinator_checkpoint
         from claw_v2.coordinator import CoordinatorResult, WorkerResult

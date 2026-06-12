@@ -349,6 +349,12 @@ class ApprovalManager:
                 # before persisting so a resolved record is content-immutable on
                 # replay (and re-attach it for the caller).
                 result = payload.pop("_result", False)
+                # AH1 (2026-06-11): sign only resolutions made by this manager
+                # in this update (`result` is True). A record forged on disk as
+                # "approved" never gets a valid signature — and a no-op pass
+                # over it must not stamp one retroactively.
+                if result and payload.get("status") == "approved":
+                    payload["resolution_sig"] = self._resolution_sig(payload)
                 # Crash-safe persist: an in-place truncate+write left
                 # permanently corrupt JSON if the process died mid-write,
                 # and one corrupt record breaks the whole approval inbox.
@@ -413,6 +419,27 @@ class ApprovalManager:
         focused on the ones that genuinely need a human signal.
         """
         return [p for p in self.list_pending() if p.get("visible_to_user", True)]
+
+    def _resolution_sig(self, payload: dict) -> str:
+        basis = "|".join(
+            (
+                str(payload.get("approval_id") or ""),
+                str(payload.get("status") or ""),
+                str(payload.get("resolved_by") or ""),
+                str(payload.get("resolved_at") or ""),
+            )
+        )
+        return hmac.new(self.secret, basis.encode("utf-8"), hashlib.sha256).hexdigest()
+
+    def verify_resolution(self, payload: dict) -> bool:
+        """True only for an "approved" record whose resolution was stamped by
+        this manager's secret — a file rewritten on disk cannot produce it."""
+        if payload.get("status") != "approved":
+            return False
+        sig = str(payload.get("resolution_sig") or "")
+        if not sig:
+            return False
+        return hmac.compare_digest(sig, self._resolution_sig(payload))
 
     def _path_for(self, approval_id: str) -> Path:
         return self.root / f"{approval_id}.json"

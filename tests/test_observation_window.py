@@ -422,6 +422,63 @@ class TokenWindowTests(unittest.TestCase):
             self.assertTrue(window.status_payload()["frozen"])
 
 
+class CostFreezeRestartTests(unittest.TestCase):
+    # AH4 (2026-06-11): _llm_costs is in-memory only. After a restart the
+    # deque is empty, which used to read as "cost decayed" and evaporate a
+    # persisted cost freeze on the first call.
+    def test_recent_persisted_cost_freeze_survives_restart_without_samples(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "window.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "frozen": True,
+                        "reason": "circuit_breaker:cost_per_hour",
+                        "actor": "brain",
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            window = ObservationWindowState(
+                state_path=state_path,
+                config=ObservationWindowConfig(cost_per_hour_threshold=0.05),
+            )
+
+            self.assertTrue(window.frozen)
+            # First status read runs the decay-clear path — the freeze must
+            # survive it even though the cost deque is empty post-restart.
+            payload = window.status_payload()
+            self.assertTrue(window.frozen)
+            self.assertTrue(payload["frozen"])
+            self.assertEqual(window.freeze_reason, "circuit_breaker:cost_per_hour")
+
+    def test_stale_persisted_cost_freeze_still_decays_after_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "window.json"
+            stale = datetime.now(timezone.utc) - timedelta(seconds=3700)
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "frozen": True,
+                        "reason": "circuit_breaker:cost_per_hour",
+                        "actor": "brain",
+                        "updated_at": stale.isoformat(),
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            window = ObservationWindowState(
+                state_path=state_path,
+                config=ObservationWindowConfig(cost_per_hour_threshold=0.05),
+            )
+
+            window.status_payload()
+            self.assertFalse(window.frozen)
+
+
 class CostBreakerTierSplitTests(unittest.TestCase):
     """PR 0A: LLM cost-per-hour breaker must not block Tier-1 local read tools."""
 

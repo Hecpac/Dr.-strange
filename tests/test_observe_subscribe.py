@@ -42,6 +42,9 @@ class ObserveSubscribeTests(unittest.TestCase):
         self.assertEqual(good_received, [{"n": 1}])
 
     def test_locked_database_drops_event_without_breaking_emit(self) -> None:
+        # PR #91 (M3/M4): the diagnostic write is dropped after retries, but
+        # in-process subscribers still fire — a transient SQLite lock must not
+        # swallow task-completion notifications wired as subscribers.
         received: list[dict] = []
         self.stream.subscribe("evt", received.append)
         fake_conn = MagicMock()
@@ -53,7 +56,7 @@ class ObserveSubscribeTests(unittest.TestCase):
 
         self.assertEqual(fake_conn.execute.call_count, 3)
         self.assertGreaterEqual(fake_conn.rollback.call_count, 1)
-        self.assertEqual(received, [])
+        self.assertEqual(received, [{"n": 1}])
 
     def test_emit_persists_even_when_no_subscribers(self) -> None:
         self.stream.emit("lonely_event", payload={"a": 1})

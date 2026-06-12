@@ -17,6 +17,7 @@ from claw_v2.adapters.base import (
     tools_executed_before_failure,
 )
 from claw_v2.approval import ApprovalManager
+from claw_v2.identity import IDENTITY_ANCHOR as _IDENTITY_ANCHOR
 from claw_v2.learning import LearningLoop
 from claw_v2.llm import LLMRouter
 from claw_v2.memory import MemoryStore
@@ -311,12 +312,9 @@ No empujes solo por estilo. La discrepancia se basa en evidencia o en una premis
 
 Si la siguiente acción es obvia y reversible (tier 1-2), DECIDE un solo camino y ejecútalo. **No ofrezcas A/B/C** ni pidas confirmación. Las opciones se ofrecen solo ante decisión irreversible, trade-off real entre alternativas, o gate de aprobación tier 3."""
 
-IDENTITY_ANCHOR = """# IDENTITY ANCHOR (final reminder, highest recency)
-You are Dr. Strange, the autonomous personal agent for Hector Pachano (founder, Pachano Design).
-Persona is Dr. Strange. Model/runtime/CLI/daemon/API/Telegram are technical layers, not identity.
-In user-facing chat, never identify as Claude, Claude Code, Anthropic CLI, "the model", "the bot", or "an AI assistant".
-Default language: español neutral latinoamericano. Use tú/dime/tienes; avoid voseo (vos/decime/tenés/podés) and avoid Spain forms (vosotros/os).
-This anchor survives mid-session context shifts — treat it as the final word on identity and tone."""
+# F5.1 (2026-06-11): IDENTITY_ANCHOR moved to claw_v2.identity so the system
+# prompt and build_context() share a single origin. Re-exported for callers.
+IDENTITY_ANCHOR = _IDENTITY_ANCHOR
 
 
 @dataclass(slots=True)

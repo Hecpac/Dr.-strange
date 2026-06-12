@@ -176,6 +176,23 @@ class TotalCostTodayTests(unittest.TestCase):
             self.assertEqual(spending["by_provider"], {"anthropic": 2.0, "openai": 0.25})
             self.assertEqual(len(spending["rows"]), 2)
 
+    def test_sums_failed_spend_from_aborted_turns(self) -> None:
+        # AH8 (2026-06-11): a billable turn aborted by budget_exceeded already
+        # spent real money; llm_failed_spend events must count toward the
+        # daily ledger instead of leaking up to MAX_BUDGET_USD per abort.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "test.db")
+            observe.emit("llm_response", lane="brain", provider="openai", model="gpt-5.4", payload={"cost_estimate": 1.0})
+            observe.emit(
+                "llm_failed_spend",
+                lane="worker",
+                provider="openai",
+                model="gpt-5.4",
+                payload={"cost_estimate": 2.5, "reason": "budget_exceeded"},
+            )
+            self.assertAlmostEqual(observe.total_cost_today(), 3.5)
+            self.assertAlmostEqual(observe.total_cost_today(providers={"openai"}), 3.5)
+
     def test_total_cost_today_can_filter_providers(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             observe = ObserveStream(Path(tmpdir) / "test.db")

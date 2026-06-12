@@ -11,6 +11,7 @@ import threading
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from claw_v2.identity import IDENTITY_ANCHOR
 from claw_v2.memory_retention import (
     classify_memory_fact,
     format_memory_fact_for_prompt,
@@ -130,8 +131,8 @@ CREATE INDEX IF NOT EXISTS idx_checkpoints_created_at ON checkpoints(created_at 
 CREATE INDEX IF NOT EXISTS idx_checkpoints_pending_restore
     ON checkpoints(pending_restore) WHERE pending_restore = 1;
 
--- Edges follow task_outcomes lifecycle. ON DELETE CASCADE is currently inert
--- because PRAGMA foreign_keys is not enabled; cleanup is the caller's responsibility.
+-- Edges follow task_outcomes lifecycle. PRAGMA foreign_keys=ON since f20379e
+-- (sqlite_runtime), so ON DELETE CASCADE is live for runtime connections.
 CREATE TABLE IF NOT EXISTS outcome_entity_edges (
     outcome_id INTEGER NOT NULL REFERENCES task_outcomes(id) ON DELETE CASCADE,
     entity_tag TEXT NOT NULL,
@@ -420,6 +421,9 @@ class MemoryStore:
         # RLock (not Lock): read methods are @_synchronized and may be called
         # from within already-locked write paths; reentrancy avoids deadlock.
         self._lock = threading.RLock()
+        # Optional ObserveStream, attached post-construction (main._setup_core_state)
+        # to break the memory↔observe construction-order cycle.
+        self.observe: Any | None = None
         self._migrate()
 
     def _ensure_task_outcome_usable_reply_unverified_locked(self) -> None:
@@ -481,6 +485,17 @@ class MemoryStore:
 
         with self._lock:
             try:
+                # AH2 (2026-06-11): with PRAGMA foreign_keys=ON the final DROP
+                # fails when child rows (outcome_embeddings,
+                # outcome_entity_edges) exist. And independently of that
+                # pragma, the RENAME rewrites child REFERENCES to track
+                # task_outcomes_old — leaving them pointed at a dropped table.
+                # legacy_alter_table=ON keeps child REFERENCES on the
+                # "task_outcomes" name so they bind to the rebuilt table.
+                # Both pragmas are no-ops inside a transaction, so toggle
+                # before BEGIN IMMEDIATE and restore in the finally below.
+                self._conn.execute("PRAGMA foreign_keys=OFF")
+                self._conn.execute("PRAGMA legacy_alter_table=ON")
                 # Use a single BEGIN IMMEDIATE so any failure (including
                 # power loss) rolls back to a consistent pre-step state
                 # instead of leaving an orphan + missing new table.
@@ -574,6 +589,12 @@ class MemoryStore:
                 except sqlite3.Error:
                     logger.debug("task_outcomes migration rollback failed", exc_info=True)
                 logger.warning("task_outcomes CHECK migration skipped: %s", exc)
+            finally:
+                try:
+                    self._conn.execute("PRAGMA legacy_alter_table=OFF")
+                    self._conn.execute("PRAGMA foreign_keys=ON")
+                except sqlite3.Error:
+                    logger.debug("re-enabling foreign_keys failed", exc_info=True)
 
     def _migrate(self) -> None:
         cursor = self._conn.execute("PRAGMA table_info(facts)")
@@ -697,8 +718,8 @@ class MemoryStore:
         if cursor.fetchone() is None:
             try:
                 self._conn.executescript(
-                    "-- Edges follow task_outcomes lifecycle. ON DELETE CASCADE is currently inert\n"
-                    "-- because PRAGMA foreign_keys is not enabled; cleanup is the caller's responsibility.\n"
+                    "-- Edges follow task_outcomes lifecycle. PRAGMA foreign_keys=ON since f20379e\n"
+                    "-- (sqlite_runtime), so ON DELETE CASCADE is live for runtime connections.\n"
                     "CREATE TABLE IF NOT EXISTS outcome_entity_edges ("
                     "outcome_id INTEGER NOT NULL REFERENCES task_outcomes(id) ON DELETE CASCADE, "
                     "entity_tag TEXT NOT NULL, "
@@ -1142,6 +1163,13 @@ class MemoryStore:
 
     def delete_fact(self, key: str) -> bool:
         with self._lock:
+            # AH2 (2026-06-11): fact_embeddings.fact_id references facts(id)
+            # without ON DELETE CASCADE; with PRAGMA foreign_keys=ON deleting
+            # the parent first raises IntegrityError. Delete children first.
+            self._conn.execute(
+                "DELETE FROM fact_embeddings WHERE fact_id IN (SELECT id FROM facts WHERE key = ?)",
+                (key,),
+            )
             cursor = self._conn.execute("DELETE FROM facts WHERE key = ?", (key,))
             self._conn.commit()
             return cursor.rowcount > 0
@@ -1314,6 +1342,30 @@ class MemoryStore:
         sections: list[str] = []
         if message is not None:
             sections.extend(["# Current input", message])
+
+        # F5.1 (2026-06-11): identity must survive compaction + provider
+        # resets, so it is injected unconditionally on every path (including
+        # include_history=False). Only a pathologically small budget trims it
+        # — and that is reported, never silent.
+        identity_text = IDENTITY_ANCHOR
+        identity_budget = budget - (sum(len(s) for s in sections) + len(sections))
+        if len(identity_text) > identity_budget:
+            kept = max(0, identity_budget)
+            identity_text = identity_text[:kept]
+            if self.observe is not None:
+                try:
+                    self.observe.emit(
+                        "identity_block_truncated",
+                        payload={
+                            "session_id": session_id,
+                            "kept_chars": kept,
+                            "total_chars": len(IDENTITY_ANCHOR),
+                        },
+                    )
+                except Exception:
+                    logger.debug("identity_block_truncated emit failed", exc_info=True)
+        if identity_text:
+            sections.append(identity_text)
 
         session_state = self.get_session_state(session_id)
         state_lines = [

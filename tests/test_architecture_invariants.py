@@ -15,6 +15,7 @@ from claw_v2.scheduled_background_jobs import (
     A2A_PROCESS_INBOX_JOB_KIND,
     APPROVAL_SWEEP_JOB_KIND,
     AUTO_DREAM_JOB_KIND,
+    DAEMON_HEALTH_CHECK_JOB_KIND,
     KAIROS_TICK_JOB_KIND,
     LEARNING_CONSOLIDATE_JOB_KIND,
     LEARNING_SOUL_SUGGESTIONS_JOB_KIND,
@@ -410,6 +411,81 @@ class ArchitectureInvariantTests(unittest.TestCase):
                     rows = runtime.job_service.list(kinds=(SELF_IMPROVE_JOB_KIND,), limit=10)
                     self.assertEqual(len(rows), 1)
                     self.assertEqual(rows[0].status, "queued")
+
+    def test_daemon_health_check_is_off_tick_and_fires_within_window(self) -> None:
+        """AH5 (2026-06-11): the 20:58 health check ran kairos.run_health_check
+        (LLM judge, 30s timeout) inline in daemon.tick, and escaped the sweep
+        because it was registered in lifecycle.run() behind an exact-minute
+        match. Now the guard is registered in build_runtime, only enqueues a
+        durable job, and uses a window so a slow tick cannot skip the day."""
+
+        def fake_anthropic(req: LLMRequest) -> LLMResponse:
+            return LLMResponse(content="<response>ok</response>", lane=req.lane, provider="anthropic")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "PIPELINE_STATE_ROOT": str(root / "pipeline"),
+                "WORKER_PROVIDER": "anthropic",
+            }
+
+            with patch.dict(os.environ, env, clear=False):
+                with patch("claw_v2.main._resolve_pytest_command") as mock_resolve:
+                    mock_resolve.return_value = (["true"], "true")
+                    runtime = build_runtime(anthropic_executor=fake_anthropic)
+
+                jobs = {job.name: job for job in runtime.scheduler.list_jobs()}
+                self.assertIn("daemon_health_check_guard", jobs)
+
+                # Drive the guard inside the 20:58 window with the heavy
+                # chokepoints sentinelled: it must only enqueue.
+                from datetime import datetime as real_datetime
+
+                due = real_datetime(2026, 6, 11, 20, 59, 30)
+                with patch("claw_v2.main.datetime") as mock_dt:
+                    mock_dt.now.return_value = due
+                    with patch.object(
+                        runtime.router, "ask", side_effect=_HeavyInlineCall
+                    ), patch.object(
+                        runtime.kairos, "run_health_check", side_effect=_HeavyInlineCall
+                    ), patch("subprocess.run", side_effect=_HeavyInlineCall):
+                        jobs["daemon_health_check_guard"].handler()
+
+                    rows = runtime.job_service.list(
+                        kinds=(DAEMON_HEALTH_CHECK_JOB_KIND,), limit=10
+                    )
+                    self.assertEqual(len(rows), 1)
+                    self.assertEqual(rows[0].status, "queued")
+
+                    # At-most-once per day: a second tick in the same window
+                    # must not enqueue again.
+                    jobs["daemon_health_check_guard"].handler()
+
+                # The judge itself is wired as an off-tick durable runner.
+                runner_names = {runner.name for runner in runtime.daemon._background_job_runners}
+                self.assertIn("daemon_health_check", runner_names)
+
+    def test_daemon_health_check_window_tolerates_slow_ticks(self) -> None:
+        from datetime import datetime as real_datetime
+
+        from claw_v2.scheduled_background_jobs import daemon_health_check_due
+
+        # A tick landing minutes late (the old `minute != 58` exact match
+        # skipped these) still fires within the window.
+        late = real_datetime(2026, 6, 11, 21, 3, 12)
+        self.assertEqual(daemon_health_check_due(late, ""), "2026-06-11")
+        # Outside the window: no fire.
+        too_late = real_datetime(2026, 6, 11, 21, 20, 0)
+        self.assertIsNone(daemon_health_check_due(too_late, ""))
+        before = real_datetime(2026, 6, 11, 20, 57, 59)
+        self.assertIsNone(daemon_health_check_due(before, ""))
+        # Same day key: at-most-once.
+        self.assertIsNone(daemon_health_check_due(late, "2026-06-11"))
 
     def test_self_improve_runner_does_not_drain_queued_jobs_when_disabled(self) -> None:
         """The EVAL_ON_SELF_IMPROVE kill-switch must apply to the durable runner,
