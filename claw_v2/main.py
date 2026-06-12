@@ -5,6 +5,7 @@ import logging
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -104,6 +105,7 @@ from claw_v2.scheduled_background_jobs import (
     PIPELINE_POLL_RESUME_KEY,
     SELF_IMPROVE_JOB_KIND,
     SELF_IMPROVE_RESUME_KEY,
+    SITE_MONITOR_JOB_KIND,
     SUB_AGENT_JOB_KIND,
     WIKI_RESEARCH_JOB_KIND,
     WIKI_RESEARCH_RESUME_KEY,
@@ -858,10 +860,17 @@ def _build_kairos_agent_loop_factory(
                 f"{last.verdict.reason}. Try a different angle."
             )
 
+        # AM-LOOPCOST (2026-06-12): spending_today() resets at midnight, which
+        # dropped the tracker below the run() baseline and silently disarmed
+        # the guard mid-loop. cost_since(loop creation) is monotonic. It still
+        # over-counts concurrent daemon spend (conservative: aborts early,
+        # never late); true per-trace metering needs cost plumbed through
+        # SubAgentResult.
+        loop_created_at = time.time()
+
         def cost_tracker() -> float:
             try:
-                spending = observe.spending_today()
-                return float(spending.get("total") or 0.0)
+                return float(observe.cost_since(loop_created_at))
             except Exception:
                 return 0.0
 
@@ -1005,22 +1014,48 @@ def _register_site_monitor_jobs(
     observe: ObserveStream,
     sites: list[MonitoredSiteConfig],
     skip_if: Callable[[], str | None] | None = None,
+    daemon: ClawDaemon | None = None,
+    job_service: JobService | None = None,
 ) -> None:
-    import httpx
+    # AM-SITEMON (2026-06-12): the HTTP probe (15s timeout, network I/O) used
+    # to run inline in the scheduler handler — i.e. inside daemon.tick. The
+    # scheduler job now only enqueues a durable row; the probe executes in a
+    # daemon background runner off-tick (Core Invariant 1).
+    def _site_monitor_probe(payload: dict) -> dict:
+        import httpx
 
-    def _site_monitor_handler(site: MonitoredSiteConfig) -> None:
+        site_name = str(payload.get("site") or "")
+        url = str(payload.get("url") or "")
         try:
-            response = httpx.get(site.url, timeout=15, follow_redirects=True)
-            payload = {"site": site.name, "url": site.url, "status": response.status_code, "ok": response.status_code < 400}
-            if response.status_code < 400:
-                observe.emit("site_monitor_ok", payload=payload)
-                logger.info("site monitor %s ok (%s)", site.name, response.status_code)
+            response = httpx.get(url, timeout=15, follow_redirects=True)
+            result = {"site": site_name, "url": url, "status": response.status_code, "ok": response.status_code < 400}
+            if result["ok"]:
+                observe.emit("site_monitor_ok", payload=result)
+                logger.info("site monitor %s ok (%s)", site_name, response.status_code)
             else:
-                observe.emit("site_down", payload=payload)
-                logger.warning("site monitor %s failed (%s)", site.name, response.status_code)
+                observe.emit("site_down", payload=result)
+                logger.warning("site monitor %s failed (%s)", site_name, response.status_code)
         except Exception as exc:
-            observe.emit("site_down", payload={"site": site.name, "url": site.url, "status": 0, "ok": False, "error": str(exc)})
-            logger.warning("site monitor %s exception: %s", site.name, exc)
+            result = {"site": site_name, "url": url, "status": 0, "ok": False, "error": str(exc)}
+            observe.emit("site_down", payload=result)
+            logger.warning("site monitor %s exception: %s", site_name, exc)
+        return result
+
+    if not sites:
+        return
+    if daemon is not None and job_service is not None:
+        site_monitor_runner = ScheduledBackgroundJobRunner(
+            job_name="site_monitor",
+            job_kind=SITE_MONITOR_JOB_KIND,
+            job_service=job_service,
+            handler=_site_monitor_probe,
+            observe=observe,
+            worker_id="site-monitor-runner",
+        )
+        daemon.register_background_job_runner(
+            name="site_monitor",
+            handler=lambda: site_monitor_runner.run_available(limit=len(sites)),
+        )
 
     for site in sites:
         job_name = f"site_monitor_{_sanitize_job_name(site.name)}"
@@ -1031,7 +1066,15 @@ def _register_site_monitor_jobs(
                 handler=_wrap_job_handler(
                     name=job_name,
                     observe=observe,
-                    handler=lambda s=site: _site_monitor_handler(s),
+                    handler=lambda s=site: enqueue_scheduled_background_job(
+                        job_name=f"site_monitor_{_sanitize_job_name(s.name)}",
+                        job_kind=SITE_MONITOR_JOB_KIND,
+                        resume_key=f"scheduler:site_monitor:{_sanitize_job_name(s.name)}",
+                        job_service=job_service,
+                        observe=observe,
+                        payload={"site": s.name, "url": s.url},
+                        max_attempts=1,
+                    ),
                     skip_if=skip_if,
                 ),
             )
@@ -1769,6 +1812,8 @@ def _setup_scheduler(
         observe=observe,
         sites=config.monitored_sites,
         skip_if=_maintenance_skip,
+        daemon=daemon,
+        job_service=job_service,
     )
 
     skill_registry = SkillRegistry(router=router, observe=observe)

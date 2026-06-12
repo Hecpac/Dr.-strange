@@ -215,6 +215,39 @@ class BuildContextTests(unittest.TestCase):
         self.assertEqual(uncertain["prompt_residency"], "retrieval_on_demand")
         self.assertEqual(uncertain["retention_reason"], "low_confidence")
 
+    def test_history_trim_keeps_newest_contiguous_block(self) -> None:
+        # AM-TRIM (2026-06-12): the tail fill used `continue` on a too-big
+        # line — a huge NEWEST turn was silently skipped while OLDER ones
+        # filled the budget, and the "intermedios omitidos" marker lied.
+        # The omitted block must be one contiguous gap.
+        first = "primer mensaje fundacional"
+        middles = [f"medio-{i}" for i in range(3)]
+        huge = "H" * 5_000
+        newest = "ultimo turno corto"
+        self.store.store_message("s1", "user", first)
+        for m in middles:
+            self.store.store_message("s1", "user", m)
+        self.store.store_message("s1", "user", huge)
+        self.store.store_message("s1", "user", newest)
+
+        base = self.store.build_context("s1", include_history=False)
+        budget = (
+            len(base)
+            + len("# Recent messages")
+            + len(f"user: {first}")
+            + len(f"user: {newest}")
+            + len("[... 4 mensajes intermedios omitidos ...]")
+            + 20
+        )
+        ctx = self.store.build_context("s1", include_history=True, budget=budget)
+
+        self.assertIn(first, ctx)
+        self.assertIn(newest, ctx)
+        self.assertNotIn(huge[:50], ctx)
+        for m in middles:
+            self.assertNotIn(m, ctx)
+        self.assertIn("[... 4 mensajes intermedios omitidos ...]", ctx)
+
     # F5.1 (2026-06-11): identity must be present on EVERY context path —
     # after compaction + provider reset the rebuilt context used to carry no
     # identity layer at all (root cause of persona amnesia).

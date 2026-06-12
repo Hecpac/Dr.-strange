@@ -4,7 +4,7 @@ a real AgentLoop driven by sub_agents.dispatch_typed and observe spending.
 Verifies the integration end-to-end without booting the full runtime:
 - factory(goal_id, project_id, milestone_id) returns an AgentLoop
 - Loop's executor calls sub_agents.dispatch_typed with worker lane
-- Loop's cost_tracker reads from observe.spending_today
+- Loop's cost_tracker reads observe.cost_since anchored to loop creation
 - Loop's max_cost_usd / max_iterations are populated
 - KairosService._handle_run_agent_loop drives factory + emits outcome event
 """
@@ -28,7 +28,7 @@ class KairosAgentLoopFactoryTests(unittest.TestCase):
     def test_factory_returns_an_agent_loop_with_budget_and_iteration_caps(self) -> None:
         sub_agents = MagicMock()
         observe = MagicMock()
-        observe.spending_today.return_value = {"total": 0.5}
+        observe.cost_since.return_value = 0.5
 
         factory = _build_kairos_agent_loop_factory(sub_agents=sub_agents, observe=observe)
         loop = factory("g1", "p1", "m1")
@@ -37,8 +37,12 @@ class KairosAgentLoopFactoryTests(unittest.TestCase):
         self.assertEqual(loop.max_iterations, 3)
         self.assertEqual(loop.max_cost_usd, 10.0)
         self.assertIsNotNone(loop.cost_tracker)
-        # cost_tracker reads observe.spending_today["total"]
+        # AM-LOOPCOST (2026-06-12): cost_tracker reads observe.cost_since
+        # anchored to the loop's creation time — monotonic, unlike
+        # spending_today which reset at midnight and disarmed the guard.
         self.assertAlmostEqual(loop.cost_tracker(), 0.5)
+        anchor = observe.cost_since.call_args.args[0]
+        self.assertIsInstance(anchor, float)
 
     def test_loop_executor_dispatches_to_worker_subagent_with_plan(self) -> None:
         sub_agents = MagicMock()

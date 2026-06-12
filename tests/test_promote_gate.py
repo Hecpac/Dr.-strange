@@ -389,6 +389,60 @@ def test_task_handler_wires_promote_gate():
 # ---------------------------------------------------------------------------
 
 
+def test_gate_artifact_schema_version_mismatch():
+    """D8/DV.2 (2026-06-12): an artifact serialized under another schema
+    version must park as pending_verification (never silently pass or hard
+    fail — the check semantics may have changed)."""
+    tool_result = {"ok": True, "artifact_path": "/tmp/x", "rows_written": 1}
+    artifact = _tier2_artifact(tool_result, {"db_table": "agent_tasks", "rows_delta": 1})
+    artifact["success_condition"]["schema_version"] = "0.9.0"
+    outcome = gate_terminal_status(
+        raw_terminal_status="succeeded",
+        raw_verification_status="passed",
+        completed_checkpoint={"success_condition_artifact": artifact},
+    )
+    assert outcome.terminal_status == ""
+    assert outcome.verification_status == "pending_verification"
+    assert outcome.degraded is True
+    assert outcome.reason == "schema_version_mismatch"
+
+
+def test_gate_regex_guard_rejects_catastrophic_pattern_fast():
+    """D9 (2026-06-12): a catastrophic-backtracking pattern over attacker-
+    sized input must come back as regex_invalid quickly, not hang the gate."""
+    import time as _time
+
+    from claw_v2.verification.success_contract import validate_success_condition
+
+    condition = SuccessCondition(must_match_regex={"output": r"(a+)+$"})
+    started = _time.monotonic()
+    errors = validate_success_condition(
+        tool_result={"ok": True, "output": "a" * 50_000 + "!"},
+        condition=condition,
+    )
+    elapsed = _time.monotonic() - started
+    assert "regex_invalid:output" in errors
+    assert elapsed < 1.0
+
+    # Valid patterns keep their existing semantics.
+    ok_errors = validate_success_condition(
+        tool_result={"ok": True, "output": "deploy complete"},
+        condition=SuccessCondition(must_match_regex={"output": r"deploy complete"}),
+    )
+    assert ok_errors == []
+    mismatch_errors = validate_success_condition(
+        tool_result={"ok": True, "output": "nope"},
+        condition=SuccessCondition(must_match_regex={"output": r"deploy complete"}),
+    )
+    assert mismatch_errors == ["regex_mismatch:output"]
+    # An unparseable pattern is reported as invalid, not as a mismatch.
+    invalid_errors = validate_success_condition(
+        tool_result={"ok": True, "output": "x"},
+        condition=SuccessCondition(must_match_regex={"output": r"([unclosed"}),
+    )
+    assert invalid_errors == ["regex_invalid:output"]
+
+
 def test_gate_fails_on_malformed_artifact():
     checkpoint = {
         "verification_status": "passed",

@@ -25,6 +25,15 @@ from typing import Any, Literal
 
 SUCCESS_CONDITION_SCHEMA_VERSION = "1.0.0"
 
+# D9 (2026-06-12): bounds for must_match_regex evaluation. The gate runs on
+# untrusted artifact data; a catastrophic-backtracking pattern (e.g. (a+)+$)
+# over a large value would hang the promote path. Patterns with quantified
+# groups that themselves contain quantifiers or alternation are rejected as
+# regex_invalid rather than risk exponential search.
+_REGEX_INPUT_CAP_CHARS = 10_000
+_REGEX_PATTERN_CAP_CHARS = 512
+_NESTED_QUANTIFIER_RE = re.compile(r"\([^)]*[+*|][^)]*\)\s*[+*{]")
+
 
 # ---------------------------------------------------------------------------
 # Declarative specs
@@ -173,12 +182,18 @@ def validate_success_condition(
             errors.append(f"missing_key:{key}")
 
     for field_name, pattern in (condition.must_match_regex or {}).items():
-        value = str(tool_result.get(field_name) or "")
+        # D9 (2026-06-12): the gate is a pure function on untrusted artifact
+        # data — cap the evaluated text and reject dangerous patterns instead
+        # of letting a catastrophic-backtracking regex hang the promote path.
+        value = str(tool_result.get(field_name) or "")[:_REGEX_INPUT_CAP_CHARS]
+        if len(pattern) > _REGEX_PATTERN_CAP_CHARS or _NESTED_QUANTIFIER_RE.search(pattern):
+            errors.append(f"regex_invalid:{field_name}")
+            continue
         try:
             if not re.search(pattern, value):
                 errors.append(f"regex_mismatch:{field_name}")
         except re.error:
-            errors.append(f"regex_mismatch:{field_name}")
+            errors.append(f"regex_invalid:{field_name}")
 
     if condition.external_check is not None:
         obs = external_observation or {}

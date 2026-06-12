@@ -54,7 +54,9 @@ def _redact_command(args: Sequence[str]) -> list[str]:
 def _truncate_output(value: str, max_chars: int) -> str:
     if max_chars <= 0 or len(value) <= max_chars:
         return value
-    marker = f"\n[... truncated to last {max_chars} chars]\n"
+    # Paso 4 (2026-06-12): unified marker format ("kept X of Y chars"),
+    # keeping this site's tail-preserving semantics ("last").
+    marker = f"\n[truncated: kept last {max_chars} of {len(value)} chars]\n"
     keep = max(0, max_chars - len(marker))
     return marker + value[-keep:]
 

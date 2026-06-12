@@ -18,6 +18,39 @@ def _make_runner(stdout: str = "", stderr: str = "", return_code: int = 0):
     return runner, calls
 
 
+class ExtractPageTextTests(unittest.TestCase):
+    # F2.1 (2026-06-12): page extraction must never cut silently.
+    def test_truncated_extraction_carries_marker(self) -> None:
+        from claw_v2.browser import _CONTENT_LIMIT, _extract_page_text
+
+        total = _CONTENT_LIMIT + 500
+
+        class _Body:
+            def inner_text(self) -> str:
+                return "z" * total
+
+        class _Page:
+            def query_selector(self, selector: str) -> object:
+                return _Body()
+
+        out = _extract_page_text(_Page())
+        self.assertIn(f"[truncated: kept {_CONTENT_LIMIT} of {total} chars]", out)
+        self.assertTrue(out.startswith("z" * 100))
+
+    def test_short_extraction_untouched(self) -> None:
+        from claw_v2.browser import _extract_page_text
+
+        class _Body:
+            def inner_text(self) -> str:
+                return "short page"
+
+        class _Page:
+            def query_selector(self, selector: str) -> object:
+                return _Body()
+
+        self.assertEqual(_extract_page_text(_Page()), "short page")
+
+
 class TestDevBrowserService(unittest.TestCase):
     def test_browse_parses_json_output(self) -> None:
         payload = json.dumps({"url": "https://example.com/", "title": "Example", "content": "- heading"})

@@ -494,11 +494,18 @@ def _wait_for_dynamic_content(page, url: str) -> None:
 
 def _extract_page_text(page) -> str:
     """Extract visible text from page with higher limit."""
+    from claw_v2.truncation import truncation_marker
+
     try:
         body = page.query_selector("body")
         if body is None:
             return ""
-        return body.inner_text()[:_CONTENT_LIMIT]
+        text = body.inner_text()
+        if len(text) <= _CONTENT_LIMIT:
+            return text
+        # F2.1 (2026-06-12): never cut silently — the brain must be able to
+        # tell a short page from a truncated one.
+        return f"{text[:_CONTENT_LIMIT]}\n{truncation_marker(_CONTENT_LIMIT, len(text))}"
     except Exception:
         return ""
 

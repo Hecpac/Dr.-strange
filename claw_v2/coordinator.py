@@ -229,6 +229,7 @@ class CoordinatorService:
                     input_artifact_ref=synthesis_artifact_ref,
                     input_summary=synthesis_summary,
                     phase_input_summary_chars=self.phase_input_summary_chars,
+                    degraded=any(r.degraded_compaction for r in research_results),
                 )
                 impl_results = self._dispatch_parallel(impl_tasks, trace, lane_overrides=lane_overrides)
                 result.phase_results["implementation"] = impl_results
@@ -289,6 +290,10 @@ class CoordinatorService:
                     input_artifact_ref=verification_input_ref,
                     input_summary=verification_input_summary,
                     phase_input_summary_chars=self.phase_input_summary_chars,
+                    degraded=any(
+                        r.degraded_compaction
+                        for r in (impl_results if impl_results else research_results)
+                    ),
                 )
                 verify_results = self._dispatch_parallel(verify_tasks, trace, lane_overrides=lane_overrides)
                 result.phase_results["verification"] = verify_results
@@ -565,10 +570,20 @@ class CoordinatorService:
         input_artifact_ref: str | None,
         input_summary: str,
         phase_input_summary_chars: int = DEFAULT_PHASE_INPUT_SUMMARY_CHARS,
+        degraded: bool = False,
     ) -> list[WorkerTask]:
         """Prepend compact artifact-mediated context to each task's instruction."""
         ref = input_artifact_ref or "none"
         summary = _compact_text(input_summary, limit=phase_input_summary_chars)
+        # F3.3 (2026-06-12): degraded_compaction used to be an internal flag
+        # only — workers consumed mechanically-cut context without knowing it.
+        degraded_line = (
+            "* **Advertencia de Contexto:** la destilación semántica de la fase previa "
+            "falló y el resumen fue recortado mecánicamente (head+tail). Si te falta "
+            "contexto, consulta el artefacto de referencia en scratch antes de asumir.\n"
+            if degraded
+            else ""
+        )
         return [
             WorkerTask(
                 name=t.name,
@@ -577,6 +592,7 @@ class CoordinatorService:
                     "## Contexto de la Misión\n\n"
                     f"* **Objetivo General del Dueño:** {objective}\n"
                     f"* **Artefacto de Referencia en Scratch:** {ref}\n"
+                    f"{degraded_line}"
                     f"* **Estado Técnico Consolidado:** {summary or 'none'}\n\n"
                     "## Tu Tarea Específica:\n\n"
                     f"**{t.instruction}**\n"
@@ -1052,7 +1068,9 @@ def _compact_text(text: str, *, limit: int) -> str:
     clean = " ".join(str(text or "").split())
     if len(clean) <= limit:
         return clean
-    suffix = "... [truncated]"
+    # F3.2 (2026-06-12): standard marker — downstream phases must see how
+    # much context they lost, not just that "something" was cut.
+    suffix = f"... [truncated: kept {limit} of {len(clean)} chars]"
     return _head_tail_compact(clean, limit=limit, suffix=suffix)
 
 
