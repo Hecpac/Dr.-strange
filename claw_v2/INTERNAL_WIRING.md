@@ -8,8 +8,8 @@
 ## meta
 
 ```yaml
-describes_commit: fe99808+spec-002-self-improve-promotion-hotfix+spec-002-subprocess-bounded-pr-c+spec-002-approval-manager-pr-d+spec-002-promotion-tooling-phase-4+brain-delegation-tool+recovery-jobs-drain-c1+audit-m3-m4-offloop-emits-nonblocking-checkpoint-backup+audit-high-2026-06-11+audit-waves-2-3-2026-06-12+adapters-d1-split-2026-06-12
-doc_version: 2.19
+describes_commit: fe99808+spec-002-self-improve-promotion-hotfix+spec-002-subprocess-bounded-pr-c+spec-002-approval-manager-pr-d+spec-002-promotion-tooling-phase-4+brain-delegation-tool+recovery-jobs-drain-c1+audit-m3-m4-offloop-emits-nonblocking-checkpoint-backup+audit-high-2026-06-11+audit-waves-2-3-2026-06-12+adapters-d1-split-2026-06-12+pasos-6-7-coordinator-resumable-2026-06-12
+doc_version: 2.20
 last_verified: 2026-06-12
 verification_method: manual + pytest + AST sentinel cross-check
 anchor_strategy: symbol_only  # path:symbol, no line numbers
@@ -746,6 +746,21 @@ mode_phases:  # planned_phases_for_mode (artifacts.py) + _build_coordinator_task
 scratch_dir: ~/.claw/scratch/<task_id>/
   persists: research/*.json, synthesis.md, implementation/*.json, verification/*.json
   resume: TaskLedger.list(statuses=("running",)) → _resume_autonomous_record
+  retention: CoordinatorService._prune_stale_scratch_dirs (default 14d, bounded,
+    best-effort at run() start; current task always kept)
+
+resumability:  # F3.1 + AM-CANCEL (2026-06-12)
+  run(start_phase=...): phases before start_phase load artifacts from scratch
+    instead of re-executing; detect_resume_phase(task_id) finds the first
+    incomplete phase; TaskHandler._run_coordinated_task(resumed=True) wires it.
+  implementation_gate: a resumed run that finds implementation.started without
+    persisted results fails closed (implementation_rerun_blocked) — re-running
+    the side-effect phase requires allow_implementation_rerun=True explicitly.
+  should_abort: checked at every phase boundary (TaskHandler passes
+    _is_cancelled); cancelled runs emit coordinator_cancelled and return
+    error=cancelled_at_phase_boundary:<next_phase>.
+  empty_synthesis: visible degradation (audit.synthesis_empty +
+    coordinator_synthesis_empty event + Advertencia de Contexto downstream).
 ```
 
 ### 5.5 layer 5 — AgentLoop
