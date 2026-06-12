@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from claw_v2.verification.success_contract import (
+    SUCCESS_CONDITION_SCHEMA_VERSION,
     ExternalCheckSpec,
     FileIntegrityCheck as _FileIntegrityCheck,
     PreflightSpec,
@@ -175,6 +176,18 @@ def gate_terminal_status(
             envelope=None,
             degraded=True,
             reason="success_condition_unparseable",
+        )
+
+    # D8/DV.2 (2026-06-12): an artifact serialized under another schema
+    # version must not silently pass (or fail) the gate — its check
+    # semantics may have changed. Park it as pending, never "failed".
+    if condition.schema_version != SUCCESS_CONDITION_SCHEMA_VERSION:
+        return GateOutcome(
+            terminal_status="",
+            verification_status="pending_verification",
+            envelope=None,
+            degraded=True,
+            reason="schema_version_mismatch",
         )
 
     tool_result = dict(artifact.get("tool_result") or {})

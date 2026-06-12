@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -192,6 +193,24 @@ class TotalCostTodayTests(unittest.TestCase):
             )
             self.assertAlmostEqual(observe.total_cost_today(), 3.5)
             self.assertAlmostEqual(observe.total_cost_today(providers={"openai"}), 3.5)
+
+    def test_cost_since_is_anchored_to_timestamp_not_calendar_day(self) -> None:
+        # AM-LOOPCOST (2026-06-12): the AgentLoop budget guard needs a
+        # monotonic measure — spending_today() resets at midnight and
+        # silently disarmed the guard mid-loop.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "test.db")
+            observe._conn.execute(
+                "INSERT INTO observe_stream (event_type, lane, provider, model, payload, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
+                ("llm_response", "worker", "openai", "gpt-5.4", '{"cost_estimate": 99.0}', "2020-01-01 00:00:00"),
+            )
+            observe._conn.commit()
+            anchor = time.time() - 60
+            observe.emit("llm_response", lane="worker", provider="openai", model="gpt-5.4", payload={"cost_estimate": 1.5})
+            observe.emit("llm_failed_spend", lane="worker", provider="openai", model="gpt-5.4", payload={"cost_estimate": 0.5})
+
+            self.assertAlmostEqual(observe.cost_since(anchor), 2.0)
+            self.assertAlmostEqual(observe.cost_since(0.0), 101.0)
 
     def test_total_cost_today_can_filter_providers(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -1452,15 +1452,21 @@ class MemoryStore:
                     remaining -= first_cost
                     recent_lines.append(first_line)
                     # Fill from newest backwards with the remaining budget.
+                    # AM-TRIM (2026-06-12): stop at the first line that does
+                    # not fit (`break`, not `continue`). Skipping a too-big
+                    # NEWEST turn while keeping older ones produced a context
+                    # where the latest exchange silently never happened — and
+                    # the "intermedios omitidos" marker lied about which
+                    # messages were dropped. The omitted block is now always
+                    # contiguous, between the first message and the kept tail.
                     tail_lines: list[str] = []
-                    skipped = 0
                     for row in reversed(rest):
                         line = f"{row['role']}: {row['content']}"
                         if remaining - len(line) - 1 < 0:
-                            skipped += 1
-                            continue
+                            break
                         tail_lines.insert(0, line)
                         remaining -= len(line) + 1
+                    skipped = len(rest) - len(tail_lines)
                     if skipped:
                         recent_lines.append(f"[... {skipped} mensajes intermedios omitidos ...]")
                     recent_lines.extend(tail_lines)

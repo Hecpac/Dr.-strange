@@ -38,6 +38,7 @@ LEARNING_SOUL_SUGGESTIONS_JOB_KIND = "scheduler.learning_soul_suggestions"
 LEARNING_SOUL_SUGGESTIONS_RESUME_KEY = "scheduler:learning_soul_suggestions"
 DAEMON_HEALTH_CHECK_JOB_KIND = "scheduler.daemon_health_check"
 DAEMON_HEALTH_CHECK_RESUME_KEY = "scheduler:daemon_health_check"
+SITE_MONITOR_JOB_KIND = "scheduler.site_monitor"
 SCHEDULED_BACKGROUND_STALE_RUNNING_SECONDS = 60 * 60
 _ERROR_PREVIEW_LIMIT = 200
 _RESULT_STRING_LIMIT = 200

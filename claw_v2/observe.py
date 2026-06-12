@@ -316,6 +316,25 @@ class ObserveStream:
             ).fetchone()
         return float(row[0]) if row else 0.0
 
+    def cost_since(self, since_epoch: float) -> float:
+        """Sum of LLM spend recorded at or after ``since_epoch`` (unix time).
+
+        AM-LOOPCOST (2026-06-12): unlike total_cost_today this is monotonic —
+        it never resets at midnight, so a budget guard anchored to a loop's
+        start timestamp cannot silently disarm mid-run.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT COALESCE(SUM(json_extract(payload, '$.cost_estimate')), 0.0)
+                FROM observe_stream
+                WHERE event_type IN ('llm_response', 'llm_fallback', 'llm_failed_spend')
+                  AND timestamp >= datetime(?, 'unixepoch')
+                """,
+                (float(since_epoch),),
+            ).fetchone()
+        return float(row[0]) if row else 0.0
+
     def has_unknown_billable_cost_today(self, *, providers: set[str] | None = None) -> bool:
         """True if any billable LLM call today had an unpriced (cost_unknown) model.
 

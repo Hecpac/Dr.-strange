@@ -54,6 +54,7 @@ class ClawDaemon:
         pending_verification_drain_apply: bool | None = None,
         pending_verification_drain_max_apply: int = 10,
         pending_verification_drain_max_scan: int = 500,
+        heartbeat_snapshot_interval: float = 300.0,
     ) -> None:
         self.scheduler = scheduler
         self.heartbeat = heartbeat
@@ -75,6 +76,13 @@ class ClawDaemon:
         self.pending_verification_drain_max_apply = pending_verification_drain_max_apply
         self.pending_verification_drain_max_scan = pending_verification_drain_max_scan
         self._background_job_runners: list[BackgroundJobRunner] = []
+        # AM-HB (2026-06-12): heartbeat.collect() scans approvals, aggregates
+        # cost SQL and reads every agent's state file — running it on EVERY
+        # 60s tick is ~30× the intended heartbeat cadence. Cache and refresh
+        # at most every heartbeat_snapshot_interval.
+        self.heartbeat_snapshot_interval = max(0.0, float(heartbeat_snapshot_interval))
+        self._cached_heartbeat_snapshot: HeartbeatSnapshot | None = None
+        self._cached_heartbeat_snapshot_at = 0.0
 
     def register_background_job_runner(
         self,
@@ -97,7 +105,7 @@ class ClawDaemon:
         reconciled_orphan_jobs = self._reconcile_orphaned_jobs()
         pending_reconciliation_job_id = self._enqueue_pending_verification_reconciliation(now=now)
         executed_jobs = self.scheduler.run_due(now=now)
-        snapshot = self.heartbeat.collect()
+        snapshot = self._heartbeat_snapshot(now=now)
         if self.observe is not None:
             payload = {
                 "executed_jobs": executed_jobs,
@@ -120,6 +128,16 @@ class ClawDaemon:
                 payload=payload,
             )
         return TickResult(executed_jobs=executed_jobs, heartbeat=snapshot)
+
+    def _heartbeat_snapshot(self, *, now: float | None = None) -> HeartbeatSnapshot:
+        current = time.time() if now is None else now
+        if (
+            self._cached_heartbeat_snapshot is None
+            or current - self._cached_heartbeat_snapshot_at >= self.heartbeat_snapshot_interval
+        ):
+            self._cached_heartbeat_snapshot = self.heartbeat.collect()
+            self._cached_heartbeat_snapshot_at = current
+        return self._cached_heartbeat_snapshot
 
     def _reconcile_stale_tasks(self, *, now: float | None = None) -> int:
         if self.task_ledger is None:

@@ -24,6 +24,7 @@ from claw_v2.scheduled_background_jobs import (
     PIPELINE_POLL_MERGES_JOB_KIND,
     SELF_IMPROVE_JOB_KIND,
     SELF_IMPROVE_RESUME_KEY,
+    SITE_MONITOR_JOB_KIND,
     SUB_AGENT_JOB_KIND,
     WIKI_RESEARCH_JOB_KIND,
     WIKI_SCRAPE_JOB_KIND,
@@ -486,6 +487,96 @@ class ArchitectureInvariantTests(unittest.TestCase):
         self.assertIsNone(daemon_health_check_due(before, ""))
         # Same day key: at-most-once.
         self.assertIsNone(daemon_health_check_due(late, "2026-06-11"))
+
+    def test_site_monitor_probe_is_off_tick(self) -> None:
+        """AM-SITEMON (2026-06-12): the HTTP probe (httpx, 15s timeout) used
+        to run inline in the scheduler handler — network I/O inside
+        daemon.tick. The handler must only enqueue a durable job; the probe
+        runs in a daemon background runner."""
+
+        def fake_anthropic(req: LLMRequest) -> LLMResponse:
+            return LLMResponse(content="<response>ok</response>", lane=req.lane, provider="anthropic")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            runtime_config = root / "runtime.yml"
+            runtime_config.write_text(
+                "monitored_sites:\n"
+                "  - name: status page\n"
+                "    url: https://status.example.com\n"
+                "    interval_seconds: 900\n",
+                encoding="utf-8",
+            )
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "PIPELINE_STATE_ROOT": str(root / "pipeline"),
+                "RUNTIME_CONFIG_PATH": str(runtime_config),
+            }
+            with patch.dict(os.environ, env, clear=False):
+                with patch("claw_v2.main._resolve_pytest_command") as mock_resolve:
+                    mock_resolve.return_value = (["true"], "true")
+                    runtime = build_runtime(anthropic_executor=fake_anthropic)
+
+                jobs = {job.name: job for job in runtime.scheduler.list_jobs()}
+                job_name = next(name for name in jobs if name.startswith("site_monitor_"))
+
+                # The scheduler handler must not touch the network.
+                import httpx
+
+                with patch.object(httpx, "get", side_effect=_HeavyInlineCall):
+                    jobs[job_name].handler()
+
+                rows = runtime.job_service.list(kinds=(SITE_MONITOR_JOB_KIND,), limit=10)
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0].status, "queued")
+                self.assertEqual(rows[0].payload["url"], "https://status.example.com")
+
+                runner_names = {runner.name for runner in runtime.daemon._background_job_runners}
+                self.assertIn("site_monitor", runner_names)
+
+    def test_daemon_tick_heartbeat_snapshot_is_throttled(self) -> None:
+        """AM-HB (2026-06-12): heartbeat.collect() scans approvals, runs cost
+        SQL and reads every agent state file — it must not run on every 60s
+        tick, only at the snapshot interval."""
+        from claw_v2.daemon import ClawDaemon
+
+        class _Scheduler:
+            def run_due(self, now=None):
+                return []
+
+        class _Heartbeat:
+            def __init__(self) -> None:
+                self.collect_calls = 0
+
+            def collect(self):
+                self.collect_calls += 1
+                from claw_v2.heartbeat import HeartbeatSnapshot
+
+                return HeartbeatSnapshot(
+                    timestamp="t",
+                    pending_approvals=0,
+                    pending_approval_ids=[],
+                    agents={},
+                    lane_metrics={},
+                )
+
+        heartbeat = _Heartbeat()
+        daemon = ClawDaemon(
+            scheduler=_Scheduler(),
+            heartbeat=heartbeat,
+            heartbeat_snapshot_interval=300.0,
+        )
+
+        base = 1_000_000.0
+        for offset in (0.0, 60.0, 120.0, 180.0, 240.0):
+            daemon.tick(now=base + offset)
+        self.assertEqual(heartbeat.collect_calls, 1)
+        daemon.tick(now=base + 300.0)
+        self.assertEqual(heartbeat.collect_calls, 2)
 
     def test_self_improve_runner_does_not_drain_queued_jobs_when_disabled(self) -> None:
         """The EVAL_ON_SELF_IMPROVE kill-switch must apply to the durable runner,

@@ -149,12 +149,18 @@ class ObservationWindowState:
             self._prune_locked(now)
             auto_cleared = self._clear_token_window_freeze_if_decayed_locked(now)
             cost_cleared = self._clear_cost_freeze_if_decayed_locked(now)
+            rate_cleared = self._clear_tool_rate_freeze_if_decayed_locked(now)
             frozen = self._frozen
             freeze_reason = self._freeze_reason or "observation_window_frozen"
         if auto_cleared:
             self._emit("observation_window_freeze_auto_cleared", {"stale_reason": "circuit_breaker:token_window"})
         if cost_cleared:
             self._emit("observation_window_freeze_auto_cleared", {"stale_reason": "circuit_breaker:cost_per_hour"})
+        if rate_cleared:
+            self._emit(
+                "observation_window_freeze_auto_cleared",
+                {"stale_reason": "circuit_breaker:tool_calls_per_minute"},
+            )
         if frozen:
             if _allows_read_only_during_freeze(freeze_reason) and tier <= LOCAL_READ_ONLY_TIER:
                 self._emit(
@@ -668,6 +674,27 @@ class ObservationWindowState:
         self._persist_state_locked()
         return True
 
+    def _clear_tool_rate_freeze_if_decayed_locked(self, now: float) -> bool:
+        """AM-TOOLFREEZE (2026-06-12): the rate breaker was the only one with
+        no auto-clear — one burst froze ALL tools (no read-only carve-out)
+        until a manual /unfreeze. The signal is inherently 60s-scoped: once
+        the rolling-minute rate is back under the threshold the freeze
+        self-heals. Callers run ``_prune_locked`` first.
+        """
+        if self._freeze_reason != "circuit_breaker:tool_calls_per_minute":
+            return False
+        if len(self._tool_call_times) > self.config.tool_calls_per_minute_threshold:
+            return False
+        if not self._tool_call_times and self._freeze_age_seconds_locked(now) <= 60.0:
+            return False
+        self._frozen = False
+        self._freeze_reason = ""
+        self._freeze_actor = "auto_clear_tool_calls_per_minute"
+        self._freeze_updated_at = now
+        self._tripped_breakers.discard("tool_calls_per_minute")
+        self._persist_state_locked()
+        return True
+
     def _freeze_ttl_seconds(self, reason: str) -> float:
         if reason == "circuit_breaker:token_window":
             return float(self.config.token_window_seconds)
@@ -725,8 +752,14 @@ def _diagnostic_only_freeze_reason(reason: str) -> bool:
     # cost_per_hour is a budget alarm — it must reach the operator (Telegram).
     # token_window is also an autonomy budget alarm, not a diagnostic-only
     # circuit breaker.
+    # tool_calls_per_minute freezes ALL tools (no read-only carve-out) — the
+    # operator must know the bot went mute (AM-TOOLFREEZE, 2026-06-12).
     # All other circuit_breaker:* reasons (provider, sdk, etc.) stay diagnostic.
-    if reason in {"circuit_breaker:cost_per_hour", "circuit_breaker:token_window"}:
+    if reason in {
+        "circuit_breaker:cost_per_hour",
+        "circuit_breaker:token_window",
+        "circuit_breaker:tool_calls_per_minute",
+    }:
         return False
     return reason.startswith("circuit_breaker:")
 

@@ -180,6 +180,37 @@ class InjectContextTests(unittest.TestCase):
         )
         self.assertEqual(result[0].assigned_agent, "hex")
 
+    def test_degraded_compaction_warning_is_visible_in_prompt(self) -> None:
+        # F3.3 (2026-06-12): degraded_compaction was an internal flag only —
+        # the next phase consumed mechanically-cut context unknowingly.
+        tasks = [WorkerTask(name="impl1", instruction="write code")]
+        degraded = CoordinatorService._inject_context(
+            tasks,
+            objective="ship feature",
+            input_artifact_ref="art:abc123",
+            input_summary="the plan",
+            degraded=True,
+        )
+        self.assertIn("Advertencia de Contexto", degraded[0].instruction)
+        clean = CoordinatorService._inject_context(
+            tasks,
+            objective="ship feature",
+            input_artifact_ref="art:abc123",
+            input_summary="the plan",
+        )
+        self.assertNotIn("Advertencia de Contexto", clean[0].instruction)
+
+    def test_compact_text_marker_reports_kept_and_total(self) -> None:
+        # F3.2 (2026-06-12): standard truncation marker.
+        from claw_v2.coordinator import _compact_text
+
+        text = "palabra " * 5_000
+        clean_len = len(" ".join(text.split()))
+        out = _compact_text(text, limit=1_000)
+        self.assertLessEqual(len(out), 1_000)
+        self.assertIn(f"[truncated: kept 1000 of {clean_len} chars]", out)
+        self.assertEqual(_compact_text("corto", limit=1_000), "corto")
+
 
 class FullRunTests(unittest.TestCase):
     def test_research_only_run(self) -> None:

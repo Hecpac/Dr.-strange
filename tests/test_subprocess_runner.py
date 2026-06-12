@@ -115,6 +115,9 @@ class SubprocessRunnerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertLessEqual(len(result.stdout), 2000)
         self.assertLessEqual(len(result.stderr), 2000)
+        # Paso 4 (2026-06-12): unified truncation marker format.
+        self.assertIn("[truncated: kept last 2000 of 200000 chars]", result.stdout)
+        self.assertIn("[truncated: kept last 2000 of 200000 chars]", result.stderr)
 
     def test_check_true_raises_called_process_error_with_output(self) -> None:
         with self.assertRaises(subprocess.CalledProcessError) as ctx:

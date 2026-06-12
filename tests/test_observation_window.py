@@ -148,9 +148,46 @@ class ObservationWindowTests(unittest.TestCase):
     def test_cost_per_hour_is_not_diagnostic_only(self) -> None:
         # Regression: budget breaker must escape the diagnostic-silence path so it
         # reaches Telegram. Other circuit_breaker:* reasons stay silent.
+        # AM-TOOLFREEZE (2026-06-12): tool_calls_per_minute freezes ALL tools,
+        # so it must alert the operator too.
         self.assertFalse(_diagnostic_only_freeze_reason("circuit_breaker:cost_per_hour"))
-        self.assertTrue(_diagnostic_only_freeze_reason("circuit_breaker:tool_calls_per_minute"))
+        self.assertFalse(_diagnostic_only_freeze_reason("circuit_breaker:tool_calls_per_minute"))
         self.assertTrue(_diagnostic_only_freeze_reason("circuit_breaker:provider_failure"))
+
+    def test_tool_rate_freeze_auto_clears_after_window_decays(self) -> None:
+        # AM-TOOLFREEZE (2026-06-12): the rate breaker was a one-way trap —
+        # the only breaker without auto-clear, requiring a manual /unfreeze.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = _RecordingObserve()
+            now = [1000.0]
+            window = ObservationWindowState(
+                observe=observe,
+                state_path=Path(tmpdir) / "window.json",
+                config=ObservationWindowConfig(tool_calls_per_minute_threshold=2),
+                clock=lambda: now[0],
+            )
+
+            window.before_tool_execution(tool_name="Read", args={}, tier=1, actor="operator")
+            window.before_tool_execution(tool_name="Read", args={}, tier=1, actor="operator")
+            with self.assertRaises(ObservationWindowBlocked):
+                window.before_tool_execution(tool_name="Read", args={}, tier=1, actor="operator")
+            self.assertTrue(window.frozen)
+
+            # Still inside the rolling minute: the freeze holds.
+            now[0] += 10
+            with self.assertRaises(ObservationWindowBlocked):
+                window.before_tool_execution(tool_name="Read", args={}, tier=1, actor="operator")
+
+            # Past the rolling minute the rate evidence decays — self-heal.
+            now[0] += 60
+            window.before_tool_execution(tool_name="Read", args={}, tier=1, actor="operator")
+            self.assertFalse(window.frozen)
+            cleared = [
+                payload for name, payload in observe.events
+                if name == "observation_window_freeze_auto_cleared"
+                and payload["payload"]["stale_reason"] == "circuit_breaker:tool_calls_per_minute"
+            ]
+            self.assertEqual(len(cleared), 1)
 
     def test_stale_circuit_breaker_freeze_auto_clears_on_load(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
