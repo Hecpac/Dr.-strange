@@ -518,5 +518,224 @@ class RetryAndContextTests(unittest.TestCase):
         self.assertIn("i1: ERROR: Codex CLI timed out after 120s", verify_prompts[0])
 
 
+class ResumeFromScratchTests(unittest.TestCase):
+    """F3.1 — kill+resume must not re-execute completed phases."""
+
+    def test_detect_resume_phase_progression(self) -> None:
+        svc, _, _, tmp = _make_service()
+        self.assertEqual(svc.detect_resume_phase("missing-task"), "research")
+        scratch = tmp / "t-detect"
+        (scratch / "research").mkdir(parents=True)
+        (scratch / "research" / "r1.json").write_text(
+            json.dumps({"task_name": "r1", "content": "hallazgo"}), encoding="utf-8"
+        )
+        self.assertEqual(svc.detect_resume_phase("t-detect"), "synthesis")
+        (scratch / "synthesis.md").write_text("plan", encoding="utf-8")
+        self.assertEqual(svc.detect_resume_phase("t-detect"), "implementation")
+        (scratch / "implementation").mkdir()
+        (scratch / "implementation" / "i1.json").write_text(
+            json.dumps({"task_name": "i1", "content": "hecho"}), encoding="utf-8"
+        )
+        self.assertEqual(svc.detect_resume_phase("t-detect"), "verification")
+
+    def test_resume_does_not_reexecute_research_or_synthesis(self) -> None:
+        tmp = Path(tempfile.mkdtemp())
+        svc, router, _, _ = _make_service(scratch_root=tmp)
+        router.ask.return_value = MagicMock(content="hallazgo de research")
+        research = [WorkerTask(name="r1", instruction="investiga")]
+        # First attempt completes research + synthesis and is then "killed"
+        # (research-only run leaves exactly those artifacts in scratch).
+        svc.run("task-resume", "objetivo", research)
+
+        svc2, router2, observe2, _ = _make_service(scratch_root=tmp)
+        router2.ask.return_value = MagicMock(content="Verification Status: passed")
+        start_phase = svc2.detect_resume_phase("task-resume")
+        self.assertEqual(start_phase, "implementation")
+        impl = [WorkerTask(name="i1", instruction="implementa", lane="worker")]
+        verify = [WorkerTask(name="v1", instruction="verifica", lane="verifier")]
+        result = svc2.run(
+            "task-resume",
+            "objetivo",
+            research,
+            implementation_tasks=impl,
+            verification_tasks=verify,
+            start_phase=start_phase,
+        )
+
+        lanes = [call.kwargs.get("lane") for call in router2.ask.call_args_list]
+        self.assertNotIn("research", lanes, "research/synthesis must load from scratch")
+        self.assertEqual(sorted(lanes), ["verifier", "worker"])
+        self.assertEqual(result.phase_results["research"][0].content, "hallazgo de research")
+        self.assertEqual(result.synthesis, "hallazgo de research")
+        self.assertEqual(result.error, "")
+        event_names = [call.args[0] for call in observe2.emit.call_args_list]
+        self.assertIn("coordinator_phase_resumed_from_scratch", event_names)
+
+    def test_resumed_run_blocks_implementation_rerun_after_partial_attempt(self) -> None:
+        tmp = Path(tempfile.mkdtemp())
+        svc, router, _, _ = _make_service(scratch_root=tmp)
+        router.ask.return_value = MagicMock(content="ok")
+        research = [WorkerTask(name="r1", instruction="investiga")]
+        svc.run("task-gate", "objetivo", research)
+        # Simulate a previous attempt that STARTED implementation but died
+        # before persisting completed results: side effects are possible.
+        (tmp / "task-gate" / "implementation.started").write_text("{}", encoding="utf-8")
+
+        svc2, router2, observe2, _ = _make_service(scratch_root=tmp)
+        router2.ask.return_value = MagicMock(content="ok")
+        impl = [WorkerTask(name="i1", instruction="implementa", lane="worker")]
+        result = svc2.run(
+            "task-gate",
+            "objetivo",
+            research,
+            implementation_tasks=impl,
+            start_phase="implementation",
+        )
+        self.assertEqual(result.error, "implementation_rerun_blocked")
+        lanes = [call.kwargs.get("lane") for call in router2.ask.call_args_list]
+        self.assertNotIn("worker", lanes, "implementation must not silently re-run")
+        event_names = [call.args[0] for call in observe2.emit.call_args_list]
+        self.assertIn("coordinator_implementation_rerun_blocked", event_names)
+
+        # Explicit override is the only path to a re-run.
+        svc3, router3, _, _ = _make_service(scratch_root=tmp)
+        router3.ask.return_value = MagicMock(content="ok")
+        result = svc3.run(
+            "task-gate",
+            "objetivo",
+            research,
+            implementation_tasks=impl,
+            start_phase="implementation",
+            allow_implementation_rerun=True,
+        )
+        self.assertEqual(result.error, "")
+        self.assertIn("implementation", result.phase_results)
+
+    def test_fresh_run_is_not_blocked_by_its_own_marker(self) -> None:
+        svc, router, _, _ = _make_service()
+        router.ask.return_value = MagicMock(content="ok")
+        research = [WorkerTask(name="r1", instruction="investiga")]
+        impl = [WorkerTask(name="i1", instruction="implementa", lane="worker")]
+        result = svc.run("task-fresh", "objetivo", research, implementation_tasks=impl)
+        self.assertEqual(result.error, "")
+        self.assertIn("implementation", result.phase_results)
+
+    def test_invalid_start_phase_rejected(self) -> None:
+        svc, *_ = _make_service()
+        with self.assertRaises(ValueError):
+            svc.run("t", "obj", [], start_phase="deploy")
+
+    def test_prune_stale_scratch_dirs_respects_retention(self) -> None:
+        import os
+        import time as time_mod
+
+        svc, router, _, tmp = _make_service(scratch_retention_days=1.0)
+        old_dir = tmp / "old-task"
+        old_dir.mkdir(parents=True)
+        stale = time_mod.time() - 3 * 86_400
+        os.utime(old_dir, (stale, stale))
+        fresh_dir = tmp / "fresh-task"
+        fresh_dir.mkdir()
+        router.ask.return_value = MagicMock(content="ok")
+        svc.run("task-prune", "objetivo", [WorkerTask(name="r1", instruction="x")])
+        self.assertFalse(old_dir.exists(), "stale scratch dir must be pruned")
+        self.assertTrue(fresh_dir.exists(), "fresh scratch dir must be kept")
+
+
+class CancelAtPhaseBoundaryTests(unittest.TestCase):
+    """AM-CANCEL — should_abort is honored between phases."""
+
+    def test_abort_after_research_skips_synthesis(self) -> None:
+        svc, router, observe, _ = _make_service()
+        router.ask.return_value = MagicMock(content="ok")
+        research = [WorkerTask(name="r1", instruction="investiga")]
+        impl = [WorkerTask(name="i1", instruction="implementa", lane="worker")]
+        result = svc.run(
+            "task-cancel",
+            "objetivo",
+            research,
+            implementation_tasks=impl,
+            should_abort=lambda: True,
+        )
+        self.assertEqual(result.error, "cancelled_at_phase_boundary:synthesis")
+        self.assertEqual(list(result.phase_results.keys()), ["research"])
+        self.assertEqual(router.ask.call_count, 1, "only the research worker may run")
+        event_names = [call.args[0] for call in observe.emit.call_args_list]
+        self.assertIn("coordinator_cancelled", event_names)
+
+    def test_abort_callback_failure_does_not_cancel(self) -> None:
+        svc, router, _, _ = _make_service()
+        router.ask.return_value = MagicMock(content="ok")
+
+        def broken() -> bool:
+            raise RuntimeError("callback exploded")
+
+        result = svc.run(
+            "task-cb",
+            "objetivo",
+            [WorkerTask(name="r1", instruction="x")],
+            should_abort=broken,
+        )
+        self.assertEqual(result.error, "")
+
+
+class EmptySynthesisDegradationTests(unittest.TestCase):
+    """AM-SYNTH — an empty synthesis must degrade visibly, not in silence."""
+
+    def test_empty_synthesis_marks_audit_event_and_context_warning(self) -> None:
+        svc, router, observe, _ = _make_service()
+
+        def ask(prompt: str, **kwargs: Any) -> MagicMock:
+            evidence = kwargs.get("evidence_pack") or {}
+            if evidence.get("coordinator_phase") == "synthesis":
+                raise RuntimeError("synthesis lane down")
+            return MagicMock(content="ok")
+
+        router.ask.side_effect = ask
+        research = [WorkerTask(name="r1", instruction="investiga")]
+        impl = [WorkerTask(name="i1", instruction="implementa", lane="worker")]
+        result = svc.run("task-synth", "objetivo", research, implementation_tasks=impl)
+
+        self.assertTrue(result.audit.get("synthesis_empty"))
+        event_names = [call.args[0] for call in observe.emit.call_args_list]
+        self.assertIn("coordinator_synthesis_empty", event_names)
+        impl_call = next(
+            call for call in router.ask.call_args_list if call.kwargs.get("lane") == "worker"
+        )
+        self.assertIn("Advertencia de Contexto", impl_call.args[0])
+
+
+class ParallelDistillationTests(unittest.TestCase):
+    """AM-DISTILL — per-worker-result distillation runs concurrently."""
+
+    def test_distillation_calls_overlap(self) -> None:
+        import threading
+
+        from claw_v2.coordinator import WorkerResult
+
+        svc, router, _, _ = _make_service(worker_result_summary_chars=10, max_workers=2)
+        barrier = threading.Barrier(2, timeout=10)
+
+        def ask(prompt: str, **kwargs: Any) -> MagicMock:
+            evidence = kwargs.get("evidence_pack") or {}
+            if evidence.get("coordinator_phase") == "semantic_distillation":
+                # Deadlocks (and falls back to mechanical compaction) if the
+                # two distillation calls run serially.
+                barrier.wait()
+                return MagicMock(content="corto")
+            return MagicMock(content="x" * 200)
+
+        router.ask.side_effect = ask
+        results = [
+            WorkerResult(task_name="a", content="y" * 200, duration_seconds=0.1),
+            WorkerResult(task_name="b", content="z" * 200, duration_seconds=0.1),
+        ]
+        summary = svc._phase_results_summary(results, limit=10_000)
+        self.assertIn("- a: corto", summary)
+        self.assertIn("- b: corto", summary)
+        self.assertFalse(results[0].degraded_compaction)
+        self.assertFalse(results[1].degraded_compaction)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -19,7 +19,7 @@ class _BlockingCoordinator:
         self.started = threading.Event()
         self.release = threading.Event()
 
-    def run(self, task_id, objective, research_tasks, implementation_tasks=None, verification_tasks=None, lane_overrides=None):
+    def run(self, task_id, objective, research_tasks, implementation_tasks=None, verification_tasks=None, lane_overrides=None, **kwargs):
         self.started.set()
         self.release.wait(timeout=2)
         return CoordinatorResult(
@@ -248,6 +248,7 @@ class TaskHandlerTests(unittest.TestCase):
                     implementation_tasks=None,
                     verification_tasks=None,
                     lane_overrides=None,
+                    **kwargs,
                 ):
                     return CoordinatorResult(
                         task_id=task_id,
@@ -315,6 +316,7 @@ class TaskHandlerTests(unittest.TestCase):
                     implementation_tasks=None,
                     verification_tasks=None,
                     lane_overrides=None,
+                    **kwargs,
                 ):
                     recorded["implementation_tasks"] = implementation_tasks
                     recorded["research_tasks"] = research_tasks
@@ -371,6 +373,78 @@ class TaskHandlerTests(unittest.TestCase):
             )
             events = [event["event_type"] for event in observe.recent_events(limit=50)]
             self.assertIn("autonomous_task_started", events)
+
+
+class ResumeWiringTests(unittest.TestCase):
+    """F3.1 — a resumed coordinated task passes the detected start_phase."""
+
+    def _handler_with_recording_coordinator(self, root: Path, recorded: dict):
+        memory = MemoryStore(root / "claw.db")
+        observe = ObserveStream(root / "observe.db")
+
+        class _RecordingCoordinator:
+            def detect_resume_phase(self, task_id):
+                recorded["detect_task_id"] = task_id
+                return "implementation"
+
+            def run(
+                self,
+                task_id,
+                objective,
+                research_tasks,
+                implementation_tasks=None,
+                verification_tasks=None,
+                lane_overrides=None,
+                **kwargs,
+            ):
+                recorded["start_phase"] = kwargs.get("start_phase")
+                recorded["should_abort"] = kwargs.get("should_abort")
+                return CoordinatorResult(
+                    task_id=task_id,
+                    phase_results={
+                        "verification": [
+                            WorkerResult(
+                                task_name="verify_change",
+                                content="Verification Status: passed",
+                                duration_seconds=0.1,
+                            )
+                        ]
+                    },
+                    synthesis="done",
+                )
+
+        handler = TaskHandler(
+            coordinator=_RecordingCoordinator(),
+            observe=observe,
+            get_session_state=memory.get_session_state,
+            update_session_state=memory.update_session_state,
+        )
+        return handler
+
+    def test_resumed_run_passes_detected_start_phase_and_abort_callback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorded: dict = {}
+            handler = self._handler_with_recording_coordinator(Path(tmpdir), recorded)
+            handler._run_coordinated_task(
+                "tg-1", "objetivo", mode="coding", forced=False, task_id="t-99", resumed=True
+            )
+            self.assertEqual(recorded["detect_task_id"], "t-99")
+            self.assertEqual(recorded["start_phase"], "implementation")
+            self.assertTrue(callable(recorded["should_abort"]))
+            self.assertFalse(recorded["should_abort"]())
+            with handler._task_lock:
+                handler._cancelled_tasks.add("t-99")
+            self.assertTrue(recorded["should_abort"]())
+
+    def test_fresh_run_passes_no_start_phase(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorded: dict = {}
+            handler = self._handler_with_recording_coordinator(Path(tmpdir), recorded)
+            handler._run_coordinated_task(
+                "tg-1", "objetivo", mode="coding", forced=False, task_id="t-100"
+            )
+            self.assertIsNone(recorded["start_phase"])
+            self.assertNotIn("detect_task_id", recorded)
 
 
 if __name__ == "__main__":

@@ -582,8 +582,20 @@ class TaskHandler:
         mode: str,
         forced: bool,
         task_id: str,
+        resumed: bool = False,
     ) -> str:
         research_tasks, implementation_tasks, verification_tasks = _build_coordinator_tasks(mode, objective)
+        # F3.1 (2026-06-12): a resumed task loads completed-phase artifacts
+        # from scratch instead of re-running coordinator.run() from zero
+        # (re-running implementation duplicated external side effects).
+        start_phase: str | None = None
+        if resumed:
+            try:
+                candidate = self.coordinator.detect_resume_phase(task_id)
+            except Exception:
+                candidate = None
+            if candidate in ("research", "synthesis", "implementation", "verification"):
+                start_phase = candidate
         result = self.coordinator.run(
             task_id,
             objective,
@@ -591,6 +603,8 @@ class TaskHandler:
             implementation_tasks=implementation_tasks,
             verification_tasks=verification_tasks,
             lane_overrides=self._lane_model_overrides(session_id),
+            start_phase=start_phase,
+            should_abort=lambda: self._is_cancelled(task_id),
         )
         # Record per-phase worker results to the target stream so the petri
         # judge has concrete evidence (file paths, commit hashes, exit codes)
@@ -716,6 +730,7 @@ class TaskHandler:
                 mode=mode,
                 forced=False,
                 task_id=task_id,
+                resumed=resumed,
             )
             if self._is_cancelled(task_id):
                 self._mark_cancelled_task_state(session_id, task_id, objective, reason="cancelled_during_run")
