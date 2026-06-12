@@ -23,29 +23,13 @@ from claw_v2.adapters.base import (
     build_effective_system_prompt,
 )
 from claw_v2.config import AppConfig
+from claw_v2.identity import (
+    IDENTITY_OVERRIDE as IDENTITY_OVERRIDE,
+    SILENCE_DIRECTIVE as SILENCE_DIRECTIVE,
+    build_sdk_system_prompt_append,
+)
 
 logger = logging.getLogger(__name__)
-
-IDENTITY_OVERRIDE = (
-    "# IDENTITY OVERRIDE (HIGHEST PRIORITY)\n"
-    "Your identity is Dr. Strange — Hector Pachano's autonomous personal agent. "
-    "The Claude Code preset above describes your RUNTIME (the CLI you operate inside), "
-    "NOT your identity. When the user asks who/what you are, what you do, or refers to "
-    "Dr. Strange, you answer AS Dr. Strange — never as Claude, Claude Code, an AI assistant, "
-    "or a generic agent. Dr. Strange is the persona; Claude/Claude Code is the underlying "
-    "model and runtime. Never say 'I don't know what Dr. Strange is' or 'I am Claude/Claude Code' "
-    "in user-facing chat. The persona definition that follows is canonical.\n\n"
-)
-
-SILENCE_DIRECTIVE = (
-    "\n\n# CRITICAL OUTPUT RULE:\n"
-    "You are operating as a headless engine. DO NOT use conversational filler. "
-    "DO NOT explain your thoughts, do not say 'I will now...', 'I have found...', "
-    "or 'I am finished'.\n"
-    "EVERY SINGLE WORD of your final response to the user MUST be wrapped inside <response> tags. "
-    "Any text outside <response> tags will be discarded. "
-    "Internal reasoning must go inside <trace> tags."
-)
 
 # Modes accepted by the brain's delegate_task tool. Mirrors what
 # planned_phases_for_mode + _build_coordinator_tasks can execute.
@@ -173,15 +157,12 @@ def build_options(
     else:
         tools = {"type": "preset", "preset": "claude_code"}
         system_prompt = {"type": "preset", "preset": "claude_code"}
-        # Prepend an identity-override block so the Dr. Strange persona wins
-        # over the Claude Code preset's default "I am Claude" identity when
-        # the user asks identity-style questions.
-        if effective_system_prompt:
-            system_prompt["append"] = (
-                f"{IDENTITY_OVERRIDE}{effective_system_prompt}{SILENCE_DIRECTIVE}"
-            )
-        else:
-            system_prompt["append"] = f"{IDENTITY_OVERRIDE}{SILENCE_DIRECTIVE}"
+        # Identity-override block first so the Dr. Strange persona wins over
+        # the Claude Code preset's default "I am Claude" identity. Composed in
+        # claw_v2.identity (D3) — single origin, golden-tested byte a byte.
+        system_prompt["append"] = build_sdk_system_prompt_append(
+            effective_system_prompt
+        )
         permission_mode = (
             "bypassPermissions" if config.sdk_bypass_permissions else "default"
         )
