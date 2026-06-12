@@ -11,7 +11,11 @@ from pathlib import Path
 from typing import Any
 
 from claw_v2.redaction import redact_sensitive
-from claw_v2.sqlite_runtime import connect_runtime_sqlite
+from claw_v2.sqlite_runtime import (
+    connect_runtime_sqlite,
+    make_store_wal_heal,
+    register_wal_heal,
+)
 from claw_v2.tracing import TRACE_KEYS
 
 
@@ -238,6 +242,7 @@ class OrchestrationStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.observe = observe
         self._conn = connect_runtime_sqlite(self.db_path)
+        register_wal_heal(self.db_path, make_store_wal_heal(self))
         self._lock = threading.Lock()
         with self._lock:
             self._conn.executescript(ORCHESTRATION_SCHEMA)

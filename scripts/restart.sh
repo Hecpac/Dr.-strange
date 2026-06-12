@@ -48,11 +48,29 @@ stop_pid() {
 }
 
 if launchctl print "$DOMAIN" >/dev/null 2>&1; then
+  # T10 (2026-06-12): two daemons overlapping on the same SQLite WAL risk
+  # sidecar churn. Capture the old PID, kickstart, and wait for the OLD
+  # process to fully exit before accepting any "new" PID.
+  old_pid="$(pgrep -f "claw_v2.main" 2>/dev/null | head -n 1)"
   launchctl kickstart -k "$DOMAIN"
+  if [ -n "$old_pid" ]; then
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+      ps -p "$old_pid" >/dev/null 2>&1 || break
+      sleep 1
+    done
+    if ps -p "$old_pid" >/dev/null 2>&1; then
+      echo "ERROR: previous Claw process $old_pid is still alive after kickstart" >&2
+      exit 1
+    fi
+  fi
   pid="$(wait_for_process)" || {
     echo "ERROR: launchd restart did not produce a Claw process" >&2
     exit 1
   }
+  if [ -n "$old_pid" ] && [ "$pid" = "$old_pid" ]; then
+    echo "ERROR: launchd did not replace the Claw process (pid $pid unchanged)" >&2
+    exit 1
+  fi
   wait_for_port || {
     echo "ERROR: Claw process $pid started but web port did not listen" >&2
     exit 1

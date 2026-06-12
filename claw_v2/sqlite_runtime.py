@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import contextlib
+import logging
 import sqlite3
+import threading
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
 
 SQLITE_BUSY_TIMEOUT_MS = 15_000
 SQLITE_CONNECT_TIMEOUT_SECONDS = 15.0
@@ -49,6 +53,124 @@ def configure_runtime_sqlite(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA checkpoint_fullfsync=ON")
     conn.execute(f"PRAGMA wal_autocheckpoint={SQLITE_WAL_AUTOCHECKPOINT_PAGES}")
     conn.execute("PRAGMA foreign_keys=ON")
+
+
+# --- WAL generation guard (T10, incidente 2026-06-12) -----------------------
+#
+# Something unlinked data/claw.db-wal/-shm under the daemon's live
+# connections. The orphaned connections then fail every write with
+# "database is locked" forever (messages, events and task closes silently
+# stop persisting), while NEW connections silently form a second WAL
+# generation on fresh sidecar files. The guard makes that state recoverable:
+# every store holding a long-lived connection registers a heal callback; when
+# a writer exhausts its locked retries AND the sidecars are gone, ALL
+# registered connections for that path reopen together so the process rejoins
+# a single WAL generation instead of splitting into two writers.
+
+_WAL_HEAL_REGISTRY: dict[str, list["StoreWalHealHandle"]] = {}
+_WAL_HEAL_REGISTRY_LOCK = threading.Lock()
+_NULL_STORE_LOCK = contextlib.nullcontext()
+
+
+def _registry_key(db_path: Path | str) -> str:
+    return str(Path(db_path).expanduser().resolve(strict=False))
+
+
+def register_wal_heal(db_path: Path | str, handle: "StoreWalHealHandle") -> None:
+    """Register a close/reopen handle for one store's connection to ``db_path``."""
+    with _WAL_HEAL_REGISTRY_LOCK:
+        _WAL_HEAL_REGISTRY.setdefault(_registry_key(db_path), []).append(handle)
+
+
+class StoreWalHealHandle:
+    """Close/reopen handle for the conventional store shape (.db_path/._conn/._lock).
+
+    Two-phase on purpose: every registered connection must CLOSE before any
+    reopens, so the process abandons the orphaned WAL generation completely
+    instead of splitting into two concurrent generations.
+    """
+
+    def __init__(self, store: object, *, row_factory: bool = True) -> None:
+        self._store = store
+        self._row_factory = row_factory
+
+    def _lock_ctx(self):
+        return getattr(self._store, "_lock", None) or _NULL_STORE_LOCK
+
+    def close(self) -> None:
+        with self._lock_ctx():
+            old = getattr(self._store, "_conn", None)
+            if old is not None:
+                try:
+                    old.close()
+                except Exception:
+                    logger.debug("closing orphaned connection failed", exc_info=True)
+
+    def reopen(self) -> None:
+        with self._lock_ctx():
+            self._store._conn = connect_runtime_sqlite(
+                self._store.db_path, row_factory=self._row_factory
+            )
+
+
+def make_store_wal_heal(store: object, *, row_factory: bool = True) -> StoreWalHealHandle:
+    return StoreWalHealHandle(store, row_factory=row_factory)
+
+
+def wal_sidecars_orphaned(db_path: Path | str) -> bool:
+    """True when a non-empty DB exists but its ``-wal`` sidecar is gone.
+
+    Only meaningful while connections are open in WAL mode (a live WAL
+    connection keeps the sidecar present); callers must use it from a
+    locked-error context, never as a standalone health probe.
+    """
+    path = Path(db_path)
+    try:
+        if not path.exists() or path.stat().st_size == 0:
+            return False
+    except OSError:
+        return False
+    return not Path(f"{path}-wal").exists()
+
+
+def heal_orphaned_wal(db_path: Path | str) -> bool:
+    """Reopen every registered connection for ``db_path`` if sidecars are gone.
+
+    Returns True when a heal ran. Safe to call from any writer's
+    locked-retry-exhausted path; idempotent (each heal callback reopens under
+    its own store lock).
+    """
+    if not wal_sidecars_orphaned(db_path):
+        return False
+    with _WAL_HEAL_REGISTRY_LOCK:
+        handles = list(_WAL_HEAL_REGISTRY.get(_registry_key(db_path), ()))
+    logger.critical(
+        "SQLite WAL sidecars for %s are missing while connections are open; "
+        "reopening %d registered connection(s) to rejoin one WAL generation.",
+        db_path,
+        len(handles),
+    )
+    for handle in handles:
+        try:
+            handle.close()
+        except Exception:
+            logger.exception("WAL heal close failed for %s", db_path)
+    # A reopen attempt that raced the unlink can leave an EMPTY recreated
+    # -wal without its -shm; that husk makes every subsequent open fail with
+    # "disk I/O error". Empty means zero frames, so removing it loses nothing.
+    wal = Path(f"{Path(db_path)}-wal")
+    shm = Path(f"{Path(db_path)}-shm")
+    try:
+        if wal.exists() and not shm.exists() and wal.stat().st_size == 0:
+            wal.unlink()
+    except OSError:
+        logger.debug("WAL husk cleanup failed for %s", db_path, exc_info=True)
+    for handle in handles:
+        try:
+            handle.reopen()
+        except Exception:
+            logger.exception("WAL heal reopen failed for %s", db_path)
+    return True
 
 
 def check_runtime_sqlite_health(db_path: Path | str, *, thorough: bool = False) -> None:

@@ -41,6 +41,18 @@ _TELEGRAM_API_URL = "https://api.telegram.org/bot{token}/sendMessage"
 _NOTIFY_TIMEOUT_SEC = 15.0
 
 
+def _sanitize_outbound(text: str) -> str:
+    """T11 (2026-06-12): this module POSTs straight to the Bot API, skipping
+    the transport's outbound sanitizer — internal noise leaked to the chat
+    (16:31 incident). Route every direct send through the same filter."""
+    try:
+        from claw_v2.bot_helpers import _sanitize_chat_response
+
+        return _sanitize_chat_response(str(text or ""))
+    except Exception:
+        return str(text or "")
+
+
 def send_telegram_message(token: str, chat_id: str, text: str) -> None:
     """Synchronously POST a plain-text message to a Telegram chat.
 
@@ -51,6 +63,7 @@ def send_telegram_message(token: str, chat_id: str, text: str) -> None:
     """
     if not token or not chat_id:
         raise ValueError("Telegram token and chat_id are required to send a message")
+    text = _sanitize_outbound(text)
     url = _TELEGRAM_API_URL.format(token=token)
     payload = json.dumps(
         {"chat_id": chat_id, "text": text, "disable_web_page_preview": True}
@@ -167,6 +180,7 @@ class StopNotifier:
 
     def _send_safely(self, chat_id: str, text: str, task_id: str) -> None:
         try:
+            text = _sanitize_outbound(text)
             url = _TELEGRAM_API_URL.format(token=self.token)
             payload = json.dumps({
                 "chat_id": chat_id,

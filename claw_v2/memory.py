@@ -17,7 +17,11 @@ from claw_v2.memory_retention import (
     format_memory_fact_for_prompt,
     normalize_prompt_residency,
 )
-from claw_v2.sqlite_runtime import connect_runtime_sqlite
+from claw_v2.sqlite_runtime import (
+    connect_runtime_sqlite,
+    make_store_wal_heal,
+    register_wal_heal,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -429,6 +433,7 @@ class MemoryStore:
         except Exception:
             logger.debug("Pending restore check failed", exc_info=True)
         self._conn = connect_runtime_sqlite(self.db_path)
+        register_wal_heal(self.db_path, make_store_wal_heal(self))
         self._conn.executescript(SCHEMA)
         # RLock (not Lock): read methods are @_synchronized and may be called
         # from within already-locked write paths; reentrancy avoids deadlock.
