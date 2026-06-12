@@ -6,6 +6,7 @@ from claw_v2.lifecycle import (
     format_autonomous_task_terminal_message,
     format_task_ledger_terminal_message,
     should_notify_task_ledger_terminal,
+    terminal_notification_key,
 )
 
 
@@ -119,7 +120,9 @@ class TaskLifecycleNotificationTests(unittest.TestCase):
             "status": "failed",
         }
 
-        self.assertFalse(should_notify_task_ledger_terminal(payload, {"task-1"}))
+        # AM-NOTIFY (2026-06-12): dedupe keys are per attempt, not bare task ids.
+        notified = {terminal_notification_key(payload)}
+        self.assertFalse(should_notify_task_ledger_terminal(payload, notified))
 
     def test_autonomous_completion_message_uses_response_without_system_header(self) -> None:
         payload = {
