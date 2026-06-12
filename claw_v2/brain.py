@@ -1180,7 +1180,17 @@ class BrainService:
                     ),
                 )
             votes = [primary_future.result()]
-            speculative_vote = speculative_future.result() if speculative_future is not None else None
+            speculative_vote = None
+            if speculative_future is not None:
+                try:
+                    speculative_vote = speculative_future.result()
+                except Exception:
+                    # PR #96 review (gemini): a raising speculative vote must
+                    # not fail the whole verification — with it discarded, the
+                    # corrected serial path below takes over.
+                    logger.warning(
+                        "speculative secondary verifier vote failed", exc_info=True
+                    )
         primary_actual_provider = votes[0].get("provider") or primary_provider
         secondary_provider = self._secondary_verifier_provider(str(primary_actual_provider))
         if secondary_provider is not None:

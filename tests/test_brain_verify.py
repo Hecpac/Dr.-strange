@@ -393,6 +393,73 @@ class BrainVerificationTests(unittest.TestCase):
             self.assertEqual(verdict.consensus_status, "verifier_error")
             self.assertTrue(verdict.requires_human_approval)
 
+    def test_raising_speculative_vote_does_not_fail_verification(self) -> None:
+        # PR #96 review (gemini): an exception escaping the speculative
+        # secondary vote thread must be contained; the serial corrected
+        # path collects the secondary again.
+        from claw_v2.brain import BrainService
+
+        calls = {"secondary": 0}
+        original = BrainService._collect_verifier_vote
+
+        def flaky_collect(self_brain, *, evidence, provider, model, role):
+            if role == "secondary":
+                calls["secondary"] += 1
+                if calls["secondary"] == 1:
+                    raise RuntimeError("speculative thread exploded")
+            return original(
+                self_brain, evidence=evidence, provider=provider, model=model, role=role
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+            }
+            approve_json = (
+                '{"recommendation":"approve","risk_level":"low","summary":"Safe.",'
+                '"reasons":["ok"],"blockers":[],"missing_checks":[],"confidence":0.9}'
+            )
+
+            def anthropic_verifier(request: LLMRequest) -> LLMResponse:
+                if request.lane != "verifier":
+                    return self._fake_brain(request)
+                return LLMResponse(
+                    content=approve_json,
+                    lane="verifier",
+                    provider="anthropic",
+                    model=request.model,
+                )
+
+            def openai_verifier(request: LLMRequest) -> LLMResponse:
+                return LLMResponse(
+                    content=approve_json,
+                    lane="verifier",
+                    provider="openai",
+                    model=request.model,
+                )
+
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(
+                    anthropic_executor=anthropic_verifier, openai_transport=openai_verifier
+                )
+                with patch.object(BrainService, "_collect_verifier_vote", flaky_collect):
+                    verdict = runtime.brain.verify_critical_action(
+                        plan="Refactor helper module",
+                        diff="helpers.py",
+                        test_output="unit ok",
+                        action="refactor_module",
+                        create_approval=False,
+                    )
+
+            self.assertEqual(calls["secondary"], 2, "corrected serial collection must run")
+            self.assertEqual(verdict.consensus_status, "unanimous_approve")
+            self.assertTrue(verdict.should_proceed)
+
     def test_verify_critical_action_falls_back_to_text_heuristics(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

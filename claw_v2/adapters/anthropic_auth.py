@@ -22,10 +22,12 @@ def resolve_anthropic_api_key(env_file: Path | None = None) -> str | None:
     """Return the API key from the environment or ``~/.claw/env``, else None."""
     if value := os.getenv("ANTHROPIC_API_KEY"):
         return value.strip() or None
-    path = env_file if env_file is not None else Path.home() / ".claw" / "env"
     try:
+        # Path.home() raises RuntimeError when the home directory cannot be
+        # resolved (restricted/containerized environments).
+        path = env_file if env_file is not None else Path.home() / ".claw" / "env"
         lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
-    except OSError:
+    except (OSError, RuntimeError):
         return None
     for line in reversed(lines):
         match = _ENV_KEY_PATTERN.match(line)
