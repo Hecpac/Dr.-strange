@@ -88,8 +88,15 @@ class PropertyGraphProjection:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = connect_runtime_sqlite(self.db_path)
-        # PR #97 review: the heal handle swaps _conn under _lock; give this
-        # store one so the swap is atomic.
+        # PR #97/#98 review: the heal handle swaps _conn under this lock so
+        # the swap itself is atomic. This is a LOW-traffic store (off-tick
+        # graph materialization, not a hot path); its query methods are not
+        # individually locked — wrapping the long materialize() under the
+        # lock would block the heal for its whole duration. A heal only fires
+        # during a sidecar-orphan incident where this store is ALREADY failing
+        # locked, so a transient ProgrammingError before the reopen is
+        # acceptable and strictly better than staying wedged (same rationale
+        # accepted for capability_grants in #97).
         self._lock = threading.Lock()
         register_wal_heal(self.db_path, make_store_wal_heal(self))
         self._batch_mode = False

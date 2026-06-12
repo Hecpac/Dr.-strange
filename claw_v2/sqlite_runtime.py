@@ -83,8 +83,13 @@ def _registry_key(db_path: Path | str) -> str:
 
 def register_wal_heal(db_path: Path | str, handle: "StoreWalHealHandle") -> None:
     """Register a close/reopen handle for one store's connection to ``db_path``."""
+    key = _registry_key(db_path)
     with _WAL_HEAL_REGISTRY_LOCK:
-        _WAL_HEAL_REGISTRY.setdefault(_registry_key(db_path), []).append(handle)
+        bucket = _WAL_HEAL_REGISTRY.setdefault(key, [])
+        # Prune dead (gc'd) handles on every registration so repeated
+        # create/destroy cycles (large test suites) never accumulate.
+        bucket[:] = [h for h in bucket if h.alive]
+        bucket.append(handle)
 
 
 class StoreWalHealHandle:
@@ -211,8 +216,9 @@ def heal_orphaned_wal(db_path: Path | str) -> bool:
     # A reopen attempt that raced the unlink can leave an EMPTY recreated
     # -wal without its -shm; that husk makes every subsequent open fail with
     # "disk I/O error". Empty means zero frames, so removing it loses nothing.
-    wal = Path(f"{Path(db_path)}-wal")
-    shm = Path(f"{Path(db_path)}-shm")
+    # Use the resolved key so a relative/~ db_path targets the right files.
+    wal = Path(f"{key}-wal")
+    shm = Path(f"{key}-shm")
     try:
         if wal.exists() and not shm.exists() and wal.stat().st_size == 0:
             wal.unlink()

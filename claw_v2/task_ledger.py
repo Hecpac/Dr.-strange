@@ -13,6 +13,7 @@ from claw_v2.sqlite_runtime import (
     connect_runtime_sqlite,
     heal_orphaned_wal,
     make_store_wal_heal,
+    note_wal_generation,
     register_wal_heal,
 )
 from claw_v2.task_completion import (
@@ -316,8 +317,11 @@ class TaskLedger:
             except sqlite3.OperationalError as exc:
                 if "locked" not in str(exc).lower():
                     raise
+                # rollback must run under the same lock as the writes
+                # (sqlite3.Connection is not thread-safe across methods).
                 try:
-                    self._conn.rollback()
+                    with self._lock:
+                        self._conn.rollback()
                 except Exception:
                     pass
                 if write_attempt >= _TERMINAL_WRITE_LOCKED_ATTEMPTS:
@@ -397,6 +401,7 @@ class TaskLedger:
                 ),
             )
             self._conn.commit()
+        note_wal_generation(self.db_path)
         return None
 
     def mark_running_checkpoint(
