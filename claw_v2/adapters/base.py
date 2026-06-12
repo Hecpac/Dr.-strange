@@ -169,6 +169,15 @@ class ProviderAdapter(ABC):
     def complete(self, request: LLMRequest) -> LLMResponse:
         raise NotImplementedError
 
+    def owns_session_id(self, session_id: str) -> bool:
+        """Whether ``session_id`` is a session cursor this adapter minted.
+
+        D5 (2026-06-12): the router asks the adapter instead of hardcoding
+        provider id formats. Default False — a foreign session id must be
+        dropped on cross-provider fallback, never replayed.
+        """
+        return False
+
 
 def _finite_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))

@@ -49,6 +49,10 @@ class OpenAIAdapter(ProviderAdapter):
     def tool_capable(self) -> bool:  # type: ignore[override]
         return bool(self._tool_executor and self._tool_schemas)
 
+    def owns_session_id(self, session_id: str) -> bool:
+        # OpenAI Responses session cursors are response ids (resp_*/resp-*).
+        return _is_openai_response_id(session_id)
+
     def complete(self, request: LLMRequest) -> LLMResponse:
         if self._transport is not None:
             try:
@@ -350,10 +354,14 @@ def _request_without_session(request: LLMRequest) -> LLMRequest:
     return replace(request, session_id=None, evidence_pack=evidence)
 
 
+def _is_openai_response_id(session_id: str) -> bool:
+    return session_id.startswith("resp_") or session_id.startswith("resp-")
+
+
 def _valid_previous_response_id(session_id: str | None) -> str | None:
     if not session_id:
         return None
-    if session_id.startswith("resp_") or session_id.startswith("resp-"):
+    if _is_openai_response_id(session_id):
         return session_id
     logger.warning("Ignoring non-OpenAI previous_response_id: %s", session_id[:32])
     return None

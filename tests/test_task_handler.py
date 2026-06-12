@@ -19,7 +19,7 @@ class _BlockingCoordinator:
         self.started = threading.Event()
         self.release = threading.Event()
 
-    def run(self, task_id, objective, research_tasks, implementation_tasks=None, verification_tasks=None, lane_overrides=None):
+    def run(self, task_id, objective, research_tasks, implementation_tasks=None, verification_tasks=None, lane_overrides=None, **kwargs):
         self.started.set()
         self.release.wait(timeout=2)
         return CoordinatorResult(
@@ -248,6 +248,7 @@ class TaskHandlerTests(unittest.TestCase):
                     implementation_tasks=None,
                     verification_tasks=None,
                     lane_overrides=None,
+                    **kwargs,
                 ):
                     return CoordinatorResult(
                         task_id=task_id,
@@ -315,6 +316,7 @@ class TaskHandlerTests(unittest.TestCase):
                     implementation_tasks=None,
                     verification_tasks=None,
                     lane_overrides=None,
+                    **kwargs,
                 ):
                     recorded["implementation_tasks"] = implementation_tasks
                     recorded["research_tasks"] = research_tasks
@@ -371,6 +373,204 @@ class TaskHandlerTests(unittest.TestCase):
             )
             events = [event["event_type"] for event in observe.recent_events(limit=50)]
             self.assertIn("autonomous_task_started", events)
+
+
+class ResumeWiringTests(unittest.TestCase):
+    """F3.1 — a resumed coordinated task passes the detected start_phase."""
+
+    def _handler_with_recording_coordinator(self, root: Path, recorded: dict):
+        memory = MemoryStore(root / "claw.db")
+        observe = ObserveStream(root / "observe.db")
+
+        class _RecordingCoordinator:
+            def detect_resume_phase(self, task_id):
+                recorded["detect_task_id"] = task_id
+                return "implementation"
+
+            def run(
+                self,
+                task_id,
+                objective,
+                research_tasks,
+                implementation_tasks=None,
+                verification_tasks=None,
+                lane_overrides=None,
+                **kwargs,
+            ):
+                recorded["start_phase"] = kwargs.get("start_phase")
+                recorded["should_abort"] = kwargs.get("should_abort")
+                return CoordinatorResult(
+                    task_id=task_id,
+                    phase_results={
+                        "verification": [
+                            WorkerResult(
+                                task_name="verify_change",
+                                content="Verification Status: passed",
+                                duration_seconds=0.1,
+                            )
+                        ]
+                    },
+                    synthesis="done",
+                )
+
+        handler = TaskHandler(
+            coordinator=_RecordingCoordinator(),
+            observe=observe,
+            get_session_state=memory.get_session_state,
+            update_session_state=memory.update_session_state,
+        )
+        return handler
+
+    def test_resumed_run_passes_detected_start_phase_and_abort_callback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorded: dict = {}
+            handler = self._handler_with_recording_coordinator(Path(tmpdir), recorded)
+            handler._run_coordinated_task(
+                "tg-1", "objetivo", mode="coding", forced=False, task_id="t-99", resumed=True
+            )
+            self.assertEqual(recorded["detect_task_id"], "t-99")
+            self.assertEqual(recorded["start_phase"], "implementation")
+            self.assertTrue(callable(recorded["should_abort"]))
+            self.assertFalse(recorded["should_abort"]())
+            with handler._task_lock:
+                handler._cancelled_tasks.add("t-99")
+            self.assertTrue(recorded["should_abort"]())
+
+    def test_fresh_run_passes_no_start_phase(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorded: dict = {}
+            handler = self._handler_with_recording_coordinator(Path(tmpdir), recorded)
+            handler._run_coordinated_task(
+                "tg-1", "objetivo", mode="coding", forced=False, task_id="t-100"
+            )
+            self.assertIsNone(recorded["start_phase"])
+            self.assertNotIn("detect_task_id", recorded)
+
+
+class StaleMessageTests(unittest.TestCase):
+    """AM-STALEMSG — the terminal message is formatted AFTER the gates."""
+
+    def test_gate_downgraded_task_notifies_failure_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            memory = MemoryStore(root / "claw.db")
+            observe = ObserveStream(root / "observe.db")
+            ledger = TaskLedger(root / "claw.db", observe=observe)
+            jobs = JobService(root / "claw.db", observe=observe)
+            stored: list[tuple[str, str, str]] = []
+
+            class _BlockedCoordinator:
+                def run(
+                    self,
+                    task_id,
+                    objective,
+                    research_tasks,
+                    implementation_tasks=None,
+                    verification_tasks=None,
+                    lane_overrides=None,
+                    **kwargs,
+                ):
+                    return CoordinatorResult(
+                        task_id=task_id,
+                        phase_results={
+                            "verification": [
+                                WorkerResult(
+                                    task_name="verify_change",
+                                    content=(
+                                        "Verification Status: pending\n"
+                                        "Siguiente paso: solicitar al usuario el enlace del documento"
+                                    ),
+                                    duration_seconds=0.1,
+                                )
+                            ]
+                        },
+                        synthesis="plan listo",
+                    )
+
+            handler = TaskHandler(
+                coordinator=_BlockedCoordinator(),
+                observe=observe,
+                task_ledger=ledger,
+                job_service=jobs,
+                get_session_state=memory.get_session_state,
+                update_session_state=memory.update_session_state,
+                store_message=lambda sid, role, text: stored.append((sid, role, text)),
+                workspace_root=root,
+            )
+            ack = handler.start_autonomous_task("tg-1", "implementa el informe", mode="coding")
+            task_id = ack.split("`", 2)[1]
+            self.assertTrue(handler.wait_for_task(task_id, timeout=5))
+
+            events = observe.recent_events(limit=200)
+            failed = next(e for e in events if e["event_type"] == "autonomous_task_failed")
+            self.assertIn("No pude cerrar bien la tarea", failed["payload"]["response"])
+            self.assertNotIn("Listo. Cerr", failed["payload"]["response"])
+            # AM-NOTIFY: terminal events carry the attempt for per-attempt dedupe.
+            self.assertIn("attempt", failed["payload"])
+            assistant_texts = [text for _sid, role, text in stored if role == "assistant"]
+            self.assertTrue(assistant_texts, "assistant message must be stored")
+            self.assertTrue(
+                assistant_texts[-1].startswith("No pude cerrar bien la tarea"),
+                assistant_texts[-1],
+            )
+
+
+class TaskQueueVocabularyTests(unittest.TestCase):
+    """AM-VOCAB — every queue write goes through the single status map."""
+
+    def test_upsert_normalizes_cross_vocabulary_statuses(self) -> None:
+        for raw, expected in (
+            ("passed", "done"),
+            ("succeeded", "done"),
+            ("failed", "blocked"),
+            ("awaiting_approval", "blocked"),
+            ("unknown", "pending"),
+            ("running", "in_progress"),
+            ("deferred", "deferred"),
+        ):
+            queue = TaskHandler.upsert_task_queue_entry(
+                [],
+                summary=f"tarea {raw}",
+                mode="coding",
+                status=raw,
+                source="coordinator",
+                priority=0,
+            )
+            self.assertEqual(queue[0]["status"], expected, raw)
+
+    def test_set_task_queue_status_normalizes(self) -> None:
+        queue = [{"task_id": "x", "summary": "s", "status": "pending", "priority": 1}]
+        updated = TaskHandler.set_task_queue_status(queue, task_id="x", to_status="succeeded")
+        self.assertEqual(updated[0]["status"], "done")
+        updated = TaskHandler.set_task_queue_status(queue, task_id="x", to_status="deferred")
+        self.assertEqual(updated[0]["status"], "deferred")
+
+    def test_task_attempt_reads_ledger_resume_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            memory = MemoryStore(root / "claw.db")
+            observe = ObserveStream(root / "observe.db")
+            ledger = TaskLedger(root / "claw.db", observe=observe)
+            handler = TaskHandler(
+                coordinator=None,
+                observe=observe,
+                task_ledger=ledger,
+                get_session_state=memory.get_session_state,
+                update_session_state=memory.update_session_state,
+            )
+            self.assertEqual(handler._task_attempt("missing"), 0)
+            ledger.create(
+                task_id="t-attempt",
+                session_id="tg-1",
+                objective="obj",
+                mode="coding",
+                runtime="coordinator",
+                provider="anthropic",
+                model="m",
+                status="running",
+                metadata={"resume_count": 2},
+            )
+            self.assertEqual(handler._task_attempt("t-attempt"), 2)
 
 
 if __name__ == "__main__":

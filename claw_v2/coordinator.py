@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
+import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from claw_v2.adapters.base import AdapterError
 from claw_v2.redaction import redact_text
@@ -23,6 +26,10 @@ MECHANICAL_TRUNCATION_SIGNATURE = (
     "Los datos intermedios fueron omitidos]"
 )
 HEAD_TAIL_PRESERVE_CHARS = 2_000
+PHASE_ORDER = ("research", "synthesis", "implementation", "verification")
+IMPLEMENTATION_STARTED_MARKER = "implementation.started"
+DEFAULT_SCRATCH_RETENTION_DAYS = 14.0
+_SCRATCH_PRUNE_MAX_DIRS = 50
 
 
 @dataclass(slots=True)
@@ -81,10 +88,12 @@ class CoordinatorService:
         default_research_timeout_seconds: float = 90.0,
         default_verification_timeout_seconds: float = 60.0,
         default_implementation_timeout_seconds: float = 180.0,
+        scratch_retention_days: float = DEFAULT_SCRATCH_RETENTION_DAYS,
     ) -> None:
         self.router = router
         self.observe = observe
         self.scratch_root = Path(scratch_root)
+        self.scratch_retention_days = float(scratch_retention_days)
         self.max_workers = max_workers
         self.agent_registry = agent_registry or {}
         self.orchestration_store = orchestration_store
@@ -103,6 +112,10 @@ class CoordinatorService:
         implementation_tasks: list[WorkerTask] | None = None,
         verification_tasks: list[WorkerTask] | None = None,
         lane_overrides: dict[str, dict[str, Any]] | None = None,
+        *,
+        start_phase: str | None = None,
+        should_abort: Callable[[], bool] | None = None,
+        allow_implementation_rerun: bool = False,
     ) -> CoordinatorResult:
         """Execute the full coordinator cycle.
 
@@ -110,12 +123,27 @@ class CoordinatorService:
         2. Synthesis  — coordinator merges findings into a plan
         3. Implementation — parallel workers execute the plan (optional)
         4. Verification   — parallel workers validate results (optional)
+
+        F3.1 (2026-06-12): ``start_phase`` resumes a killed run — phases
+        before it load their artifacts from scratch instead of re-executing.
+        Implementation (the phase with external side effects) is gated: if a
+        previous attempt started it without persisting completed results, a
+        resumed run fails closed with ``implementation_rerun_blocked`` unless
+        ``allow_implementation_rerun`` is set. AM-CANCEL: ``should_abort`` is
+        checked at every phase boundary.
         """
+        if start_phase is not None and start_phase not in PHASE_ORDER:
+            raise ValueError(f"start_phase must be one of {PHASE_ORDER}, got {start_phase!r}")
         start = time.time()
+        self._prune_stale_scratch_dirs(keep_task_id=task_id)
         scratch = self._ensure_scratch(task_id)
         result = CoordinatorResult(task_id=task_id)
         trace = new_trace_context(job_id=task_id, artifact_id=task_id)
         orchestration_run_id = task_id
+        start_rank = PHASE_ORDER.index(start_phase) if start_phase else 0
+
+        def _phase_resumable(phase: str) -> bool:
+            return PHASE_ORDER.index(phase) < start_rank
 
         try:
             self._orchestration_begin_run(
@@ -133,95 +161,215 @@ class CoordinatorService:
                 parent_span_id=trace["parent_span_id"],
                 job_id=trace["job_id"],
                 artifact_id=trace["artifact_id"],
-                payload={"task_id": task_id, "objective": objective},
+                payload={"task_id": task_id, "objective": objective, "start_phase": start_phase},
             )
             # Phase 1: Research
-            self._orchestration_begin_phase(orchestration_run_id, "research", trace)
-            research_results = self._dispatch_parallel(
-                self._with_phase_timeout(research_tasks, self.default_research_timeout_seconds),
-                trace,
-                lane_overrides=lane_overrides,
-            )
-            result.phase_results["research"] = research_results
-            self._write_scratch(scratch, "research", research_results)
-            research_artifact_id = self._orchestration_record_phase_results(
-                orchestration_run_id,
-                phase="research",
-                results=research_results,
-                producer_role="research_workers",
-                consumer_role="coordinator_synthesis",
-                trace_context=trace,
-            )
-            self._orchestration_ack(research_artifact_id, consumer_role="coordinator_synthesis")
-            self._orchestration_require_ack(research_artifact_id, consumer_role="coordinator_synthesis")
-            self._orchestration_checkpoint(
-                orchestration_run_id,
-                phase="research",
-                reason="research_phase_completed",
-                artifact_ids=[research_artifact_id] if research_artifact_id else [],
-            )
-            self._orchestration_finish_phase(
-                orchestration_run_id,
-                "research",
-                trace,
-                results=research_results,
-            )
-            critical = _critical_worker_result(research_results)
-            if critical is not None:
-                return self._complete_critical_worker_run(
-                    result=result,
-                    objective=objective,
+            research_results: list[WorkerResult] = []
+            if _phase_resumable("research"):
+                research_results = self._load_scratch_results(task_id, "research")
+                if research_results:
+                    result.phase_results["research"] = research_results
+                    self._emit_phase_resumed_from_scratch(trace, task_id, "research", len(research_results))
+                    # A kill between _write_scratch and the self-healing path
+                    # can persist a critical artifact: re-check loaded results
+                    # so a resume never proceeds past a critical worker error.
+                    critical = _critical_worker_result(research_results)
+                    if critical is not None:
+                        return self._complete_critical_worker_run(
+                            result=result,
+                            objective=objective,
+                            phase="research",
+                            critical_result=critical,
+                            collected_results=research_results,
+                            scratch=scratch,
+                            orchestration_run_id=orchestration_run_id,
+                            trace_context=trace,
+                            lane_overrides=lane_overrides,
+                            start_time=start,
+                        )
+            if not result.phase_results.get("research"):
+                self._orchestration_begin_phase(orchestration_run_id, "research", trace)
+                research_results = self._dispatch_parallel(
+                    self._with_phase_timeout(research_tasks, self.default_research_timeout_seconds),
+                    trace,
+                    lane_overrides=lane_overrides,
+                )
+                result.phase_results["research"] = research_results
+                self._write_scratch(scratch, "research", research_results)
+                research_artifact_id = self._orchestration_record_phase_results(
+                    orchestration_run_id,
                     phase="research",
-                    critical_result=critical,
-                    collected_results=research_results,
-                    scratch=scratch,
+                    results=research_results,
+                    producer_role="research_workers",
+                    consumer_role="coordinator_synthesis",
+                    trace_context=trace,
+                )
+                self._orchestration_ack(research_artifact_id, consumer_role="coordinator_synthesis")
+                self._orchestration_require_ack(research_artifact_id, consumer_role="coordinator_synthesis")
+                self._orchestration_checkpoint(
+                    orchestration_run_id,
+                    phase="research",
+                    reason="research_phase_completed",
+                    artifact_ids=[research_artifact_id] if research_artifact_id else [],
+                )
+                self._orchestration_finish_phase(
+                    orchestration_run_id,
+                    "research",
+                    trace,
+                    results=research_results,
+                )
+                critical = _critical_worker_result(research_results)
+                if critical is not None:
+                    return self._complete_critical_worker_run(
+                        result=result,
+                        objective=objective,
+                        phase="research",
+                        critical_result=critical,
+                        collected_results=research_results,
+                        scratch=scratch,
+                        orchestration_run_id=orchestration_run_id,
+                        trace_context=trace,
+                        lane_overrides=lane_overrides,
+                        start_time=start,
+                    )
+
+            if self._abort_requested(should_abort):
+                return self._complete_cancelled_run(
+                    result=result,
+                    next_phase="synthesis",
                     orchestration_run_id=orchestration_run_id,
                     trace_context=trace,
-                    lane_overrides=lane_overrides,
                     start_time=start,
                 )
 
             # Phase 2: Synthesis
-            self._orchestration_begin_phase(orchestration_run_id, "synthesis", trace)
-            synthesis = self._synthesize(objective, research_results, trace, lane_overrides=lane_overrides)
-            result.synthesis = synthesis
-            self._write_scratch_text(scratch, "synthesis.md", synthesis)
-            if implementation_tasks:
-                synthesis_consumer = "implementation_workers"
-            elif verification_tasks:
-                synthesis_consumer = "verification_workers"
-            else:
-                synthesis_consumer = "coordinator_result"
-            synthesis_artifact_id = self._orchestration_record_text_artifact(
-                orchestration_run_id,
-                phase="synthesis",
-                artifact_type="synthesis",
-                content=synthesis,
-                producer_role="coordinator_synthesis",
-                consumer_role=synthesis_consumer,
-                trace_context=trace,
-            )
-            self._orchestration_ack(synthesis_artifact_id, consumer_role=synthesis_consumer)
-            self._orchestration_require_ack(synthesis_artifact_id, consumer_role=synthesis_consumer)
+            synthesis = ""
+            synthesis_artifact_id: str | None = None
+            if _phase_resumable("synthesis"):
+                synthesis = self._load_scratch_text(task_id, "synthesis.md")
+                if synthesis:
+                    result.synthesis = synthesis
+                    self._emit_phase_resumed_from_scratch(trace, task_id, "synthesis", 1)
+            if not synthesis:
+                self._orchestration_begin_phase(orchestration_run_id, "synthesis", trace)
+                synthesis = self._synthesize(objective, research_results, trace, lane_overrides=lane_overrides)
+                result.synthesis = synthesis
+                self._write_scratch_text(scratch, "synthesis.md", synthesis)
+                if implementation_tasks:
+                    synthesis_consumer = "implementation_workers"
+                elif verification_tasks:
+                    synthesis_consumer = "verification_workers"
+                else:
+                    synthesis_consumer = "coordinator_result"
+                synthesis_artifact_id = self._orchestration_record_text_artifact(
+                    orchestration_run_id,
+                    phase="synthesis",
+                    artifact_type="synthesis",
+                    content=synthesis,
+                    producer_role="coordinator_synthesis",
+                    consumer_role=synthesis_consumer,
+                    trace_context=trace,
+                )
+                self._orchestration_ack(synthesis_artifact_id, consumer_role=synthesis_consumer)
+                self._orchestration_require_ack(synthesis_artifact_id, consumer_role=synthesis_consumer)
+                self._orchestration_checkpoint(
+                    orchestration_run_id,
+                    phase="synthesis",
+                    reason="synthesis_phase_completed",
+                    artifact_ids=[synthesis_artifact_id] if synthesis_artifact_id else [],
+                )
+                self._orchestration_finish_phase(
+                    orchestration_run_id,
+                    "synthesis",
+                    trace,
+                    payload={
+                        "content_length": len(synthesis or ""),
+                        "synthesis_empty": not (synthesis or "").strip(),
+                    },
+                )
             synthesis_artifact_ref = synthesis_artifact_id or str(scratch / "synthesis.md")
             synthesis_summary = _compact_text(synthesis, limit=self.phase_input_summary_chars)
-            self._orchestration_checkpoint(
-                orchestration_run_id,
-                phase="synthesis",
-                reason="synthesis_phase_completed",
-                artifact_ids=[synthesis_artifact_id] if synthesis_artifact_id else [],
-            )
-            self._orchestration_finish_phase(
-                orchestration_run_id,
-                "synthesis",
-                trace,
-                payload={"content_length": len(synthesis or "")},
-            )
+            synthesis_empty = not (synthesis or "").strip()
+            if synthesis_empty:
+                # AM-SYNTH (2026-06-12): an empty synthesis used to degrade in
+                # silence — downstream phases consumed "none" as their plan and
+                # every phase still closed succeeded. Make it visible: audit
+                # flag + event here, "Advertencia de Contexto" downstream.
+                result.audit = {**result.audit, "synthesis_empty": True}
+                self.observe.emit(
+                    "coordinator_synthesis_empty",
+                    trace_id=trace["trace_id"],
+                    root_trace_id=trace["root_trace_id"],
+                    span_id=trace["span_id"],
+                    parent_span_id=trace["parent_span_id"],
+                    job_id=trace["job_id"],
+                    artifact_id=trace["artifact_id"],
+                    payload={"task_id": task_id, "objective": objective[:300]},
+                )
 
             # Phase 3: Implementation (optional)
             impl_results: list[WorkerResult] = []
             impl_artifact_id: str | None = None
             if implementation_tasks:
+                if self._abort_requested(should_abort):
+                    return self._complete_cancelled_run(
+                        result=result,
+                        next_phase="implementation",
+                        orchestration_run_id=orchestration_run_id,
+                        trace_context=trace,
+                        start_time=start,
+                    )
+                if _phase_resumable("implementation"):
+                    impl_results = self._load_scratch_results(task_id, "implementation")
+                    if impl_results:
+                        result.phase_results["implementation"] = impl_results
+                        self._emit_phase_resumed_from_scratch(
+                            trace, task_id, "implementation", len(impl_results)
+                        )
+                        critical = _critical_worker_result(impl_results)
+                        if critical is not None:
+                            return self._complete_critical_worker_run(
+                                result=result,
+                                objective=objective,
+                                phase="implementation",
+                                critical_result=critical,
+                                collected_results=research_results + impl_results,
+                                scratch=scratch,
+                                orchestration_run_id=orchestration_run_id,
+                                trace_context=trace,
+                                lane_overrides=lane_overrides,
+                                start_time=start,
+                            )
+            if implementation_tasks and not result.phase_results.get("implementation"):
+                started_marker = scratch / IMPLEMENTATION_STARTED_MARKER
+                if start_phase is not None and started_marker.exists() and not allow_implementation_rerun:
+                    # F3.1 gate: a previous attempt started implementation but
+                    # never persisted completed results — partial external side
+                    # effects are possible. Re-execution must be an explicit
+                    # decision, never an automatic replay.
+                    result.error = "implementation_rerun_blocked"
+                    result.duration_seconds = time.time() - start
+                    self.observe.emit(
+                        "coordinator_implementation_rerun_blocked",
+                        trace_id=trace["trace_id"],
+                        root_trace_id=trace["root_trace_id"],
+                        span_id=trace["span_id"],
+                        parent_span_id=trace["parent_span_id"],
+                        job_id=trace["job_id"],
+                        artifact_id=trace["artifact_id"],
+                        payload={"task_id": task_id, "marker": str(started_marker)},
+                    )
+                    self._orchestration_complete_run(
+                        orchestration_run_id,
+                        status="failed",
+                        reason=result.error,
+                        trace_context=trace,
+                    )
+                    return result
+                started_marker.write_text(
+                    json.dumps({"task_id": task_id, "started_at": time.time()}),
+                    encoding="utf-8",
+                )
                 self._orchestration_begin_phase(orchestration_run_id, "implementation", trace)
                 impl_tasks = self._inject_context(
                     self._with_phase_timeout(implementation_tasks, self.default_implementation_timeout_seconds),
@@ -229,7 +377,7 @@ class CoordinatorService:
                     input_artifact_ref=synthesis_artifact_ref,
                     input_summary=synthesis_summary,
                     phase_input_summary_chars=self.phase_input_summary_chars,
-                    degraded=any(r.degraded_compaction for r in research_results),
+                    degraded=any(r.degraded_compaction for r in research_results) or synthesis_empty,
                 )
                 impl_results = self._dispatch_parallel(impl_tasks, trace, lane_overrides=lane_overrides)
                 result.phase_results["implementation"] = impl_results
@@ -273,6 +421,14 @@ class CoordinatorService:
 
             # Phase 4: Verification (optional)
             if verification_tasks:
+                if self._abort_requested(should_abort):
+                    return self._complete_cancelled_run(
+                        result=result,
+                        next_phase="verification",
+                        orchestration_run_id=orchestration_run_id,
+                        trace_context=trace,
+                        start_time=start,
+                    )
                 self._orchestration_begin_phase(orchestration_run_id, "verification", trace)
                 verification_input_ref = synthesis_artifact_ref
                 verification_input_summary = synthesis_summary
@@ -293,7 +449,8 @@ class CoordinatorService:
                     degraded=any(
                         r.degraded_compaction
                         for r in (impl_results if impl_results else research_results)
-                    ),
+                    )
+                    or synthesis_empty,
                 )
                 verify_results = self._dispatch_parallel(verify_tasks, trace, lane_overrides=lane_overrides)
                 result.phase_results["verification"] = verify_results
@@ -652,17 +809,39 @@ class CoordinatorService:
     ) -> str:
         if not results:
             return "none"
+        # AM-DISTILL (2026-06-12): each oversized worker result triggers an
+        # LLM distillation call; they ran serially between phases. Summarize
+        # per worker result concurrently (order preserved via submit order).
+        if len(results) == 1:
+            summaries = [
+                self._worker_result_summary(
+                    results[0],
+                    limit=self.worker_result_summary_chars,
+                    trace_context=trace_context,
+                    lane_overrides=lane_overrides,
+                )
+            ]
+        else:
+            with ThreadPoolExecutor(max_workers=min(self.max_workers, len(results))) as pool:
+                futures = [
+                    pool.submit(
+                        contextvars.copy_context().run,
+                        partial(
+                            self._worker_result_summary,
+                            item,
+                            limit=self.worker_result_summary_chars,
+                            trace_context=trace_context,
+                            lane_overrides=lane_overrides,
+                        ),
+                    )
+                    for item in results
+                ]
+                summaries = [future.result() for future in futures]
         lines: list[str] = []
         critical_present = False
-        for result in results:
+        for result, (summary, degraded) in zip(results, summaries):
             if _has_critical_worker_error(result):
                 critical_present = True
-            summary, degraded = self._worker_result_summary(
-                result,
-                limit=self.worker_result_summary_chars,
-                trace_context=trace_context,
-                lane_overrides=lane_overrides,
-            )
             if degraded:
                 result.degraded_compaction = True
             lines.append(f"- {result.task_name}: {summary}")
@@ -841,6 +1020,144 @@ class CoordinatorService:
         scratch = self.scratch_root / task_id
         scratch.mkdir(parents=True, exist_ok=True)
         return scratch
+
+    def detect_resume_phase(self, task_id: str) -> str:
+        """Return the first phase whose completed artifacts are missing (F3.1).
+
+        Scratch artifacts are written when a phase COMPLETES, so their
+        presence proves the phase finished in a previous attempt.
+        """
+        if not self._load_scratch_results(task_id, "research"):
+            return "research"
+        if not self._load_scratch_text(task_id, "synthesis.md").strip():
+            return "synthesis"
+        if not self._load_scratch_results(task_id, "implementation"):
+            return "implementation"
+        return "verification"
+
+    def _load_scratch_results(self, task_id: str, phase: str) -> list[WorkerResult]:
+        phase_dir = self.scratch_root / task_id / phase
+        if not phase_dir.is_dir():
+            return []
+        results: list[WorkerResult] = []
+        for path in sorted(phase_dir.glob("*.json")):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                logger.warning("Skipping corrupt scratch artifact %s", path)
+                continue
+            if not isinstance(data, dict):
+                continue
+            results.append(
+                WorkerResult(
+                    task_name=str(data.get("task_name") or path.stem),
+                    content=str(data.get("content") or ""),
+                    duration_seconds=float(data.get("duration_seconds") or 0.0),
+                    error=str(data.get("error") or ""),
+                    degraded_compaction=bool(data.get("degraded_compaction")),
+                )
+            )
+        return results
+
+    def _load_scratch_text(self, task_id: str, filename: str) -> str:
+        try:
+            return (self.scratch_root / task_id / filename).read_text(encoding="utf-8")
+        except OSError:
+            return ""
+
+    def _emit_phase_resumed_from_scratch(
+        self,
+        trace_context: dict[str, Any],
+        task_id: str,
+        phase: str,
+        artifact_count: int,
+    ) -> None:
+        self.observe.emit(
+            "coordinator_phase_resumed_from_scratch",
+            trace_id=trace_context["trace_id"],
+            root_trace_id=trace_context["root_trace_id"],
+            span_id=trace_context["span_id"],
+            parent_span_id=trace_context["parent_span_id"],
+            job_id=trace_context["job_id"],
+            artifact_id=trace_context["artifact_id"],
+            payload={"task_id": task_id, "phase": phase, "artifacts": artifact_count},
+        )
+
+    def _abort_requested(self, should_abort: Callable[[], bool] | None) -> bool:
+        if should_abort is None:
+            return False
+        try:
+            return bool(should_abort())
+        except Exception:
+            logger.debug("should_abort callback failed", exc_info=True)
+            return False
+
+    def _complete_cancelled_run(
+        self,
+        *,
+        result: CoordinatorResult,
+        next_phase: str,
+        orchestration_run_id: str,
+        trace_context: dict[str, Any],
+        start_time: float,
+    ) -> CoordinatorResult:
+        """AM-CANCEL: stop at a phase boundary without starting the next phase."""
+        result.error = f"cancelled_at_phase_boundary:{next_phase}"
+        result.duration_seconds = time.time() - start_time
+        self.observe.emit(
+            "coordinator_cancelled",
+            trace_id=trace_context["trace_id"],
+            root_trace_id=trace_context["root_trace_id"],
+            span_id=trace_context["span_id"],
+            parent_span_id=trace_context["parent_span_id"],
+            job_id=trace_context["job_id"],
+            artifact_id=trace_context["artifact_id"],
+            payload={
+                "task_id": result.task_id,
+                "next_phase": next_phase,
+                "phases_completed": list(result.phase_results.keys()),
+            },
+        )
+        self._orchestration_complete_run(
+            orchestration_run_id,
+            status="failed",
+            reason=result.error,
+            trace_context=trace_context,
+        )
+        return result
+
+    def _prune_stale_scratch_dirs(self, *, keep_task_id: str) -> None:
+        """Best-effort retention sweep of old task scratch dirs (F3.1).
+
+        Bounded (at most _SCRATCH_PRUNE_MAX_DIRS per run) and failure-tolerant;
+        runs in the coordinator worker thread at run() start, never in
+        daemon.tick. The current task's dir is always kept.
+        """
+        if self.scratch_retention_days <= 0:
+            return
+        cutoff = time.time() - self.scratch_retention_days * 86_400
+        try:
+            candidates = sorted(self.scratch_root.iterdir())
+        except OSError:
+            return
+        removed = 0
+        for path in candidates:
+            if removed >= _SCRATCH_PRUNE_MAX_DIRS:
+                break
+            if path.name == keep_task_id or not path.is_dir():
+                continue
+            try:
+                if path.stat().st_mtime >= cutoff:
+                    continue
+                shutil.rmtree(path)
+                removed += 1
+            except OSError:
+                continue
+        if removed:
+            self.observe.emit(
+                "coordinator_scratch_pruned",
+                payload={"removed_dirs": removed, "retention_days": self.scratch_retention_days},
+            )
 
     def _orchestration_begin_run(
         self,

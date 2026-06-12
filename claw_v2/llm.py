@@ -228,7 +228,7 @@ class LLMRouter:
                     **asdict(request),
                     "provider": fallback_provider,
                     "model": self.config.advisory_model_for_provider(fallback_provider),
-                    "session_id": _fallback_session_id(request, fallback_provider),
+                    "session_id": _fallback_session_id(request, fallback_provider, fb_adapter),
                 }
             )
             if fallback_request.role is not None:
@@ -542,20 +542,22 @@ class LLMRouter:
                 raise ValueError(f"Lane '{lane}' cannot receive tool-loop configuration.")
 
 
-def _fallback_session_id(request: LLMRequest, fallback_provider: str) -> str | None:
-    """Return a provider-safe session cursor for fallback requests."""
+def _fallback_session_id(
+    request: LLMRequest, fallback_provider: str, fallback_adapter: ProviderAdapter
+) -> str | None:
+    """Return a provider-safe session cursor for fallback requests.
+
+    D5 (2026-06-12): the adapter owns its session-id format
+    (``ProviderAdapter.owns_session_id``); the router only asks.
+    """
     session_id = request.session_id
     if not session_id:
         return None
     if fallback_provider == request.provider:
         return session_id
-    if fallback_provider == "openai" and _looks_like_openai_response_id(session_id):
+    if fallback_adapter.owns_session_id(session_id):
         return session_id
     return None
-
-
-def _looks_like_openai_response_id(session_id: str) -> bool:
-    return session_id.startswith("resp_") or session_id.startswith("resp-")
 
 
 _INTERNAL_TOOL_TRACE_PATTERNS = (

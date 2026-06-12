@@ -146,8 +146,14 @@ def get_local_tool_success_condition(tool_name: str) -> SuccessCondition | None:
     return LOCAL_TOOL_SUCCESS_CONDITIONS.get(tool_name)
 
 
-def _resolve_contract(tool_name: str) -> SuccessCondition | None:
-    """Look up a SuccessCondition across LOCAL + EXTERNAL registries."""
+def resolve_success_condition(tool_name: str) -> SuccessCondition | None:
+    """Single contract-registry lookup across LOCAL + EXTERNAL (DV.3 / D10).
+
+    Every runtime consumer (observe_pre_state, state-delta computation,
+    attach_artifact_to_result) must resolve contracts through here instead of
+    consulting one of the two dicts directly — a LOCAL-only lookup silently
+    skipped artifact generation for Tier-3 external tools.
+    """
     local = LOCAL_TOOL_SUCCESS_CONDITIONS.get(tool_name)
     if local is not None:
         return local
@@ -156,6 +162,10 @@ def _resolve_contract(tool_name: str) -> SuccessCondition | None:
         return EXTERNAL_TOOL_SUCCESS_CONDITIONS.get(tool_name)
     except Exception:
         return None
+
+
+# Backwards-compatible internal alias (pre-D10 name).
+_resolve_contract = resolve_success_condition
 
 
 # ---------------------------------------------------------------------------
