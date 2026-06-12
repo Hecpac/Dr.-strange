@@ -294,7 +294,14 @@ class TaskLedger:
         # silently (no close, no notification — the user waited forever).
         # Bounded retry with backoff; on persistent locks try the WAL
         # generation heal, and fail VISIBLY if the write still cannot land.
-        for write_attempt in range(1, _TERMINAL_WRITE_LOCKED_ATTEMPTS + 1):
+        # PR #97 review (gemini, crítico): exhaustion must ALWAYS raise — a
+        # heal on the last attempt previously fell out of the loop without
+        # writing OR raising, and mark_terminal continued as if it had closed
+        # the task. The heal grants exactly one fresh retry budget.
+        wal_heal_attempted = False
+        write_attempt = 0
+        while True:
+            write_attempt += 1
             try:
                 blocked_status = self._terminal_write_once(
                     task_id,
@@ -313,9 +320,11 @@ class TaskLedger:
                     self._conn.rollback()
                 except Exception:
                     pass
-                if heal_orphaned_wal(self.db_path):
-                    continue
                 if write_attempt >= _TERMINAL_WRITE_LOCKED_ATTEMPTS:
+                    if not wal_heal_attempted and heal_orphaned_wal(self.db_path):
+                        wal_heal_attempted = True
+                        write_attempt = 0
+                        continue
                     self._emit(
                         "task_terminal_write_contention",
                         {

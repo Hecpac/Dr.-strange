@@ -12,7 +12,10 @@ from claw_v2.sqlite_runtime import (
     connect_runtime_sqlite,
     heal_orphaned_wal,
     make_store_wal_heal,
+    note_wal_generation,
     register_wal_heal,
+    wal_generation_stamp_missing,
+    wal_sidecars_orphaned,
 )
 from claw_v2.turn_context import (
     CRITICAL_OBSERVE_EVENTS_REQUIRING_TURN_ID,
@@ -208,6 +211,16 @@ class ObserveStream:
                         ),
                     )
                     self._conn.commit()
+                # Generation drift check (live drill 2026-06-12): a victim of
+                # an external sidecar swap keeps writing 'successfully' into
+                # the orphaned inode WITHOUT lock errors (void writes), so the
+                # locked-exhaust hook alone is blind. One stat per persist:
+                # stamp the generation on the first write after (re)connect,
+                # then heal as soon as the on-disk wal stops being ours.
+                if wal_generation_stamp_missing(self.db_path):
+                    note_wal_generation(self.db_path)
+                elif wal_sidecars_orphaned(self.db_path):
+                    heal_orphaned_wal(self.db_path)
                 return True
             except sqlite3.OperationalError as exc:
                 if "locked" not in str(exc).lower():

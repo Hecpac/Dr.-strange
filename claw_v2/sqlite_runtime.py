@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 import sqlite3
 import threading
+import weakref
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -32,6 +34,9 @@ def connect_runtime_sqlite(
         if row_factory:
             conn.row_factory = sqlite3.Row
         configure_runtime_sqlite(conn)
+        # A fresh connection always joins the ON-DISK WAL generation: stamp it
+        # so later writers can detect an external generation swap by inode.
+        note_wal_generation(path)
     except sqlite3.DatabaseError as exc:
         raise RuntimeDatabaseError(
             f"Runtime database is not a readable SQLite database: {path}. "
@@ -91,15 +96,25 @@ class StoreWalHealHandle:
     """
 
     def __init__(self, store: object, *, row_factory: bool = True) -> None:
-        self._store = store
+        # weakref (PR #97 review): the global registry must not leak every
+        # store instance created during the process/test-suite lifetime.
+        self._store_ref = weakref.ref(store)
         self._row_factory = row_factory
 
-    def _lock_ctx(self):
-        return getattr(self._store, "_lock", None) or _NULL_STORE_LOCK
+    @property
+    def alive(self) -> bool:
+        return self._store_ref() is not None
+
+    @staticmethod
+    def _lock_ctx(store: object):
+        return getattr(store, "_lock", None) or _NULL_STORE_LOCK
 
     def close(self) -> None:
-        with self._lock_ctx():
-            old = getattr(self._store, "_conn", None)
+        store = self._store_ref()
+        if store is None:
+            return
+        with self._lock_ctx(store):
+            old = getattr(store, "_conn", None)
             if old is not None:
                 try:
                     old.close()
@@ -107,9 +122,12 @@ class StoreWalHealHandle:
                     logger.debug("closing orphaned connection failed", exc_info=True)
 
     def reopen(self) -> None:
-        with self._lock_ctx():
-            self._store._conn = connect_runtime_sqlite(
-                self._store.db_path, row_factory=self._row_factory
+        store = self._store_ref()
+        if store is None:
+            return
+        with self._lock_ctx(store):
+            store._conn = connect_runtime_sqlite(
+                store.db_path, row_factory=self._row_factory
             )
 
 
@@ -117,20 +135,53 @@ def make_store_wal_heal(store: object, *, row_factory: bool = True) -> StoreWalH
     return StoreWalHealHandle(store, row_factory=row_factory)
 
 
-def wal_sidecars_orphaned(db_path: Path | str) -> bool:
-    """True when a non-empty DB exists but its ``-wal`` sidecar is gone.
+_WAL_GENERATION_INODES: dict[str, int] = {}
 
-    Only meaningful while connections are open in WAL mode (a live WAL
-    connection keeps the sidecar present); callers must use it from a
+
+def note_wal_generation(db_path: Path | str) -> None:
+    """Record the inode of the ``-wal`` this process is successfully writing.
+
+    Called by writers after a successful persist (one stat). Lets the orphan
+    check detect a GENERATION SWAP: an external process can delete our
+    sidecars AND leave fresh ones of its own on disk — the wal "exists" but
+    it is not the one our connections write to (live drill, 2026-06-12).
+    """
+    key = _registry_key(db_path)
+    try:
+        _WAL_GENERATION_INODES[key] = os.stat(
+            f"{Path(db_path).expanduser().resolve(strict=False)}-wal"
+        ).st_ino
+    except OSError:
+        # No wal yet (fresh DB before its first write): leave the stamp as-is;
+        # the first successful persist will stamp it.
+        pass
+
+
+def wal_generation_stamp_missing(db_path: Path | str) -> bool:
+    return _registry_key(db_path) not in _WAL_GENERATION_INODES
+
+
+def wal_sidecars_orphaned(db_path: Path | str) -> bool:
+    """True when this process's WAL generation is broken.
+
+    Either the ``-wal`` sidecar is gone from disk, or it exists with a
+    DIFFERENT inode than the one our last successful write used (an external
+    process replaced the generation under us). Only meaningful from a
     locked-error context, never as a standalone health probe.
     """
-    path = Path(db_path)
+    path = Path(db_path).expanduser().resolve(strict=False)
     try:
         if not path.exists() or path.stat().st_size == 0:
             return False
     except OSError:
         return False
-    return not Path(f"{path}-wal").exists()
+    wal = Path(f"{path}-wal")
+    try:
+        wal_inode = wal.stat().st_ino
+    except OSError:
+        return True
+    expected = _WAL_GENERATION_INODES.get(_registry_key(db_path))
+    return expected is not None and wal_inode != expected
 
 
 def heal_orphaned_wal(db_path: Path | str) -> bool:
@@ -142,8 +193,10 @@ def heal_orphaned_wal(db_path: Path | str) -> bool:
     """
     if not wal_sidecars_orphaned(db_path):
         return False
+    key = _registry_key(db_path)
     with _WAL_HEAL_REGISTRY_LOCK:
-        handles = list(_WAL_HEAL_REGISTRY.get(_registry_key(db_path), ()))
+        handles = [h for h in _WAL_HEAL_REGISTRY.get(key, ()) if h.alive]
+        _WAL_HEAL_REGISTRY[key] = handles
     logger.critical(
         "SQLite WAL sidecars for %s are missing while connections are open; "
         "reopening %d registered connection(s) to rejoin one WAL generation.",
@@ -170,6 +223,9 @@ def heal_orphaned_wal(db_path: Path | str) -> bool:
             handle.reopen()
         except Exception:
             logger.exception("WAL heal reopen failed for %s", db_path)
+    # The new generation has no wal until the first write; clear the stamp so
+    # the next successful persist records the fresh inode.
+    _WAL_GENERATION_INODES.pop(key, None)
     return True
 
 
