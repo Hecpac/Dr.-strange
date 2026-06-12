@@ -216,5 +216,170 @@ class TerminalWriteRetryTests(unittest.TestCase):
             self.assertIn("task_terminal_write_contention", events)
 
 
+class WalGenerationSwapTests(unittest.TestCase):
+    """Live drill 2026-06-12: an external process can delete our sidecars and
+    leave fresh ones of its own — the wal 'exists' but it is a different
+    generation. Detection must be by inode, not mere existence."""
+
+    def test_inode_swap_triggers_orphan_detection(self) -> None:
+        from claw_v2.sqlite_runtime import note_wal_generation
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "t.db"
+            _seed_db(db_path)
+            conn = connect_runtime_sqlite(db_path)
+            conn.execute("INSERT INTO seed VALUES (2)")
+            conn.commit()
+            note_wal_generation(db_path)
+            self.assertFalse(wal_sidecars_orphaned(db_path))
+
+            # External generation swap: our wal disappears; a different file
+            # (new inode) takes its place and STAYS on disk.
+            wal = Path(f"{db_path}-wal")
+            wal.unlink()
+            wal.write_bytes(b"")
+            self.assertTrue(
+                wal_sidecars_orphaned(db_path),
+                "a swapped wal inode must count as a broken generation",
+            )
+            conn.close()
+
+    def test_void_write_drift_detected_on_success_path(self) -> None:
+        # Live drill: the victim keeps 'succeeding' into the orphaned inode
+        # (no lock errors). The success-path drift check must heal anyway.
+        from claw_v2.sqlite_runtime import _WAL_GENERATION_INODES, _registry_key
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "obs.db"
+            observe = ObserveStream(db_path)
+            observe.emit("seed_event", payload={})
+            wedged_or_first_conn = observe._conn
+            # Simulate the external swap: our stamp no longer matches the
+            # on-disk wal inode.
+            key = _registry_key(db_path)
+            assert key in _WAL_GENERATION_INODES
+            _WAL_GENERATION_INODES[key] = _WAL_GENERATION_INODES[key] + 12345
+
+            observe.emit("drift_probe", payload={})
+
+            self.assertIsNot(
+                observe._conn,
+                wedged_or_first_conn,
+                "success-path drift must trigger the generation heal",
+            )
+            events = [e["event_type"] for e in observe.recent_events(limit=10)]
+            self.assertIn("drift_probe", events)
+
+    def test_heal_clears_generation_stamp(self) -> None:
+        from claw_v2.sqlite_runtime import _WAL_GENERATION_INODES, _registry_key, note_wal_generation
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "t.db"
+            _seed_db(db_path)
+            conn = connect_runtime_sqlite(db_path)
+            conn.execute("INSERT INTO seed VALUES (2)")
+            conn.commit()
+            note_wal_generation(db_path)
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            conn.close()
+            self.assertTrue(heal_orphaned_wal(db_path))
+            self.assertNotIn(_registry_key(db_path), _WAL_GENERATION_INODES)
+
+
+class HealHandleLifecycleTests(unittest.TestCase):
+    def test_dead_store_handles_are_pruned(self) -> None:
+        # PR #97 review (gemini HIGH): the registry must not keep dead stores
+        # alive nor crash on them.
+        import gc
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "t.db"
+            _seed_db(db_path)
+
+            class _Store:
+                def __init__(self) -> None:
+                    self.db_path = db_path
+                    self._conn = _AlwaysLockedConn()
+                    self._lock = threading.Lock()
+
+            store = _Store()
+            handle = make_store_wal_heal(store)
+            register_wal_heal(db_path, handle)
+            self.assertTrue(handle.alive)
+            del store
+            gc.collect()
+            self.assertFalse(handle.alive)
+            # Orphaned state + dead handle: heal must run without raising.
+            self.assertTrue(heal_orphaned_wal(db_path))
+
+
+class TerminalWriteHealExhaustionTests(unittest.TestCase):
+    def test_exhaustion_after_successful_heal_still_raises(self) -> None:
+        # PR #97 review (gemini CRITICAL): a heal on the last attempt used to
+        # fall out of the loop without writing OR raising — mark_terminal
+        # continued silently with the task still 'running'.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "ledger.db"
+            events: list[str] = []
+
+            class _Obs:
+                def emit(self, event_type, **kwargs):
+                    events.append(event_type)
+
+            ledger = TaskLedger(db_path, observe=_Obs())
+            ledger.create(
+                task_id="t-3",
+                session_id="tg-1",
+                objective="obj",
+                mode="coding",
+                runtime="coordinator",
+                provider="anthropic",
+                model="m",
+            status="running",
+            )
+            # Make the heal trigger (orphaned sidecars) while the ledger conn
+            # keeps failing locked even after the heal round.
+            ledger._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            real = ledger._conn
+            ledger._conn = _AlwaysLockedConn()
+            real.close()
+            Path(f"{db_path}-wal").unlink(missing_ok=True)
+            Path(f"{db_path}-shm").unlink(missing_ok=True)
+
+            # The registered heal handle will reopen ledger._conn to a REAL
+            # connection mid-retry; force it back to locked each time so the
+            # post-heal budget also exhausts.
+            class _RelockingLedgerConn(_AlwaysLockedConn):
+                pass
+
+            original_reopen_marker = {}
+
+            import claw_v2.sqlite_runtime as sr
+
+            original_connect = sr.connect_runtime_sqlite
+
+            def relock_connect(path, **kwargs):
+                conn = original_connect(path, **kwargs)
+                if Path(path) == db_path:
+                    original_reopen_marker["reopened"] = True
+                    conn.close()
+                    return _RelockingLedgerConn()
+                return conn
+
+            sr.connect_runtime_sqlite = relock_connect
+            try:
+                with self.assertRaises(sqlite3.OperationalError):
+                    ledger.mark_terminal("t-3", status="failed", summary="s", error="x")
+            finally:
+                sr.connect_runtime_sqlite = original_connect
+            self.assertIn("task_terminal_write_contention", events)
+            record_conn = original_connect(db_path)
+            row = record_conn.execute(
+                "SELECT status FROM agent_tasks WHERE task_id='t-3'"
+            ).fetchone()
+            record_conn.close()
+            self.assertEqual(row["status"], "running", "the write must NOT be faked")
+
+
 if __name__ == "__main__":
     unittest.main()

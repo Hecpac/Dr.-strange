@@ -5,6 +5,7 @@ import json
 import re
 import sqlite3
 from dataclasses import dataclass, field
+import threading
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -87,6 +88,9 @@ class PropertyGraphProjection:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = connect_runtime_sqlite(self.db_path)
+        # PR #97 review: the heal handle swaps _conn under _lock; give this
+        # store one so the swap is atomic.
+        self._lock = threading.Lock()
         register_wal_heal(self.db_path, make_store_wal_heal(self))
         self._batch_mode = False
         self.ensure_schema()
