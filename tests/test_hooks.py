@@ -487,6 +487,84 @@ class DecisionLoggerTests(unittest.TestCase):
             self.assertEqual(payload["prompt_length"], 2)
             self.assertTrue(payload["has_evidence_pack"])
 
+    def _bounded_request(self, *, prompt, system_prompt=None, evidence_pack=None) -> LLMRequest:
+        return LLMRequest(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            lane="brain",
+            provider="anthropic",
+            model="claude-opus-4-7",
+            effort="high",
+            session_id=None,
+            max_budget=0.5,
+            evidence_pack=evidence_pack,
+            allowed_tools=None,
+            agents=None,
+            hooks=None,
+            timeout=30.0,
+        )
+
+    def _emit_and_read_payload(self, request: LLMRequest) -> dict:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "test.db")
+            hook = make_decision_logger(observe)
+            response = LLMResponse(
+                content="ok",
+                lane="brain",
+                provider="anthropic",
+                model="claude-opus-4-7",
+                confidence=0.5,
+                cost_estimate=0.01,
+            )
+            hook(request, response)
+            events = observe.recent_events(limit=5)
+            return [e for e in events if e["event_type"] == "llm_decision"][0]["payload"]
+
+    def test_snapshots_are_bounded(self) -> None:
+        # AM-DLOG: huge prompts/system prompts/evidence packs must not be
+        # persisted whole into observe_stream on every LLM call.
+        big = "x" * 50_000
+        payload = self._emit_and_read_payload(
+            self._bounded_request(
+                prompt=big, system_prompt=big, evidence_pack={"diff": big}
+            )
+        )
+        self.assertLess(len(payload["prompt_snapshot"]), 5_000)
+        self.assertIn("[truncated", payload["prompt_snapshot"])
+        self.assertLess(len(payload["system_prompt_snapshot"]), 5_000)
+        self.assertLess(len(str(payload["evidence_pack_snapshot"])), 6_000)
+        # Exact lengths stay available even though snapshots are bounded.
+        self.assertEqual(payload["prompt_length"], 50_000)
+
+    def test_small_snapshots_are_kept_whole(self) -> None:
+        payload = self._emit_and_read_payload(
+            self._bounded_request(
+                prompt="small prompt",
+                system_prompt="small system",
+                evidence_pack={"k": "v"},
+            )
+        )
+        self.assertEqual(payload["prompt_snapshot"], "small prompt")
+        self.assertEqual(payload["system_prompt_snapshot"], "small system")
+        self.assertEqual(payload["evidence_pack_snapshot"], {"k": "v"})
+
+    def test_multimodal_snapshot_omits_media_payloads(self) -> None:
+        payload = self._emit_and_read_payload(
+            self._bounded_request(
+                prompt=[
+                    {"type": "text", "text": "que ves?"},
+                    {
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": "image/png", "data": "A" * 100_000},
+                    },
+                ],
+            )
+        )
+        snapshot = payload["prompt_snapshot"]
+        self.assertEqual(snapshot[0], {"type": "text", "text": "que ves?"})
+        self.assertEqual(snapshot[1], {"type": "image", "content_omitted": True})
+        self.assertNotIn("A" * 100, str(snapshot))
+
     def test_router_uses_shared_trace_for_decision_and_response_events(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             observe = ObserveStream(Path(tmpdir) / "test.db")

@@ -5,7 +5,13 @@ import logging
 import os
 from typing import Any
 
-from claw_v2.adapters.base import LLMRequest, PreLLMHook, PostLLMHook
+from claw_v2.adapters.base import (
+    LLMRequest,
+    PreLLMHook,
+    PostLLMHook,
+    evidence_pack_serialized_chars,
+    render_bounded_evidence_pack,
+)
 from claw_v2.observe import ObserveStream
 from claw_v2.tracing import current_llm_trace, trace_metadata
 from claw_v2.types import LLMResponse
@@ -125,8 +131,12 @@ def make_decision_logger(observe: ObserveStream) -> PostLLMHook:
                 "effort": request.effort,
                 "has_evidence_pack": request.evidence_pack is not None,
                 "prompt_snapshot": _snapshot_prompt(request.prompt),
-                "system_prompt_snapshot": request.system_prompt,
-                "evidence_pack_snapshot": request.evidence_pack or {},
+                "system_prompt_snapshot": (
+                    _bounded_snapshot_text(request.system_prompt)
+                    if request.system_prompt is not None
+                    else None
+                ),
+                "evidence_pack_snapshot": _snapshot_evidence_pack(request.evidence_pack),
             },
         )
         return response
@@ -156,12 +166,56 @@ def _select_decoys(session_id: str | None, count: int = 2) -> list[str]:
     return [_DECOY_POOL[i] for i in indices]
 
 
+# AM-DLOG (2026-06-12): decision_logger persisted the full prompt, system
+# prompt and evidence pack per LLM call — multimodal turns wrote base64 image
+# payloads straight into observe_stream. Snapshots are bounded; lengths stay
+# exact via prompt_length/response_length.
+_SNAPSHOT_MAX_CHARS = 4_000
+_SNAPSHOT_BLOCK_MAX_CHARS = 1_000
+_SNAPSHOT_MAX_BLOCKS = 20
+
+
+def _bounded_snapshot_text(value: Any, limit: int = _SNAPSHOT_MAX_CHARS) -> str:
+    text = str(value)
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"... [truncated {len(text) - limit} chars]"
+
+
 def _snapshot_prompt(prompt: Any) -> Any:
     if isinstance(prompt, str):
-        return prompt
+        return _bounded_snapshot_text(prompt)
     if isinstance(prompt, list):
-        return prompt
-    return str(prompt)
+        blocks: list[Any] = []
+        for block in prompt[:_SNAPSHOT_MAX_BLOCKS]:
+            if isinstance(block, dict):
+                block_type = str(block.get("type") or "block")
+                if block_type == "text":
+                    blocks.append(
+                        {
+                            "type": "text",
+                            "text": _bounded_snapshot_text(
+                                block.get("text", ""), _SNAPSHOT_BLOCK_MAX_CHARS
+                            ),
+                        }
+                    )
+                else:
+                    # Media/base64 payloads never belong in the event log.
+                    blocks.append({"type": block_type, "content_omitted": True})
+            else:
+                blocks.append(_bounded_snapshot_text(block, _SNAPSHOT_BLOCK_MAX_CHARS))
+        if len(prompt) > _SNAPSHOT_MAX_BLOCKS:
+            blocks.append({"omitted_blocks": len(prompt) - _SNAPSHOT_MAX_BLOCKS})
+        return blocks
+    return _bounded_snapshot_text(prompt)
+
+
+def _snapshot_evidence_pack(evidence_pack: dict[str, Any] | None) -> Any:
+    if not evidence_pack:
+        return {}
+    if evidence_pack_serialized_chars(evidence_pack) <= _SNAPSHOT_MAX_CHARS:
+        return evidence_pack
+    return render_bounded_evidence_pack(evidence_pack, max_chars=_SNAPSHOT_MAX_CHARS)
 
 
 def make_anti_distillation_hook(enabled: bool = True) -> PreLLMHook:
