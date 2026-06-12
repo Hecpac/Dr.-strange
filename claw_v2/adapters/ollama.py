@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import json
 import re
 import subprocess
 import tempfile
@@ -44,7 +43,10 @@ class OllamaAdapter(ProviderAdapter):
         if self._transport is not None:
             return self._transport(request)
         ollama = self._load_sdk()
-        client = ollama.Client(host=self._host)
+        # D6 (2026-06-12): request.timeout was never enforced here, so a hung
+        # local server pinned the worker thread indefinitely. The Client kwarg
+        # flows into httpx as the HTTP timeout for chat().
+        client = ollama.Client(host=self._host, timeout=request.timeout)
 
         messages: list[dict[str, Any]] = []
         system_prompt = build_effective_system_prompt(request)
@@ -69,6 +71,13 @@ class OllamaAdapter(ProviderAdapter):
         try:
             response = client.chat(**kwargs)
         except Exception as exc:
+            # reason="timeout" feeds the router's llm_timeout audit and the
+            # provider circuit breaker (same contract as the other adapters).
+            if "timeout" in exc.__class__.__name__.lower() or "timed out" in str(exc).lower():
+                raise AdapterError(
+                    f"Ollama request timed out after {request.timeout:.0f}s",
+                    metadata={"reason": "timeout", "timeout_seconds": request.timeout},
+                ) from exc
             raise AdapterError(f"Ollama request failed: {exc}") from exc
 
         content = self._extract_content(response)

@@ -453,6 +453,11 @@ NON_TOOL_LANES: [verifier, research, judge]
 enforced_by:
   - LLMRouter._validate_lane_input  # blocks tool-loop config
   - CodexAdapter read-only sandbox for advisory lanes
+
+google_provider: advisory-only (D6 decision, 2026-06-12 — documented, not
+  pruned). GoogleAdapter stays tool_capable=False, serves only the advisory
+  lanes, and no fallback chain points to it. A Google tool loop would be a
+  new project, not a flag flip.
 ```
 
 ### provider roles + timeouts

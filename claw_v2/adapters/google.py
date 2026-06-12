@@ -17,6 +17,15 @@ from claw_v2.types import LLMResponse
 
 
 class GoogleAdapter(ProviderAdapter):
+    """Advisory-only adapter — D6 decision (2026-06-12): documented, not pruned.
+
+    Google/Gemini serves only the advisory lanes (verifier/research/judge):
+    ``tool_capable`` stays False, there is no tool loop, no session reuse and
+    no fallback chain points here. It remains available as a cheap advisory
+    provider option; giving it a tool loop would be a new project, not a
+    flag flip.
+    """
+
     provider_name = "google"
     tool_capable = False
 

@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import tempfile
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from claw_v2.adapters.base import AdapterError, AdapterUnavailableError, LLMRequest, build_effective_input
 from claw_v2.adapters.google import GoogleAdapter
+from claw_v2.adapters.ollama import OllamaAdapter
 from claw_v2.adapters.openai import OpenAIAdapter
 
 
@@ -328,6 +327,60 @@ class SecondaryProviderAdapterTests(unittest.TestCase):
         with patch("claw_v2.adapters.google.import_module", side_effect=ModuleNotFoundError):
             with self.assertRaises(AdapterUnavailableError):
                 adapter.complete(request)
+
+    def test_google_adapter_stays_advisory_only(self) -> None:
+        # D6 decision: Google serves only advisory lanes; a tool loop is a
+        # new project, not a flag flip.
+        self.assertFalse(GoogleAdapter.tool_capable)
+
+    def test_ollama_client_enforces_request_timeout(self) -> None:
+        recorded: dict[str, object] = {}
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                recorded["client_kwargs"] = kwargs
+
+            def chat(self, **kwargs):
+                recorded["chat_kwargs"] = kwargs
+                return {"message": {"content": "ok"}, "eval_count": 1, "prompt_eval_count": 2}
+
+        request = make_request()
+        request.provider = "ollama"
+        request.model = "gemma4"
+        request.timeout = 45.0
+        adapter = OllamaAdapter()
+        with patch(
+            "claw_v2.adapters.ollama.import_module",
+            return_value=SimpleNamespace(Client=FakeClient),
+        ):
+            response = adapter.complete(request)
+        self.assertEqual(response.content, "ok")
+        self.assertEqual(recorded["client_kwargs"]["timeout"], 45.0)
+
+    def test_ollama_timeout_maps_to_adapter_error_with_timeout_reason(self) -> None:
+        class ReadTimeout(Exception):
+            pass
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                pass
+
+            def chat(self, **kwargs):
+                raise ReadTimeout("timed out")
+
+        request = make_request()
+        request.provider = "ollama"
+        request.model = "gemma4"
+        request.timeout = 7.0
+        adapter = OllamaAdapter()
+        with patch(
+            "claw_v2.adapters.ollama.import_module",
+            return_value=SimpleNamespace(Client=FakeClient),
+        ):
+            with self.assertRaises(AdapterError) as ctx:
+                adapter.complete(request)
+        self.assertEqual(ctx.exception.metadata.get("reason"), "timeout")
+        self.assertEqual(ctx.exception.metadata.get("timeout_seconds"), 7.0)
 
 
 if __name__ == "__main__":
