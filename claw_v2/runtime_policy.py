@@ -12,6 +12,9 @@ from claw_v2.network_proxy import DomainAllowlistEnforcer, NetworkPolicy
 from claw_v2.sandbox import SandboxPolicy, check_command, _unwrap_command_tokens
 from claw_v2.tool_policy import TOOL_POLICIES, ToolPolicy, _decode_path_text, path_is_secret
 
+# Mirrors tools.TIER_REQUIRES_APPROVAL (importing tools here would be circular).
+_TIER_REQUIRES_APPROVAL = 3
+
 if TYPE_CHECKING:
     from claw_v2.tools import ToolDefinition
 
@@ -188,7 +191,10 @@ class RuntimePolicyEngine:
         self.sandbox_policy = sandbox_policy
         self.network_enforcer = network_enforcer
         self.approval_gate = approval_gate
-        self.autoexec_max_tier = autoexec_max_tier
+        # AM-T3FLOOR (2026-06-12): autoexec_max_tier is a CEILING, never an
+        # override — Tier 3 always hits the approval gate (core invariant).
+        # Clamp so a misconfigured env value (e.g. 3) cannot disable the gate.
+        self.autoexec_max_tier = min(int(autoexec_max_tier), _TIER_REQUIRES_APPROVAL - 1)
         self.policies = policies if policies is not None else TOOL_POLICIES
 
     def enforce_tool(
@@ -250,7 +256,13 @@ class RuntimePolicyEngine:
         )
 
         effective_tier = tier if tier is not None else _tier_for_policy(policy)
-        approval_required = policy.requires_human or effective_tier > self.autoexec_max_tier
+        # AM-T3FLOOR: the >= floor is unconditional — independent of the
+        # (already clamped) autoexec ceiling, by construction.
+        approval_required = (
+            policy.requires_human
+            or effective_tier >= _TIER_REQUIRES_APPROVAL
+            or effective_tier > self.autoexec_max_tier
+        )
         if approval_required:
             gate = approval_gate or self.approval_gate
             if gate is None:
@@ -302,7 +314,14 @@ class RuntimePolicyEngine:
         if not raw_path.strip():
             return self.workspace_root
         decoded_path = _decode_path_text(raw_path)
-        candidate = Path(decoded_path).expanduser()
+        try:
+            candidate = Path(decoded_path).expanduser()
+        except RuntimeError:
+            # LOW (2026-06-12): "~nonexistentuser/..." raises RuntimeError,
+            # which escaped the structured deny. Fail closed instead.
+            raise RuntimePolicyViolation(
+                f"Tool '{tool_name}' path '{key}' could not be expanded"
+            ) from None
         if not candidate.is_absolute():
             candidate = self.workspace_root / candidate
         resolved = candidate.resolve(strict=False)

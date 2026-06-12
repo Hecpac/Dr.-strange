@@ -965,8 +965,12 @@ _TELEGRAM_IMPERATIVE_RULES: tuple[dict[str, Any], ...] = (
     },
     {
         "intent": "ui.submit_prompt",
+        # LOW (2026-06-12): whole-message only — unanchored \b matches caught
+        # verbs embedded in conversation ("no lo ejecutalo aún", "el CI hizo
+        # submit") and fired a UI-write intent. Embedded mentions belong to
+        # the brain (same policy as task.continue_active_mission below).
         "patterns": (
-            r"\b(?:mandalo|mandalo ya|envialo|dale enter|presiona enter|ejecutalo|correlo|run it|submit|send it)\b",
+            r"^\s*(?:mandalo(?:\s+ya)?|envialo|dale\s+enter|presiona\s+enter|ejecutalo|correlo|run\s+it|submit|send\s+it)[\s.!?…]*$",
         ),
         "requires_ui_write": True,
         "requires_submit": True,

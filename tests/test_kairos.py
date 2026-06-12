@@ -286,6 +286,143 @@ class TickTests(unittest.TestCase):
         self.assertEqual(svc.state.actions_taken, 1)
         self.assertEqual(svc.state.last_action, "alert")
 
+    def test_tick_suppresses_recently_started_duplicate_action(self) -> None:
+        # AM-KAIROSIDEM (2026-06-12): the tick runs as an at-least-once job —
+        # a crash-replay must not re-execute the same action+detail. The
+        # kairos_action_started checkpoint within the window suppresses it.
+        from datetime import datetime, timezone
+
+        svc, router, _, observe = _make_service()
+        router.ask.return_value = MagicMock(
+            content='{"action": "alert", "reason": "stale agent", "detail": "hex paused 3 days"}'
+        )
+        import hashlib as _hashlib
+
+        action_key = _hashlib.sha256(b"alert|hex paused 3 days").hexdigest()[:16]
+        started_event = {
+            "event_type": "kairos_action_started",
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+            "payload": {"action": "alert", "action_key": action_key},
+        }
+
+        def _recent(limit: int = 20, *, event_type: str | None = None):
+            if event_type == "kairos_action_started":
+                return [started_event]
+            return []
+
+        observe.recent_events.side_effect = _recent
+
+        result = svc.tick()
+
+        self.assertEqual(result.error, "duplicate_action_suppressed")
+        self.assertEqual(svc.state.actions_taken, 0)
+        suppressed = [
+            call for call in observe.emit.call_args_list
+            if call.args and call.args[0] == "kairos_action_suppressed"
+        ]
+        self.assertEqual(len(suppressed), 1)
+
+    def test_tick_retries_action_whose_previous_attempt_failed_cleanly(self) -> None:
+        # PR #95 review (codex P2): a handler that failed cleanly never
+        # produced the side effect — the kairos_action_failed checkpoint
+        # must re-arm the retry instead of suppressing it for 30 min.
+        from datetime import datetime, timezone
+
+        svc, router, _, observe = _make_service()
+        router.ask.return_value = MagicMock(
+            content='{"action": "alert", "reason": "stale agent", "detail": "hex paused 3 days"}'
+        )
+        import hashlib as _hashlib
+
+        action_key = _hashlib.sha256(b"alert|hex paused 3 days").hexdigest()[:16]
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+        def _recent(limit: int = 20, *, event_type: str | None = None):
+            if event_type == "kairos_action_started":
+                return [
+                    {
+                        "event_type": "kairos_action_started",
+                        "timestamp": now_str,
+                        "payload": {"action": "alert", "action_key": action_key},
+                    }
+                ]
+            if event_type == "kairos_action_failed":
+                return [
+                    {
+                        "event_type": "kairos_action_failed",
+                        "timestamp": now_str,
+                        "payload": {"action": "alert", "action_key": action_key},
+                    }
+                ]
+            return []
+
+        observe.recent_events.side_effect = _recent
+
+        result = svc.tick()
+
+        self.assertEqual(result.action, "alert")
+        self.assertNotEqual(result.error, "duplicate_action_suppressed")
+        self.assertEqual(svc.state.actions_taken, 1)
+
+    def test_tick_does_not_suppress_on_unparseable_started_timestamp(self) -> None:
+        # PR #95 review (gemini): a malformed checkpoint timestamp must read
+        # as "not started" — suppressing on parse failure could starve the
+        # action permanently.
+        svc, router, _, observe = _make_service()
+        router.ask.return_value = MagicMock(
+            content='{"action": "alert", "reason": "stale agent", "detail": "hex paused 3 days"}'
+        )
+        import hashlib as _hashlib
+
+        action_key = _hashlib.sha256(b"alert|hex paused 3 days").hexdigest()[:16]
+
+        def _recent(limit: int = 20, *, event_type: str | None = None):
+            if event_type == "kairos_action_started":
+                return [
+                    {
+                        "event_type": "kairos_action_started",
+                        "timestamp": "garbage",
+                        "payload": {"action": "alert", "action_key": action_key},
+                    }
+                ]
+            return []
+
+        observe.recent_events.side_effect = _recent
+
+        result = svc.tick()
+
+        self.assertEqual(result.action, "alert")
+        self.assertEqual(svc.state.actions_taken, 1)
+
+    def test_tick_executes_when_started_checkpoint_is_stale(self) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        svc, router, _, observe = _make_service()
+        router.ask.return_value = MagicMock(
+            content='{"action": "alert", "reason": "stale agent", "detail": "hex paused 3 days"}'
+        )
+        import hashlib as _hashlib
+
+        action_key = _hashlib.sha256(b"alert|hex paused 3 days").hexdigest()[:16]
+        stale = datetime.now(timezone.utc) - timedelta(hours=2)
+        observe.recent_events.return_value = [
+            {
+                "event_type": "kairos_action_started",
+                "timestamp": stale.strftime("%Y-%m-%d %H:%M:%S"),
+                "payload": {"action": "alert", "action_key": action_key},
+            }
+        ]
+
+        result = svc.tick()
+
+        self.assertEqual(result.action, "alert")
+        self.assertEqual(svc.state.actions_taken, 1)
+        started = [
+            call for call in observe.emit.call_args_list
+            if call.args and call.args[0] == "kairos_action_started"
+        ]
+        self.assertEqual(len(started), 1)
+
     def test_tick_increments_counter(self) -> None:
         svc, router, _, _ = _make_service()
         router.ask.return_value = MagicMock(content='{"action": "none"}')

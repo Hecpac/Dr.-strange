@@ -280,31 +280,54 @@ class TaskLedger:
                     artifacts=artifacts,
                 )
         now = time.time()
+        blocked_status: str | None = None
         with self._lock:
-            self._conn.execute(
-                """
-                UPDATE agent_tasks
-                SET status = ?,
-                    completed_at = ?,
-                    summary = ?,
-                    error = ?,
-                    verification_status = ?,
-                    artifacts_json = ?,
-                    updated_at = ?
-                WHERE task_id = ?
-                """,
-                (
-                    status,
-                    now,
-                    summary,
-                    error,
-                    verification_status,
-                    json.dumps(dict(artifacts or {}), sort_keys=True),
-                    now,
-                    task_id,
-                ),
+            # LOW (2026-06-12, PR #95 review): a terminal row is immutable —
+            # a late writer (reconciliation marking lost, duplicated
+            # completion path) must not flip an already-terminal status.
+            # Check and write under ONE lock acquisition (TOCTOU); only the
+            # emit/read happen outside (plain Lock, not reentrant).
+            row = self._conn.execute(
+                "SELECT status FROM agent_tasks WHERE task_id = ?", (task_id,)
+            ).fetchone()
+            current_status = str(row["status"]) if row is not None else ""
+            if current_status in TERMINAL_STATUSES:
+                blocked_status = current_status
+            else:
+                self._conn.execute(
+                    """
+                    UPDATE agent_tasks
+                    SET status = ?,
+                        completed_at = ?,
+                        summary = ?,
+                        error = ?,
+                        verification_status = ?,
+                        artifacts_json = ?,
+                        updated_at = ?
+                    WHERE task_id = ?
+                    """,
+                    (
+                        status,
+                        now,
+                        summary,
+                        error,
+                        verification_status,
+                        json.dumps(dict(artifacts or {}), sort_keys=True),
+                        now,
+                        task_id,
+                    ),
+                )
+                self._conn.commit()
+        if blocked_status is not None:
+            self._emit(
+                "task_ledger_terminal_transition_blocked",
+                {
+                    "task_id": task_id,
+                    "current_status": blocked_status,
+                    "requested_status": status,
+                },
             )
-            self._conn.commit()
+            return self.get(task_id)
         record = self.get(task_id)
         if record is not None:
             self._emit("task_ledger_terminal", record.to_dict())

@@ -508,7 +508,7 @@ def test_submit_prompt_is_distinct_from_paste(bot, text: str) -> None:
     _assert_not_brain_fallback(response, decisions)
 
 
-@pytest.mark.parametrize("text", ["Descarga el prototipo y Envialo", "El prototipo Envialo Aqui"])
+@pytest.mark.parametrize("text", ["Envialo", "Mandalo ya"])
 def test_contextual_submit_without_resolved_target_falls_through_to_brain(bot, text: str) -> None:
     response, decisions, events = _drive(bot, text)
 
@@ -519,6 +519,24 @@ def test_contextual_submit_without_resolved_target_falls_through_to_brain(bot, t
         ev.get("handler") == "telegram_imperative"
         and ev.get("route") == "fall_through"
         and ev.get("reason") == "telegram_imperative:ui.submit_prompt:contextual_fallthrough"
+        for ev in decisions
+    ), decisions
+
+
+@pytest.mark.parametrize("text", ["Descarga el prototipo y Envialo", "El prototipo Envialo Aqui"])
+def test_embedded_submit_verbs_never_match_the_imperative_router(bot, text: str) -> None:
+    # LOW (2026-06-12): ui.submit_prompt patterns are anchored to the whole
+    # message — a verb embedded in conversation must not even reach the
+    # imperative matcher (with a resolved UI target it used to fire a real
+    # submit). Embedded mentions belong to the brain.
+    _seed_codex_mission(bot)
+
+    response, decisions, _events = _drive(bot, text)
+
+    assert response == "BRAIN_FALLBACK_USED"
+    assert not any(
+        ev.get("handler") == "telegram_imperative"
+        and "ui.submit_prompt" in str(ev.get("reason") or "")
         for ev in decisions
     ), decisions
 

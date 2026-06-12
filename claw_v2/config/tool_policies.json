@@ -245,6 +245,20 @@
       "allowed_domains": ["api.heygen.com"],
       "requires_human": true
     },
+    "HeyGenDeliver": {
+      "risk_level": "critical",
+      "read_only": false,
+      "allowed_contexts": ["telegram", "daemon", "operator", "deployer"],
+      "allowed_domains": ["api.heygen.com", "api.telegram.org"],
+      "requires_human": true
+    },
+    "InstagramPublish": {
+      "risk_level": "critical",
+      "read_only": false,
+      "allowed_contexts": ["telegram", "daemon", "operator", "deployer"],
+      "allowed_domains": ["graph.facebook.com"],
+      "requires_human": true
+    },
     "GPTImage": {
       "risk_level": "critical",
       "read_only": false,

@@ -23,6 +23,11 @@ APPROVAL_TTL_SECONDS = 900  # 15 minutes
 VALID_APPROVAL_STATES = frozenset({"pending", "approved", "rejected", "expired", "archived"})
 TERMINAL_APPROVAL_STATES = frozenset({"approved", "rejected", "expired", "archived"})
 
+# AM-APPRSCAN (2026-06-12): list_pending runs on hot message paths; a short
+# TTL bounds the directory rescan without serving stale approvals (every
+# in-process mutation invalidates the cache immediately).
+_LIST_PENDING_CACHE_TTL_SECONDS = 2.0
+
 _NON_SENSITIVE_CONFIRMATIONS = frozenset(
     {
         "aprobada",
@@ -84,6 +89,8 @@ class ApprovalManager:
     ) -> None:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
+        # AM-APPRSCAN: (monotonic_ts, snapshot) — invalidated on every mutation.
+        self._pending_cache: tuple[float, list[dict]] | None = None
         self.secret = secret.encode("utf-8")
         if int(ttl_seconds) <= 0:
             raise ValueError("approval ttl_seconds must be positive")
@@ -134,6 +141,7 @@ class ApprovalManager:
             "resolved_by": None,
         }
         _atomic_write_json(self._path_for(approval_id), payload)
+        self._pending_cache = None
         self._emit(
             "approval_created",
             {
@@ -175,7 +183,11 @@ class ApprovalManager:
                 return
             required_confirmation = _required_confirmation(payload)
             if required_confirmation:
-                valid = hmac.compare_digest(str(token).strip(), required_confirmation)
+                # LOW (2026-06-12): compare bytes — compare_digest raises
+                # TypeError on non-ASCII str (confirmations carry tildes/ñ).
+                valid = hmac.compare_digest(
+                    str(token).strip().encode("utf-8"), required_confirmation.encode("utf-8")
+                )
             else:
                 valid = hmac.compare_digest(payload["token_hash"], self._digest(token))
             payload["status"] = "approved" if valid else "rejected"
@@ -191,7 +203,9 @@ class ApprovalManager:
         payload = self.read(approval_id)
         required_confirmation = _required_confirmation(payload)
         if required_confirmation:
-            if not hmac.compare_digest(str(confirmation).strip(), required_confirmation):
+            if not hmac.compare_digest(
+                str(confirmation).strip().encode("utf-8"), required_confirmation.encode("utf-8")
+            ):
                 return False
             return self._approve_human_without_token(approval_id)
         if _normalize_confirmation(confirmation) not in _NON_SENSITIVE_CONFIRMATIONS:
@@ -359,6 +373,7 @@ class ApprovalManager:
                 # permanently corrupt JSON if the process died mid-write,
                 # and one corrupt record breaks the whole approval inbox.
                 _atomic_write_json(path, payload)
+                self._pending_cache = None
             finally:
                 fcntl.flock(fd, fcntl.LOCK_UN)
                 os.close(fd)
@@ -398,6 +413,14 @@ class ApprovalManager:
         return payload
 
     def list_pending(self) -> list[dict]:
+        # AM-APPRSCAN (2026-06-12): this scans and parses every record file
+        # and runs on hot message paths. A short TTL cache (invalidated by
+        # every mutation in _locked_update/create) bounds the per-message
+        # cost; the reaper below keeps the directory itself small.
+        now = time.monotonic()
+        cached = self._pending_cache
+        if cached is not None and now - cached[0] <= _LIST_PENDING_CACHE_TTL_SECONDS:
+            return [dict(item) for item in cached[1]]
         pending: list[dict] = []
         for path in sorted(self.root.glob("*.json")):
             try:
@@ -410,7 +433,39 @@ class ApprovalManager:
                 continue
             if payload.get("status") == "pending":
                 pending.append(payload)
+        self._pending_cache = (now, [dict(item) for item in pending])
         return pending
+
+    def reap_resolved(self, *, older_than_seconds: float = 7 * 86_400.0) -> int:
+        """Move long-resolved records into ``root/resolved/`` so the hot
+        ``list_pending`` glob stays small. Terminal records are immutable;
+        relocation preserves them for audit without rescanning them on
+        every message (AM-APPRSCAN, 2026-06-12)."""
+        cutoff = time.time() - max(0.0, older_than_seconds)
+        archive_dir = self.root / "resolved"
+        moved = 0
+        for path in sorted(self.root.glob("*.json")):
+            try:
+                payload = self.read(path.stem)
+            except (json.JSONDecodeError, ValueError, OSError):
+                continue
+            if payload.get("status") not in TERMINAL_APPROVAL_STATES:
+                continue
+            resolved_at = _coerce_timestamp(
+                payload.get("resolved_at") or payload.get("archived_at") or payload.get("created_at") or 0
+            )
+            if resolved_at > cutoff:
+                continue
+            try:
+                archive_dir.mkdir(parents=True, exist_ok=True)
+                path.rename(archive_dir / path.name)
+                moved += 1
+            except OSError:
+                logger.debug("approval reap failed for %s", path, exc_info=True)
+        if moved:
+            self._pending_cache = None
+            self._emit("approval_reap_completed", {"moved_count": moved})
+        return moved
 
     def list_pending_visible_to_user(self) -> list[dict]:
         """Subset of ``list_pending()`` restricted to approvals that should

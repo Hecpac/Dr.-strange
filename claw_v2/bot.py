@@ -593,6 +593,20 @@ PRE_HOOK_BLOCK_REPEATED_THRESHOLD = 5
 PRE_HOOK_BLOCK_REPEATED_WINDOW_MINUTES = 10
 
 
+def _parse_observe_timestamp(value: object) -> float | None:
+    """observe_stream timestamps are 'YYYY-MM-DD HH:MM:SS' in UTC."""
+    from datetime import datetime, timezone
+
+    try:
+        return (
+            datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S")
+            .replace(tzinfo=timezone.utc)
+            .timestamp()
+        )
+    except (TypeError, ValueError):
+        return None
+
+
 def _looks_like_pre_hook_block(content: str) -> bool:
     return content.strip().startswith(_PRE_HOOK_BLOCK_PREFIX)
 
@@ -966,6 +980,7 @@ class BotService:
             router=getattr(brain, "router", None),
             get_session_state=brain.memory.get_session_state,
             update_session_state=brain.memory.update_session_state,
+            merge_active_object=brain.memory.merge_active_object,
             store_message=self._store_message_from_handler,
             workspace_root=getattr(config, "workspace_root", None),
             telemetry_root=getattr(config, "telemetry_root", None),
@@ -6180,34 +6195,34 @@ class BotService:
             _format_approval_pending_for_memory(exc),
             assistant_limit=2000,
         )
-        state = self.brain.memory.get_session_state(session_id)
-        active_object = dict(state.get("active_object") or {})
-        active_object["pending_tool_approval"] = {
-            "approval_id": exc.approval_id,
-            "tool": exc.tool,
-            "summary": exc.summary,
-            "args_hash": exc.args_hash,
-            "original_text": user_text,
-            "created_at": time.time(),
-        }
-        self.brain.memory.update_session_state(
+        # AM-STATEWR/M16 (2026-06-12): atomic merge — a concurrent worker
+        # thread writing active_task must not be overwritten by this turn.
+        self.brain.memory.merge_active_object(
             session_id,
+            {
+                "pending_tool_approval": {
+                    "approval_id": exc.approval_id,
+                    "tool": exc.tool,
+                    "summary": exc.summary,
+                    "args_hash": exc.args_hash,
+                    "original_text": user_text,
+                    "created_at": time.time(),
+                }
+            },
             pending_action=user_text,
             verification_status="awaiting_tool_approval",
-            active_object=active_object,
         )
 
     def _clear_pending_tool_approval(self, session_id: str, approval_id: str | None = None) -> None:
         state = self.brain.memory.get_session_state(session_id)
-        active_object = dict(state.get("active_object") or {})
-        pending = active_object.get("pending_tool_approval")
+        pending = (state.get("active_object") or {}).get("pending_tool_approval")
         if approval_id is None or not isinstance(pending, dict) or pending.get("approval_id") == approval_id:
-            active_object.pop("pending_tool_approval", None)
-            self.brain.memory.update_session_state(
+            self.brain.memory.merge_active_object(
                 session_id,
+                {},
+                remove=("pending_tool_approval",),
                 pending_action="",
                 verification_status="unknown",
-                active_object=active_object,
             )
 
     def _handle_pending_tool_approval_grant_response(self, session_id: str, text: str) -> str | None:
@@ -6327,6 +6342,9 @@ class BotService:
         except Exception:
             return content
         cutoff_minutes = PRE_HOOK_BLOCK_REPEATED_WINDOW_MINUTES
+        # LOW (2026-06-12): the window was announced but never applied — old
+        # events among the last 200 inflated the count forever.
+        cutoff_ts = time.time() - cutoff_minutes * 60
         same_hook_count = 0
         for event in recent:
             if event.get("event_type") != "llm_pre_hook_blocked":
@@ -6335,6 +6353,9 @@ class BotService:
             if not isinstance(payload, dict):
                 continue
             if payload.get("blocked_by") != hook_name:
+                continue
+            event_ts = _parse_observe_timestamp(event.get("timestamp"))
+            if event_ts is not None and event_ts < cutoff_ts:
                 continue
             same_hook_count += 1
         if same_hook_count <= PRE_HOOK_BLOCK_REPEATED_THRESHOLD:
@@ -7036,17 +7057,22 @@ class BotService:
         reason = fields.get("reason") or fields.get("razon") or "unknown"
         error = fields.get("error") or ""
         if self.observe is not None:
-            self.observe.emit(
-                "operational_alert_input_handled",
-                payload={
-                    "session_id": session_id,
-                    "title": title,
-                    "severity": severity,
-                    "agent": agent,
-                    "reason": reason,
-                    "error": error[:500],
-                },
-            )
+            # LOW (2026-06-12): a failed diagnostic emit must not kill the
+            # operational-alert turn.
+            try:
+                self.observe.emit(
+                    "operational_alert_input_handled",
+                    payload={
+                        "session_id": session_id,
+                        "title": title,
+                        "severity": severity,
+                        "agent": agent,
+                        "reason": reason,
+                        "error": error[:500],
+                    },
+                )
+            except Exception:
+                logger.debug("operational_alert_input_handled emit failed", exc_info=True)
         lines = [
             "Alerta operacional registrada; no la voy a convertir en tarea autónoma.",
             f"Tipo: {title}",

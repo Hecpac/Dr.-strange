@@ -15,6 +15,9 @@ class AlertRule:
     severity: str = "warning"
     cooldown_seconds: float = 3600.0
     notify_user: bool = True
+    # Payload key that must be truthy for the alert to reach the user
+    # (e.g. approval_expired only notifies for visible_to_user approvals).
+    require_truthy: str | None = None
 
 
 DEFAULT_ALERT_RULES: dict[str, AlertRule] = {
@@ -44,6 +47,13 @@ DEFAULT_ALERT_RULES: dict[str, AlertRule] = {
     "telegram_transport_stop_error": AlertRule("Telegram transport stop degraded", cooldown_seconds=1800),
     "nlm_research_degraded": AlertRule("NotebookLM degraded", cooldown_seconds=1800),
     "nlm_research_failed": AlertRule("NotebookLM failed", severity="critical", cooldown_seconds=1800),
+    # Paso 9 (2026-06-12): an approval the user was asked for must not die in
+    # silence — the action it gated simply never happens otherwise.
+    "approval_expired": AlertRule(
+        "Aprobación expirada sin respuesta",
+        cooldown_seconds=60,
+        require_truthy="visible_to_user",
+    ),
 }
 
 
@@ -81,6 +91,11 @@ class OperationalAlertRouter:
             return False
         if not rule.notify_user:
             self._emit_status("operational_alert_suppressed", event_type, event_payload, reason="observe_only")
+            return False
+        if rule.require_truthy and not event_payload.get(rule.require_truthy):
+            self._emit_status(
+                "operational_alert_suppressed", event_type, event_payload, reason="flag_not_set"
+            )
             return False
         dedupe_key = _dedupe_key(event_type, event_payload)
         now = self.clock()
@@ -138,6 +153,13 @@ def _event_detail(event_type: str, payload: dict[str, Any]) -> str:
         return f"Error: {payload.get('error', 'unknown')}"
     if event_type == "daemon_task_reconciliation":
         return f"Lost tasks: {payload.get('lost_tasks', 0)}"
+    if event_type == "approval_expired":
+        return (
+            f"Aprobación: {payload.get('approval_id', 'unknown')}\n"
+            f"Acción: {payload.get('action', 'unknown')}\n"
+            "La acción que esperaba esta aprobación no se ejecutará. "
+            "Reenvía el objetivo si sigues queriendo que se haga."
+        )
     if event_type == "session_resume_failed":
         return (
             f"Provider: {payload.get('provider', payload.get('lane', 'unknown'))}\n"
@@ -190,7 +212,7 @@ def _dedupe_key(event_type: str, payload: dict[str, Any]) -> str:
     parts = [
         event_type,
         str(payload.get("job") or payload.get("agent") or payload.get("poller") or payload.get("reason") or payload.get("failure_kind") or ""),
-        str(payload.get("notebook_id") or payload.get("stale_session") or payload.get("error") or "")[:120],
+        str(payload.get("notebook_id") or payload.get("stale_session") or payload.get("approval_id") or payload.get("error") or "")[:120],
     ]
     return ":".join(parts)
 

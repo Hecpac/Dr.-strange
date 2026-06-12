@@ -29,6 +29,12 @@ class ScheduledJob:
     last_run_at: float = 0.0
     runs: int = 0
     metadata: dict = field(default_factory=dict)
+    # LOW (2026-06-12): set when a daily_at run failed — the day's slot is
+    # NOT burned; the job retries once this bounded delay elapses.
+    next_retry_at: float | None = None
+
+
+_DAILY_JOB_RETRY_DELAY_SECONDS = 900.0
 
 
 def _next_due_for_daily_at(
@@ -95,15 +101,24 @@ class CronScheduler:
         for job in self._jobs.values():
             if not self._is_due(job, current):
                 continue
+            failed = False
             try:
                 job.handler()
             except Exception as exc:
+                failed = True
                 logger.exception("cron job %s failed", job.name)
                 if self._error_sink is not None:
                     try:
                         self._error_sink(job, exc)
                     except Exception:
                         logger.exception("cron error sink failed for %s", job.name)
+            if failed and job.daily_at:
+                # LOW (2026-06-12): a failed daily run must not burn the
+                # day's slot — keep last_run_at and retry after a bounded
+                # delay instead of waiting until tomorrow.
+                job.next_retry_at = current + _DAILY_JOB_RETRY_DELAY_SECONDS
+                continue
+            job.next_retry_at = None
             job.last_run_at = current
             job.runs += 1
             executed.append(job.name)
@@ -117,6 +132,8 @@ class CronScheduler:
     def _is_due(self, job: ScheduledJob, current: float) -> bool:
         # daily_at takes precedence when set
         if job.daily_at and job.timezone:
+            if job.next_retry_at is not None and current < job.next_retry_at:
+                return False
             try:
                 next_due = _next_due_for_daily_at(
                     job.daily_at, job.timezone, job.last_run_at, now=current

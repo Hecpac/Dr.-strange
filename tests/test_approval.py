@@ -143,6 +143,43 @@ diff --git a/package-lock.json b/package-lock.json
             self.assertFalse(m.approve(pending.approval_id, pending.token))
             self.assertFalse(m.verify_resolution(m.read(pending.approval_id)))
 
+    # AM-APPRSCAN (2026-06-12): list_pending caches briefly but every
+    # mutation invalidates the cache, so the inbox is never stale in-process.
+    def test_list_pending_cache_invalidated_on_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            m = ApprovalManager(Path(tmpdir), "secret")
+            first = m.create("deploy", "Deploy A")
+            self.assertEqual(len(m.list_pending()), 1)
+            # Cached call within TTL must still reflect a new record...
+            second = m.create("deploy", "Deploy B")
+            ids = {p["approval_id"] for p in m.list_pending()}
+            self.assertEqual(ids, {first.approval_id, second.approval_id})
+            # ...and a resolution.
+            self.assertTrue(m.approve(first.approval_id, first.token))
+            ids = {p["approval_id"] for p in m.list_pending()}
+            self.assertEqual(ids, {second.approval_id})
+
+    def test_reap_resolved_moves_old_terminal_records_out_of_hot_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            m = ApprovalManager(Path(tmpdir), "secret")
+            old = m.create("deploy", "Old resolved")
+            self.assertTrue(m.approve(old.approval_id, old.token))
+            # Backdate the resolution beyond the reap window.
+            path = Path(tmpdir) / f"{old.approval_id}.json"
+            payload = json.loads(path.read_text())
+            payload["resolved_at"] = time.time() - 8 * 86_400
+            path.write_text(json.dumps(payload))
+            fresh = m.create("deploy", "Still pending")
+
+            moved = m.reap_resolved(older_than_seconds=7 * 86_400)
+
+            self.assertEqual(moved, 1)
+            self.assertFalse(path.exists())
+            self.assertTrue((Path(tmpdir) / "resolved" / f"{old.approval_id}.json").exists())
+            self.assertEqual(
+                {p["approval_id"] for p in m.list_pending()}, {fresh.approval_id}
+            )
+
     # MED-2: approval tokens are single-use; a resolved record is immutable.
     def test_valid_token_approves_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

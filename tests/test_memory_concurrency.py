@@ -52,5 +52,48 @@ class MemoryStoreConcurrencyTests(unittest.TestCase):
             self.assertEqual(errors, [], msg=f"concurrent access raised: {[repr(e) for e in errors[:3]]}")
 
 
+class MergeActiveObjectTests(unittest.TestCase):
+    # AM-STATEWR/M16 (2026-06-12): the read-copy-write caller pattern lost
+    # updates when a worker thread and a chat turn interleaved. The atomic
+    # merge re-reads under the store lock so concurrent writers compose.
+    def test_concurrent_merges_compose_instead_of_overwriting(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = MemoryStore(Path(tmpdir) / "claw.db")
+            session = "tg-merge"
+            start = threading.Barrier(2)
+
+            def worker_side() -> None:
+                start.wait()
+                for i in range(50):
+                    store.merge_active_object(session, {"active_task": {"step": i}})
+
+            def chat_side() -> None:
+                start.wait()
+                for i in range(50):
+                    store.merge_active_object(session, {"pending_tool_approval": {"n": i}})
+
+            threads = [threading.Thread(target=worker_side), threading.Thread(target=chat_side)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+            active_object = store.get_session_state(session)["active_object"]
+            self.assertEqual(active_object["active_task"], {"step": 49})
+            self.assertEqual(active_object["pending_tool_approval"], {"n": 49})
+
+    def test_merge_supports_remove_and_state_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = MemoryStore(Path(tmpdir) / "claw.db")
+            store.merge_active_object("s1", {"a": 1, "b": 2})
+            store.merge_active_object(
+                "s1", {}, remove=("a",), pending_action="retry", verification_status="pending"
+            )
+            state = store.get_session_state("s1")
+            self.assertEqual(state["active_object"], {"b": 2})
+            self.assertEqual(state["pending_action"], "retry")
+            self.assertEqual(state["verification_status"], "pending")
+
+
 if __name__ == "__main__":
     unittest.main()

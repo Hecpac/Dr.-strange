@@ -50,6 +50,44 @@ class TaskLedgerTests(unittest.TestCase):
             self.assertEqual(ledger.summary(session_id="tg-123"), {"succeeded": 1})
             self.assertEqual(ledger.list(session_id="tg-123")[0].task_id, "task-1")
 
+    def test_terminal_status_is_immutable_for_late_writers(self) -> None:
+        # LOW (2026-06-12, hardened per PR #95 review): a late writer
+        # (reconciliation marking lost, duplicated completion path) must not
+        # flip an already-terminal row; check+write happen under one lock.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "observe.db")
+            ledger = TaskLedger(Path(tmpdir) / "claw.db", observe=observe)
+            ledger.create(
+                task_id="task-1",
+                session_id="tg-123",
+                objective="fix login",
+                mode="coding",
+                runtime="coordinator",
+                provider="codex",
+                model="gpt-5.3-codex",
+                status="running",
+                route={"channel": "telegram"},
+            )
+            first = ledger.mark_terminal(
+                "task-1", status="failed", summary="broke", error="boom", verification_status="failed"
+            )
+            self.assertEqual(first.status, "failed")
+
+            # Late writer with full evidence still cannot resurrect the row.
+            second = ledger.mark_terminal(
+                "task-1",
+                status="succeeded",
+                summary="late success",
+                verification_status="passed",
+                artifacts={"commit": "abc123"},
+            )
+
+            self.assertIsNotNone(second)
+            self.assertEqual(second.status, "failed")
+            self.assertEqual(second.summary, "broke")
+            events = [e["event_type"] for e in observe.recent_events(limit=20)]
+            self.assertIn("task_ledger_terminal_transition_blocked", events)
+
     def test_emits_task_events_with_job_and_artifact_lineage(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             observe = ObserveStream(Path(tmpdir) / "observe.db")

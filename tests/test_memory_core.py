@@ -215,6 +215,23 @@ class BuildContextTests(unittest.TestCase):
         self.assertEqual(uncertain["prompt_residency"], "retrieval_on_demand")
         self.assertEqual(uncertain["retention_reason"], "low_confidence")
 
+    def test_profile_facts_return_latest_version_per_key(self) -> None:
+        # AM-FACTDUP (2026-06-12): append-only fact versions must not appear
+        # as duplicates in the prompt — only the newest row per key counts.
+        self.store.store_fact("profile.city", "Caracas", source="test", source_trust="trusted", confidence=0.9)
+        self.store.store_fact("profile.city", "Dallas", source="test", source_trust="trusted", confidence=0.9)
+        self.store.store_fact("profile.role", "PM", source="test", source_trust="trusted", confidence=0.8)
+
+        facts = self.store.get_profile_facts()
+        keys = [f["key"] for f in facts]
+        self.assertEqual(keys.count("profile.city"), 1)
+        city = next(f for f in facts if f["key"] == "profile.city")
+        self.assertEqual(city["value"], "Dallas")
+
+        ctx = self.store.build_context("s1", message="go", include_history=False)
+        self.assertNotIn("Caracas", ctx)
+        self.assertIn("Dallas", ctx)
+
     def test_history_trim_keeps_newest_contiguous_block(self) -> None:
         # AM-TRIM (2026-06-12): the tail fill used `continue` on a too-big
         # line — a huge NEWEST turn was silently skipped while OLDER ones

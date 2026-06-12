@@ -207,7 +207,15 @@ def run_subprocess_bounded(
                         "timed_out": True,
                     },
                 )
-            stdout, stderr = proc.communicate()
+            # LOW (2026-06-12): even post-SIGKILL, communicate() can hang
+            # forever when a surviving grandchild holds the pipes open.
+            # PR #95 review: keep whatever partial output the exception
+            # captured instead of discarding it.
+            try:
+                stdout, stderr = proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired as drain_exc:
+                stdout = drain_exc.stdout or ""
+                stderr = drain_exc.stderr or ""
         else:
             _emit(
                 observe,
