@@ -381,5 +381,60 @@ class TerminalWriteHealExhaustionTests(unittest.TestCase):
             self.assertEqual(row["status"], "running", "the write must NOT be faked")
 
 
+class RegistryHygieneTests(unittest.TestCase):
+    def test_register_prunes_dead_handles(self) -> None:
+        # PR #98 review (gemini): create/destroy churn must not accumulate
+        # dead handles even when no heal ever fires.
+        import gc
+
+        from claw_v2.sqlite_runtime import _WAL_HEAL_REGISTRY, _registry_key
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "t.db"
+            _seed_db(db_path)
+            key = _registry_key(db_path)
+
+            class _Store:
+                def __init__(self) -> None:
+                    self.db_path = db_path
+                    self._conn = _AlwaysLockedConn()
+                    self._lock = threading.Lock()
+
+            for _ in range(20):
+                store = _Store()
+                register_wal_heal(db_path, make_store_wal_heal(store))
+                del store
+                gc.collect()
+            # A fresh registration prunes the dead ones: at most a handful live.
+            live = _Store()
+            register_wal_heal(db_path, make_store_wal_heal(live))
+            alive = [h for h in _WAL_HEAL_REGISTRY.get(key, ()) if h.alive]
+            self.assertLessEqual(len(alive), 2, "dead handles must be pruned on register")
+
+
+class TaskLedgerStampTests(unittest.TestCase):
+    def test_terminal_write_stamps_generation(self) -> None:
+        # PR #98 review (gemini): task_ledger must also contribute the WAL
+        # generation stamp so swap detection works when it writes first.
+        from claw_v2.sqlite_runtime import _WAL_GENERATION_INODES, _registry_key
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "ledger.db"
+            _WAL_GENERATION_INODES.pop(_registry_key(db_path), None)
+            ledger = TaskLedger(db_path)
+            ledger.create(
+                task_id="t-stamp",
+                session_id="tg-1",
+                objective="obj",
+                mode="coding",
+                runtime="coordinator",
+                provider="anthropic",
+                model="m",
+                status="running",
+            )
+            ledger.mark_terminal("t-stamp", status="failed", summary="s", error="x")
+            self.assertIn(_registry_key(db_path), _WAL_GENERATION_INODES)
+
+
 if __name__ == "__main__":
     unittest.main()
