@@ -19,6 +19,7 @@ from claw_v2.adapters.anthropic_auth import (
 )
 from claw_v2.adapters.base import (
     ADVISORY_LANES,
+    AdapterUnavailableError,
     LLMRequest,
     build_effective_system_prompt,
 )
@@ -173,6 +174,14 @@ def build_options(
     if should_use_api_key_auth(config):
         if api_key := resolve_anthropic_api_key():
             sdk_env["ANTHROPIC_API_KEY"] = api_key
+        else:
+            # D4: fail actionably instead of launching the CLI in bare mode
+            # without credentials (which surfaces as an opaque CLI error).
+            raise AdapterUnavailableError(
+                "CLAUDE_AUTH_MODE=api_key but no ANTHROPIC_API_KEY is available. "
+                "Export it in the daemon environment or add it to ~/.claw/env "
+                "(shell dotfiles are not scanned)."
+            )
         extra_args["bare"] = None
     elif os.environ.get("ANTHROPIC_API_KEY"):
         sdk_env["ANTHROPIC_API_KEY"] = ""
