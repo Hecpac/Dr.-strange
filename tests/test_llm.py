@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from claw_v2.adapters.base import AdapterError, AdapterUnavailableError, LLMRequest
+from claw_v2.adapters.openai import OpenAIAdapter
 from claw_v2.eval_mocks import StaticAdapter, echo_response
 from claw_v2.llm import LLMRouter
 from claw_v2.observation_window import ObservationWindowConfig, ObservationWindowState
@@ -215,6 +216,53 @@ class LLMRouterTests(unittest.TestCase):
             )
             self.assertEqual(response.provider, "openai")
             self.assertIsNone(recorded["session_id"])
+
+    def test_cross_provider_fallback_keeps_session_id_owned_by_fallback_adapter(self) -> None:
+        # D5: the router asks the fallback adapter (owns_session_id) instead
+        # of hardcoding provider id formats.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            recorded: dict[str, object] = {}
+
+            def failing(_: LLMRequest) -> LLMResponse:
+                raise AdapterError("Claude SDK execution failed")
+
+            def fallback(request: LLMRequest) -> LLMResponse:
+                recorded["session_id"] = request.session_id
+                return LLMResponse(
+                    content="fallback ok",
+                    lane=request.lane,
+                    provider="openai",
+                    model=request.model,
+                    confidence=0.7,
+                    cost_estimate=0.0,
+                )
+
+            router = LLMRouter(
+                config=config,
+                adapters={
+                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=failing),
+                    "openai": OpenAIAdapter(transport=fallback),
+                },
+            )
+            response = router.ask(
+                "verify",
+                lane="verifier",
+                provider="anthropic",
+                session_id="resp_openai_cursor_1",
+                evidence_pack={"diff": "x"},
+            )
+            self.assertEqual(response.provider, "openai")
+            self.assertEqual(recorded["session_id"], "resp_openai_cursor_1")
+
+    def test_session_ownership_contract(self) -> None:
+        default_adapter = StaticAdapter("x", tool_capable=False, responder=echo_response("x"))
+        self.assertFalse(default_adapter.owns_session_id("resp_123"))
+        self.assertFalse(default_adapter.owns_session_id("bb1e321e-claude-session"))
+        openai_adapter = OpenAIAdapter()
+        self.assertTrue(openai_adapter.owns_session_id("resp_123"))
+        self.assertTrue(openai_adapter.owns_session_id("resp-123"))
+        self.assertFalse(openai_adapter.owns_session_id("bb1e321e-claude-session"))
 
     def test_ollama_lane_routes_to_adapter(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
