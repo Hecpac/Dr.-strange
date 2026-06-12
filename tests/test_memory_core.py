@@ -115,6 +115,17 @@ class DeleteFactTests(unittest.TestCase):
         self.store.delete_fact("drop")
         self.assertEqual(len(self.store.search_facts("keep")), 1)
 
+    def test_delete_fact_with_embedding(self) -> None:
+        # AH2 (2026-06-11): with PRAGMA foreign_keys=ON, deleting a fact that
+        # has a fact_embeddings child raised IntegrityError. Children must be
+        # removed alongside the fact.
+        fact_id = self.store.store_fact_with_embedding("embedded", "val", source="test")
+        self.assertTrue(self.store.delete_fact("embedded"))
+        orphan = self.store._conn.execute(
+            "SELECT 1 FROM fact_embeddings WHERE fact_id = ?", (fact_id,)
+        ).fetchone()
+        self.assertIsNone(orphan)
+
 
 class BuildContextTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -203,6 +214,40 @@ class BuildContextTests(unittest.TestCase):
         uncertain = next(match for match in matches if match["key"] == "profile.uncertain_preference")
         self.assertEqual(uncertain["prompt_residency"], "retrieval_on_demand")
         self.assertEqual(uncertain["retention_reason"], "low_confidence")
+
+    # F5.1 (2026-06-11): identity must be present on EVERY context path —
+    # after compaction + provider reset the rebuilt context used to carry no
+    # identity layer at all (root cause of persona amnesia).
+    def test_identity_anchor_injected_unconditionally(self) -> None:
+        for include_history in (True, False):
+            with self.subTest(include_history=include_history):
+                ctx = self.store.build_context("s1", message="go", include_history=include_history)
+                self.assertIn("# IDENTITY ANCHOR", ctx)
+                self.assertIn("Dr. Strange", ctx)
+
+    def test_identity_anchor_survives_compaction_and_provider_reset(self) -> None:
+        for i in range(8):
+            self.store.store_message(
+                "s1", "user", f"msg-{i}", compact=True, max_messages=6, preserve_recent=4
+            )
+        self.store.mark_provider_session_reset("s1", reason="context_compacted")
+        ctx = self.store.build_context("s1", include_history=False)
+        self.assertIn("# IDENTITY ANCHOR", ctx)
+
+    def test_identity_anchor_truncated_emits_event(self) -> None:
+        events: list[tuple[str, dict]] = []
+
+        class Observe:
+            def emit(self, event_type: str, payload: dict | None = None, **_: object) -> None:
+                events.append((event_type, payload or {}))
+
+        self.store.observe = Observe()
+        ctx = self.store.build_context("s1", message="go", budget=40)
+        self.assertIn("# Current input", ctx)
+        types = [event_type for event_type, _ in events]
+        self.assertIn("identity_block_truncated", types)
+        payload = dict(events[types.index("identity_block_truncated")][1])
+        self.assertLess(payload["kept_chars"], payload["total_chars"])
 
     def test_learning_rules_backfill_after_retention_filter(self) -> None:
         for index in range(5):

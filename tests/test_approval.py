@@ -116,6 +116,33 @@ diff --git a/package-lock.json b/package-lock.json
             self.assertEqual(payload["archive_reason"], "duplicate")
             self.assertIn("archived_at", payload)
 
+    # AH1 (2026-06-11): an "approved" status on disk only counts if the
+    # manager stamped the resolution — a forged record must not verify.
+    def test_verify_resolution_accepts_manager_approved_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            m = ApprovalManager(Path(tmpdir), "secret")
+            pending = m.create("deploy", "Deploy to production")
+            self.assertTrue(m.approve(pending.approval_id, pending.token))
+            payload = m.read(pending.approval_id)
+            self.assertTrue(m.verify_resolution(payload))
+
+    def test_verify_resolution_rejects_forged_approved_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            m = ApprovalManager(Path(tmpdir), "secret")
+            pending = m.create("deploy", "Deploy to production")
+            path = Path(tmpdir) / f"{pending.approval_id}.json"
+            payload = json.loads(path.read_text())
+            payload["status"] = "approved"
+            payload["resolved_by"] = "human"
+            payload["resolved_at"] = time.time()
+            path.write_text(json.dumps(payload))
+
+            self.assertFalse(m.verify_resolution(m.read(pending.approval_id)))
+            # A no-op manager pass over the forged record (replayed token on a
+            # non-pending record) must not stamp a signature retroactively.
+            self.assertFalse(m.approve(pending.approval_id, pending.token))
+            self.assertFalse(m.verify_resolution(m.read(pending.approval_id)))
+
     # MED-2: approval tokens are single-use; a resolved record is immutable.
     def test_valid_token_approves_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

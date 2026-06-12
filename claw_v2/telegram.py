@@ -1653,13 +1653,17 @@ class TelegramTransport:
                     duration_seconds=duration_seconds,
                 )
                 try:
-                    response = await asyncio.to_thread(
-                        self._handle_agent_multimodal_sync,
-                        user_id=user_id,
-                        session_id=session_id,
-                        content_blocks=content_blocks,
-                        memory_text=memory_text,
-                    )
+                    # AH7/M19 (2026-06-11): same per-chat ordering as text,
+                    # image and document turns — without the lock a concurrent
+                    # text turn races this read-modify-write of session state.
+                    async with self._chat_lock(session_id):
+                        response = await asyncio.to_thread(
+                            self._handle_agent_multimodal_sync,
+                            user_id=user_id,
+                            session_id=session_id,
+                            content_blocks=content_blocks,
+                            memory_text=memory_text,
+                        )
                 except Exception:
                     logger.exception("Error handling video message")
                     response = "Error procesando tu video. Intenta de nuevo."

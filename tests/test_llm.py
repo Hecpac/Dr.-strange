@@ -63,6 +63,34 @@ class LLMRouterTests(unittest.TestCase):
                 "abort path must emit cost_metering_unknown so the daily gate can freeze",
             )
 
+    def test_budget_exceeded_abort_emits_llm_failed_spend_with_real_cost(self) -> None:
+        # AH8 (2026-06-11): the adapter knows the real spend when it aborts
+        # (budget_exceeded carries cost_usd); the router must record it as
+        # llm_failed_spend instead of hardcoding cost_estimate 0.0.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            audit_events: list[dict] = []
+
+            def aborting(request: LLMRequest) -> LLMResponse:
+                raise AdapterError(
+                    "OpenAI request exceeded max_budget: $2.5000 > $1.0000",
+                    metadata={"reason": "budget_exceeded", "cost_usd": 2.5},
+                )
+
+            router = LLMRouter(
+                config=config,
+                adapters={"openai": StaticAdapter("openai", tool_capable=True, responder=aborting)},
+                audit_sink=audit_events.append,
+            )
+
+            with self.assertRaises(AdapterError):
+                router.ask("do the task", lane="worker", provider="openai")
+
+            failed_spend = [e for e in audit_events if e.get("action") == "llm_failed_spend"]
+            self.assertEqual(len(failed_spend), 1)
+            self.assertAlmostEqual(failed_spend[0]["cost_estimate"], 2.5)
+            self.assertEqual(failed_spend[0]["metadata"]["reason"], "budget_exceeded")
+
     def test_secondary_lane_falls_back_to_anthropic(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = make_config(Path(tmpdir))
@@ -81,6 +109,76 @@ class LLMRouterTests(unittest.TestCase):
             self.assertEqual(response.provider, "anthropic")
             self.assertTrue(response.degraded_mode)
             self.assertIn("fallback_reason", response.artifacts)
+
+    def test_fallback_blocked_when_pre_hook_gates_fallback_provider(self) -> None:
+        # AH3 (2026-06-11): pre-hooks (daily cost gate) used to run only
+        # against the primary provider. anthropic is non-billable under
+        # subscription, so a frozen daily budget still let the fallback
+        # request reach OpenAI unmetered. The fallback must clear the same
+        # gates — and fail the turn when blocked.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            audit_events: list[dict] = []
+            fallback_called: list[str] = []
+
+            def failing(_: LLMRequest) -> LLMResponse:
+                raise AdapterError("provider down")
+
+            def fallback(request: LLMRequest) -> LLMResponse:
+                fallback_called.append(request.provider)
+                return echo_response("openai")(request)
+
+            def billable_gate(request: LLMRequest) -> LLMRequest | None:
+                if request.provider == "openai":
+                    return None
+                return request
+
+            billable_gate.__name__ = "daily_cost_gate"
+            billable_gate.block_reason = "daily_budget_exceeded"
+
+            router = LLMRouter(
+                config=config,
+                adapters={
+                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=failing),
+                    "openai": StaticAdapter("openai", tool_capable=False, responder=fallback),
+                },
+                pre_hooks=[billable_gate],
+                audit_sink=audit_events.append,
+            )
+
+            with self.assertRaises(AdapterError):
+                router.ask("verify", lane="verifier", provider="anthropic", evidence_pack={"diff": "x"})
+
+            self.assertEqual(fallback_called, [], "blocked fallback must never reach the adapter")
+            blocked = [e for e in audit_events if e.get("action") == "llm_fallback_blocked_by_pre_hook"]
+            self.assertEqual(len(blocked), 1)
+            self.assertEqual(blocked[0]["metadata"]["block_reason"], "daily_budget_exceeded")
+
+    def test_fallback_reruns_pre_hooks_against_fallback_request(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            seen_providers: list[str] = []
+
+            def failing(_: LLMRequest) -> LLMResponse:
+                raise AdapterError("provider down")
+
+            def recording_hook(request: LLMRequest) -> LLMRequest | None:
+                seen_providers.append(request.provider)
+                return request
+
+            router = LLMRouter(
+                config=config,
+                adapters={
+                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=failing),
+                    "openai": StaticAdapter("openai", tool_capable=False, responder=echo_response("openai")),
+                },
+                pre_hooks=[recording_hook],
+            )
+
+            response = router.ask("verify", lane="verifier", provider="anthropic", evidence_pack={"diff": "x"})
+
+            self.assertEqual(response.provider, "openai")
+            self.assertEqual(seen_providers, ["anthropic", "openai"])
 
     def test_cross_provider_fallback_does_not_reuse_incompatible_session_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

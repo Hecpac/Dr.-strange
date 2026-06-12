@@ -137,6 +137,17 @@ class SecretPathTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertTrue(path_is_secret(path), msg=path)
 
+    def test_pending_approvals_root_detected(self) -> None:
+        # 2026-06-11 audit (AH1): prod approvals live in ~/.claw/pending_approvals
+        # (config.approvals_root), which the "approvals/*" pattern missed — a
+        # worker could overwrite a pending record with {"status": "approved"}.
+        for path in (
+            "/Users/x/.claw/pending_approvals/abc123.json",
+            "pending_approvals/abc123.json",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(path_is_secret(path), msg=path)
+
     def test_browser_credential_stores_detected_case_insensitive(self) -> None:
         # 2026-05-31 audit (H3): macOS browser credential stores have
         # capitalized on-disk names ("Cookies", "Login Data") that the

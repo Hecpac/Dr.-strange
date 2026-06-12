@@ -52,6 +52,11 @@ logger = _logging.getLogger(__name__)
 
 _PETRI_DIMENSIONS_ROOT = Path(__file__).parent / "verification" / "dimensions"
 
+# F1.1 (2026-06-11): a task may be deferred for pending verification at most
+# this many times before it is forced to a terminal "failed"
+# (verification_stalled) instead of looping forever.
+_MAX_VERIFICATION_DEFERRALS = 5
+
 
 class TaskHandler:
     def __init__(
@@ -823,9 +828,49 @@ class TaskHandler:
                         last_checkpoint=completed_checkpoint,
                     )
             if not terminal_status:
+                # F1.1 (2026-06-11): cap the verification-pending defer loop.
+                # jobs.fail() bounds retries of one job at max_attempts, but a
+                # terminal-failed job leaves the task "pending" and the next
+                # cycle enqueues a fresh job (attempts reset) — unbounded
+                # across generations. The counter lives on active_task in
+                # session state, which survives job re-creation.
+                deferrals = 1
+                if active_task.get("task_id") == task_id:
+                    try:
+                        deferrals = int(active_task.get("verification_deferrals") or 0) + 1
+                    except (TypeError, ValueError):
+                        deferrals = 1
+                if deferrals > _MAX_VERIFICATION_DEFERRALS:
+                    verification_status = "failed"
+                    terminal_status = "failed"
+                    checkpoint_error = checkpoint_error or (
+                        f"verification_stalled: {deferrals - 1} deferrals sin estado terminal"
+                    )
+                    completed_checkpoint = {
+                        **completed_checkpoint,
+                        "verification_status": "failed",
+                        "error": checkpoint_error,
+                        "reason": "verification_stalled",
+                    }
+                    self._update_session_state(
+                        session_id,
+                        verification_status="failed",
+                        last_checkpoint=completed_checkpoint,
+                    )
+                    self._emit(
+                        "autonomous_task_verification_stalled",
+                        {
+                            "session_id": session_id,
+                            "task_id": task_id,
+                            "objective": objective,
+                            "deferrals": deferrals - 1,
+                        },
+                    )
+            if not terminal_status:
                 if active_task.get("task_id") == task_id:
                     active_task["status"] = "pending"
                     active_task["pending_action"] = pending_action
+                    active_task["verification_deferrals"] = deferrals
                     active_task["updated_at"] = time.time()
                     active_object["active_task"] = active_task
                     self._update_session_state(session_id, active_object=active_object)
@@ -2335,11 +2380,17 @@ class TaskHandler:
             return
         record_id = job_id or self._active_job_id_for_task(task_id)
         if record_id is not None:
+            # F1.1 (2026-06-11): exponential backoff instead of an immediate
+            # re-claim — each attempt of the same job doubles the delay.
+            attempts = 0
+            record = self.job_service.get(record_id)
+            if record is not None:
+                attempts = int(record.attempts or 0)
             self.job_service.fail(
                 record_id,
                 error="verification pending",
                 retry=True,
-                retry_delay_seconds=0,
+                retry_delay_seconds=min(300.0, 15.0 * (2.0 ** max(0, attempts - 1))),
                 checkpoint=checkpoint,
             )
 

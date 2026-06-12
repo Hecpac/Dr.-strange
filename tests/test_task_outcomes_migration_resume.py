@@ -104,6 +104,58 @@ class TaskOutcomesMigrationResumeTests(unittest.TestCase):
                     ).fetchone()
                 )
 
+    def test_legacy_db_with_child_rows_migrates_under_foreign_keys_on(self) -> None:
+        """AH2 (2026-06-11): the runtime connection enables PRAGMA
+        foreign_keys=ON. With child rows in outcome_entity_edges /
+        outcome_embeddings the rebuild used to fail at DROP (FK violation),
+        and the RENAME rewrote child REFERENCES to task_outcomes_old —
+        pointing them at a dropped table. The migration must complete and
+        leave children referencing the rebuilt task_outcomes."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Path(tmpdir) / "claw.db"
+            with sqlite3.connect(db) as conn:
+                _create_legacy_task_outcomes(conn)
+                _seed_outcomes(conn, 5)
+                conn.executescript(
+                    """
+                    CREATE TABLE outcome_embeddings (
+                        outcome_id INTEGER PRIMARY KEY REFERENCES task_outcomes(id),
+                        embedding TEXT NOT NULL
+                    );
+                    CREATE TABLE outcome_entity_edges (
+                        outcome_id INTEGER NOT NULL REFERENCES task_outcomes(id) ON DELETE CASCADE,
+                        entity_tag TEXT NOT NULL,
+                        PRIMARY KEY (outcome_id, entity_tag)
+                    );
+                    INSERT INTO outcome_embeddings VALUES (1, '[0.1]');
+                    INSERT INTO outcome_entity_edges VALUES (1, 'tag-a');
+                    """
+                )
+            MemoryStore(db)
+            with sqlite3.connect(db) as conn:
+                conn.execute("PRAGMA foreign_keys=ON")
+                schema = conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE name='task_outcomes'"
+                ).fetchone()[0]
+                self.assertIn("usable_reply_unverified", schema)
+                self.assertIsNone(
+                    conn.execute(
+                        "SELECT name FROM sqlite_master WHERE name='task_outcomes_old'"
+                    ).fetchone()
+                )
+                self.assertEqual(
+                    conn.execute("SELECT COUNT(*) FROM task_outcomes").fetchone()[0], 5
+                )
+                # Children must still reference the live table, not the
+                # renamed-and-dropped one, and pass FK enforcement.
+                for child in ("outcome_embeddings", "outcome_entity_edges"):
+                    child_sql = conn.execute(
+                        "SELECT sql FROM sqlite_master WHERE name=?", (child,)
+                    ).fetchone()[0]
+                    self.assertNotIn("task_outcomes_old", child_sql, child)
+                self.assertEqual(conn.execute("PRAGMA foreign_key_check").fetchall(), [])
+                conn.execute("INSERT INTO outcome_entity_edges VALUES (2, 'tag-b')")
+
     def test_orphan_task_outcomes_old_after_crash_is_resumed(self) -> None:
         """Simulates: previous run ran RENAME (creating task_outcomes_old)
         and was killed before the new table got the rows. On next boot

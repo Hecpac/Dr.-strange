@@ -46,6 +46,10 @@ SECRET_PATH_PATTERNS: tuple[str, ...] = (
     "*/browser_profile*",
     "approvals/*",
     "*/approvals/*",
+    # 2026-06-11 audit (AH1): prod approvals root is ~/.claw/pending_approvals
+    # (config.approvals_root), which "approvals/*" does not match.
+    "pending_approvals/*",
+    "*/pending_approvals/*",
     "id_rsa*",
     "*.token",
     # --- 2026-05-29 audit (PR 1): credential files exposed by the HOME read-root ---

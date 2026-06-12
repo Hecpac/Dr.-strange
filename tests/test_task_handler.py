@@ -226,6 +226,77 @@ class TaskHandlerTests(unittest.TestCase):
             coordinator.release.set()
             self.assertTrue(handler.wait_for_task(first_task_id, timeout=2))
 
+    def test_pending_verification_stalls_to_failed_after_max_deferrals(self) -> None:
+        # F1.1 (2026-06-11): a task whose verification never resolves must
+        # reach terminal "failed" (verification_stalled) in ≤ N deferrals
+        # instead of re-running forever.
+        from claw_v2.task_handler import _MAX_VERIFICATION_DEFERRALS
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            memory = MemoryStore(root / "claw.db")
+            observe = ObserveStream(root / "observe.db")
+            ledger = TaskLedger(root / "claw.db", observe=observe)
+            jobs = JobService(root / "claw.db", observe=observe)
+
+            class _PendingCoordinator:
+                def run(
+                    self,
+                    task_id,
+                    objective,
+                    research_tasks,
+                    implementation_tasks=None,
+                    verification_tasks=None,
+                    lane_overrides=None,
+                ):
+                    return CoordinatorResult(
+                        task_id=task_id,
+                        phase_results={
+                            "verification": [
+                                WorkerResult(
+                                    task_name="verify_change",
+                                    content="Verification Status: pending",
+                                    duration_seconds=0.1,
+                                )
+                            ]
+                        },
+                        synthesis="todavía falta",
+                    )
+
+            handler = TaskHandler(
+                coordinator=_PendingCoordinator(),
+                observe=observe,
+                task_ledger=ledger,
+                job_service=jobs,
+                get_session_state=memory.get_session_state,
+                update_session_state=memory.update_session_state,
+                workspace_root=root,
+            )
+
+            ack = handler.start_autonomous_task("s1", "implementa el fix pendiente", mode="coding")
+            task_id = ack.split("`", 2)[1]
+            self.assertTrue(handler.wait_for_task(task_id, timeout=5))
+
+            state = memory.get_session_state("s1")
+            active_task = state["active_object"]["active_task"]
+            self.assertEqual(active_task["status"], "pending")
+            self.assertEqual(active_task["verification_deferrals"], 1)
+
+            # Re-run the same task as the daemon job runner would.
+            for _ in range(_MAX_VERIFICATION_DEFERRALS):
+                handler._run_autonomous_task("s1", task_id, "implementa el fix pendiente", "coding")
+
+            state = memory.get_session_state("s1")
+            self.assertEqual(state["verification_status"], "failed")
+            self.assertEqual(state["active_object"]["active_task"]["status"], "failed")
+            record = ledger.get(task_id)
+            self.assertIsNotNone(record)
+            assert record is not None
+            self.assertEqual(record.status, "failed")
+            events = [event["event_type"] for event in observe.recent_events(limit=300)]
+            self.assertIn("autonomous_task_verification_stalled", events)
+            self.assertIn("autonomous_task_failed", events)
+
     def test_start_autonomous_task_ops_mode_dispatches_implementation_tasks(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

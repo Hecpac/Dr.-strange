@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -87,6 +88,8 @@ from claw_v2.scheduled_background_jobs import (
     APPROVAL_SWEEP_RESUME_KEY,
     AUTO_DREAM_JOB_KIND,
     AUTO_DREAM_RESUME_KEY,
+    DAEMON_HEALTH_CHECK_JOB_KIND,
+    DAEMON_HEALTH_CHECK_RESUME_KEY,
     KAIROS_TICK_JOB_KIND,
     KAIROS_TICK_RESUME_KEY,
     LEARNING_CONSOLIDATE_JOB_KIND,
@@ -107,6 +110,7 @@ from claw_v2.scheduled_background_jobs import (
     WIKI_SCRAPE_JOB_KIND,
     WIKI_SCRAPE_RESUME_KEY,
     ScheduledBackgroundJobRunner,
+    daemon_health_check_due,
     enqueue_scheduled_background_job,
     kairos_tick_result_summary,
     safe_non_negative_int,
@@ -534,6 +538,8 @@ def _wrap_job_handler(
 def _setup_core_state(config: AppConfig) -> tuple[MemoryStore, ObserveStream, MetricsTracker, ApprovalManager, AgentBus, FileAgentStore]:
     memory = MemoryStore(config.db_path)
     observe = ObserveStream(config.db_path)
+    # F5.1: lets build_context report identity_block_truncated.
+    memory.observe = observe
     metrics = MetricsTracker()
     approvals = ApprovalManager(
         config.approvals_root,
@@ -1375,6 +1381,20 @@ def _setup_scheduler(
             name="kairos_tick",
             handler=lambda: kairos_tick_runner.run_available(limit=1),
         )
+        # AH5 (2026-06-11): the daily health check runs an LLM judge — it
+        # executes off-tick here; the scheduler guard below only enqueues.
+        daemon_health_check_runner = ScheduledBackgroundJobRunner(
+            job_name="daemon_health_check",
+            job_kind=DAEMON_HEALTH_CHECK_JOB_KIND,
+            job_service=job_service,
+            handler=lambda _payload: kairos.run_health_check(),
+            observe=observe,
+            worker_id="daemon-health-check-runner",
+        )
+        daemon.register_background_job_runner(
+            name="daemon_health_check",
+            handler=lambda: daemon_health_check_runner.run_available(limit=1),
+        )
         self_improve_runner = ScheduledBackgroundJobRunner(
             job_name="self_improve",
             job_kind=SELF_IMPROVE_JOB_KIND,
@@ -1469,6 +1489,40 @@ def _setup_scheduler(
                     observe=observe,
                     max_attempts=1,
                 ),
+            ),
+        )
+    )
+
+    # Daemon health check at 20:58 local. AH5 (2026-06-11): the guard only
+    # enqueues a durable job (Invariant 1); kairos.run_health_check (LLM
+    # judge) executes in the daemon_health_check background runner. The
+    # notification consumer lives in lifecycle.run.
+    _daemon_health_state = {"last_fire_day_key": ""}
+
+    def _daemon_health_guard() -> None:
+        day_key = daemon_health_check_due(
+            datetime.now(), _daemon_health_state["last_fire_day_key"]
+        )
+        if day_key is None:
+            return
+        _daemon_health_state["last_fire_day_key"] = day_key
+        enqueue_scheduled_background_job(
+            job_name="daemon_health_check",
+            job_kind=DAEMON_HEALTH_CHECK_JOB_KIND,
+            resume_key=DAEMON_HEALTH_CHECK_RESUME_KEY,
+            job_service=job_service,
+            observe=observe,
+            max_attempts=1,
+        )
+
+    scheduler.register(
+        ScheduledJob(
+            name="daemon_health_check_guard",
+            interval_seconds=60,
+            handler=_wrap_job_handler(
+                name="daemon_health_check_guard",
+                observe=observe,
+                handler=_daemon_health_guard,
             ),
         )
     )
