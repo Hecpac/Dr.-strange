@@ -9,7 +9,12 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from claw_v2.redaction import redact_sensitive
-from claw_v2.sqlite_runtime import connect_runtime_sqlite
+from claw_v2.sqlite_runtime import (
+    connect_runtime_sqlite,
+    heal_orphaned_wal,
+    make_store_wal_heal,
+    register_wal_heal,
+)
 from claw_v2.task_completion import (
     COMPLETION_CANDIDATES,
     NEEDS_VERIFICATION_STATUSES,
@@ -20,6 +25,9 @@ from claw_v2.turn_context import current_turn_id
 
 TERMINAL_STATUSES = frozenset({"succeeded", "failed", "timed_out", "cancelled", "lost", "completed_unverified"})
 VALID_STATUSES = frozenset({"queued", "running", *TERMINAL_STATUSES})
+
+_TERMINAL_WRITE_LOCKED_ATTEMPTS = 4
+_TERMINAL_WRITE_LOCKED_BACKOFF_SECONDS = 0.2
 
 
 TASK_LEDGER_SCHEMA = """
@@ -97,6 +105,7 @@ class TaskLedger:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.observe = observe
         self._conn = connect_runtime_sqlite(self.db_path)
+        register_wal_heal(self.db_path, make_store_wal_heal(self))
         self._lock = threading.Lock()
         with self._lock:
             self._conn.executescript(TASK_LEDGER_SCHEMA)
@@ -281,43 +290,42 @@ class TaskLedger:
                 )
         now = time.time()
         blocked_status: str | None = None
-        with self._lock:
-            # LOW (2026-06-12, PR #95 review): a terminal row is immutable —
-            # a late writer (reconciliation marking lost, duplicated
-            # completion path) must not flip an already-terminal status.
-            # Check and write under ONE lock acquisition (TOCTOU); only the
-            # emit/read happen outside (plain Lock, not reentrant).
-            row = self._conn.execute(
-                "SELECT status FROM agent_tasks WHERE task_id = ?", (task_id,)
-            ).fetchone()
-            current_status = str(row["status"]) if row is not None else ""
-            if current_status in TERMINAL_STATUSES:
-                blocked_status = current_status
-            else:
-                self._conn.execute(
-                    """
-                    UPDATE agent_tasks
-                    SET status = ?,
-                        completed_at = ?,
-                        summary = ?,
-                        error = ?,
-                        verification_status = ?,
-                        artifacts_json = ?,
-                        updated_at = ?
-                    WHERE task_id = ?
-                    """,
-                    (
-                        status,
-                        now,
-                        summary,
-                        error,
-                        verification_status,
-                        json.dumps(dict(artifacts or {}), sort_keys=True),
-                        now,
-                        task_id,
-                    ),
+        # T10 (2026-06-12): a locked DB at the terminal write killed the task
+        # silently (no close, no notification — the user waited forever).
+        # Bounded retry with backoff; on persistent locks try the WAL
+        # generation heal, and fail VISIBLY if the write still cannot land.
+        for write_attempt in range(1, _TERMINAL_WRITE_LOCKED_ATTEMPTS + 1):
+            try:
+                blocked_status = self._terminal_write_once(
+                    task_id,
+                    status=status,
+                    now=now,
+                    summary=summary,
+                    error=error,
+                    verification_status=verification_status,
+                    artifacts=artifacts,
                 )
-                self._conn.commit()
+                break
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower():
+                    raise
+                try:
+                    self._conn.rollback()
+                except Exception:
+                    pass
+                if heal_orphaned_wal(self.db_path):
+                    continue
+                if write_attempt >= _TERMINAL_WRITE_LOCKED_ATTEMPTS:
+                    self._emit(
+                        "task_terminal_write_contention",
+                        {
+                            "task_id": task_id,
+                            "requested_status": status,
+                            "attempts": write_attempt,
+                        },
+                    )
+                    raise
+                time.sleep(_TERMINAL_WRITE_LOCKED_BACKOFF_SECONDS * write_attempt)
         if blocked_status is not None:
             self._emit(
                 "task_ledger_terminal_transition_blocked",
@@ -332,6 +340,55 @@ class TaskLedger:
         if record is not None:
             self._emit("task_ledger_terminal", record.to_dict())
         return record
+
+    def _terminal_write_once(
+        self,
+        task_id: str,
+        *,
+        status: str,
+        now: float,
+        summary: str,
+        error: str,
+        verification_status: str,
+        artifacts: dict[str, Any],
+    ) -> str | None:
+        with self._lock:
+            # LOW (2026-06-12, PR #95 review): a terminal row is immutable —
+            # a late writer (reconciliation marking lost, duplicated
+            # completion path) must not flip an already-terminal status.
+            # Check and write under ONE lock acquisition (TOCTOU); only the
+            # emit/read happen outside (plain Lock, not reentrant).
+            row = self._conn.execute(
+                "SELECT status FROM agent_tasks WHERE task_id = ?", (task_id,)
+            ).fetchone()
+            current_status = str(row["status"]) if row is not None else ""
+            if current_status in TERMINAL_STATUSES:
+                return current_status
+            self._conn.execute(
+                """
+                UPDATE agent_tasks
+                SET status = ?,
+                    completed_at = ?,
+                    summary = ?,
+                    error = ?,
+                    verification_status = ?,
+                    artifacts_json = ?,
+                    updated_at = ?
+                WHERE task_id = ?
+                """,
+                (
+                    status,
+                    now,
+                    summary,
+                    error,
+                    verification_status,
+                    json.dumps(dict(artifacts or {}), sort_keys=True),
+                    now,
+                    task_id,
+                ),
+            )
+            self._conn.commit()
+        return None
 
     def mark_running_checkpoint(
         self,

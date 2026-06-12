@@ -8,8 +8,8 @@
 ## meta
 
 ```yaml
-describes_commit: fe99808+spec-002-self-improve-promotion-hotfix+spec-002-subprocess-bounded-pr-c+spec-002-approval-manager-pr-d+spec-002-promotion-tooling-phase-4+brain-delegation-tool+recovery-jobs-drain-c1+audit-m3-m4-offloop-emits-nonblocking-checkpoint-backup+audit-high-2026-06-11+audit-waves-2-3-2026-06-12+adapters-d1-split-2026-06-12+pasos-6-7-coordinator-resumable-2026-06-12
-doc_version: 2.20
+describes_commit: fe99808+spec-002-self-improve-promotion-hotfix+spec-002-subprocess-bounded-pr-c+spec-002-approval-manager-pr-d+spec-002-promotion-tooling-phase-4+brain-delegation-tool+recovery-jobs-drain-c1+audit-m3-m4-offloop-emits-nonblocking-checkpoint-backup+audit-high-2026-06-11+audit-waves-2-3-2026-06-12+adapters-d1-split-2026-06-12+pasos-6-7-coordinator-resumable-2026-06-12+wal-generation-guard-2026-06-12
+doc_version: 2.21
 last_verified: 2026-06-12
 verification_method: manual + pytest + AST sentinel cross-check
 anchor_strategy: symbol_only  # path:symbol, no line numbers
@@ -29,6 +29,25 @@ tests pass. Defend them.
 
 ```yaml
 invariants:
+  wal_generation_guard:
+    rule: Every store holding a long-lived SQLite connection to the runtime DB
+          (observe, memory, task_ledger, jobs, orchestration, capability_grants,
+          property_graph) registers a StoreWalHealHandle; writers that exhaust
+          locked retries call sqlite_runtime.heal_orphaned_wal, which — only
+          when the -wal sidecar is gone from disk — closes ALL registered
+          connections, clears an empty recreated -wal husk, and reopens them
+          together so the process rejoins ONE WAL generation.
+    why: 2026-06-12 incident — pytest run from the production repo root (by the
+         runtime agent itself) unlinked data/claw.db-wal/-shm under the live
+         daemon; every writer then failed "database is locked" forever and
+         messages/events/task closes silently stopped persisting while the bot
+         kept chatting. Two concurrent WAL generations writing the same DB risk
+         corruption, so the heal is registry-wide and two-phase, never
+         per-store. tests/conftest.py isolates DB_PATH so the suite can never
+         touch the production DB again.
+    enforced_by:
+      - tests/test_sqlite_wal_heal.py
+
   audit_trail:
     rule: Every decision emits an event
     examples: [dispatch_decision, llm_response, llm_fallback, llm_circuit_open,

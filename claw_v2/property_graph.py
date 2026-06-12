@@ -8,7 +8,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-from claw_v2.sqlite_runtime import connect_runtime_sqlite
+from claw_v2.sqlite_runtime import (
+    connect_runtime_sqlite,
+    make_store_wal_heal,
+    register_wal_heal,
+)
 from claw_v2.telemetry import now_iso
 
 
@@ -83,6 +87,7 @@ class PropertyGraphProjection:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = connect_runtime_sqlite(self.db_path)
+        register_wal_heal(self.db_path, make_store_wal_heal(self))
         self._batch_mode = False
         self.ensure_schema()
 

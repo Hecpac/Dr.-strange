@@ -8,7 +8,12 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from claw_v2.sqlite_runtime import connect_runtime_sqlite
+from claw_v2.sqlite_runtime import (
+    connect_runtime_sqlite,
+    heal_orphaned_wal,
+    make_store_wal_heal,
+    register_wal_heal,
+)
 from claw_v2.turn_context import (
     CRITICAL_OBSERVE_EVENTS_REQUIRING_TURN_ID,
     current_turn_id,
@@ -67,6 +72,7 @@ class ObserveStream:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = connect_runtime_sqlite(self.db_path, row_factory=False)
+        register_wal_heal(self.db_path, make_store_wal_heal(self, row_factory=False))
         # Observe events are diagnostic. If another runtime writer owns the DB,
         # drop the event quickly instead of blocking the chat/event loop.
         self._conn.execute(f"PRAGMA busy_timeout={OBSERVE_SQLITE_BUSY_TIMEOUT_MS}")
@@ -172,7 +178,10 @@ class ObserveStream:
         clean_payload: dict,
     ) -> bool:
         payload_json = json.dumps(clean_payload)
-        for attempt in range(1, OBSERVE_LOCKED_RETRY_ATTEMPTS + 1):
+        wal_heal_attempted = False
+        attempt = 0
+        while attempt < OBSERVE_LOCKED_RETRY_ATTEMPTS:
+            attempt += 1
             try:
                 with self._lock:
                     self._conn.execute(
@@ -207,6 +216,15 @@ class ObserveStream:
                     self._conn.rollback()
                 except Exception:
                     logger.debug("observe rollback failed after locked DB", exc_info=True)
+                if attempt >= OBSERVE_LOCKED_RETRY_ATTEMPTS and not wal_heal_attempted:
+                    # T10 (2026-06-12): persistent locks with the -wal sidecar
+                    # gone mean this process is wedged on orphaned WAL files.
+                    # Heal (reopen every registered connection) and grant one
+                    # fresh retry round before dropping anything.
+                    wal_heal_attempted = True
+                    if heal_orphaned_wal(self.db_path):
+                        attempt = 0
+                        continue
                 if attempt >= OBSERVE_LOCKED_RETRY_ATTEMPTS:
                     logger.warning(
                         "dropping observe event after locked database retries: %s",

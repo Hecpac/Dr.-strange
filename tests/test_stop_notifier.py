@@ -240,3 +240,43 @@ def test_build_stop_notifier_respects_disabled_flag():
     notifier = build_stop_notifier(config=config, enabled=False)
     assert isinstance(notifier, StopNotifier)
     assert notifier.enabled is False
+
+
+# --- T11 (2026-06-12): direct Bot API sends must sanitize like the transport ---
+
+
+def test_sanitize_outbound_matches_transport_filter():
+    from claw_v2.bot_helpers import _sanitize_chat_response
+    from claw_v2.stop_notifier import _sanitize_outbound
+
+    dirty = "<response>resultado</response>"
+    cleaned = _sanitize_outbound(dirty)
+    assert "<response>" not in cleaned
+    assert "resultado" in cleaned
+    # Contract: exactly the transport's outbound filter, no divergence.
+    assert cleaned == _sanitize_chat_response(dirty)
+
+
+def test_send_telegram_message_routes_through_sanitizer(monkeypatch):
+    import claw_v2.stop_notifier as sn
+
+    captured = {}
+
+    class _Resp:
+        def read(self, *args):
+            return b"{}"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def fake_urlopen(request, timeout=0):
+        captured["body"] = request.data.decode("utf-8")
+        return _Resp()
+
+    monkeypatch.setattr(sn.urllib.request, "urlopen", fake_urlopen)
+    sn.send_telegram_message("tok", "1", "<response>hola</response>")
+    assert "<response>" not in captured["body"]
+    assert "hola" in captured["body"]
