@@ -355,3 +355,30 @@ def test_integration_wikilint_with_issues_present_now_fails_without_report_only(
         completed_checkpoint=checkpoint,
     )
     assert terminal == "failed"
+
+
+# ---------------------------------------------------------------------------
+# DV.3 / D10 — unified contract registry
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_success_condition_spans_local_and_external() -> None:
+    from claw_v2.verification.local_tool_contracts import resolve_success_condition
+
+    assert resolve_success_condition("Write") is not None  # LOCAL
+    assert resolve_success_condition("HeyGenDeliver") is not None  # EXTERNAL
+    assert resolve_success_condition("NoSuchTool") is None
+
+
+def test_runner_resolves_contracts_only_through_unified_registry() -> None:
+    import inspect
+
+    from claw_v2.verification import local_tool_runner
+
+    src = inspect.getsource(local_tool_runner)
+    assert "LOCAL_TOOL_SUCCESS_CONDITIONS" not in src, (
+        "local_tool_runner must resolve contracts via resolve_success_condition, "
+        "never a single-registry dict (DV.3/D10)"
+    )
+    assert "EXTERNAL_TOOL_SUCCESS_CONDITIONS" not in src
+    assert "resolve_success_condition" in src

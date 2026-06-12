@@ -25,8 +25,8 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from claw_v2.verification.local_tool_contracts import (
-    LOCAL_TOOL_SUCCESS_CONDITIONS,
     build_local_tool_artifact,
+    resolve_success_condition,
 )
 
 
@@ -72,7 +72,7 @@ def observe_pre_state(tool_name: str, args: Mapping[str, Any]) -> dict[str, Any]
     contract has an fs_path-based state_delta_check. For tools without an
     fs_path observation (Bash, WikiLint), returns an empty marker dict.
     """
-    sc = LOCAL_TOOL_SUCCESS_CONDITIONS.get(tool_name)
+    sc = resolve_success_condition(tool_name)
     if sc is None or sc.state_delta_check is None or sc.state_delta_check.fs_path != "":
         return {"kind": "no_fs_observation"}
     path = _safe_path(args)
@@ -95,7 +95,7 @@ def compute_state_delta_observation(
 ) -> dict[str, Any] | None:
     """Compare post-state vs pre-state. Returns the observation dict the
     promote-gate consumes, or None if the contract does not require fs delta."""
-    sc = LOCAL_TOOL_SUCCESS_CONDITIONS.get(tool_name)
+    sc = resolve_success_condition(tool_name)
     if sc is None or sc.state_delta_check is None:
         return None
     if sc.state_delta_check.fs_path != "":
@@ -134,17 +134,10 @@ def attach_artifact_to_result(
       * If the tool has NO declared contract, this is a no-op (legacy tools
         are not affected by the new contract surface).
     """
-    # F3b.1 — accept both LOCAL and EXTERNAL contracts. Previously this
-    # only checked LOCAL, which silently skipped artifact generation for
-    # Tier-3 tools and broke the contract chain.
-    try:
-        from claw_v2.verification.external_tool_contracts import EXTERNAL_TOOL_SUCCESS_CONDITIONS
-    except Exception:
-        EXTERNAL_TOOL_SUCCESS_CONDITIONS = {}
-    if (
-        tool_name not in LOCAL_TOOL_SUCCESS_CONDITIONS
-        and tool_name not in EXTERNAL_TOOL_SUCCESS_CONDITIONS
-    ):
+    # DV.3 / D10 (2026-06-12): one unified registry lookup. The F3b.1 dual
+    # membership check (and the LOCAL-only lookups in the state-delta
+    # helpers) are replaced by resolve_success_condition.
+    if resolve_success_condition(tool_name) is None:
         return result
     if not isinstance(result, dict):
         return result
