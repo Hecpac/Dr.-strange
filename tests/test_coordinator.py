@@ -642,6 +642,68 @@ class ResumeFromScratchTests(unittest.TestCase):
         self.assertTrue(fresh_dir.exists(), "fresh scratch dir must be kept")
 
 
+class ResumeCriticalWorkerTests(unittest.TestCase):
+    """PR #96 review (codex): a resume must fail closed on a critical
+    artifact persisted by a killed attempt, never proceed past it."""
+
+    def _seed_research(self, tmp: Path, task_id: str, *, content: str) -> None:
+        research_dir = tmp / task_id / "research"
+        research_dir.mkdir(parents=True)
+        (research_dir / "r1.json").write_text(
+            json.dumps({"task_name": "r1", "content": content}), encoding="utf-8"
+        )
+
+    def test_loaded_research_with_critical_marker_runs_self_healing(self) -> None:
+        tmp = Path(tempfile.mkdtemp())
+        self._seed_research(
+            tmp, "task-crit", content="CRITICAL ERROR EN WORKER: entorno roto"
+        )
+        svc, router, observe, _ = _make_service(scratch_root=tmp)
+        router.ask.return_value = MagicMock(content="diagnóstico")
+        impl = [WorkerTask(name="i1", instruction="implementa", lane="worker")]
+        result = svc.run(
+            "task-crit",
+            "objetivo",
+            [WorkerTask(name="r1", instruction="investiga")],
+            implementation_tasks=impl,
+            start_phase="synthesis",
+        )
+        self.assertTrue(result.error.startswith("critical_worker_error:"), result.error)
+        self.assertNotIn("implementation", result.phase_results)
+        lanes = [call.kwargs.get("lane") for call in router.ask.call_args_list]
+        self.assertNotIn("worker", lanes, "implementation must never run after a critical artifact")
+        event_names = [call.args[0] for call in observe.emit.call_args_list]
+        self.assertIn("coordinator_critical_worker_error", event_names)
+
+    def test_loaded_implementation_with_critical_marker_fails_closed(self) -> None:
+        tmp = Path(tempfile.mkdtemp())
+        self._seed_research(tmp, "task-crit2", content="hallazgo limpio")
+        (tmp / "task-crit2" / "synthesis.md").write_text("plan", encoding="utf-8")
+        impl_dir = tmp / "task-crit2" / "implementation"
+        impl_dir.mkdir()
+        (impl_dir / "i1.json").write_text(
+            json.dumps(
+                {"task_name": "i1", "content": "CRITICAL ERROR EN WORKER: deploy roto"}
+            ),
+            encoding="utf-8",
+        )
+        svc, router, observe, _ = _make_service(scratch_root=tmp)
+        router.ask.return_value = MagicMock(content="diagnóstico")
+        result = svc.run(
+            "task-crit2",
+            "objetivo",
+            [WorkerTask(name="r1", instruction="investiga")],
+            implementation_tasks=[WorkerTask(name="i1", instruction="implementa", lane="worker")],
+            verification_tasks=[WorkerTask(name="v1", instruction="verifica", lane="verifier")],
+            start_phase="verification",
+        )
+        self.assertTrue(result.error.startswith("critical_worker_error:"), result.error)
+        self.assertNotIn("verification", result.phase_results)
+        lanes = [call.kwargs.get("lane") for call in router.ask.call_args_list]
+        self.assertNotIn("verifier", lanes, "verification must never run after a critical artifact")
+        self.assertNotIn("worker", lanes)
+
+
 class CancelAtPhaseBoundaryTests(unittest.TestCase):
     """AM-CANCEL — should_abort is honored between phases."""
 

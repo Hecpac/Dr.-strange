@@ -170,6 +170,23 @@ class CoordinatorService:
                 if research_results:
                     result.phase_results["research"] = research_results
                     self._emit_phase_resumed_from_scratch(trace, task_id, "research", len(research_results))
+                    # A kill between _write_scratch and the self-healing path
+                    # can persist a critical artifact: re-check loaded results
+                    # so a resume never proceeds past a critical worker error.
+                    critical = _critical_worker_result(research_results)
+                    if critical is not None:
+                        return self._complete_critical_worker_run(
+                            result=result,
+                            objective=objective,
+                            phase="research",
+                            critical_result=critical,
+                            collected_results=research_results,
+                            scratch=scratch,
+                            orchestration_run_id=orchestration_run_id,
+                            trace_context=trace,
+                            lane_overrides=lane_overrides,
+                            start_time=start,
+                        )
             if not result.phase_results.get("research"):
                 self._orchestration_begin_phase(orchestration_run_id, "research", trace)
                 research_results = self._dispatch_parallel(
@@ -309,6 +326,20 @@ class CoordinatorService:
                         self._emit_phase_resumed_from_scratch(
                             trace, task_id, "implementation", len(impl_results)
                         )
+                        critical = _critical_worker_result(impl_results)
+                        if critical is not None:
+                            return self._complete_critical_worker_run(
+                                result=result,
+                                objective=objective,
+                                phase="implementation",
+                                critical_result=critical,
+                                collected_results=research_results + impl_results,
+                                scratch=scratch,
+                                orchestration_run_id=orchestration_run_id,
+                                trace_context=trace,
+                                lane_overrides=lane_overrides,
+                                start_time=start,
+                            )
             if implementation_tasks and not result.phase_results.get("implementation"):
                 started_marker = scratch / IMPLEMENTATION_STARTED_MARKER
                 if start_phase is not None and started_marker.exists() and not allow_implementation_rerun:
