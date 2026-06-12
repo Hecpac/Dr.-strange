@@ -8,9 +8,9 @@
 ## meta
 
 ```yaml
-describes_commit: fe99808+spec-002-self-improve-promotion-hotfix+spec-002-subprocess-bounded-pr-c+spec-002-approval-manager-pr-d+spec-002-promotion-tooling-phase-4+brain-delegation-tool+recovery-jobs-drain-c1+audit-m3-m4-offloop-emits-nonblocking-checkpoint-backup+audit-high-2026-06-11+audit-waves-2-3-2026-06-12
-doc_version: 2.18
-last_verified: 2026-06-11
+describes_commit: fe99808+spec-002-self-improve-promotion-hotfix+spec-002-subprocess-bounded-pr-c+spec-002-approval-manager-pr-d+spec-002-promotion-tooling-phase-4+brain-delegation-tool+recovery-jobs-drain-c1+audit-m3-m4-offloop-emits-nonblocking-checkpoint-backup+audit-high-2026-06-11+audit-waves-2-3-2026-06-12+adapters-d1-split-2026-06-12
+doc_version: 2.19
+last_verified: 2026-06-12
 verification_method: manual + pytest + AST sentinel cross-check
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
@@ -598,6 +598,7 @@ brain's delegation tool: `_context_candidates` maps only the brain lane onto
 the `brain` context, so coordinator workers cannot re-delegate recursively.
 
 **Inline browser-drive backstop** (`_inline_browser_drive_reason`,
+`claw_v2/adapters/anthropic_hooks.py`; re-exported by
 `claw_v2/adapters/anthropic.py`): the PreToolUse hook denies — `brain` lane
 only — any Bash call that would drive Chrome/CDP, a browser, or desktop
 computer-use (high-confidence markers: peekaboo, playwright/selenium, Chrome

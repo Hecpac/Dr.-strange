@@ -1,15 +1,31 @@
+"""Anthropic adapter + Claude SDK executor (turn flow).
+
+D1 split (2026-06-12): hooks live in anthropic_hooks.py, options assembly in
+anthropic_options.py, API-key resolution in anthropic_auth.py. This module
+keeps the adapter, the executor's turn flow (`_run`), and the SDK loaders.
+"""
+
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import json
 import logging
-import os
-import re
 from importlib import import_module
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
+from claw_v2.adapters.anthropic_hooks import (
+    _inline_browser_drive_reason as _inline_browser_drive_reason,
+    _safe_runtime_policy_reason as _safe_runtime_policy_reason,
+    _tool_input_evidence as _tool_input_evidence,
+    _tool_response_evidence as _tool_response_evidence,
+    build_can_use_tool,
+    build_hooks,
+)
+from claw_v2.adapters.anthropic_options import (
+    IDENTITY_OVERRIDE as IDENTITY_OVERRIDE,
+    SILENCE_DIRECTIVE as SILENCE_DIRECTIVE,
+    build_options,
+)
 from claw_v2.adapters.base import (
     ADVISORY_LANES,
     AdapterError,
@@ -17,7 +33,6 @@ from claw_v2.adapters.base import (
     LLMRequest,
     ProviderAdapter,
     build_effective_input,
-    build_effective_system_prompt,
     coerce_usage_dict,
     record_tools_executed,
 )
@@ -25,8 +40,7 @@ from claw_v2.approval import ApprovalManager
 from claw_v2.config import AppConfig
 from claw_v2.network_proxy import DomainAllowlistEnforcer
 from claw_v2.observe import ObserveStream
-from claw_v2.approval_gate import ApprovalPending, build_telegram_approval_gate
-from claw_v2.redaction import redact_text
+from claw_v2.approval_gate import build_telegram_approval_gate
 from claw_v2.runtime_policy import RuntimePolicyEngine
 from claw_v2.sandbox import SandboxPolicy
 from claw_v2.tracing import trace_metadata
@@ -34,98 +48,14 @@ from claw_v2.types import LLMResponse
 
 logger = logging.getLogger(__name__)
 
-IDENTITY_OVERRIDE = (
-    "# IDENTITY OVERRIDE (HIGHEST PRIORITY)\n"
-    "Your identity is Dr. Strange — Hector Pachano's autonomous personal agent. "
-    "The Claude Code preset above describes your RUNTIME (the CLI you operate inside), "
-    "NOT your identity. When the user asks who/what you are, what you do, or refers to "
-    "Dr. Strange, you answer AS Dr. Strange — never as Claude, Claude Code, an AI assistant, "
-    "or a generic agent. Dr. Strange is the persona; Claude/Claude Code is the underlying "
-    "model and runtime. Never say 'I don't know what Dr. Strange is' or 'I am Claude/Claude Code' "
-    "in user-facing chat. The persona definition that follows is canonical.\n\n"
-)
-
-# Modes accepted by the brain's delegate_task tool. Mirrors what
-# planned_phases_for_mode + _build_coordinator_tasks can execute.
-_DELEGATE_TASK_MODES = frozenset({"coding", "research", "ops", "publish", "browse"})
-
-# Backstop for the delegation contract: high-confidence signals that a Bash
-# command is about to drive Chrome/CDP, a browser, or desktop computer-use.
-# Such work does not fit the brain turn's 300s wall and must be delegated.
-# Worker lanes (delegated coordinator tasks) are NOT gated by this.
-_INLINE_BROWSER_DRIVE_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"\bpeekaboo\b", re.IGNORECASE),
-    re.compile(r"\bplaywright\b", re.IGNORECASE),
-    re.compile(r"\bselenium\b", re.IGNORECASE),
-    re.compile(r"\bchromedriver\b", re.IGNORECASE),
-    re.compile(r"\bcliclick\b", re.IGNORECASE),
-    re.compile(r"webSocketDebuggerUrl"),
-    re.compile(r"/json/(?:list|version)\b"),
-    re.compile(r":9(?:250|222)\b"),  # Chrome CDP debug ports used by the workspace
-    re.compile(r"\bcomputer[-_]use\b", re.IGNORECASE),
-)
-# Absolute python script paths inside a command; their contents are folded into
-# the scan so `python3 /path/_ig_publish.py` (CDP inside the script) is caught.
-_SCRIPT_PATH_RE = re.compile(r"(/[^\s'\"]+\.py)\b")
-_SCRIPT_SCAN_MAX_BYTES = 262_144
-
-
-def _read_bounded_script(path: str) -> str:
-    try:
-        p = Path(path)
-        if not p.is_file() or p.stat().st_size > _SCRIPT_SCAN_MAX_BYTES:
-            return ""
-        return p.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return ""
-
-
-def _inline_browser_drive_reason(tool_name: str, tool_input: dict[str, Any] | None) -> str | None:
-    """Return a deny reason if a Bash call would drive a browser/CDP/desktop.
-
-    Scans the command and, when it runs a local ``.py`` script, that script's
-    contents too. Conservative by design: only high-confidence markers, so a
-    miss is preferred over blocking a benign local command.
-    """
-    if tool_name != "Bash":
-        return None
-    command = str((tool_input or {}).get("command") or "")
-    if not command:
-        return None
-    haystacks = [command]
-    for match in _SCRIPT_PATH_RE.finditer(command):
-        content = _read_bounded_script(match.group(1))
-        if content:
-            haystacks.append(content)
-    blob = "\n".join(haystacks)
-    for pattern in _INLINE_BROWSER_DRIVE_PATTERNS:
-        if pattern.search(blob):
-            return "inline browser/CDP/computer-use drive in a chat turn"
-    return None
-
-# SDK tools that cannot mutate external state. Anything outside this set
-# (Bash, Edit, Write, Task, MCP tools, ...) is treated as potentially mutating
-# so a failed turn that already ran one is never replayed by fallback/retry.
-_READ_ONLY_SDK_TOOLS = frozenset(
-    {"Read", "Grep", "Glob", "WebSearch", "WebFetch", "TodoWrite", "BashOutput", "NotebookRead"}
-)
-
-SILENCE_DIRECTIVE = (
-    "\n\n# CRITICAL OUTPUT RULE:\n"
-    "You are operating as a headless engine. DO NOT use conversational filler. "
-    "DO NOT explain your thoughts, do not say 'I will now...', 'I have found...', "
-    "or 'I am finished'.\n"
-    "EVERY SINGLE WORD of your final response to the user MUST be wrapped inside <response> tags. "
-    "Any text outside <response> tags will be discarded. "
-    "Internal reasoning must go inside <trace> tags."
-)
-
 
 class AnthropicAgentAdapter(ProviderAdapter):
     provider_name = "anthropic"
     tool_capable = True
 
-    def __init__(self, executor: Callable[[LLMRequest], LLMResponse] | None = None) -> None:
+    def __init__(
+        self, executor: Callable[[LLMRequest], LLMResponse] | None = None
+    ) -> None:
         self._executor = executor
 
     def complete(self, request: LLMRequest) -> LLMResponse:
@@ -156,6 +86,7 @@ class ClaudeSDKExecutor:
             loop = None
         if loop is not None and loop.is_running():
             import concurrent.futures
+
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                 return pool.submit(asyncio.run, self._run(request)).result()
         return asyncio.run(self._run(request))
@@ -191,10 +122,15 @@ class ClaudeSDKExecutor:
                 if isinstance(effective_input, str):
                     await client.query(effective_input, session_id=query_session_id)
                 else:
-                    await client.query(_stream_user_content(effective_input), session_id=query_session_id)
+                    await client.query(
+                        _stream_user_content(effective_input),
+                        session_id=query_session_id,
+                    )
                 async for message in client.receive_response():
                     if isinstance(message, sdk.AssistantMessage):
-                        assistant_text_chunks.extend(_extract_assistant_text(message.content))
+                        assistant_text_chunks.extend(
+                            _extract_assistant_text(message.content)
+                        )
                         model_name = getattr(message, "model", model_name) or model_name
                     elif isinstance(message, sdk.ResultMessage):
                         result_session_id = message.session_id or result_session_id
@@ -239,7 +175,9 @@ class ClaudeSDKExecutor:
                 raise
             if stderr_excerpt:
                 logger.error("Claude CLI stderr before failure: %s", stderr_excerpt)
-                error = AdapterError(f"Claude SDK execution failed: {exc}. Claude stderr: {stderr_excerpt}")
+                error = AdapterError(
+                    f"Claude SDK execution failed: {exc}. Claude stderr: {stderr_excerpt}"
+                )
                 record_tools_executed(error, mutating_tools)
                 raise error from exc
             error = AdapterError(f"Claude SDK execution failed: {exc}")
@@ -315,74 +253,6 @@ class ClaudeSDKExecutor:
             payload=payload,
         )
 
-    def _build_delegation_mcp_server(self, sdk: Any, request: LLMRequest) -> Any:
-        """In-process MCP server exposing `delegate_task` to brain-lane turns.
-
-        The handler only enqueues a durable autonomous task (TaskHandler side);
-        it must never run the delegated work itself. Enforcement of the tool
-        name still goes through runtime_policy via the PreToolUse hook, so the
-        `mcp__claw__delegate_task` policy entry is load-bearing.
-        """
-        handler = request.delegation_handler
-
-        @sdk.tool(
-            "delegate_task",
-            (
-                "Delegate long-running work (GUI/computer-use, browser sessions, "
-                "publishing, multi-step jobs) to the durable autonomous-task lane. "
-                "Returns an acknowledgement with the task id; the result is "
-                "delivered to the user when the task finishes."
-            ),
-            {
-                "type": "object",
-                "properties": {
-                    "objective": {
-                        "type": "string",
-                        "description": "Imperative, self-contained objective for the task.",
-                    },
-                    "mode": {
-                        "type": "string",
-                        "enum": sorted(_DELEGATE_TASK_MODES),
-                        "description": "Execution mode; omit to infer from the objective.",
-                    },
-                    "reason": {
-                        "type": "string",
-                        "description": "One line on why this work is being delegated.",
-                    },
-                },
-                "required": ["objective"],
-            },
-        )
-        async def delegate_task(args: dict[str, Any]) -> dict[str, Any]:
-            def _error(text: str) -> dict[str, Any]:
-                return {"content": [{"type": "text", "text": text}], "is_error": True}
-
-            objective = args.get("objective")
-            if not isinstance(objective, str) or not objective.strip():
-                return _error("delegate_task error: objective must be a non-empty string")
-            mode = args.get("mode")
-            if mode is not None and mode not in _DELEGATE_TASK_MODES:
-                return _error(
-                    "delegate_task error: mode must be one of "
-                    + ", ".join(sorted(_DELEGATE_TASK_MODES))
-                )
-            payload = {
-                "objective": objective.strip(),
-                "mode": mode,
-                "reason": str(args.get("reason") or "")[:300],
-            }
-            try:
-                result = await asyncio.to_thread(handler, payload)
-            except Exception as exc:
-                logger.exception("delegate_task handler failed")
-                return _error(f"delegate_task error: {str(exc)[:300]}")
-            ack = str((result or {}).get("ack") or "").strip()
-            if not ack:
-                return _error("delegate_task error: delegation returned no acknowledgement")
-            return {"content": [{"type": "text", "text": ack}]}
-
-        return sdk.create_sdk_mcp_server(name="claw", version="1.0.0", tools=[delegate_task])
-
     def _build_options(
         self,
         sdk: Any,
@@ -391,339 +261,69 @@ class ClaudeSDKExecutor:
         stderr_callback: Callable[[str], None] | None = None,
         mutation_tracker: list[str] | None = None,
     ) -> Any:
-        tools: Any
-        system_prompt: Any
-        can_use_tool = None
-        hooks = self._build_hooks(sdk, request, mutation_tracker=mutation_tracker)
-        effective_system_prompt = build_effective_system_prompt(request)
-
-        if request.lane in ADVISORY_LANES:
-            tools = []
-            system_prompt = effective_system_prompt
-            permission_mode = "plan"
-        else:
-            tools = {"type": "preset", "preset": "claude_code"}
-            system_prompt = {"type": "preset", "preset": "claude_code"}
-            # Prepend an identity-override block so the Dr. Strange persona wins
-            # over the Claude Code preset's default "I am Claude" identity when
-            # the user asks identity-style questions.
-            if effective_system_prompt:
-                system_prompt["append"] = (
-                    f"{IDENTITY_OVERRIDE}{effective_system_prompt}{SILENCE_DIRECTIVE}"
-                )
-            else:
-                system_prompt["append"] = f"{IDENTITY_OVERRIDE}{SILENCE_DIRECTIVE}"
-            permission_mode = "bypassPermissions" if self.config.sdk_bypass_permissions else "default"
-            can_use_tool = self._build_can_use_tool(sdk, request)
-
-        sdk_agents = self._build_agents(sdk, request)
-        sdk_env: dict[str, str] = {}
-        extra_args: dict[str, str | None] = {"disable-slash-commands": None}
-        if self._should_use_api_key_auth():
-            if api_key := _resolve_anthropic_api_key():
-                sdk_env["ANTHROPIC_API_KEY"] = api_key
-            extra_args["bare"] = None
-        elif os.environ.get("ANTHROPIC_API_KEY"):
-            sdk_env["ANTHROPIC_API_KEY"] = ""
-        options_kwargs: dict[str, Any] = dict(
-            tools=tools,
-            allowed_tools=list(request.allowed_tools or []),
-            system_prompt=system_prompt,
-            permission_mode=permission_mode,
-            resume=request.session_id,
-            max_budget_usd=request.max_budget,
-            model=request.model,
-            cli_path=self.config.claude_cli_path,
-            cwd=Path(request.cwd) if request.cwd else self.config.workspace_root,
-            # Isolate the bot from Claude Code user/project/local settings and
-            # skills. Telegram policy/sandbox is the source of truth here.
-            setting_sources=[],
-            stderr=stderr_callback,
-            extra_args=extra_args,
-            env=sdk_env,
-            hooks=hooks,
-            agents=sdk_agents,
-            can_use_tool=can_use_tool,
-            effort=request.effort,
+        hooks = build_hooks(
+            sdk,
+            request,
+            runtime_policy=self._runtime_policy_for_request(
+                request, self._policy_for_request(request)
+            ),
+            observe=self.observe,
+            mutation_tracker=mutation_tracker,
         )
-        if request.thinking_tokens > 0:
-            options_kwargs["thinking"] = {
-                "type": "enabled",
-                "budget_tokens": int(request.thinking_tokens),
-            }
-            options_kwargs["max_thinking_tokens"] = int(request.thinking_tokens)
-        if request.lane == "brain" and request.delegation_handler is not None:
-            options_kwargs["mcp_servers"] = {
-                "claw": self._build_delegation_mcp_server(sdk, request)
-            }
-        return sdk.ClaudeAgentOptions(**options_kwargs)
-
-    def _build_agents(self, sdk: Any, request: LLMRequest) -> dict[str, Any] | None:
-        if not request.agents:
-            return None
-        built: dict[str, Any] = {}
-        for name, raw in request.agents.items():
-            if isinstance(raw, dict):
-                if {"description", "prompt"} <= set(raw):
-                    built[name] = sdk.AgentDefinition(
-                        description=raw["description"],
-                        prompt=raw["prompt"],
-                        tools=raw.get("tools"),
-                        model=raw.get("model"),
-                    )
-                    continue
-                built[name] = sdk.AgentDefinition(
-                    description=raw.get("agent_class", name),
-                    prompt=raw.get("instruction", ""),
-                    tools=raw.get("allowed_tools"),
-                    model=raw.get("model", "inherit"),
-                )
-                continue
-            built[name] = sdk.AgentDefinition(
-                description=getattr(raw, "agent_class", name),
-                prompt=getattr(raw, "instruction", ""),
-                tools=getattr(raw, "allowed_tools", None),
-                model=getattr(raw, "model", "inherit"),
-            )
-        return built
-
-    def _build_can_use_tool(self, sdk: Any, request: LLMRequest) -> Callable[..., Any]:
-        allowed = set(request.allowed_tools or [])
-        policy = self._policy_for_request(request)
-        runtime_policy = self._runtime_policy_for_request(request, policy)
-        sdk_types = _load_sdk_types()
-
-        async def can_use_tool(tool_name: str, input_data: dict[str, Any], context: Any) -> Any:
-            if allowed and tool_name not in allowed:
-                return sdk_types.PermissionResultDeny(
-                    message=f"Tool '{tool_name}' is not allowed in this execution.",
-                    interrupt=True,
-                )
-
-            try:
-                runtime_policy.enforce(tool_name, input_data, context=request.lane)
-            except ApprovalPending as exc:
-                return sdk_types.PermissionResultDeny(message=str(exc), interrupt=True)
-            except PermissionError as exc:
-                return sdk_types.PermissionResultDeny(
-                    message=_safe_runtime_policy_reason(str(exc)),
-                    interrupt=True,
-                )
-            return sdk_types.PermissionResultAllow(updated_input=input_data)
-
-        return can_use_tool
-
-    def _build_hooks(
-        self,
-        sdk: Any,
-        request: LLMRequest,
-        *,
-        mutation_tracker: list[str] | None = None,
-    ) -> dict[str, list[Any]] | None:
-        hooks: dict[str, list[Any]] = {}
-        policy = self._policy_for_request(request)
-        runtime_policy = self._runtime_policy_for_request(request, policy)
-
-        def _track_mutation(tool_name: str) -> None:
-            if mutation_tracker is not None and tool_name and tool_name not in _READ_ONLY_SDK_TOOLS:
-                mutation_tracker.append(tool_name)
-
-        async def pre_tool_use(input_data: dict[str, Any], tool_use_id: str | None, context: Any) -> dict[str, Any]:
-            if request.lane == "brain":
-                drive_reason = _inline_browser_drive_reason(
-                    str(input_data.get("tool_name", "")),
-                    input_data.get("tool_input", {}),
-                )
-                if drive_reason:
-                    nudge = (
-                        "Browser/CDP/computer-use cannot run inline in a chat turn (300s wall). "
-                        "Delegate it with the delegate_task tool (mode=ops/publish/browse) — fold any "
-                        "verification into the delegated objective — instead of running it here."
-                    )
-                    if self.observe is not None:
-                        try:
-                            self.observe.emit(
-                                "brain_inline_browser_drive_blocked",
-                                lane=request.lane,
-                                provider="anthropic",
-                                model=request.model,
-                                **trace_metadata(request.evidence_pack),
-                                payload={
-                                    "tool_name": str(input_data.get("tool_name", "")),
-                                    "reason": drive_reason,
-                                },
-                            )
-                        except Exception:
-                            logger.debug("brain_inline_browser_drive_blocked emit failed", exc_info=True)
-                    return {
-                        "systemMessage": f"Tool invocation blocked: {nudge}",
-                        "hookSpecificOutput": {
-                            "hookEventName": "PreToolUse",
-                            "permissionDecision": "deny",
-                            "permissionDecisionReason": nudge,
-                        },
-                    }
-            try:
-                runtime_policy.enforce(
-                    input_data.get("tool_name", ""),
-                    input_data.get("tool_input", {}),
-                    context=request.lane,
-                )
-            except ApprovalPending as exc:
-                reason = str(exc)
-                return {
-                    "systemMessage": f"Tool invocation blocked: {reason}",
-                    "hookSpecificOutput": {
-                        "hookEventName": "PreToolUse",
-                        "permissionDecision": "deny",
-                        "permissionDecisionReason": reason,
-                    },
-                }
-            except PermissionError as exc:
-                reason = _safe_runtime_policy_reason(str(exc))
-                return {
-                    "systemMessage": f"Tool invocation blocked: {reason}",
-                    "hookSpecificOutput": {
-                        "hookEventName": "PreToolUse",
-                        "permissionDecision": "deny",
-                        "permissionDecisionReason": reason,
-                    },
-                }
-            return {"continue_": True}
-
-        async def post_tool_use(input_data: dict[str, Any], tool_use_id: str | None, context: Any) -> dict[str, Any]:
-            _track_mutation(str(input_data.get("tool_name") or ""))
-            if self.observe is not None:
-                tool_name = str(input_data.get("tool_name") or "")
-                payload = {
-                    "tool_name": tool_name,
-                    "tool_use_id": tool_use_id,
-                    "session_id": input_data.get("session_id"),
-                    "tool_input": _tool_input_evidence(
-                        tool_name,
-                        input_data.get("tool_input"),
-                    ),
-                }
-                response_evidence = _tool_response_evidence(
-                    tool_name,
-                    input_data.get("tool_response"),
-                )
-                if response_evidence:
-                    payload["tool_response"] = response_evidence
-                self.observe.emit(
-                    "sdk_post_tool_use",
-                    lane=request.lane,
-                    provider="anthropic",
-                    model=request.model,
-                    **trace_metadata(request.evidence_pack),
-                    payload=payload,
-                )
-            return {}
-
-        async def post_tool_use_failure(
-            input_data: dict[str, Any], tool_use_id: str | None, context: Any
-        ) -> dict[str, Any]:
-            # A failed tool may still have produced partial side effects
-            # (e.g. a Bash command that timed out after sending): count it.
-            _track_mutation(str(input_data.get("tool_name") or ""))
-            if self.observe is not None:
-                tool_name = str(input_data.get("tool_name") or "")
-                tool_response = input_data.get("tool_response") or {}
-                error_message = (
-                    input_data.get("error")
-                    or input_data.get("error_message")
-                    or input_data.get("stderr")
-                    or tool_response.get("error")
-                    or tool_response.get("error_message")
-                    or tool_response.get("stderr")
-                    or ""
-                )
-                self.observe.emit(
-                    "sdk_post_tool_use_failure",
-                    lane=request.lane,
-                    provider="anthropic",
-                    model=request.model,
-                    **trace_metadata(request.evidence_pack),
-                    payload={
-                        "tool_name": tool_name,
-                        "tool_use_id": tool_use_id,
-                        "session_id": input_data.get("session_id"),
-                        "tool_input": _tool_input_evidence(
-                            tool_name,
-                            input_data.get("tool_input"),
-                        ),
-                        "error": str(error_message)[:1000],
-                        "is_error": bool(tool_response.get("is_error")) if isinstance(tool_response, dict) else False,
-                    },
-                )
-            return {}
-
-        async def stop_hook(input_data: dict[str, Any], tool_use_id: str | None, context: Any) -> dict[str, Any]:
-            if self.observe is not None:
-                self.observe.emit(
-                    "sdk_stop",
-                    lane=request.lane,
-                    provider="anthropic",
-                    model=request.model,
-                    **trace_metadata(request.evidence_pack),
-                    payload={"session_id": input_data.get("session_id")},
-                )
-            return {}
-
-        async def subagent_start(input_data: dict[str, Any], tool_use_id: str | None, context: Any) -> dict[str, Any]:
-            if self.observe is not None:
-                self.observe.emit(
-                    "sdk_subagent_start",
-                    lane=request.lane,
-                    provider="anthropic",
-                    model=request.model,
-                    **trace_metadata(request.evidence_pack),
-                    payload={"agent_id": input_data.get("agent_id"), "tool_use_id": tool_use_id},
-                )
-            return {}
-
-        async def subagent_stop(input_data: dict[str, Any], tool_use_id: str | None, context: Any) -> dict[str, Any]:
-            if self.observe is not None:
-                self.observe.emit(
-                    "sdk_subagent_stop",
-                    lane=request.lane,
-                    provider="anthropic",
-                    model=request.model,
-                    **trace_metadata(request.evidence_pack),
-                    payload={"agent_id": input_data.get("agent_id"), "tool_use_id": tool_use_id},
-                )
-            return {}
-
-        hooks["Stop"] = [sdk.HookMatcher(hooks=[stop_hook])]
-        hooks["SubagentStart"] = [sdk.HookMatcher(hooks=[subagent_start])]
-        hooks["SubagentStop"] = [sdk.HookMatcher(hooks=[subagent_stop])]
-
+        can_use_tool = None
         if request.lane not in ADVISORY_LANES:
-            hooks["PreToolUse"] = [sdk.HookMatcher(hooks=[pre_tool_use])]
-            hooks["PostToolUse"] = [sdk.HookMatcher(hooks=[post_tool_use])]
-            hooks["PostToolUseFailure"] = [sdk.HookMatcher(hooks=[post_tool_use_failure])]
-
-        if request.hooks:
-            for event_name, matchers in request.hooks.items():
-                hooks.setdefault(event_name, []).extend(matchers)
-        return hooks
+            can_use_tool = build_can_use_tool(
+                _load_sdk_types(),
+                request,
+                runtime_policy=self._runtime_policy_for_request(
+                    request, self._policy_for_request(request)
+                ),
+            )
+        return build_options(
+            sdk,
+            request,
+            config=self.config,
+            hooks=hooks,
+            can_use_tool=can_use_tool,
+            stderr_callback=stderr_callback,
+        )
 
     def _policy_for_request(self, request: LLMRequest) -> SandboxPolicy:
-        workspace_root = Path(request.cwd) if request.cwd else self.config.workspace_root
+        workspace_root = (
+            Path(request.cwd) if request.cwd else self.config.workspace_root
+        )
         read_paths = getattr(self.config, "allowed_read_paths", [])
         extra_roots = getattr(self.config, "extra_workspace_roots", [])
-        allowed = [workspace_root, *read_paths, *extra_roots, *getattr(self.config, "allowed_paths", [])]
+        allowed = [
+            workspace_root,
+            *read_paths,
+            *extra_roots,
+            *getattr(self.config, "allowed_paths", []),
+        ]
         return SandboxPolicy(
             workspace_root=workspace_root,
             allowed_paths=allowed,
-            writable_paths=[workspace_root, Path("/private/tmp"), Path.home() / ".claw", *extra_roots],
+            writable_paths=[
+                workspace_root,
+                Path("/private/tmp"),
+                Path.home() / ".claw",
+                *extra_roots,
+            ],
             network_policy="allow",
             credential_scope="external",
-            capability_profile=getattr(self.config, "sandbox_capability_profile", "engineer"),
+            capability_profile=getattr(
+                self.config, "sandbox_capability_profile", "engineer"
+            ),
         )
 
-    def _runtime_policy_for_request(self, request: LLMRequest, policy: SandboxPolicy) -> RuntimePolicyEngine:
-        approval_gate = build_telegram_approval_gate(self.approvals) if self.approvals is not None else None
+    def _runtime_policy_for_request(
+        self, request: LLMRequest, policy: SandboxPolicy
+    ) -> RuntimePolicyEngine:
+        approval_gate = (
+            build_telegram_approval_gate(self.approvals)
+            if self.approvals is not None
+            else None
+        )
         return RuntimePolicyEngine(
             workspace_root=policy.workspace_root,
             sandbox_policy=policy,
@@ -731,28 +331,6 @@ class ClaudeSDKExecutor:
             approval_gate=approval_gate,
             autoexec_max_tier=getattr(self.config, "tier_autoexec_max", 2),
         )
-
-    def _should_use_api_key_auth(self) -> bool:
-        if self.config.claude_auth_mode == "api_key":
-            return True
-        if self.config.claude_auth_mode == "auto":
-            return _resolve_anthropic_api_key() is not None
-        return False
-
-
-def _safe_runtime_policy_reason(reason: str) -> str:
-    text = str(reason or "runtime policy blocked the command")
-    text = re.sub(
-        r"\bbinary\s+'([^']+)'\s+requires higher privilege level\s+\(not in the allowed whitelist\)",
-        r"command '\1' is blocked by local execution policy",
-        text,
-        flags=re.IGNORECASE,
-    )
-    text = re.sub(r"\ballowed whitelist\b", "local execution policy", text, flags=re.IGNORECASE)
-    text = re.sub(r"\bwhitelist\b", "policy", text, flags=re.IGNORECASE)
-    text = re.sub(r"\bruntime host\b", "local runtime", text, flags=re.IGNORECASE)
-    text = re.sub(r"\bBash tool\b|\btool Bash\b", "local tool", text, flags=re.IGNORECASE)
-    return text
 
 
 def create_claude_sdk_executor(
@@ -763,111 +341,6 @@ def create_claude_sdk_executor(
 ) -> Callable[[LLMRequest], LLMResponse]:
     executor = ClaudeSDKExecutor(config, observe=observe, approvals=approvals)
     return executor
-
-
-def _tool_input_evidence(tool_name: str, tool_input: Any) -> dict[str, str]:
-    if not isinstance(tool_input, dict):
-        return {}
-    allowed_by_tool = {
-        "Bash": ("command", "cmd"),
-        "Edit": ("file_path",),
-        "Write": ("file_path",),
-        "Read": ("file_path",),
-        "NotebookEdit": ("notebook_path", "file_path"),
-        "Grep": ("pattern", "path"),
-        "Glob": ("pattern",),
-    }
-    allowed = allowed_by_tool.get(tool_name, ())
-    evidence: dict[str, str] = {}
-    for key in allowed:
-        value = tool_input.get(key)
-        if value:
-            evidence[key] = redact_text(str(value)[:1000], limit=0)
-    return evidence
-
-
-def _tool_response_evidence(tool_name: str, tool_response: Any) -> dict[str, Any]:
-    if not isinstance(tool_response, dict):
-        return {}
-    evidence: dict[str, Any] = {}
-    if "is_error" in tool_response:
-        evidence["is_error"] = bool(tool_response.get("is_error"))
-    for key in ("exit_code", "returncode", "return_code", "rc"):
-        value = tool_response.get(key)
-        if value is None:
-            continue
-        evidence["returncode"] = _safe_int(value)
-        break
-    if tool_name != "Bash":
-        return evidence
-    stdout = _coerce_tool_response_text(tool_response.get("stdout") or tool_response.get("output"))
-    stderr = _coerce_tool_response_text(tool_response.get("stderr"))
-    if stdout:
-        evidence["stdout_chars"] = len(stdout)
-        evidence["stdout_sha256"] = hashlib.sha256(stdout.encode("utf-8")).hexdigest()
-        markers = _safe_json_markers_from_text(stdout)
-        if markers:
-            evidence["json_markers"] = markers[:5]
-    if stderr:
-        evidence["stderr_chars"] = len(stderr)
-        evidence["stderr_sha256"] = hashlib.sha256(stderr.encode("utf-8")).hexdigest()
-    return evidence
-
-
-def _safe_int(value: Any) -> int | str:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return str(value)[:40]
-
-
-def _coerce_tool_response_text(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, list):
-        parts: list[str] = []
-        for item in value:
-            if isinstance(item, dict):
-                text = item.get("text")
-                if text:
-                    parts.append(str(text))
-            else:
-                text = getattr(item, "text", None)
-                if text:
-                    parts.append(str(text))
-        return "\n".join(parts)
-    return ""
-
-
-def _safe_json_markers_from_text(text: str) -> list[dict[str, Any]]:
-    markers: list[dict[str, Any]] = []
-    safe_keys = {
-        "ok",
-        "message_id",
-        "bytes",
-        "returncode",
-        "rc",
-        "status",
-        "width",
-        "height",
-        "duration",
-    }
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped.startswith("{") or not stripped.endswith("}"):
-            continue
-        try:
-            payload = json.loads(stripped)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(payload, dict):
-            continue
-        marker = {key: payload[key] for key in safe_keys if key in payload}
-        if marker:
-            markers.append(marker)
-    return markers
 
 
 def _load_sdk() -> Any:
@@ -897,7 +370,9 @@ def _extract_assistant_text(blocks: list[Any]) -> list[str]:
     return chunks
 
 
-async def _stream_user_content(content: list[dict[str, Any]]) -> AsyncIterator[dict[str, Any]]:
+async def _stream_user_content(
+    content: list[dict[str, Any]],
+) -> AsyncIterator[dict[str, Any]]:
     yield {
         "type": "user",
         "message": {"role": "user", "content": content},
@@ -906,7 +381,9 @@ async def _stream_user_content(content: list[dict[str, Any]]) -> AsyncIterator[d
 
 
 def _coalesce_content(assistant_text_chunks: list[str], result_text: str | None) -> str:
-    content = "\n".join(chunk.strip() for chunk in assistant_text_chunks if chunk.strip()).strip()
+    content = "\n".join(
+        chunk.strip() for chunk in assistant_text_chunks if chunk.strip()
+    ).strip()
     if content:
         if result_text and result_text.strip() and result_text.strip() not in content:
             return f"{content}\n\n{result_text.strip()}"
@@ -914,27 +391,3 @@ def _coalesce_content(assistant_text_chunks: list[str], result_text: str | None)
     if result_text:
         return result_text.strip()
     return ""
-
-
-def _resolve_anthropic_api_key() -> str | None:
-    if value := os.getenv("ANTHROPIC_API_KEY"):
-        return value.strip() or None
-    pattern = re.compile(r"^\s*(?:export\s+)?ANTHROPIC_API_KEY=(?P<value>.+?)\s*$")
-    for path in (
-        Path.home() / ".zshrc",
-        Path.home() / ".zprofile",
-        Path.home() / ".zshenv",
-        Path.home() / ".profile",
-    ):
-        try:
-            lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
-        except FileNotFoundError:
-            continue
-        for line in reversed(lines):
-            match = pattern.match(line)
-            if match is None:
-                continue
-            value = match.group("value").strip().strip("\"'")
-            if value:
-                return value
-    return None
