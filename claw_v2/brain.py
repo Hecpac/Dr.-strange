@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import contextvars
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from html import escape
 import json
 import logging
@@ -1146,23 +1149,50 @@ class BrainService:
         evidence_truncated = evidence_chars > ADVISORY_EVIDENCE_PACK_MAX_CHARS
         primary_provider = self.router.config.provider_for_role("critical_verifier")
         primary_model = self.router.config.model_for_role("critical_verifier")
-        votes = [
-            self._collect_verifier_vote(
-                evidence=evidence,
-                provider=primary_provider,
-                model=primary_model,
-                role="primary",
+        # AM-VOTES (2026-06-12): the two votes ran serially (up to 2x the 30s
+        # critical_verifier timeout per action). Run the primary and a
+        # speculative secondary concurrently; the secondary's provider choice
+        # only differs when the primary FELL BACK to another provider, in
+        # which case the speculative vote is discarded and a corrected
+        # secondary is collected serially (rare path, preserves semantics).
+        speculative_secondary = self._secondary_verifier_provider(str(primary_provider))
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            primary_future = pool.submit(
+                contextvars.copy_context().run,
+                partial(
+                    self._collect_verifier_vote,
+                    evidence=evidence,
+                    provider=primary_provider,
+                    model=primary_model,
+                    role="primary",
+                ),
             )
-        ]
+            speculative_future = None
+            if speculative_secondary is not None:
+                speculative_future = pool.submit(
+                    contextvars.copy_context().run,
+                    partial(
+                        self._collect_verifier_vote,
+                        evidence=evidence,
+                        provider=speculative_secondary,
+                        model=self.router.config.advisory_model_for_provider(speculative_secondary),
+                        role="secondary",
+                    ),
+                )
+            votes = [primary_future.result()]
+            speculative_vote = speculative_future.result() if speculative_future is not None else None
         primary_actual_provider = votes[0].get("provider") or primary_provider
         secondary_provider = self._secondary_verifier_provider(str(primary_actual_provider))
         if secondary_provider is not None:
-            secondary_vote = self._collect_verifier_vote(
-                evidence=evidence,
-                provider=secondary_provider,
-                model=self.router.config.advisory_model_for_provider(secondary_provider),
-                role="secondary",
-            )
+            if secondary_provider == speculative_secondary and speculative_vote is not None:
+                secondary_vote = speculative_vote
+            else:
+                secondary_vote = self._collect_verifier_vote(
+                    evidence=evidence,
+                    provider=secondary_provider,
+                    model=self.router.config.advisory_model_for_provider(secondary_provider),
+                    role="secondary",
+                )
             if secondary_vote.get("provider") == primary_actual_provider:
                 secondary_vote = _verifier_error_vote(
                     role="secondary",
