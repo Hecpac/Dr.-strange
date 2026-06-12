@@ -1455,11 +1455,17 @@ def _setup_scheduler(
             name="self_improve",
             handler=lambda: self_improve_runner.run_available(limit=1),
         )
+        def _approval_sweep(_payload: dict) -> int:
+            expired = approvals.expire_due()
+            # AM-APPRSCAN (2026-06-12): keep the hot list_pending glob small.
+            approvals.reap_resolved()
+            return expired
+
         approval_sweep_runner = ScheduledBackgroundJobRunner(
             job_name="approval_sweep",
             job_kind=APPROVAL_SWEEP_JOB_KIND,
             job_service=job_service,
-            handler=lambda _payload: approvals.expire_due(),
+            handler=_approval_sweep,
             observe=observe,
             worker_id="approval-sweep-runner",
             result_summary=lambda expired_count: {

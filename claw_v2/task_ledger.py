@@ -280,6 +280,27 @@ class TaskLedger:
                     artifacts=artifacts,
                 )
         now = time.time()
+        blocked_status: str | None = None
+        with self._lock:
+            # LOW (2026-06-12): a terminal row is immutable — a late writer
+            # (reconciliation marking lost, duplicated completion path) must
+            # not flip an already-terminal status.
+            row = self._conn.execute(
+                "SELECT status FROM agent_tasks WHERE task_id = ?", (task_id,)
+            ).fetchone()
+            current_status = str(row["status"]) if row is not None else ""
+            if current_status in TERMINAL_STATUSES:
+                blocked_status = current_status
+        if blocked_status is not None:
+            self._emit(
+                "task_ledger_terminal_transition_blocked",
+                {
+                    "task_id": task_id,
+                    "current_status": blocked_status,
+                    "requested_status": status,
+                },
+            )
+            return self.get(task_id)
         with self._lock:
             self._conn.execute(
                 """

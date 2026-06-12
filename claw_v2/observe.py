@@ -213,9 +213,48 @@ class ObserveStream:
                         event_type,
                         exc_info=True,
                     )
+                    # AM-OBSDROP (2026-06-12): the stream is the audit-trail
+                    # invariant — a dropped event must leave a recoverable
+                    # trace on disk, not vanish.
+                    self._spill_dropped_event(
+                        event_type,
+                        lane=lane,
+                        provider=provider,
+                        model=model,
+                        trace_id=trace_id,
+                        root_trace_id=root_trace_id,
+                        span_id=span_id,
+                        parent_span_id=parent_span_id,
+                        job_id=job_id,
+                        artifact_id=artifact_id,
+                        payload_json=payload_json,
+                    )
                     return False
                 time.sleep(OBSERVE_LOCKED_RETRY_DELAY_SECONDS * attempt)
         return False
+
+    def _spill_dropped_event(self, event_type: str, *, payload_json: str, **columns: str | None) -> None:
+        """Append a dropped event as a JSONL line next to the DB.
+
+        Best-effort: spilling must never raise into the emit path. The file
+        is the recovery source for events the locked DB rejected; `think`
+        tooling (or a future drain job) can replay it.
+        """
+        try:
+            line = json.dumps(
+                {
+                    "dropped_at": time.time(),
+                    "event_type": event_type,
+                    **{k: v for k, v in columns.items() if v is not None},
+                    "payload": payload_json,
+                },
+                sort_keys=True,
+            )
+            spill_path = self.db_path.with_suffix(".spill.jsonl")
+            with open(spill_path, "a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+        except Exception:
+            logger.debug("observe spill write failed", exc_info=True)
 
     def _ensure_schema(self) -> None:
         existing = {

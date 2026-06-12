@@ -734,6 +734,9 @@ class BrainService:
                     )
         response = _extract_visible_brain_response(response)
         self._last_confidence[session_id] = response.confidence
+        # LOW (2026-06-12): move_to_end makes the eviction LRU — plain
+        # assignment kept first-insertion order, evicting active sessions.
+        self._last_confidence.move_to_end(session_id)
         if len(self._last_confidence) > 256:
             self._last_confidence.popitem(last=False)
         provider_session_artifact = response.artifacts.get("session_id")

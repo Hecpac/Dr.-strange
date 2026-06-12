@@ -70,6 +70,7 @@ class TaskHandler:
         router: Any | None = None,
         get_session_state: Callable[[str], dict[str, Any]],
         update_session_state: Callable[..., Any],
+        merge_active_object: Callable[..., Any] | None = None,
         store_message: Callable[[str, str, str], Any] | None = None,
         workspace_root: Path | None = None,
         telemetry_root: Path | str | None = None,
@@ -83,6 +84,7 @@ class TaskHandler:
         self.router = router
         self._get_session_state = get_session_state
         self._update_session_state = update_session_state
+        self._merge_active_object = merge_active_object
         self._store_message = store_message
         self._workspace_root = Path(workspace_root) if workspace_root is not None else None
         self._telemetry_root = Path(telemetry_root).expanduser() if telemetry_root is not None else None
@@ -872,8 +874,7 @@ class TaskHandler:
                     active_task["pending_action"] = pending_action
                     active_task["verification_deferrals"] = deferrals
                     active_task["updated_at"] = time.time()
-                    active_object["active_task"] = active_task
-                    self._update_session_state(session_id, active_object=active_object)
+                    self._write_active_task(session_id, active_task, active_object)
                 self._defer_autonomous_job(
                     task_id=task_id,
                     job_id=job_id,
@@ -932,8 +933,7 @@ class TaskHandler:
                 active_task["completed_at"] = time.time()
                 if checkpoint_error and terminal_status == "failed":
                     active_task["error"] = checkpoint_error
-                active_object["active_task"] = active_task
-                self._update_session_state(session_id, active_object=active_object)
+                self._write_active_task(session_id, active_task, active_object)
             if terminal_status == "succeeded":
                 self._complete_autonomous_job(
                     task_id=task_id,
@@ -1038,12 +1038,13 @@ class TaskHandler:
                 active_task["error"] = error
                 active_task["completed_at"] = time.time()
                 active_object["active_task"] = active_task
-            self._update_session_state(
+            self._write_active_task(
                 session_id,
+                active_task if active_task.get("task_id") == task_id else None,
+                active_object,
                 verification_status="failed",
                 pending_action="",
                 last_checkpoint=checkpoint,
-                active_object=active_object,
             )
             response = f"No pude cerrar la tarea `{task_id}`.\nError: {error}"
             if self._store_message is not None:
@@ -2368,6 +2369,29 @@ class TaskHandler:
             error=error_msg,
             claims=[claim_id] if claim_id else [],
         )
+
+    def _write_active_task(
+        self,
+        session_id: str,
+        active_task: dict[str, Any] | None,
+        active_object: dict[str, Any],
+        **state_kwargs: Any,
+    ) -> None:
+        """Persist active_task, atomically when the store supports it.
+
+        AM-STATEWR/M16 (2026-06-12): these writes happen on the autonomous
+        worker thread, concurrent with chat-turn writes to other
+        active_object keys. merge_active_object re-reads at write time so
+        both writers compose; the fallback keeps the legacy full-replace
+        for callers wired without the merge primitive.
+        """
+        if self._merge_active_object is not None:
+            updates = {"active_task": active_task} if active_task is not None else {}
+            self._merge_active_object(session_id, updates, **state_kwargs)
+            return
+        if active_task is not None:
+            active_object["active_task"] = active_task
+        self._update_session_state(session_id, active_object=active_object, **state_kwargs)
 
     def _defer_autonomous_job(
         self,

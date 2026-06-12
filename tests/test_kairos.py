@@ -286,6 +286,66 @@ class TickTests(unittest.TestCase):
         self.assertEqual(svc.state.actions_taken, 1)
         self.assertEqual(svc.state.last_action, "alert")
 
+    def test_tick_suppresses_recently_started_duplicate_action(self) -> None:
+        # AM-KAIROSIDEM (2026-06-12): the tick runs as an at-least-once job —
+        # a crash-replay must not re-execute the same action+detail. The
+        # kairos_action_started checkpoint within the window suppresses it.
+        from datetime import datetime, timezone
+
+        svc, router, _, observe = _make_service()
+        router.ask.return_value = MagicMock(
+            content='{"action": "alert", "reason": "stale agent", "detail": "hex paused 3 days"}'
+        )
+        import hashlib as _hashlib
+
+        action_key = _hashlib.sha256(b"alert|hex paused 3 days").hexdigest()[:16]
+        observe.recent_events.return_value = [
+            {
+                "event_type": "kairos_action_started",
+                "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                "payload": {"action": "alert", "action_key": action_key},
+            }
+        ]
+
+        result = svc.tick()
+
+        self.assertEqual(result.error, "duplicate_action_suppressed")
+        self.assertEqual(svc.state.actions_taken, 0)
+        suppressed = [
+            call for call in observe.emit.call_args_list
+            if call.args and call.args[0] == "kairos_action_suppressed"
+        ]
+        self.assertEqual(len(suppressed), 1)
+
+    def test_tick_executes_when_started_checkpoint_is_stale(self) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        svc, router, _, observe = _make_service()
+        router.ask.return_value = MagicMock(
+            content='{"action": "alert", "reason": "stale agent", "detail": "hex paused 3 days"}'
+        )
+        import hashlib as _hashlib
+
+        action_key = _hashlib.sha256(b"alert|hex paused 3 days").hexdigest()[:16]
+        stale = datetime.now(timezone.utc) - timedelta(hours=2)
+        observe.recent_events.return_value = [
+            {
+                "event_type": "kairos_action_started",
+                "timestamp": stale.strftime("%Y-%m-%d %H:%M:%S"),
+                "payload": {"action": "alert", "action_key": action_key},
+            }
+        ]
+
+        result = svc.tick()
+
+        self.assertEqual(result.action, "alert")
+        self.assertEqual(svc.state.actions_taken, 1)
+        started = [
+            call for call in observe.emit.call_args_list
+            if call.args and call.args[0] == "kairos_action_started"
+        ]
+        self.assertEqual(len(started), 1)
+
     def test_tick_increments_counter(self) -> None:
         svc, router, _, _ = _make_service()
         router.ask.return_value = MagicMock(content='{"action": "none"}')

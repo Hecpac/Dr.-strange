@@ -33,6 +33,34 @@ class RuntimePolicyEngineTests(unittest.TestCase):
         self.assertEqual(result.dropped_sensitive_count, 3)
         self.assertEqual(result.to_metadata()["preserved_count"], 3)
 
+    def test_autoexec_max_tier_is_a_ceiling_never_an_override(self) -> None:
+        # AM-T3FLOOR (2026-06-12): Tier 3 always hits the approval gate. A
+        # misconfigured autoexec_max_tier=3 must be clamped, and the tier>=3
+        # floor in enforce() is unconditional.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            gate_calls: list[str] = []
+
+            def gate(definition, args) -> None:
+                gate_calls.append(definition.name)
+
+            engine = RuntimePolicyEngine(
+                workspace_root=workspace,
+                sandbox_policy=SandboxPolicy(workspace_root=workspace),
+                approval_gate=gate,
+                autoexec_max_tier=3,
+            )
+            self.assertEqual(engine.autoexec_max_tier, 2)
+
+            decision = engine.enforce(
+                "HeyGenVideo",
+                {},
+                context="operator",
+                tier=3,
+            )
+            self.assertTrue(decision.approval_required)
+            self.assertEqual(gate_calls, ["HeyGenVideo"])
+
     def test_unknown_tool_is_denied_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)

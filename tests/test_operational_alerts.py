@@ -32,6 +32,26 @@ class OperationalAlertRouterTests(unittest.TestCase):
         events = self.observe.recent_events(limit=2)
         self.assertTrue(any(event["event_type"] == "operational_alert_sent" for event in events))
 
+    def test_visible_approval_expiry_notifies_owner(self) -> None:
+        # Paso 9 (2026-06-12): an approval the user was asked for must not
+        # die silently — the gated action simply never happens otherwise.
+        notifications: list[str] = []
+        router = OperationalAlertRouter(observe=self.observe, notify=notifications.append)
+        router.install()
+
+        self.observe.emit(
+            "approval_expired",
+            payload={"approval_id": "abc123", "action": "deploy", "visible_to_user": True},
+        )
+        self.observe.emit(
+            "approval_expired",
+            payload={"approval_id": "k-int", "action": "kairos_internal", "visible_to_user": False},
+        )
+
+        self.assertEqual(len(notifications), 1)
+        self.assertIn("Aprobación expirada", notifications[0])
+        self.assertIn("abc123", notifications[0])
+
     def test_suppresses_events_already_reported_to_user(self) -> None:
         notifications: list[str] = []
         router = OperationalAlertRouter(observe=self.observe, notify=notifications.append)

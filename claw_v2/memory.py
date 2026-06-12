@@ -23,6 +23,18 @@ logger = logging.getLogger(__name__)
 
 _COMPACTED_MESSAGE_SNIPPET_CHARS = 600
 _ROLLING_SUMMARY_MAX_CHARS = 20_000
+# AM-SEMLOCK (2026-06-12): per-turn semantic retrieval loads every embedding
+# it scans; cap the scan at the most recent rows (prod carries ~900 today)
+# so the per-turn cost stays bounded as task_outcomes grows.
+_SEMANTIC_SCAN_MAX_ROWS = 1_000
+
+
+def _is_benign_migration_error(exc: BaseException) -> bool:
+    """LOW (2026-06-12): _migrate's idempotency catches were swallowing EVERY
+    OperationalError — disk-full/corruption read as "migration already
+    applied". Only the expected idempotent-replay errors are benign."""
+    message = str(exc).lower()
+    return "duplicate column" in message or "already exists" in message
 
 
 SCHEMA = """
@@ -603,8 +615,9 @@ class MemoryStore:
             try:
                 self._conn.execute(_MIGRATION_ADD_AGENT_NAME)
                 self._conn.commit()
-            except sqlite3.OperationalError:
-                pass
+            except sqlite3.OperationalError as exc:
+                if not _is_benign_migration_error(exc):
+                    raise
         for col, sql in [
             ("prompt_residency", _MIGRATION_ADD_FACT_PROMPT_RESIDENCY),
             ("retention_reason", _MIGRATION_ADD_FACT_RETENTION_REASON),
@@ -613,8 +626,9 @@ class MemoryStore:
                 try:
                     self._conn.execute(sql)
                     self._conn.commit()
-                except sqlite3.OperationalError:
-                    pass
+                except sqlite3.OperationalError as exc:
+                    if not _is_benign_migration_error(exc):
+                        raise
         cursor = self._conn.execute("PRAGMA table_info(task_outcomes)")
         outcome_cols = {row[1] for row in cursor.fetchall()}
         for col, sql in [
@@ -626,8 +640,9 @@ class MemoryStore:
                 try:
                     self._conn.execute(sql)
                     self._conn.commit()
-                except sqlite3.OperationalError:
-                    pass
+                except sqlite3.OperationalError as exc:
+                    if not _is_benign_migration_error(exc):
+                        raise
         # P0-E: extend the outcome CHECK constraint so we can distinguish
         # "brain produced a usable reply but tools were not verified" from
         # plain success. Existing rows are all valid in both old and new
@@ -640,16 +655,18 @@ class MemoryStore:
             try:
                 self._conn.executescript(_MIGRATION_CREATE_CALIBRATION_STATS)
                 self._conn.commit()
-            except sqlite3.OperationalError:
-                pass
+            except sqlite3.OperationalError as exc:
+                if not _is_benign_migration_error(exc):
+                    raise
         cursor = self._conn.execute("PRAGMA table_info(provider_sessions)")
         provider_cols = {row[1] for row in cursor.fetchall()}
         if "last_message_id" not in provider_cols:
             try:
                 self._conn.execute(_MIGRATION_ADD_PROVIDER_LAST_MESSAGE_ID)
                 self._conn.commit()
-            except sqlite3.OperationalError:
-                pass
+            except sqlite3.OperationalError as exc:
+                if not _is_benign_migration_error(exc):
+                    raise
         cursor = self._conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='outcome_embeddings'"
         )
@@ -661,8 +678,9 @@ class MemoryStore:
                     "embedding TEXT NOT NULL)"
                 )
                 self._conn.commit()
-            except sqlite3.OperationalError:
-                pass
+            except sqlite3.OperationalError as exc:
+                if not _is_benign_migration_error(exc):
+                    raise
         cursor = self._conn.execute("PRAGMA table_info(session_state)")
         session_state_cols = {row[1] for row in cursor.fetchall()}
         for col, sql in [
@@ -678,8 +696,9 @@ class MemoryStore:
                 try:
                     self._conn.execute(sql)
                     self._conn.commit()
-                except sqlite3.OperationalError:
-                    pass
+                except sqlite3.OperationalError as exc:
+                    if not _is_benign_migration_error(exc):
+                        raise
         cursor = self._conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='checkpoints'"
         )
@@ -702,16 +721,18 @@ class MemoryStore:
                     "ON checkpoints(pending_restore) WHERE pending_restore = 1;"
                 )
                 self._conn.commit()
-            except sqlite3.OperationalError:
-                pass
+            except sqlite3.OperationalError as exc:
+                if not _is_benign_migration_error(exc):
+                    raise
         cursor = self._conn.execute("PRAGMA table_info(recovery_jobs)")
         recovery_cols = {row[1] for row in cursor.fetchall()}
         if "metadata_json" not in recovery_cols:
             try:
                 self._conn.execute(_MIGRATION_ADD_RECOVERY_METADATA)
                 self._conn.commit()
-            except sqlite3.OperationalError:
-                pass
+            except sqlite3.OperationalError as exc:
+                if not _is_benign_migration_error(exc):
+                    raise
         cursor = self._conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='outcome_entity_edges'"
         )
@@ -728,8 +749,9 @@ class MemoryStore:
                     "ON outcome_entity_edges(entity_tag);"
                 )
                 self._conn.commit()
-            except sqlite3.OperationalError:
-                pass
+            except sqlite3.OperationalError as exc:
+                if not _is_benign_migration_error(exc):
+                    raise
         try:
             self.backfill_outcome_embeddings()
         except Exception:
@@ -812,12 +834,16 @@ class MemoryStore:
             current = self.get_session_state(session_id)
             existing_summary = str(current.get("rolling_summary") or "").strip()
             rolling_summary = _append_rolling_summary(existing_summary, summary_entry)
-            self._update_session_state_locked(session_id, current, rolling_summary=rolling_summary)
 
+            # LOW (2026-06-12): delete + summary must land in ONE transaction.
+            # Summary-then-delete in two commits re-summarized the same rows
+            # after a crash between them (duplicated rolling summary). The
+            # uncommitted DELETE below is persisted by the commit inside
+            # _update_session_state_locked.
             ids = [row["id"] for row in rows]
             placeholders = ",".join("?" for _ in ids)
             self._conn.execute(f"DELETE FROM messages WHERE id IN ({placeholders})", ids)
-            self._conn.commit()
+            self._update_session_state_locked(session_id, current, rolling_summary=rolling_summary)
             return len(ids)
 
     @_synchronized
@@ -862,19 +888,32 @@ class MemoryStore:
 
     @_synchronized
     def get_messages_since(self, session_id: str, after_id: int, limit: int | None = None) -> list[dict]:
-        sql = [
+        # LOW (2026-06-12): with a limit, keep the NEWEST rows of the gap
+        # (in chronological order) — plain ASC LIMIT kept the oldest, so a
+        # large gap's most recent context never reached the catchup.
+        if limit is not None:
+            rows = self._conn.execute(
+                """
+                SELECT id, role, content, created_at FROM (
+                    SELECT id, role, content, created_at
+                    FROM messages
+                    WHERE session_id = ? AND id > ?
+                    ORDER BY id DESC
+                    LIMIT ?
+                ) ORDER BY id ASC
+                """,
+                (session_id, after_id, limit),
+            ).fetchall()
+            return [dict(row) for row in rows]
+        rows = self._conn.execute(
             """
             SELECT id, role, content, created_at
             FROM messages
             WHERE session_id = ? AND id > ?
             ORDER BY id ASC
-            """
-        ]
-        params: list[object] = [session_id, after_id]
-        if limit is not None:
-            sql.append("LIMIT ?")
-            params.append(limit)
-        rows = self._conn.execute("\n".join(sql), params).fetchall()
+            """,
+            (session_id, after_id),
+        ).fetchall()
         return [dict(row) for row in rows]
 
     @_synchronized
@@ -1038,6 +1077,33 @@ class MemoryStore:
                 task_queue=task_queue, pending_approvals=pending_approvals,
                 last_checkpoint=last_checkpoint, rolling_summary=rolling_summary,
                 last_turn_summary=last_turn_summary,
+            )
+
+    def merge_active_object(
+        self,
+        session_id: str,
+        updates: dict[str, Any],
+        *,
+        remove: Iterable[str] = (),
+        **state_kwargs: Any,
+    ) -> dict:
+        """Atomically merge keys into active_object (and optionally other
+        session-state fields) under the store lock.
+
+        AM-STATEWR/M16 (2026-06-12): the prevalent caller pattern — read
+        state, mutate a copied active_object, then update_session_state —
+        loses updates when a worker thread and a chat turn interleave. This
+        re-reads the current state at write time, so concurrent writers
+        compose instead of overwriting each other.
+        """
+        with self._lock:
+            current = self.get_session_state(session_id)
+            active_object = dict(current.get("active_object") or {})
+            active_object.update(updates)
+            for key in remove:
+                active_object.pop(key, None)
+            return self._update_session_state_locked(
+                session_id, current, active_object=active_object, **state_kwargs
             )
 
     def _update_session_state_locked(
@@ -1300,6 +1366,10 @@ class MemoryStore:
 
     @_synchronized
     def get_profile_facts(self) -> list[dict]:
+        # AM-FACTDUP (2026-06-12): facts are append-only (get_fact reads
+        # latest-by-id), but this read returned EVERY version of a key —
+        # stale duplicates filled the prompt's fact slots. Surface only the
+        # newest row per key; history rows stay on disk untouched.
         with self._lock:
             rows = self._conn.execute(
                 """
@@ -1308,6 +1378,9 @@ class MemoryStore:
                        retention_reason, created_at
                 FROM facts
                 WHERE key LIKE 'profile.%'
+                  AND id IN (
+                      SELECT MAX(id) FROM facts WHERE key LIKE 'profile.%' GROUP BY key
+                  )
                 ORDER BY confidence DESC, id DESC
                 """
             ).fetchall()
@@ -1315,6 +1388,9 @@ class MemoryStore:
 
     @_synchronized
     def get_learning_facts(self, limit: int = 3) -> list[dict]:
+        # AM-FACTDUP (2026-06-12): same latest-per-key dedup as
+        # get_profile_facts — otherwise versions of the same lesson could
+        # consume the whole LIMIT.
         with self._lock:
             rows = self._conn.execute(
                 """
@@ -1322,7 +1398,12 @@ class MemoryStore:
                        valid_from, valid_until, agent_name, prompt_residency,
                        retention_reason, created_at
                 FROM facts
-                WHERE key = 'learning_loop_consolidated' OR entity_tags LIKE '%"learning"%'
+                WHERE (key = 'learning_loop_consolidated' OR entity_tags LIKE '%"learning"%')
+                  AND id IN (
+                      SELECT MAX(id) FROM facts
+                      WHERE key = 'learning_loop_consolidated' OR entity_tags LIKE '%"learning"%'
+                      GROUP BY key
+                  )
                 ORDER BY confidence DESC, id DESC
                 LIMIT ?
                 """,
@@ -2221,17 +2302,23 @@ class MemoryStore:
         query_vec = embedder(query)
         query_dim = len(query_vec)
         query_tokens = _tokenize(query)
+        # AM-SEMLOCK (2026-06-12): bound the per-turn scan to the most recent
+        # outcomes so retrieval cost does not grow forever with the table.
         base_sql = (
             "SELECT o.id, o.task_type, o.task_id, o.description, o.approach, "
             "o.outcome, o.lesson, o.error_snippet, o.retries, o.created_at, "
             "o.feedback, oe.embedding "
             "FROM task_outcomes o JOIN outcome_embeddings oe ON o.id = oe.outcome_id"
         )
+        tail_sql = " ORDER BY o.id DESC LIMIT ?"
         with self._lock:
             if task_type:
-                rows = self._conn.execute(base_sql + " WHERE o.task_type = ?", (task_type,)).fetchall()
+                rows = self._conn.execute(
+                    base_sql + " WHERE o.task_type = ?" + tail_sql,
+                    (task_type, _SEMANTIC_SCAN_MAX_ROWS),
+                ).fetchall()
             else:
-                rows = self._conn.execute(base_sql).fetchall()
+                rows = self._conn.execute(base_sql + tail_sql, (_SEMANTIC_SCAN_MAX_ROWS,)).fetchall()
         if not rows:
             return []
 
@@ -2271,7 +2358,6 @@ class MemoryStore:
 
         return scored[:limit]
 
-    @_synchronized
     def search_outcomes_with_graph(
         self,
         query: str,
@@ -2299,6 +2385,10 @@ class MemoryStore:
         Callers MUST sort by 'score', NOT by 'similarity' or 'keyword_score' —
         graph hits have similarity=0.0 and keyword_score=0.0, so a sort on either
         of those fields would silently relegate all graph results to the bottom.
+
+        AM-SEMLOCK (2026-06-12): no method-level lock — the O(N)
+        embedding/BM25 ranking runs outside it; only the SQL reads below
+        take the store lock.
         """
         seeds = self.search_outcomes_semantic(
             query, task_type=task_type, limit=max(limit, seed_k * 2),
@@ -2311,7 +2401,8 @@ class MemoryStore:
         if not seed_ids:
             return seeds[:limit]
 
-        neighbor_ids = self._outcome_graph_neighbors(seed_ids)
+        with self._lock:
+            neighbor_ids = self._outcome_graph_neighbors(seed_ids)
         seed_id_set = {s["id"] for s in seeds if s.get("id") is not None}
         neighbor_ids = [nid for nid in neighbor_ids if nid not in seed_id_set]
         if not neighbor_ids:
@@ -2322,12 +2413,13 @@ class MemoryStore:
         graph_score = round(avg_seed_score * _GRAPH_NEIGHBOR_DISCOUNT, 4)
 
         placeholders = ",".join("?" for _ in neighbor_ids)
-        rows = self._conn.execute(
-            f"SELECT id, task_type, task_id, description, approach, outcome, lesson, "
-            f"error_snippet, retries, created_at, feedback "
-            f"FROM task_outcomes WHERE id IN ({placeholders})",
-            neighbor_ids,
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT id, task_type, task_id, description, approach, outcome, lesson, "
+                f"error_snippet, retries, created_at, feedback "
+                f"FROM task_outcomes WHERE id IN ({placeholders})",
+                neighbor_ids,
+            ).fetchall()
         for row in rows:
             item = dict(row)
             item["similarity"] = 0.0

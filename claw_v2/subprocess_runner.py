@@ -207,7 +207,12 @@ def run_subprocess_bounded(
                         "timed_out": True,
                     },
                 )
-            stdout, stderr = proc.communicate()
+            # LOW (2026-06-12): even post-SIGKILL, communicate() can hang
+            # forever when a surviving grandchild holds the pipes open.
+            try:
+                stdout, stderr = proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                stdout, stderr = "", ""
         else:
             _emit(
                 observe,

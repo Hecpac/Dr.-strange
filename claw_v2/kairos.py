@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
 import logging
 import os
@@ -202,6 +203,32 @@ class KairosService:
                 decision.duration_seconds = time.time() - start
                 return decision
 
+            # AM-KAIROSIDEM (2026-06-12): the tick runs as an at-least-once
+            # durable job — a crash after the action but before job completion
+            # replays the whole tick and duplicates external side effects.
+            # Checkpoint the action (kairos_action_started) BEFORE executing
+            # and suppress a re-execution of the same action+detail within
+            # the dedup window.
+            action_key = hashlib.sha256(
+                f"{decision.action}|{decision.detail or ''}".encode("utf-8")
+            ).hexdigest()[:16]
+            if self._action_recently_started(action_key):
+                decision.error = "duplicate_action_suppressed"
+                self.observe.emit(
+                    "kairos_action_suppressed",
+                    trace_id=trace["trace_id"],
+                    root_trace_id=trace["root_trace_id"],
+                    payload={"action": decision.action, "action_key": action_key},
+                )
+                decision.duration_seconds = time.time() - start
+                return decision
+            self.observe.emit(
+                "kairos_action_started",
+                trace_id=trace["trace_id"],
+                root_trace_id=trace["root_trace_id"],
+                payload={"action": decision.action, "action_key": action_key, "tick": self.state.ticks},
+            )
+
             decision = self._execute(decision, budget=remaining, trace_context=trace)
             self.state.actions_taken += 1
             self.state.last_action = decision.action
@@ -227,6 +254,37 @@ class KairosService:
             d = TickDecision(action="none", error=str(exc))
             d.duration_seconds = time.time() - start
             return d
+
+    @staticmethod
+    def _parse_started_event_timestamp(value: Any) -> float | None:
+        try:
+            return (
+                datetime.datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S")
+                .replace(tzinfo=datetime.timezone.utc)
+                .timestamp()
+            )
+        except (TypeError, ValueError):
+            return None
+
+    def _action_recently_started(self, action_key: str, *, window_seconds: float = 1800.0) -> bool:
+        """True when the same action+detail checkpointed within the window.
+
+        AM-KAIROSIDEM: best-effort — an observe failure must never block the
+        tick, so errors read as "not started".
+        """
+        try:
+            events = self.observe.recent_events(limit=20, event_type="kairos_action_started")
+        except Exception:
+            return False
+        cutoff = time.time() - window_seconds
+        for event in events:
+            payload = event.get("payload") or {}
+            if payload.get("action_key") != action_key:
+                continue
+            ts = self._parse_started_event_timestamp(event.get("timestamp"))
+            if ts is None or ts >= cutoff:
+                return True
+        return False
 
     def handle_event(self, event_type: str, payload: dict[str, Any] | None = None) -> TickDecision:
         start = time.time()
@@ -456,7 +514,29 @@ class KairosService:
                 decision.error = str(exc)
                 logger.exception("KAIROS action %s failed", decision.action)
         decision.duration_seconds = time.time() - start
+        # LOW (2026-06-12): the remaining budget was computed by the caller
+        # but never read here — overruns were invisible. Handlers run
+        # synchronously (no preemption), so at minimum surface the overrun.
+        if decision.duration_seconds > budget:
+            self._emit_budget_overrun(decision, budget=budget, trace_context=trace_context)
         return decision
+
+    def _emit_budget_overrun(
+        self, decision: TickDecision, *, budget: float, trace_context: dict[str, Any] | None
+    ) -> None:
+        try:
+            self.observe.emit(
+                "kairos_action_budget_exceeded",
+                trace_id=trace_context.get("trace_id") if trace_context else None,
+                root_trace_id=trace_context.get("root_trace_id") if trace_context else None,
+                payload={
+                    "action": decision.action,
+                    "budget_seconds": round(budget, 2),
+                    "duration_seconds": round(decision.duration_seconds, 2),
+                },
+            )
+        except Exception:
+            logger.debug("kairos_action_budget_exceeded emit failed", exc_info=True)
 
     def _handle_notify_user(self, decision: TickDecision, trace_context: dict[str, Any] | None = None) -> None:
         if not self._notification_is_important(decision):

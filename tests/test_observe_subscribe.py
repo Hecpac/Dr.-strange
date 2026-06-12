@@ -57,6 +57,15 @@ class ObserveSubscribeTests(unittest.TestCase):
         self.assertEqual(fake_conn.execute.call_count, 3)
         self.assertGreaterEqual(fake_conn.rollback.call_count, 1)
         self.assertEqual(received, [{"n": 1}])
+        # AM-OBSDROP (2026-06-12): a dropped event must leave a recoverable
+        # JSONL trace next to the DB instead of vanishing.
+        spill = self.stream.db_path.with_suffix(".spill.jsonl")
+        self.assertTrue(spill.exists())
+        import json as _json
+
+        spilled = _json.loads(spill.read_text().splitlines()[-1])
+        self.assertEqual(spilled["event_type"], "evt")
+        self.assertEqual(_json.loads(spilled["payload"]), {"n": 1})
 
     def test_emit_persists_even_when_no_subscribers(self) -> None:
         self.stream.emit("lonely_event", payload={"a": 1})
