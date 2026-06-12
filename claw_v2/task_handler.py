@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import threading
 import time
@@ -56,6 +57,61 @@ _PETRI_DIMENSIONS_ROOT = Path(__file__).parent / "verification" / "dimensions"
 # this many times before it is forced to a terminal "failed"
 # (verification_stalled) instead of looping forever.
 _MAX_VERIFICATION_DEFERRALS = 5
+
+# AM-VOCAB (2026-06-12): the session task_queue used to receive raw
+# verification/terminal statuses ("passed", "failed", "unknown", ...) next to
+# its own vocabulary, so consumers matching on "pending"/"done" silently
+# missed entries. This is the single status map; every queue write goes
+# through normalize_task_queue_status.
+TASK_QUEUE_STATUSES = ("pending", "in_progress", "done", "blocked", "deferred")
+
+_TASK_QUEUE_STATUS_ALIASES: dict[str, str] = {
+    "pending": "pending",
+    "queued": "pending",
+    "deferred": "deferred",
+    "unknown": "pending",
+    "running_needs_verification": "pending",
+    "needs_verification": "pending",
+    "in_progress": "in_progress",
+    "running": "in_progress",
+    "done": "done",
+    "succeeded": "done",
+    "passed": "done",
+    "completed": "done",
+    "cancelled": "done",
+    "blocked": "blocked",
+    "failed": "blocked",
+    "awaiting_approval": "blocked",
+    "timed_out": "blocked",
+    "lost": "blocked",
+}
+
+
+def normalize_task_queue_status(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    return _TASK_QUEUE_STATUS_ALIASES.get(normalized, "pending")
+
+
+# Internal marker errors (critical_worker_error:<task>, evidence_gate:<id>,
+# ...) never reach chat — the summary already carries the public framing.
+_INTERNAL_ERROR_CODE_RE = re.compile(r"^[a-z0-9_]+:\S")
+
+
+def _failure_response_text(
+    *,
+    task_id: str,
+    checkpoint: dict[str, Any],
+    error: str,
+    objective: str,
+) -> str:
+    """Failure message rebuilt from the FINAL (post-gates) status (AM-STALEMSG)."""
+    summary = str(checkpoint.get("summary") or objective or "").strip()
+    lines = [f"No pude cerrar bien la tarea `{task_id}`."]
+    if summary:
+        lines.append(summary[:240])
+    if error and not _INTERNAL_ERROR_CODE_RE.match(error.strip()):
+        lines.append(f"Error: {error}")
+    return "\n".join(lines)
 
 
 class TaskHandler:
@@ -565,13 +621,18 @@ class TaskHandler:
                 pending_action="",
             )
             return _format_autonomy_policy_block(policy)
-        task_id = f"{session_id}:{time.time_ns()}"
-        return self._run_coordinated_task(
+        # AM-TASKRUN (2026-06-12): /task_run and /task_approve used to run the
+        # whole coordinator cycle inline in the command turn — synchronous and
+        # not durable (a daemon restart lost the work). Route through the
+        # durable autonomous-task lane: ledger row + agent_job + background
+        # runner, ack returned immediately.
+        return self.start_autonomous_task(
             session_id,
             objective,
             mode=mode,
-            forced=forced,
-            task_id=task_id,
+            source_text=objective,
+            task_kind="coordinated_task_command",
+            delegation_metadata={"origin": "coordinated_task_response", "forced": forced},
         )
 
     def _run_coordinated_task(
@@ -756,8 +817,6 @@ class TaskHandler:
             state = self._get_session_state(session_id)
             active_object = dict(state.get("active_object") or {})
             active_task = dict(active_object.get("active_task") or {})
-            if self._store_message is not None:
-                self._store_message(session_id, "assistant", response[:4000])
             completed_state = self._get_session_state(session_id)
             completed_checkpoint = completed_state.get("last_checkpoint") or {}
             verification_status = str(completed_state.get("verification_status") or "unknown")
@@ -883,6 +942,19 @@ class TaskHandler:
                             "deferrals": deferrals - 1,
                         },
                     )
+            # AM-STALEMSG (2026-06-12): the user-facing response used to be
+            # formatted and stored BEFORE the verification gates ran, so a
+            # gate-downgraded task notified failure with success-flavored
+            # text. Rebuild the message from the FINAL status, then store.
+            if terminal_status == "failed":
+                response = _failure_response_text(
+                    task_id=task_id,
+                    checkpoint=completed_checkpoint,
+                    error=checkpoint_error,
+                    objective=objective,
+                )
+            if self._store_message is not None:
+                self._store_message(session_id, "assistant", response[:4000])
             if not terminal_status:
                 if active_task.get("task_id") == task_id:
                     active_task["status"] = "pending"
@@ -1000,6 +1072,8 @@ class TaskHandler:
                     "response": response,
                     "verification_status": verification_status,
                     "terminal_status": terminal_status,
+                    # AM-NOTIFY: terminal notifications dedupe per attempt.
+                    "attempt": self._task_attempt(task_id),
                     **({"error": checkpoint_error} if terminal_status == "failed" and checkpoint_error else {}),
                 },
             )
@@ -1109,6 +1183,7 @@ class TaskHandler:
                     "objective": objective,
                     "error": error,
                     "response": response,
+                    "attempt": self._task_attempt(task_id),
                 },
             )
         finally:
@@ -1633,6 +1708,21 @@ class TaskHandler:
                 "reason": reason,
             },
         )
+
+    def _task_attempt(self, task_id: str) -> int:
+        """Attempt number for AM-NOTIFY dedupe — ledger resume_count, else 0."""
+        if self.task_ledger is None:
+            return 0
+        try:
+            record = self.task_ledger.get(task_id)
+        except Exception:
+            return 0
+        if record is None:
+            return 0
+        try:
+            return int((record.metadata or {}).get("resume_count") or 0)
+        except (TypeError, ValueError):
+            return 0
 
     def _has_live_task_thread(self, task_id: str) -> bool:
         with self._task_lock:
@@ -2531,8 +2621,8 @@ class TaskHandler:
         existing = next((item for item in queue if item.get("summary") == compact), None)
         updated = [item for item in queue if item.get("summary") != compact]
         task_id = _stable_task_id(compact, mode=mode, source=source)
-        effective_status = status
-        if existing is not None and status == "pending" and existing.get("status") in {"in_progress", "done", "blocked"}:
+        effective_status = normalize_task_queue_status(status)
+        if existing is not None and effective_status == "pending" and existing.get("status") in {"in_progress", "done", "blocked"}:
             effective_status = str(existing.get("status"))
         updated.append(
             {
@@ -2582,7 +2672,7 @@ class TaskHandler:
         for item in queue:
             current = dict(item)
             if not transitioned and current.get("status") == from_status:
-                current["status"] = to_status
+                current["status"] = normalize_task_queue_status(to_status)
                 transitioned = True
             updated.append(current)
         return updated
@@ -2599,7 +2689,7 @@ class TaskHandler:
         for item in queue:
             current = dict(item)
             if current.get("task_id") == task_id:
-                current["status"] = to_status
+                current["status"] = normalize_task_queue_status(to_status)
                 changed = True
             updated.append(current)
         if changed:

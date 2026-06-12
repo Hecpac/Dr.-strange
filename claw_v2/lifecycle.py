@@ -27,6 +27,27 @@ logger = logging.getLogger(__name__)
 _DEFAULT_PID_PATH = Path.home() / ".claw" / "claw.pid"
 
 
+def terminal_notification_key(payload: dict) -> str:
+    """Dedupe key for terminal task notifications — per ATTEMPT, not per task.
+
+    AM-NOTIFY (2026-06-12): keying by task_id alone meant a resumed task
+    (same task_id, new attempt) silently suppressed its terminal
+    notification. The attempt comes from the explicit ``attempt`` payload
+    field or from ledger ``metadata.resume_count``.
+    """
+    task_id = str(payload.get("task_id") or "")
+    attempt = payload.get("attempt")
+    if attempt is None:
+        metadata = payload.get("metadata") or {}
+        if isinstance(metadata, dict):
+            attempt = metadata.get("resume_count")
+    try:
+        attempt_num = int(attempt or 0)
+    except (TypeError, ValueError):
+        attempt_num = 0
+    return f"{task_id}#attempt-{attempt_num}"
+
+
 def should_notify_task_ledger_terminal(payload: dict, notified_task_ids: set[str]) -> bool:
     session_id = str(payload.get("session_id") or "")
     task_id = str(payload.get("task_id") or "")
@@ -36,7 +57,7 @@ def should_notify_task_ledger_terminal(payload: dict, notified_task_ids: set[str
     metadata = payload.get("metadata") or {}
     if not session_id.startswith("tg-") or not task_id:
         return False
-    if task_id in notified_task_ids or notify_policy == "none":
+    if terminal_notification_key(payload) in notified_task_ids or notify_policy == "none":
         return False
     if task_id.startswith("brain-tooluse:"):
         return False
@@ -302,24 +323,26 @@ async def run() -> int:
         def _autonomous_task_complete_consumer(payload: dict) -> None:
             session_id = str(payload.get("session_id") or "")
             task_id = str(payload.get("task_id") or "")
-            if task_id in _notified_task_ids:
+            notification_key = terminal_notification_key(payload)
+            if notification_key in _notified_task_ids:
                 return
             message = format_autonomous_task_terminal_message(payload)
             if message:
                 _send_session_telegram_message(session_id, message)
             if task_id:
-                _notified_task_ids.add(task_id)
+                _notified_task_ids.add(notification_key)
 
         def _autonomous_task_failed_consumer(payload: dict) -> None:
             session_id = str(payload.get("session_id") or "")
             task_id = str(payload.get("task_id") or "")
-            if task_id in _notified_task_ids:
+            notification_key = terminal_notification_key(payload)
+            if notification_key in _notified_task_ids:
                 return
             message = format_autonomous_task_terminal_message(payload, failed=True)
             if message:
                 _send_session_telegram_message(session_id, message)
             if task_id:
-                _notified_task_ids.add(task_id)
+                _notified_task_ids.add(notification_key)
 
         def _task_ledger_terminal_consumer(payload: dict) -> None:
             if not should_notify_task_ledger_terminal(payload, _notified_task_ids):
@@ -330,7 +353,7 @@ async def run() -> int:
                 format_task_ledger_terminal_message(payload),
             )
             if task_id:
-                _notified_task_ids.add(task_id)
+                _notified_task_ids.add(terminal_notification_key(payload))
 
         runtime.observe.subscribe("autonomous_task_completed", _autonomous_task_complete_consumer)
         runtime.observe.subscribe("autonomous_task_failed", _autonomous_task_failed_consumer)

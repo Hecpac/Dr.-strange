@@ -16,6 +16,52 @@ from claw_v2.lifecycle import (
 )
 
 
+class TerminalNotificationDedupTests(unittest.TestCase):
+    """AM-NOTIFY — terminal notifications dedupe per attempt, not per task."""
+
+    def test_key_uses_attempt_from_payload_or_metadata(self) -> None:
+        from claw_v2.lifecycle import terminal_notification_key
+
+        self.assertEqual(terminal_notification_key({"task_id": "t1"}), "t1#attempt-0")
+        self.assertEqual(
+            terminal_notification_key({"task_id": "t1", "attempt": 2}), "t1#attempt-2"
+        )
+        self.assertEqual(
+            terminal_notification_key({"task_id": "t1", "metadata": {"resume_count": 3}}),
+            "t1#attempt-3",
+        )
+        self.assertEqual(
+            terminal_notification_key({"task_id": "t1", "attempt": "garbage"}),
+            "t1#attempt-0",
+        )
+
+    def test_resumed_attempt_is_not_suppressed_by_prior_notification(self) -> None:
+        from claw_v2.lifecycle import (
+            should_notify_task_ledger_terminal,
+            terminal_notification_key,
+        )
+
+        notified: set[str] = set()
+        payload = {
+            "session_id": "tg-1",
+            "task_id": "t1",
+            "status": "failed",
+            "runtime": "brain",
+            "metadata": {},
+        }
+        self.assertTrue(should_notify_task_ledger_terminal(payload, notified))
+        notified.add(terminal_notification_key(payload))
+        self.assertFalse(
+            should_notify_task_ledger_terminal(payload, notified),
+            "same attempt must stay deduped",
+        )
+        resumed = {**payload, "metadata": {"resume_count": 1}}
+        self.assertTrue(
+            should_notify_task_ledger_terminal(resumed, notified),
+            "a resumed attempt must notify even though attempt 0 already did",
+        )
+
+
 class PidLockTests(unittest.TestCase):
     def test_acquire_writes_pid_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -447,5 +447,131 @@ class ResumeWiringTests(unittest.TestCase):
             self.assertNotIn("detect_task_id", recorded)
 
 
+class StaleMessageTests(unittest.TestCase):
+    """AM-STALEMSG — the terminal message is formatted AFTER the gates."""
+
+    def test_gate_downgraded_task_notifies_failure_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            memory = MemoryStore(root / "claw.db")
+            observe = ObserveStream(root / "observe.db")
+            ledger = TaskLedger(root / "claw.db", observe=observe)
+            jobs = JobService(root / "claw.db", observe=observe)
+            stored: list[tuple[str, str, str]] = []
+
+            class _BlockedCoordinator:
+                def run(
+                    self,
+                    task_id,
+                    objective,
+                    research_tasks,
+                    implementation_tasks=None,
+                    verification_tasks=None,
+                    lane_overrides=None,
+                    **kwargs,
+                ):
+                    return CoordinatorResult(
+                        task_id=task_id,
+                        phase_results={
+                            "verification": [
+                                WorkerResult(
+                                    task_name="verify_change",
+                                    content=(
+                                        "Verification Status: pending\n"
+                                        "Siguiente paso: solicitar al usuario el enlace del documento"
+                                    ),
+                                    duration_seconds=0.1,
+                                )
+                            ]
+                        },
+                        synthesis="plan listo",
+                    )
+
+            handler = TaskHandler(
+                coordinator=_BlockedCoordinator(),
+                observe=observe,
+                task_ledger=ledger,
+                job_service=jobs,
+                get_session_state=memory.get_session_state,
+                update_session_state=memory.update_session_state,
+                store_message=lambda sid, role, text: stored.append((sid, role, text)),
+                workspace_root=root,
+            )
+            ack = handler.start_autonomous_task("tg-1", "implementa el informe", mode="coding")
+            task_id = ack.split("`", 2)[1]
+            self.assertTrue(handler.wait_for_task(task_id, timeout=5))
+
+            events = observe.recent_events(limit=200)
+            failed = next(e for e in events if e["event_type"] == "autonomous_task_failed")
+            self.assertIn("No pude cerrar bien la tarea", failed["payload"]["response"])
+            self.assertNotIn("Listo. Cerr", failed["payload"]["response"])
+            # AM-NOTIFY: terminal events carry the attempt for per-attempt dedupe.
+            self.assertIn("attempt", failed["payload"])
+            assistant_texts = [text for _sid, role, text in stored if role == "assistant"]
+            self.assertTrue(assistant_texts, "assistant message must be stored")
+            self.assertTrue(
+                assistant_texts[-1].startswith("No pude cerrar bien la tarea"),
+                assistant_texts[-1],
+            )
+
+
+class TaskQueueVocabularyTests(unittest.TestCase):
+    """AM-VOCAB — every queue write goes through the single status map."""
+
+    def test_upsert_normalizes_cross_vocabulary_statuses(self) -> None:
+        for raw, expected in (
+            ("passed", "done"),
+            ("succeeded", "done"),
+            ("failed", "blocked"),
+            ("awaiting_approval", "blocked"),
+            ("unknown", "pending"),
+            ("running", "in_progress"),
+            ("deferred", "deferred"),
+        ):
+            queue = TaskHandler.upsert_task_queue_entry(
+                [],
+                summary=f"tarea {raw}",
+                mode="coding",
+                status=raw,
+                source="coordinator",
+                priority=0,
+            )
+            self.assertEqual(queue[0]["status"], expected, raw)
+
+    def test_set_task_queue_status_normalizes(self) -> None:
+        queue = [{"task_id": "x", "summary": "s", "status": "pending", "priority": 1}]
+        updated = TaskHandler.set_task_queue_status(queue, task_id="x", to_status="succeeded")
+        self.assertEqual(updated[0]["status"], "done")
+        updated = TaskHandler.set_task_queue_status(queue, task_id="x", to_status="deferred")
+        self.assertEqual(updated[0]["status"], "deferred")
+
+    def test_task_attempt_reads_ledger_resume_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            memory = MemoryStore(root / "claw.db")
+            observe = ObserveStream(root / "observe.db")
+            ledger = TaskLedger(root / "claw.db", observe=observe)
+            handler = TaskHandler(
+                coordinator=None,
+                observe=observe,
+                task_ledger=ledger,
+                get_session_state=memory.get_session_state,
+                update_session_state=memory.update_session_state,
+            )
+            self.assertEqual(handler._task_attempt("missing"), 0)
+            ledger.create(
+                task_id="t-attempt",
+                session_id="tg-1",
+                objective="obj",
+                mode="coding",
+                runtime="coordinator",
+                provider="anthropic",
+                model="m",
+                status="running",
+                metadata={"resume_count": 2},
+            )
+            self.assertEqual(handler._task_attempt("t-attempt"), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
