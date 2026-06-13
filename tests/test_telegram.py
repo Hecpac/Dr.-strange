@@ -1082,6 +1082,25 @@ class SendPhotoTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(sent)
 
+    async def test_send_photo_returns_false_on_unexpected_error(self) -> None:
+        transport = TelegramTransport(
+            bot_service=MagicMock(), token="t", allowed_user_id="123",
+        )
+        transport._app = MagicMock()
+        transport._app.bot = AsyncMock()
+        transport._app.bot.send_photo.side_effect = BadRequest("PHOTO_INVALID_DIMENSIONS")
+
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            tmp.write(b"\x89PNG\r\n\x1a\n")
+            tmp_path = tmp.name
+
+        try:
+            sent = await transport.send_photo(chat_id=1, photo_path=tmp_path)
+        finally:
+            Path(tmp_path).unlink(missing_ok=True)
+
+        self.assertFalse(sent)
+
     async def test_send_text_treats_connection_reset_as_nonfatal(self) -> None:
         transport = TelegramTransport(
             bot_service=MagicMock(), token="t", allowed_user_id="123",

@@ -1922,6 +1922,12 @@ class TelegramTransport:
         except _NONFATAL_SEND_ERRORS as exc:
             _log_nonfatal_send_error("send_photo", exc)
             return False
+        except Exception:
+            # A BadRequest here used to blow up the whole text handler
+            # (_maybe_send_latest_generated_image) into "Error procesando
+            # tu mensaje" (2026-06-12 audit T4).
+            logger.warning("send_photo failed", exc_info=True)
+            return False
         return True
 
     async def send_video_url(self, *, chat_id: int, video_url: str, caption: str | None = None) -> None:
