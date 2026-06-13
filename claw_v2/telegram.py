@@ -711,9 +711,8 @@ class TelegramTransport:
             },
         )
 
-    async def _emit_outbound_text_event(
-        self,
-        event_type: str,
+    @staticmethod
+    def _outbound_text_payload(
         *,
         session_id: str,
         user_id: str,
@@ -725,7 +724,7 @@ class TelegramTransport:
         attempt: int | None = None,
         error: BaseException | None = None,
         message_id: int | None = None,
-    ) -> None:
+    ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "session_id": session_id,
             "user_id": user_id,
@@ -742,7 +741,37 @@ class TelegramTransport:
         if error is not None:
             payload["error_type"] = type(error).__name__
             payload["error"] = str(error)[:300]
-        await self._aemit_transport_event(event_type, payload)
+        return payload
+
+    async def _emit_outbound_text_event(
+        self,
+        event_type: str,
+        **kwargs: Any,
+    ) -> None:
+        await self._aemit_transport_event(
+            event_type, self._outbound_text_payload(**kwargs)
+        )
+
+    def _emit_outbound_text_event_nowait(
+        self,
+        event_type: str,
+        **kwargs: Any,
+    ) -> None:
+        """Fire-and-forget emit on the single-worker executor.
+
+        For per-attempt telemetry on the send critical path: under SQLite
+        contention an awaited emit costs up to ~0.3s per write, which a
+        multipart reply pays 2-3 times per part (T5, 2026-06-12). The single
+        worker preserves ordering; the final sent/error emit stays awaited
+        and acts as the barrier.
+        """
+        payload = self._outbound_text_payload(**kwargs)
+        executor = self._observe_emit_executor()
+        if executor is None:
+            # Shutdown-tail emit: keep the audit event, accept the inline write.
+            self._emit_transport_event(event_type, payload)
+            return
+        executor.submit(self._emit_transport_event, event_type, payload)
 
     async def _sleep_before_text_send_retry(self, exc: BaseException, attempt: int) -> None:
         retry_after = getattr(exc, "retry_after", None)
@@ -800,7 +829,7 @@ class TelegramTransport:
     ) -> bool:
         timeout_kwargs = self._send_text_timeout_kwargs()
         for attempt in range(1, self._text_send_retries + 1):
-            await self._emit_outbound_text_event(
+            self._emit_outbound_text_event_nowait(
                 "telegram_outbound_attempt",
                 session_id=session_id,
                 user_id=user_id,
@@ -877,7 +906,7 @@ class TelegramTransport:
             return True
 
         for attempt in range(1, self._text_send_retries + 1):
-            await self._emit_outbound_text_event(
+            self._emit_outbound_text_event_nowait(
                 "telegram_outbound_attempt",
                 session_id=session_id,
                 user_id=user_id,
@@ -949,7 +978,7 @@ class TelegramTransport:
     ) -> bool:
         if not self._token:
             return False
-        await self._emit_outbound_text_event(
+        self._emit_outbound_text_event_nowait(
             "telegram_outbound_attempt",
             session_id=session_id,
             user_id=user_id,
@@ -1980,7 +2009,7 @@ class TelegramTransport:
         user_id = str(chat_id)
         timeout_kwargs = self._send_text_timeout_kwargs()
         for attempt in range(1, self._text_send_retries + 1):
-            await self._emit_outbound_text_event(
+            self._emit_outbound_text_event_nowait(
                 "telegram_outbound_attempt",
                 session_id=session_id,
                 user_id=user_id,

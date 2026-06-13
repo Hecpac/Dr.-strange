@@ -1235,6 +1235,33 @@ class ProactiveSendTextTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(delivered)
         transport._send_text_direct_bot_api.assert_not_awaited()
 
+    async def test_attempt_telemetry_is_not_awaited_in_send_path(self) -> None:
+        """telegram_outbound_attempt rides the single-worker executor without
+        an await: under SQLite contention each awaited emit adds up to ~0.3s
+        per part to the send path (T5, 2026-06-12). The awaited final
+        sent/error emit doubles as the ordering barrier."""
+        transport, bot_service = self._transport()
+        transport._app.bot.send_message.return_value = SimpleNamespace(message_id=1)
+        awaited_types: list[str] = []
+        original = transport._aemit_transport_event
+
+        async def spy(event_type: str, payload: dict) -> None:
+            awaited_types.append(event_type)
+            await original(event_type, payload)
+
+        transport._aemit_transport_event = spy
+
+        delivered = await transport.send_text(chat_id=1, text="hello")
+
+        self.assertTrue(delivered)
+        self.assertNotIn("telegram_outbound_attempt", awaited_types)
+        emitted = [call.args[0] for call in bot_service.observe.emit.call_args_list]
+        self.assertIn("telegram_outbound_attempt", emitted)
+        self.assertLess(
+            emitted.index("telegram_outbound_attempt"),
+            emitted.index("telegram_outbound_sent"),
+        )
+
     async def test_nonretryable_error_does_not_retry(self) -> None:
         transport, bot_service = self._transport()
         transport._app.bot.send_message.side_effect = BadRequest("MESSAGE_TOO_LONG")
