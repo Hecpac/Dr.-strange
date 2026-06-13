@@ -8,7 +8,7 @@
 ## meta
 
 ```yaml
-describes_commit: fe99808+spec-002-self-improve-promotion-hotfix+spec-002-subprocess-bounded-pr-c+spec-002-approval-manager-pr-d+spec-002-promotion-tooling-phase-4+brain-delegation-tool+recovery-jobs-drain-c1+audit-m3-m4-offloop-emits-nonblocking-checkpoint-backup+audit-high-2026-06-11+audit-waves-2-3-2026-06-12+adapters-d1-split-2026-06-12+pasos-6-7-coordinator-resumable-2026-06-12+wal-generation-guard-2026-06-12
+describes_commit: fe99808+spec-002-self-improve-promotion-hotfix+spec-002-subprocess-bounded-pr-c+spec-002-approval-manager-pr-d+spec-002-promotion-tooling-phase-4+brain-delegation-tool+recovery-jobs-drain-c1+audit-m3-m4-offloop-emits-nonblocking-checkpoint-backup+audit-high-2026-06-11+audit-waves-2-3-2026-06-12+adapters-d1-split-2026-06-12+pasos-6-7-coordinator-resumable-2026-06-12+wal-generation-guard-2026-06-12+telegram-t1-t12-2026-06-12
 doc_version: 2.21
 last_verified: 2026-06-12
 verification_method: manual + pytest + AST sentinel cross-check
@@ -632,6 +632,15 @@ caught). The deny nudges the model to `delegate_task` instead. This is the
 structural backstop to the prompt-level DELEGATION_CONTRACT: such work does not
 fit the brain turn's 300s wall. Worker/`worker_heavy` lanes are NOT gated —
 delegated coordinator work legitimately drives CDP.
+
+**Detached-process backstop** (`_detached_process_reason`, same module and
+re-export; T12, 2026-06-12): the PreToolUse hook also denies — `brain` lane
+only — Bash that launches detached/long-lived background processes
+(`nohup`/`setsid`/`disown`, or a trailing `&` combined with long-life markers:
+sleep N / install / download / curl / wget). Motive: during the T10 lock storm
+the brain improvised ghost background processes with no ledger/monitor/
+notification and the work died silently. The deny nudges to `delegate_task`;
+a trivial short `cmd &` is allowed and worker lanes are not gated.
 
 ### output sanitization
 
