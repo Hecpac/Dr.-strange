@@ -291,7 +291,9 @@ async def run() -> int:
                 _loop,
             )
             if not future.result(timeout=20):
-                raise RuntimeError("Telegram observability stream message was not delivered")
+                raise RuntimeError(
+                    "Telegram observability stream message was not delivered"
+                )
 
         if runtime.observation_window is not None and observability_telegram_enabled:
             runtime.observation_window.set_alert_notifier(_send_observability_telegram_message)
