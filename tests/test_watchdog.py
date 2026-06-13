@@ -165,6 +165,16 @@ class WatchdogConfigTests(unittest.TestCase):
         self.assertEqual(cfg.bootstrap_grace_s, 120.0)
         self.assertEqual(cfg.strikes_required, 2)  # 0 is invalid -> safe default
 
+    def test_negative_bootstrap_grace_falls_back_to_default(self) -> None:
+        # A negative grace would silently disable the bootstrap window.
+        cfg = WatchdogConfig.from_env(env={"CLAW_WATCHDOG_BOOTSTRAP_GRACE_S": "-1"})
+        self.assertEqual(cfg.bootstrap_grace_s, 120.0)
+
+    def test_zero_bootstrap_grace_is_allowed(self) -> None:
+        # Zero is a legitimate "disable the grace window" choice, not a typo.
+        cfg = WatchdogConfig.from_env(env={"CLAW_WATCHDOG_BOOTSTRAP_GRACE_S": "0"})
+        self.assertEqual(cfg.bootstrap_grace_s, 0.0)
+
 
 class WatchdogStatePersistenceTests(unittest.TestCase):
     def test_round_trip(self) -> None:
@@ -184,6 +194,16 @@ class WatchdogStatePersistenceTests(unittest.TestCase):
             p = Path(d) / "watchdog_state.json"
             p.write_text("{not json")
             self.assertEqual(load_state(p).consecutive_restartable, 0)
+
+    def test_non_dict_json_file_is_zero(self) -> None:
+        # Valid JSON but not a dict: must not raise AttributeError on .get().
+        for payload in ("[1, 2, 3]", '"bad"', "5", "null"):
+            with TemporaryDirectory() as d:
+                p = Path(d) / "watchdog_state.json"
+                p.write_text(payload)
+                self.assertEqual(
+                    load_state(p).consecutive_restartable, 0, f"payload={payload!r}"
+                )
 
 
 class RunCyclePersistenceTests(unittest.TestCase):
@@ -289,6 +309,17 @@ class MainTests(unittest.TestCase):
             )
         self.assertEqual(rc, 0)
         self.assertEqual(buf.getvalue().strip(), "ok")
+
+    def test_unparseable_stdin_resets_existing_strike(self) -> None:
+        # A non-confirmatory (unreadable) read between two critical reads must
+        # break the consecutive chain, so the next critical is strike 1 again.
+        report = {"checks": _critical()}
+        self.assertEqual(self._run(report, "05:00"), "hold")  # strike 1 persisted
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            main(["--uptime", "05:00"], stdin=io.StringIO("{bad"), env=self.env)
+        self.assertEqual(buf.getvalue().strip(), "ok")  # strike reset
+        self.assertEqual(self._run(report, "05:00"), "hold")  # strike 1, not restart
 
     def test_attention_prints_ok(self) -> None:
         self.assertEqual(

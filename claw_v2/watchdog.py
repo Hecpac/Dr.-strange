@@ -66,10 +66,14 @@ class WatchdogConfig:
     def from_env(cls, env: Mapping[str, str] | None = None) -> "WatchdogConfig":
         env = os.environ if env is None else env
         strikes = _env_int(env, "CLAW_WATCHDOG_STRIKES", DEFAULT_STRIKES_REQUIRED)
+        grace = _env_float(
+            env, "CLAW_WATCHDOG_BOOTSTRAP_GRACE_S", DEFAULT_BOOTSTRAP_GRACE_S
+        )
         return cls(
-            bootstrap_grace_s=_env_float(
-                env, "CLAW_WATCHDOG_BOOTSTRAP_GRACE_S", DEFAULT_BOOTSTRAP_GRACE_S
-            ),
+            # A negative grace would silently disable the bootstrap window
+            # (uptime < grace is never true); treat it as a misconfiguration
+            # and fall back to the safe default.
+            bootstrap_grace_s=grace if grace >= 0.0 else DEFAULT_BOOTSTRAP_GRACE_S,
             # A non-positive strike count is a misconfiguration (you cannot
             # require zero readings); fall back to the safe default rather than
             # restarting on the first transient.
@@ -146,18 +150,23 @@ def run_cycle(
 
 def load_state(path: Path) -> WatchdogState:
     try:
-        data = json.loads(path.read_text())
-        return WatchdogState(
-            consecutive_restartable=int(data.get("consecutive_restartable", 0))
-        )
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, Mapping):
+            return WatchdogState(
+                consecutive_restartable=int(data.get("consecutive_restartable", 0))
+            )
     except (OSError, ValueError, TypeError):
-        return WatchdogState(0)
+        pass
+    # Missing, unreadable, or non-dict (e.g. a stray ``[1,2,3]``) state file:
+    # start clean rather than crash this robustness-critical component.
+    return WatchdogState(0)
 
 
 def save_state(path: Path, state: WatchdogState) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps({"consecutive_restartable": state.consecutive_restartable})
+        json.dumps({"consecutive_restartable": state.consecutive_restartable}),
+        encoding="utf-8",
     )
 
 
@@ -218,6 +227,9 @@ def main(
     try:
         report = json.load(stdin)
     except (ValueError, TypeError):
+        # An unreadable report is a non-confirmatory reading: it must break the
+        # consecutive-critical chain, not silently preserve a prior strike.
+        save_state(state_path, WatchdogState(0))
         print(OK)
         return 0
 

@@ -24,6 +24,12 @@ wait_for_port() {
   # too short for a slow bootstrap (DB contention), which made the watchdog
   # see port_listening=False and restart again; raise via env when needed.
   attempts="${CLAW_RESTART_PORT_WAIT_S:-10}"
+  # A non-integer value would make the `-lt` test error and skip the wait
+  # entirely (port reported down immediately); fall back to the default.
+  case "$attempts" in
+    '' | *[!0-9]*) attempts=10 ;;
+  esac
+  [ "$attempts" -gt 0 ] || attempts=10
   i=0
   while [ "$i" -lt "$attempts" ]; do
     if lsof -nP "-iTCP:$port" -sTCP:LISTEN >/dev/null 2>&1; then
