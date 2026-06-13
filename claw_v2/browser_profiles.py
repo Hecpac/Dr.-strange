@@ -161,8 +161,13 @@ def _default_cdp_probe(cdp_url: str, home_url: str, timeout_ms: int) -> tuple[st
 
         async with async_playwright() as p:
             browser = await p.chromium.connect_over_cdp(cdp_url)
+            created_context = None
             try:
-                context = browser.contexts[0] if browser.contexts else await browser.new_context()
+                if browser.contexts:
+                    context = browser.contexts[0]
+                else:
+                    context = await browser.new_context()
+                    created_context = context
                 page = await context.new_page()
                 try:
                     await page.goto(home_url, wait_until="domcontentloaded", timeout=timeout_ms)
@@ -179,7 +184,14 @@ def _default_cdp_probe(cdp_url: str, home_url: str, timeout_ms: int) -> tuple[st
                     except Exception:
                         logger.debug("probe page close failed", exc_info=True)
             finally:
-                # Disconnect the CDP client; this does NOT close Chrome.
+                # Close a context we created (never a pre-existing one — those
+                # hold the login cookies), then disconnect the CDP client; the
+                # disconnect does NOT close Chrome.
+                if created_context is not None:
+                    try:
+                        await created_context.close()
+                    except Exception:
+                        logger.debug("probe context close failed", exc_info=True)
                 try:
                     await browser.close()
                 except Exception:

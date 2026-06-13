@@ -953,12 +953,18 @@ def _resolve_claude_oauth_token() -> str | None:
     per-task read rides the live subscription without us owning refresh. Returns
     None off-macOS or when no credential is stored. Never logs the token.
     """
+    import sys
+
+    if sys.platform != "darwin":
+        # The keychain ("security" CLI + "Claude Code-credentials") is macOS-only;
+        # skip the subprocess work and exception handling entirely off-mac.
+        return None
+
+    import getpass
     import json as _json
 
     try:
-        user = subprocess.run(
-            ["whoami"], capture_output=True, text=True, timeout=5
-        ).stdout.strip()
+        user = getpass.getuser()
     except Exception:
         user = ""
     candidates = [
