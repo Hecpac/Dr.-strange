@@ -68,6 +68,27 @@ class SplitMessageTests(unittest.TestCase):
         self.assertEqual("".join(parts), text)
 
 
+class RateLimitConfigTests(unittest.TestCase):
+    """T9: the 10/60s limiter silently dropped the single operator's 11th
+    message; the limits are now env-tunable with a 30/60s default."""
+
+    def test_defaults_to_30_per_60s(self) -> None:
+        transport = TelegramTransport(bot_service=MagicMock(), token="t")
+        self.assertEqual(transport._rate_max, 30)
+        self.assertEqual(transport._rate_window, 60.0)
+
+    def test_env_overrides_and_limit_enforced(self) -> None:
+        with patch.dict(
+            "os.environ", {"TELEGRAM_RATE_MAX": "2", "TELEGRAM_RATE_WINDOW": "30"}
+        ):
+            transport = TelegramTransport(bot_service=MagicMock(), token="t")
+        self.assertEqual(transport._rate_max, 2)
+        self.assertEqual(transport._rate_window, 30.0)
+        self.assertFalse(transport._is_rate_limited("u"))
+        self.assertFalse(transport._is_rate_limited("u"))
+        self.assertTrue(transport._is_rate_limited("u"))
+
+
 class TransportStartTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         _purge_polling_lock("test-token")
@@ -99,7 +120,29 @@ class TransportStartTests(unittest.IsolatedAsyncioTestCase):
         mock_builder.get_updates_pool_timeout.assert_called_once_with(30.0)
         mock_app.initialize.assert_awaited_once()
         mock_app.start.assert_awaited_once()
-        mock_app.updater.start_polling.assert_awaited_once()
+        mock_app.updater.start_polling.assert_awaited_once_with(
+            drop_pending_updates=False
+        )
+        await transport.stop()
+
+    @patch("claw_v2.telegram.ApplicationBuilder")
+    async def test_start_polling_drops_pending_updates_when_env_set(
+        self, mock_builder_cls
+    ) -> None:
+        mock_app = AsyncMock()
+        mock_app.updater = AsyncMock()
+        mock_app.add_handler = MagicMock()
+        mock_builder = MagicMock()
+        mock_builder.token.return_value = mock_builder
+        mock_builder.build.return_value = mock_app
+        mock_builder_cls.return_value = mock_builder
+
+        transport = TelegramTransport(bot_service=MagicMock(), token="test-token")
+        with patch.dict("os.environ", {"TELEGRAM_DROP_PENDING_UPDATES": "1"}):
+            await transport.start()
+        mock_app.updater.start_polling.assert_awaited_once_with(
+            drop_pending_updates=True
+        )
         await transport.stop()
 
     @patch("claw_v2.telegram.ApplicationBuilder")

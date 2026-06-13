@@ -605,8 +605,10 @@ class TelegramTransport:
         self._xai_api_key = xai_api_key or os.environ.get("XAI_API_KEY")
         self._app = None
         self._rate_limits: dict[str, list[float]] = {}
-        self._rate_max = 10  # max requests per window
-        self._rate_window = 60.0  # seconds
+        # The sole operator hit the old hardcoded 10/60s ceiling and the 11th
+        # message was silently dropped (T9, 2026-06-12).
+        self._rate_max = max(1, _env_int("TELEGRAM_RATE_MAX", 30))  # max requests per window
+        self._rate_window = max(1.0, _env_float("TELEGRAM_RATE_WINDOW", 60.0))  # seconds
         self._connection_pool_size = _env_int("TELEGRAM_CONNECTION_POOL_SIZE", DEFAULT_CONNECTION_POOL_SIZE)
         self._pool_timeout = _env_float("TELEGRAM_POOL_TIMEOUT", DEFAULT_POOL_TIMEOUT)
         self._request_timeout = _env_float("TELEGRAM_REQUEST_TIMEOUT", DEFAULT_REQUEST_TIMEOUT)
@@ -1158,7 +1160,11 @@ class TelegramTransport:
         ))
         await self._app.initialize()
         await self._app.start()
-        await self._app.updater.start_polling()
+        # Default 0: after downtime the backlog is processed, never dropped.
+        # Set TELEGRAM_DROP_PENDING_UPDATES=1 to skip a stale backlog (T7).
+        await self._app.updater.start_polling(
+            drop_pending_updates=_env_int("TELEGRAM_DROP_PENDING_UPDATES", 0) == 1
+        )
         await self._set_commands()
         await self._notify_startup()
 

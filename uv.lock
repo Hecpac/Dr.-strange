@@ -350,7 +350,7 @@ requires-dist = [
     { name = "playwright" },
     { name = "pyautogui" },
     { name = "pypdf" },
-    { name = "python-telegram-bot" },
+    { name = "python-telegram-bot", specifier = ">=22.7,<23" },
     { name = "rank-bm25" },
 ]
 
