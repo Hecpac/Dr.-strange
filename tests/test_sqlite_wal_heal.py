@@ -22,6 +22,7 @@ from claw_v2.sqlite_runtime import (
     RuntimeDatabaseError,
     connect_runtime_sqlite,
     heal_orphaned_wal,
+    heal_wal_after_disk_io,
     make_store_wal_heal,
     register_wal_heal,
     runtime_db_degraded_error,
@@ -83,6 +84,14 @@ class _DiskIoOnceConn:
         return getattr(self._real, name)
 
 
+class _CloseTrackingConn:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class _TrackingLock:
     def __init__(self) -> None:
         self.depth = 0
@@ -114,6 +123,13 @@ def _seed_db(db_path: Path) -> None:
     conn.execute("INSERT INTO seed VALUES (1)")
     conn.commit()
     conn.close()
+
+
+def _sqlite_ioerr_short_read() -> sqlite3.OperationalError:
+    exc = sqlite3.OperationalError("disk I/O error")
+    exc.sqlite_errorcode = 522
+    exc.sqlite_errorname = "SQLITE_IOERR_SHORT_READ"
+    return exc
 
 
 class WalOrphanDetectionTests(unittest.TestCase):
@@ -321,6 +337,85 @@ class SidecarCleanupTests(unittest.TestCase):
             for store in stores:
                 with self.assertRaises(RuntimeDatabaseError):
                     store._conn.execute("SELECT 1")
+
+
+class ForcedDiskIoHealTests(unittest.TestCase):
+    def test_disk_io_heal_forces_reopen_even_when_sidecars_are_not_orphaned(self) -> None:
+        from claw_v2.sqlite_runtime import _WAL_GENERATION_INODES, _registry_key
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "t.db"
+            _seed_db(db_path)
+            _WAL_GENERATION_INODES.pop(_registry_key(db_path), None)
+            wal = Path(f"{db_path}-wal")
+            shm = Path(f"{db_path}-shm")
+            wal.write_bytes(b"")
+            shm.write_bytes(b"stale")
+            self.assertFalse(wal_sidecars_orphaned(db_path))
+
+            class _Store:
+                def __init__(self) -> None:
+                    self.db_path = db_path
+                    self._conn = _CloseTrackingConn()
+                    self._lock = threading.Lock()
+
+            store = _Store()
+            old_conn = store._conn
+            register_wal_heal(db_path, make_store_wal_heal(store))
+
+            self.assertTrue(
+                heal_wal_after_disk_io(
+                    db_path,
+                    _sqlite_ioerr_short_read(),
+                    context="ForcedDiskIoHealTests",
+                )
+            )
+
+            self.assertTrue(old_conn.closed)
+            self.assertIsNot(store._conn, old_conn)
+            store._conn.execute("INSERT INTO seed VALUES (5)")
+            store._conn.commit()
+            store._conn.close()
+
+    def test_force_heal_removes_empty_wal_and_stale_shm(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "t.db"
+            _seed_db(db_path)
+            wal = Path(f"{db_path}-wal")
+            shm = Path(f"{db_path}-shm")
+            wal.write_bytes(b"")
+            shm.write_bytes(b"stale")
+
+            self.assertTrue(
+                heal_wal_after_disk_io(
+                    db_path,
+                    _sqlite_ioerr_short_read(),
+                    context="ForcedDiskIoHealTests",
+                )
+            )
+
+            self.assertFalse(wal.exists())
+            self.assertFalse(shm.exists())
+
+    def test_force_heal_never_deletes_nonempty_wal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "t.db"
+            _seed_db(db_path)
+            wal = Path(f"{db_path}-wal")
+            shm = Path(f"{db_path}-shm")
+            wal.write_bytes(b"non-empty wal frames")
+            shm.write_bytes(b"stale")
+
+            self.assertTrue(
+                heal_wal_after_disk_io(
+                    db_path,
+                    _sqlite_ioerr_short_read(),
+                    context="ForcedDiskIoHealTests",
+                )
+            )
+
+            self.assertEqual(wal.read_bytes(), b"non-empty wal frames")
+            self.assertTrue(shm.exists())
 
 
 class ObservePersistHealTests(unittest.TestCase):
