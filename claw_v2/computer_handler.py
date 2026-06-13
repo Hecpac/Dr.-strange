@@ -729,11 +729,18 @@ class ComputerHandler:
         *,
         allow_high_risk_actions: bool = False,
         approved_domains: list[str] | None = None,
+        timeout_seconds: float | None = None,
     ) -> str:
         import asyncio
 
         model = self._browser_use_model()
-        timeout = self._browser_use_timeout()
+        # Delegated browse jobs pass the long browser/CDP budget; interactive
+        # sessions fall back to the configured (short) default.
+        timeout = (
+            int(timeout_seconds)
+            if timeout_seconds and timeout_seconds > 0
+            else self._browser_use_timeout()
+        )
         timeout_message = (
             f"browser_use timed out after {timeout}s while executing approved browser automation"
         )
@@ -778,6 +785,37 @@ class ComputerHandler:
             finally:
                 pool.shutdown(wait=False, cancel_futures=True)
         return str(asyncio.run(_run()))
+
+    def run_delegated_browser_task(
+        self, objective: str, *, task_id: str | None = None, mode: str | None = None
+    ) -> str:
+        """One-shot browser task for a delegated CDP/browse job (option b, 2026-06-13).
+
+        Runs the autonomous browser-use agent in-process (Playwright in the daemon
+        venv) so it reaches Chrome CDP directly — unlike a Codex coordinator
+        worker, whose ``--sandbox workspace-write`` denies network and cannot
+        connect to localhost:9250. Wired as ``TaskHandler.browser_executor``;
+        honors the same action gate / sensitive-URL policy as interactive
+        browser_use, with the long browser/CDP timeout. May raise on timeout —
+        the TaskHandler branch contains executor failures.
+        """
+        import types as _types
+
+        from claw_v2.bot_helpers import _LONG_BROWSER_OPERATION_TIMEOUT_SECONDS
+
+        if self.browser_use is None:
+            return (
+                "No puedo ejecutar la tarea de navegador: browser_use no está "
+                "disponible en este runtime."
+            )
+        self._emit(
+            "delegated_browser_task_started",
+            {"task_id": task_id, "mode": mode, "objective": objective[:200]},
+        )
+        session = _types.SimpleNamespace(task=objective, screenshot_path=None)
+        return self._run_browser_use_task(
+            session, timeout_seconds=_LONG_BROWSER_OPERATION_TIMEOUT_SECONDS
+        )
 
     def _capture_approval_screenshot(self, session_id: str, session: Any) -> dict[str, str]:
         if self.computer is None or not hasattr(self.computer, "capture_screenshot"):
