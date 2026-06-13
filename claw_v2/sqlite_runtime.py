@@ -132,14 +132,19 @@ def heal_wal_after_disk_io(db_path: Path | str, exc: BaseException, *, context: 
         return False
     detail = sqlite_error_details(exc)
     logger.warning(
-        "SQLite disk I/O error in %s for %s; attempting WAL heal%s%s",
+        "SQLite disk I/O error in %s for %s; forcing conservative WAL heal%s%s",
         context,
         db_path,
         ": " if detail else "",
         detail,
         exc_info=True,
     )
-    return heal_orphaned_wal(db_path)
+    return _force_conservative_wal_heal(
+        db_path,
+        reason="sqlite_disk_io",
+        context=context,
+        cause=exc,
+    )
 
 
 def _heal_lock_for_key(key: str) -> threading.Lock:
@@ -306,53 +311,105 @@ def heal_orphaned_wal(db_path: Path | str) -> bool:
     with heal_lock:
         if not wal_sidecars_orphaned(db_path):
             return False
-        with _WAL_HEAL_REGISTRY_LOCK:
-            handles = [h for h in _WAL_HEAL_REGISTRY.get(key, ()) if h.alive]
-            _WAL_HEAL_REGISTRY[key] = handles
+        return _run_conservative_wal_heal(
+            key,
+            db_path,
+            reason="orphaned_wal",
+            context="heal_orphaned_wal",
+            cause=None,
+        )
+
+
+def _force_conservative_wal_heal(
+    db_path: Path | str,
+    *,
+    reason: str,
+    context: str,
+    cause: BaseException | None,
+) -> bool:
+    key = _registry_key(db_path)
+    heal_lock = _heal_lock_for_key(key)
+    with heal_lock:
+        return _run_conservative_wal_heal(
+            key,
+            db_path,
+            reason=reason,
+            context=context,
+            cause=cause,
+        )
+
+
+def _run_conservative_wal_heal(
+    key: str,
+    db_path: Path | str,
+    *,
+    reason: str,
+    context: str,
+    cause: BaseException | None,
+) -> bool:
+    with _WAL_HEAL_REGISTRY_LOCK:
+        handles = [h for h in _WAL_HEAL_REGISTRY.get(key, ()) if h.alive]
+        _WAL_HEAL_REGISTRY[key] = handles
+    detail = sqlite_error_details(cause) if cause is not None else ""
+    if reason == "orphaned_wal":
         logger.critical(
             "SQLite WAL sidecars for %s are missing while connections are open; "
             "reopening %d registered connection(s) to rejoin one WAL generation.",
             db_path,
             len(handles),
         )
-        for handle in handles:
-            try:
-                handle.close()
-            except Exception:
-                logger.exception("WAL heal close failed for %s handle=%s", db_path, handle.describe())
-        _cleanup_recoverable_sidecars(key, db_path)
-        failures: list[tuple[StoreWalHealHandle, BaseException]] = []
-        for handle in handles:
-            try:
-                handle.reopen()
-            except Exception as exc:
-                detail = sqlite_error_details(exc)
-                logger.exception(
-                    "WAL heal reopen failed for %s handle=%s%s%s",
-                    db_path,
-                    handle.describe(),
-                    ": " if detail else "",
-                    detail,
-                )
-                failures.append((handle, exc))
-        if failures:
-            first_handle, first_exc = failures[0]
-            message = (
-                f"Runtime database WAL heal failed for {db_path}; "
-                f"{len(failures)} of {len(handles)} registered connection(s) did not reopen. "
-                f"First failed handle: {first_handle.describe()}. "
-                "Runtime DB marked degraded; restart or recover sidecars before continuing."
+    else:
+        logger.critical(
+            "SQLite WAL conservative heal for %s reason=%s context=%s%s%s; "
+            "reopening %d registered connection(s) to rejoin one WAL generation.",
+            db_path,
+            reason,
+            context,
+            ": " if detail else "",
+            detail,
+            len(handles),
+        )
+    for handle in handles:
+        try:
+            handle.close()
+        except Exception:
+            logger.exception("WAL heal close failed for %s handle=%s", db_path, handle.describe())
+    _cleanup_recoverable_sidecars(key, db_path)
+    failures: list[tuple[StoreWalHealHandle, BaseException]] = []
+    for handle in handles:
+        try:
+            handle.reopen()
+        except Exception as exc:
+            detail = sqlite_error_details(exc)
+            logger.exception(
+                "WAL heal reopen failed for %s handle=%s reason=%s context=%s%s%s",
+                db_path,
+                handle.describe(),
+                reason,
+                context,
+                ": " if detail else "",
+                detail,
             )
-            error = RuntimeDatabaseError(message)
-            _mark_runtime_db_degraded(db_path, error)
-            for handle in handles:
-                handle.mark_degraded(error)
-            raise error from first_exc
-        # The new generation has no wal until the first write; clear the stamp so
-        # the next successful persist records the fresh inode.
-        _WAL_GENERATION_INODES.pop(key, None)
-        _RUNTIME_DB_DEGRADED.pop(key, None)
-        return True
+            failures.append((handle, exc))
+    if failures:
+        first_handle, first_exc = failures[0]
+        message = (
+            f"Runtime database WAL heal failed for {db_path}; "
+            f"reason={reason}; context={context}; "
+            f"{len(failures)} of {len(handles)} registered connection(s) did not reopen. "
+            f"First failed handle: {first_handle.describe()}. "
+            "Runtime DB marked degraded; restart or recover sidecars before continuing."
+        )
+        error = RuntimeDatabaseError(message)
+        _mark_runtime_db_degraded(db_path, error)
+        for handle in handles:
+            handle.mark_degraded(error)
+        raise error from first_exc
+    # The new generation has no wal until the first write; clear the stamp so
+    # the next successful persist records the fresh inode.
+    _WAL_GENERATION_INODES.pop(key, None)
+    _RUNTIME_DB_DEGRADED.pop(key, None)
+    return True
 
 
 def _cleanup_recoverable_sidecars(key: str, db_path: Path | str) -> None:
