@@ -625,7 +625,7 @@ class AppConfig:
             codex_cli_path=os.getenv("CODEX_CLI_PATH") or shutil.which("codex") or "codex",
             codex_model=os.getenv("CODEX_MODEL", "codex-mini-latest"),
             computer_use_backend=os.getenv("COMPUTER_USE_BACKEND", "openai"),
-            computer_browser_use_model=os.getenv("CLAW_BROWSER_USE_MODEL", "gpt-5.4"),
+            computer_browser_use_model=os.getenv("CLAW_BROWSER_USE_MODEL", "claude-sonnet-4-6"),
             morning_brief_enabled=_env_bool("MORNING_BRIEF_ENABLED", True),
             morning_brief_hour=_env_int("MORNING_BRIEF_HOUR", 5),
             morning_brief_timezone=os.getenv("MORNING_BRIEF_TIMEZONE", os.getenv("TZ", "America/Chicago")),

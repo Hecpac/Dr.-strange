@@ -674,7 +674,7 @@ class BrowserUseModelConfigTests(unittest.TestCase):
         home = str(Path.home())
         with patch.dict(os.environ, {"HOME": home}, clear=True):
             config = AppConfig.from_env()
-        self.assertEqual(config.computer_browser_use_model, "gpt-5.4")
+        self.assertEqual(config.computer_browser_use_model, "claude-sonnet-4-6")
         with patch.dict(os.environ, {"HOME": home, "CLAW_BROWSER_USE_MODEL": "gpt-5.5"}, clear=True):
             configured = AppConfig.from_env()
         self.assertEqual(configured.computer_browser_use_model, "gpt-5.5")

@@ -571,7 +571,7 @@ class BrowserExecutorRoutingTests(unittest.TestCase):
                 return "feed capturado: 30 posts"
 
             def flaky_update(session_id, **kwargs):
-                if kwargs.get("verification_status") == "pending" and calls["failed_update"] == 0:
+                if kwargs.get("verification_status") == "passed" and calls["failed_update"] == 0:
                     calls["failed_update"] += 1
                     raise RuntimeDatabaseError("Runtime database WAL heal failed for claw.db")
                 return memory.update_session_state(session_id, **kwargs)
@@ -616,6 +616,64 @@ class BrowserExecutorRoutingTests(unittest.TestCase):
                 "tg-1", "repaso por X", mode="browse", forced=False, task_id="t-4"
             )
             self.assertTrue(recorded["coordinator_ran"])
+
+    def _autonomous_handler(self, root: Path, *, browser_executor):
+        memory = MemoryStore(root / "claw.db")
+        observe = ObserveStream(root / "observe.db")
+        ledger = TaskLedger(root / "claw.db", observe=observe)
+        jobs = JobService(root / "claw.db", observe=observe)
+        handler = TaskHandler(
+            observe=observe,
+            task_ledger=ledger,
+            job_service=jobs,
+            browser_executor=browser_executor,
+            get_session_state=memory.get_session_state,
+            update_session_state=memory.update_session_state,
+        )
+        return handler, ledger, jobs
+
+    def _run_autonomous_browser(self, handler, ledger, jobs, *, task_id, objective):
+        job = jobs.enqueue(
+            kind="coordinator.autonomous_task",
+            payload={"task_id": task_id, "session_id": "tg-1", "objective": objective, "mode": "browse"},
+        )
+        ledger.create(
+            task_id=task_id, session_id="tg-1", objective=objective, mode="browse",
+            runtime="coordinator", provider="codex", model="gpt", status="running",
+        )
+        handler._run_autonomous_task("tg-1", task_id, objective, "browse", job_id=job.job_id)
+
+    def test_browser_executor_no_result_terminates_failed_not_pending(self) -> None:
+        # Regression: a "(no result)" report (e.g. planning LLM rate-limited) used
+        # to land verification_status="pending", which never terminates and the
+        # lifecycle watchdog resumes the task forever. It must terminate as failed.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            handler, ledger, jobs = self._autonomous_handler(
+                Path(tmpdir), browser_executor=lambda o, *, task_id, mode: "(no result)"
+            )
+            self._run_autonomous_browser(
+                handler, ledger, jobs, task_id="t-nores", objective="repaso por X"
+            )
+            event_types = [e["event_type"] for e in handler.observe.recent_events(limit=50)]
+            self.assertIn("autonomous_task_failed", event_types)
+            self.assertNotIn("autonomous_task_pending", event_types)
+            record = ledger.get("t-nores")
+            self.assertEqual(record.status, "failed")
+
+    def test_browser_executor_real_result_terminates_succeeded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            handler, ledger, jobs = self._autonomous_handler(
+                Path(tmpdir),
+                browser_executor=lambda o, *, task_id, mode: "Capturé 32 posts del timeline: ...",
+            )
+            self._run_autonomous_browser(
+                handler, ledger, jobs, task_id="t-ok", objective="repaso por X"
+            )
+            event_types = [e["event_type"] for e in handler.observe.recent_events(limit=50)]
+            self.assertIn("autonomous_task_completed", event_types)
+            self.assertNotIn("autonomous_task_pending", event_types)
+            record = ledger.get("t-ok")
+            self.assertEqual(record.status, "succeeded")
 
 
 class StaleMessageTests(unittest.TestCase):

@@ -74,6 +74,27 @@ def _preserve_browser_use_import_env():
         os.environ.update(snapshot)
 
 
+@contextmanager
+def _suppress_anthropic_api_key(active: bool):
+    """Force the Claude OAuth (Max subscription) path by hiding ANTHROPIC_API_KEY.
+
+    browser_use's ``ChatAnthropic`` builds ``AsyncAnthropic(api_key=None, ...)``,
+    and the Anthropic SDK falls back to ``ANTHROPIC_API_KEY`` from the environment
+    when ``api_key`` is None — so a stray metered key would silently bill credits
+    instead of the subscription. Browser_use runs are serialized (CDP/profile +
+    browser_use locks) and the brain lane runs in subscription mode without this
+    var, so popping it for the duration is safe. No-op when ``active`` is False.
+    """
+    if not active or "ANTHROPIC_API_KEY" not in os.environ:
+        yield
+        return
+    saved = os.environ.pop("ANTHROPIC_API_KEY")
+    try:
+        yield
+    finally:
+        os.environ["ANTHROPIC_API_KEY"] = saved
+
+
 @dataclass
 class ComputerSession:
     task: str
@@ -565,10 +586,18 @@ class ComputerUseService:
         return self._build_call_output(action)
 
 
-# OpenAI vision model browser_use drives the page with. gpt-4o was outdated and
-# weak at grounding (more steps per task -> timeouts). Default to the repo's
-# current OpenAI API tier; override via CLAW_BROWSER_USE_MODEL.
-DEFAULT_BROWSER_USE_MODEL = "gpt-5.4"
+# Vision model browser_use drives the page with. Default to Claude (rides
+# Hector's Max subscription via the keychain OAuth token — NO metered API),
+# overridable via CLAW_BROWSER_USE_MODEL. A "claude*" model authenticates with
+# the OAuth bearer; any other (e.g. gpt-*) falls back to the metered OPENAI key.
+DEFAULT_BROWSER_USE_MODEL = "claude-sonnet-4-6"
+# Secondary model wired as browser_use's fallback_llm when the primary is a
+# Claude model — same OAuth/subscription path, so a primary-model hiccup
+# (overload/availability) doesn't kill the whole browser task.
+BROWSER_USE_OAUTH_FALLBACK_MODEL = "claude-haiku-4-5"
+# Beta header the Anthropic API requires when authenticating /v1/messages with
+# a Claude Code (Max subscription) OAuth bearer token instead of an API key.
+_ANTHROPIC_OAUTH_BETA_HEADER = "oauth-2025-04-20"
 # Upper bound for the best-effort post-task screenshot so a hung capture can
 # never delay or fail an otherwise-completed browser task.
 _BROWSER_USE_CAPTURE_TIMEOUT_SECONDS = 30
@@ -605,6 +634,39 @@ class BrowserUseService:
     def last_artifact_path(self, value: str | None) -> None:
         self._artifact_local.path = value
 
+    def _build_browser_llm(self, model: str) -> tuple[Any, Any | None]:
+        """Build the browser_use planning LLM (primary, fallback_llm).
+
+        ``claude*`` models ride Hector's Max subscription: authenticate with the
+        keychain OAuth bearer + the ``oauth-2025-04-20`` beta header (NO metered
+        ANTHROPIC_API_KEY), and wire a secondary Claude model as ``fallback_llm``
+        so a primary overload doesn't kill the task. Any other model (gpt-*) uses
+        the metered OpenAI key. Raises if a Claude model is requested but no
+        subscription token is available — fail loud, never silently no-op.
+        """
+        with _preserve_browser_use_import_env():
+            from browser_use import ChatAnthropic, ChatOpenAI
+
+        if str(model).lower().startswith("claude"):
+            token = _resolve_claude_oauth_token()
+            if not token:
+                raise RuntimeError(
+                    "No pude resolver el token OAuth de Claude (Max) del keychain "
+                    "'Claude Code-credentials'; el agente de navegador no puede "
+                    "autenticar contra Anthropic por suscripción."
+                )
+            headers = {"anthropic-beta": _ANTHROPIC_OAUTH_BETA_HEADER}
+            primary = ChatAnthropic(model=model, auth_token=token, default_headers=headers)
+            fallback = None
+            if BROWSER_USE_OAUTH_FALLBACK_MODEL and BROWSER_USE_OAUTH_FALLBACK_MODEL != model:
+                fallback = ChatAnthropic(
+                    model=BROWSER_USE_OAUTH_FALLBACK_MODEL,
+                    auth_token=token,
+                    default_headers=headers,
+                )
+            return primary, fallback
+        return ChatOpenAI(model=model, api_key=os.environ.get("OPENAI_API_KEY")), None
+
     async def run_task(
         self,
         task: str,
@@ -622,7 +684,7 @@ class BrowserUseService:
         allow_high_risk_actions: bool = False,
     ) -> str:
         with _preserve_browser_use_import_env():
-            from browser_use import Agent, BrowserSession, ChatOpenAI
+            from browser_use import Agent, BrowserSession
 
         self.last_artifact_path = None
         normalized_allowed = _normalize_domain_patterns(allowed_domains)
@@ -633,10 +695,7 @@ class BrowserUseService:
             allowed_domains=normalized_allowed or None,
             prohibited_domains=normalized_prohibited or None,
         )
-        llm = ChatOpenAI(
-            model=model,
-            api_key=os.environ.get("OPENAI_API_KEY"),
-        )
+        llm, fallback_llm = self._build_browser_llm(model)
         tools = None
         policy_interrupt: BrowserUsePolicyInterrupt | None = None
         if action_gate is not None:
@@ -655,6 +714,7 @@ class BrowserUseService:
         agent = Agent(
             task=task,
             llm=llm,
+            fallback_llm=fallback_llm,
             browser_session=browser,
             tools=tools,
             max_actions_per_step=max_actions_per_step,
@@ -663,15 +723,18 @@ class BrowserUseService:
             register_should_stop_callback=_should_stop,
         )
         artifact_path: Path | None = None
+        oauth_claude = str(model).lower().startswith("claude")
         try:
             # Only the agent work is bounded by the caller's timeout. The
             # artifact capture runs AFTER, with its own budget, so a task that
             # finishes near `timeout` is never turned into a timeout failure by
-            # the screenshot.
-            if timeout is not None:
-                result = await asyncio.wait_for(agent.run(), timeout=timeout)
-            else:
-                result = await agent.run()
+            # the screenshot. The OAuth-suppress guard keeps a Claude run on the
+            # Max subscription even if a metered ANTHROPIC_API_KEY is in the env.
+            with _suppress_anthropic_api_key(oauth_claude):
+                if timeout is not None:
+                    result = await asyncio.wait_for(agent.run(), timeout=timeout)
+                else:
+                    result = await agent.run()
             policy_interrupt = policy_state.get("interrupt") if isinstance(policy_state, dict) else None
             if policy_interrupt is not None:
                 raise policy_interrupt
@@ -880,6 +943,47 @@ def _host_from_url(url: str | None) -> str | None:
     except Exception:
         return None
     return host.lower() if host else None
+
+
+def _resolve_claude_oauth_token() -> str | None:
+    """Return the Claude Code (Max subscription) OAuth access token, or None.
+
+    Read fresh from the macOS keychain ("Claude Code-credentials") on every call:
+    the ``claude`` CLI used by the brain lane refreshes that keychain entry, so a
+    per-task read rides the live subscription without us owning refresh. Returns
+    None off-macOS or when no credential is stored. Never logs the token.
+    """
+    import json as _json
+
+    try:
+        user = subprocess.run(
+            ["whoami"], capture_output=True, text=True, timeout=5
+        ).stdout.strip()
+    except Exception:
+        user = ""
+    candidates = [
+        ["security", "find-generic-password", "-s", "Claude Code-credentials", "-a", user, "-w"],
+        ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+    ]
+    for args in candidates:
+        try:
+            res = subprocess.run(args, capture_output=True, text=True, timeout=5)
+        except Exception:
+            logger.debug("keychain lookup for Claude OAuth token failed", exc_info=True)
+            continue
+        blob = res.stdout.strip()
+        if res.returncode != 0 or not blob:
+            continue
+        try:
+            creds = _json.loads(blob)
+        except Exception:
+            continue
+        oauth = creds.get("claudeAiOauth") if isinstance(creds, dict) else None
+        oauth = oauth if isinstance(oauth, dict) else (creds if isinstance(creds, dict) else {})
+        token = oauth.get("accessToken") or oauth.get("access_token")
+        if token:
+            return str(token).strip() or None
+    return None
 
 
 def _resolve_api_key() -> str | None:

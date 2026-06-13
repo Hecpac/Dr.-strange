@@ -834,7 +834,7 @@ class ComputerHandler:
                     profile_dir=DEFAULT_CDP_PROFILE_DIR,
                 )
             except BrowserCapabilityError as exc:
-                return str(exc)
+                return f"No pude conectar al navegador (CDP): {exc}"
             self._mark_capability_available("chrome_cdp")
             with self._browser_use_lock:
                 self._ensure_browser_use_service(cdp_endpoint)
