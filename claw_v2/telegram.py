@@ -619,28 +619,6 @@ class TelegramTransport:
             lock = self._chat_locks.setdefault(session_id, asyncio.Lock())
         return lock
 
-    async def _reply_parts(self, update: Update, parts: list[str]) -> bool:
-        """Send reply parts with flood-control retry.
-
-        Returns False when delivery ultimately failed so callers can emit
-        status="send_failed" — previously the exception propagated after the
-        assistant turn was already persisted, so the agent believed it
-        answered and no telemetry recorded the loss (2026-06-10 audit C2).
-        """
-        for part in parts:
-            for attempt in range(3):
-                try:
-                    await update.message.reply_text(part, link_preview_options=_NO_PREVIEW)
-                    break
-                except Exception as exc:
-                    retry_after = getattr(exc, "retry_after", None)
-                    if attempt >= 2:
-                        logger.warning("Telegram reply failed after retries", exc_info=True)
-                        return False
-                    delay = float(retry_after) + 0.5 if retry_after is not None else 1.5 * (attempt + 1)
-                    await asyncio.sleep(delay)
-        return True
-
     def _emit_transport_event(self, event_type: str, payload: dict[str, Any]) -> None:
         observe = getattr(self._bot_service, "observe", None)
         if observe is None:
@@ -1789,7 +1767,13 @@ class TelegramTransport:
             # A failed download used to abort the handler in total silence
             # (the voice/document handlers already apologize) — C1.
             logger.exception("Error downloading image message")
-            await self._reply_parts(update, ["No pude descargar la imagen. Reenvíala e intento de nuevo."])
+            await self._send_reply_text_parts(
+                update,
+                ["No pude descargar la imagen. Reenvíala e intento de nuevo."],
+                session_id=session_id,
+                user_id=user_id,
+                message_kind="image",
+            )
             await self._emit_latency(
                 session_id=session_id,
                 user_id=user_id,
@@ -1832,7 +1816,13 @@ class TelegramTransport:
             response = "(procesando... intenta de nuevo en unos segundos)"
         response = self._sanitize_outbound_response(session_id, response)
         parts = _split_message(response)
-        delivered = await self._reply_parts(update, parts)
+        _, delivered = await self._send_reply_text_parts(
+            update,
+            parts,
+            session_id=session_id,
+            user_id=user_id,
+            message_kind="image",
+        )
         finished_at = time.perf_counter()
         await self._emit_latency(
             session_id=session_id,
@@ -1897,7 +1887,13 @@ class TelegramTransport:
             response = "(procesando... intenta de nuevo en unos segundos)"
         response = self._sanitize_outbound_response(session_id, response)
         parts = _split_message(response)
-        delivered = await self._reply_parts(update, parts)
+        _, delivered = await self._send_reply_text_parts(
+            update,
+            parts,
+            session_id=session_id,
+            user_id=user_id,
+            message_kind="document",
+        )
         finished_at = time.perf_counter()
         await self._emit_latency(
             session_id=session_id,
@@ -2101,11 +2097,23 @@ class TelegramTransport:
                     ogg_path.unlink(missing_ok=True)
             except Exception:
                 logger.warning("TTS failed, falling back to text", exc_info=True)
-                delivered = await self._reply_parts(update, parts)
+                _, delivered = await self._send_reply_text_parts(
+                    update,
+                    parts,
+                    session_id=session_id,
+                    user_id=user_id,
+                    message_kind="transcript",
+                )
             else:
                 delivered = True
         else:
-            delivered = await self._reply_parts(update, parts)
+            _, delivered = await self._send_reply_text_parts(
+                update,
+                parts,
+                session_id=session_id,
+                user_id=user_id,
+                message_kind="transcript",
+            )
         finished_at = time.perf_counter()
         await self._emit_latency(
             session_id=session_id,

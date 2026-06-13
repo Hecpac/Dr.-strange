@@ -845,8 +845,17 @@ class HandleImageTests(unittest.IsolatedAsyncioTestCase):
 
         update.message.reply_text.assert_awaited_once()
         self.assertEqual(update.message.reply_text.await_args.args[0], "image response")
-        bot_service.observe.emit.assert_called_once()
-        payload = bot_service.observe.emit.call_args.kwargs["payload"]
+        events = [
+            (call.args[0], call.kwargs["payload"])
+            for call in bot_service.observe.emit.call_args_list
+        ]
+        self.assertTrue(
+            any(
+                name == "telegram_outbound_sent" and payload["message_kind"] == "image"
+                for name, payload in events
+            )
+        )
+        payload = next(payload for name, payload in events if name == "telegram_latency")
         self.assertEqual(payload["message_kind"], "image")
         self.assertEqual(payload["response_parts"], 1)
         _, kwargs = mock_to_thread.await_args
@@ -914,8 +923,17 @@ class HandleImageTests(unittest.IsolatedAsyncioTestCase):
         with patch("claw_v2.telegram.asyncio.to_thread", new_callable=AsyncMock, return_value="voice response"):
             await transport._handle_text_content(update, "hola")
 
-        bot_service.observe.emit.assert_called_once()
-        payload = bot_service.observe.emit.call_args.kwargs["payload"]
+        events = [
+            (call.args[0], call.kwargs["payload"])
+            for call in bot_service.observe.emit.call_args_list
+        ]
+        self.assertTrue(
+            any(
+                name == "telegram_outbound_sent" and payload["message_kind"] == "transcript"
+                for name, payload in events
+            )
+        )
+        payload = next(payload for name, payload in events if name == "telegram_latency")
         self.assertEqual(payload["message_kind"], "transcript")
         self.assertEqual(payload["status"], "ok")
         self.assertEqual(payload["response_chars"], len("voice response"))
