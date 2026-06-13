@@ -16,7 +16,13 @@ from telegram.error import BadRequest, RetryAfter, TimedOut
 import claw_v2.observe as observe_module
 from claw_v2.memory import MemoryStore
 from claw_v2.observe import ObserveStream
-from claw_v2.telegram import TelegramTransport, _polling_lock_path, _split_message
+from claw_v2.telegram import (
+    TelegramTransport,
+    _build_image_content_blocks,
+    _build_video_content_blocks,
+    _polling_lock_path,
+    _split_message,
+)
 
 
 def _purge_polling_lock(token: str) -> None:
@@ -840,11 +846,24 @@ class HandleImageTests(unittest.IsolatedAsyncioTestCase):
         mock_context = MagicMock()
         mock_context.bot.get_file = AsyncMock(return_value=mock_file)
 
-        with patch("claw_v2.telegram.asyncio.to_thread", new_callable=AsyncMock, return_value="image response") as mock_to_thread:
+        with patch(
+            "claw_v2.telegram.asyncio.to_thread",
+            new_callable=AsyncMock,
+            side_effect=lambda func, *a, **k: (
+                func(*a, **k) if func is _build_image_content_blocks else "image response"
+            ),
+        ) as mock_to_thread:
             await transport._handle_photo(update, mock_context)
 
         update.message.reply_text.assert_awaited_once()
         self.assertEqual(update.message.reply_text.await_args.args[0], "image response")
+        # T6: the up-to-20MB read+base64 encode must run off the event loop.
+        self.assertTrue(
+            any(
+                call.args and call.args[0] is _build_image_content_blocks
+                for call in mock_to_thread.await_args_list
+            )
+        )
         events = [
             (call.args[0], call.kwargs["payload"])
             for call in bot_service.observe.emit.call_args_list
@@ -897,7 +916,13 @@ class HandleImageTests(unittest.IsolatedAsyncioTestCase):
         mock_context = MagicMock()
         mock_context.bot.get_file = AsyncMock(return_value=mock_file)
 
-        with patch("claw_v2.telegram.asyncio.to_thread", new_callable=AsyncMock, return_value="doc response") as mock_to_thread:
+        with patch(
+            "claw_v2.telegram.asyncio.to_thread",
+            new_callable=AsyncMock,
+            side_effect=lambda func, *a, **k: (
+                func(*a, **k) if func is _build_image_content_blocks else "doc response"
+            ),
+        ) as mock_to_thread:
             await transport._handle_image_document(update, mock_context)
 
         update.message.reply_text.assert_awaited_once()
@@ -1012,13 +1037,24 @@ class HandleVideoTests(unittest.IsolatedAsyncioTestCase):
                         with patch(
                             "claw_v2.telegram.asyncio.to_thread",
                             new_callable=AsyncMock,
-                            return_value="video response",
+                            side_effect=lambda func, *a, **k: (
+                                func(*a, **k)
+                                if func is _build_video_content_blocks
+                                else "video response"
+                            ),
                         ) as mock_to_thread:
                             await transport._handle_video(update, mock_context)
 
         update.message.reply_text.assert_awaited()
         self.assertEqual(update.message.reply_text.await_args.args[0], "video response")
         mock_frames.assert_awaited_once()
+        # T6: the frame read+base64 encode must run off the event loop.
+        self.assertTrue(
+            any(
+                call.args and call.args[0] is _build_video_content_blocks
+                for call in mock_to_thread.await_args_list
+            )
+        )
         _, kwargs = mock_to_thread.await_args
         self.assertEqual(kwargs["user_id"], "123")
         self.assertEqual(kwargs["session_id"], "tg-1")

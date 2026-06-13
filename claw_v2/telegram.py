@@ -1651,7 +1651,9 @@ class TelegramTransport:
             )
             caption = update.message.caption or ""
             if frame_paths:
-                content_blocks, memory_text = _build_video_content_blocks(
+                # Reads + base64-encodes every frame: off the event loop (T6).
+                content_blocks, memory_text = await asyncio.to_thread(
+                    _build_video_content_blocks,
                     frame_paths,
                     caption=caption,
                     durable_video_path=durable_video,
@@ -1821,7 +1823,9 @@ class TelegramTransport:
         except Exception:
             durable_path = tmp_path
         try:
-            content_blocks, memory_text = _build_image_content_blocks(
+            # Reads + base64-encodes up to 20MB: off the event loop (T6).
+            content_blocks, memory_text = await asyncio.to_thread(
+                _build_image_content_blocks,
                 tmp_path,
                 caption=caption,
                 mime_type=mime_type,
