@@ -149,6 +149,7 @@ _NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 from claw_v2.bot import BotService
 from claw_v2.bot_helpers import _sanitize_chat_response
+from claw_v2.telegram_richtext import markdown_to_telegram_html, strip_to_plain
 from claw_v2.voice import VoiceUnavailableError, extract_audio, synthesize_voice_note, transcribe
 
 logger = logging.getLogger(__name__)
@@ -280,6 +281,20 @@ def _latest_existing_image_path(messages: list[dict[str, Any]]) -> Path | None:
 
 def _log_nonfatal_send_error(operation: str, exc: BaseException) -> None:
     logger.warning("%s failed with non-fatal stream error: %s", operation, exc)
+
+
+def _is_telegram_parse_error(exc: BaseException) -> bool:
+    """True when a send failed because Telegram could not parse the HTML.
+
+    These are deterministic BadRequest entity-parse failures ("can't parse
+    entities", "unsupported start tag", "can't find end of the entity"). The
+    renderer guarantees balanced tags, so this is a safety net: when it fires
+    we degrade the part to plain text instead of losing the message.
+    """
+    if type(exc).__name__ != "BadRequest":
+        return False
+    msg = str(exc).lower()
+    return any(token in msg for token in ("parse", "entit", "tag"))
 
 
 def _is_retryable_text_send_error(exc: BaseException) -> bool:
@@ -620,6 +635,10 @@ class TelegramTransport:
         # time even with concurrent update processing enabled.
         self._chat_locks: dict[str, asyncio.Lock] = {}
         self._text_send_retries = max(1, _env_int("TELEGRAM_TEXT_SEND_RETRIES", DEFAULT_TEXT_SEND_RETRIES))
+        # Render brain replies as Telegram HTML (bold/code/lists/quotes). On a
+        # parse error the part auto-degrades to plain text, so the message is
+        # never lost. Set TELEGRAM_REPLY_HTML=0 to revert to plain delivery.
+        self._reply_html_enabled = _env_int("TELEGRAM_REPLY_HTML", 1) == 1
         self._text_send_retry_delay = max(
             0.0,
             _env_float("TELEGRAM_TEXT_SEND_RETRY_DELAY", DEFAULT_TEXT_SEND_RETRY_DELAY),
@@ -865,6 +884,12 @@ class TelegramTransport:
         part_count: int,
     ) -> bool:
         timeout_kwargs = self._send_text_timeout_kwargs()
+        # When HTML is enabled, send the rendered subset and keep a guaranteed
+        # plain rendition for both the degrade path and the plain fallbacks.
+        use_html = self._reply_html_enabled
+        plain_part = strip_to_plain(part) if use_html else part
+        send_text = markdown_to_telegram_html(part) if use_html else part
+        send_parse_mode = "HTML" if use_html else None
         for attempt in range(1, self._text_send_retries + 1):
             self._emit_outbound_text_event_nowait(
                 "telegram_outbound_attempt",
@@ -879,11 +904,32 @@ class TelegramTransport:
             )
             try:
                 result = await update.message.reply_text(
-                    part,
+                    send_text,
+                    parse_mode=send_parse_mode,
                     link_preview_options=_NO_PREVIEW,
                     **timeout_kwargs,
                 )
             except Exception as exc:
+                if use_html and _is_telegram_parse_error(exc):
+                    # Safety net: the rendered HTML did not parse. Degrade this
+                    # part to plain text and retry rather than lose formatting
+                    # the wrong way (a 400 must never drop the message).
+                    await self._emit_outbound_text_event(
+                        "telegram_outbound_degraded",
+                        session_id=session_id,
+                        user_id=user_id,
+                        message_kind=message_kind,
+                        method="reply_text_html_degrade",
+                        part_index=part_index,
+                        part_count=part_count,
+                        part_chars=len(part),
+                        attempt=attempt,
+                        error=exc,
+                    )
+                    use_html = False
+                    send_text = plain_part
+                    send_parse_mode = None
+                    continue
                 retryable = _is_retryable_text_send_error(exc)
                 logger.warning(
                     "Telegram reply_text failed%s",
@@ -932,7 +978,7 @@ class TelegramTransport:
         # reply_text times out, try the stdlib Bot API path before spending more
         # time in the same failing client stack.
         if await self._send_text_direct_bot_api(
-            part,
+            plain_part,
             chat_id=chat_id,
             session_id=session_id,
             user_id=user_id,
@@ -957,7 +1003,7 @@ class TelegramTransport:
             try:
                 result = await self._app.bot.send_message(
                     chat_id=chat_id,
-                    text=part,
+                    text=plain_part,
                     link_preview_options=_NO_PREVIEW,
                     **timeout_kwargs,
                 )
