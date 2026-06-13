@@ -1408,7 +1408,9 @@ class ReplyHtmlWiringTests(unittest.IsolatedAsyncioTestCase):
         bot_service.observe = MagicMock()
         transport = TelegramTransport(bot_service=bot_service, token="t")
         transport._text_send_retry_delay = 0.0
-        self.assertTrue(transport._reply_html_enabled)
+        # Force the flag on so the helper is hermetic to TELEGRAM_REPLY_HTML in
+        # the runner's environment.
+        transport._reply_html_enabled = True
         return transport
 
     async def test_markdown_rendered_as_html_with_parse_mode(self) -> None:
