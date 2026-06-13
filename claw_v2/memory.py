@@ -19,6 +19,7 @@ from claw_v2.memory_retention import (
 )
 from claw_v2.sqlite_runtime import (
     connect_runtime_sqlite,
+    heal_wal_after_disk_io,
     make_store_wal_heal,
     register_wal_heal,
 )
@@ -1071,18 +1072,33 @@ class MemoryStore:
         rolling_summary: str | None = None,
         last_turn_summary: str | None = None,
     ) -> dict:
-        with self._lock:
-            current = self.get_session_state(session_id)
-            return self._update_session_state_locked(
-                session_id, current,
-                autonomy_mode=autonomy_mode, mode=mode, current_goal=current_goal,
-                pending_action=pending_action, step_budget=step_budget,
-                steps_taken=steps_taken, verification_status=verification_status,
-                active_object=active_object, last_options=last_options,
-                task_queue=task_queue, pending_approvals=pending_approvals,
-                last_checkpoint=last_checkpoint, rolling_summary=rolling_summary,
-                last_turn_summary=last_turn_summary,
-            )
+        wal_heal_attempted = False
+        while True:
+            try:
+                with self._lock:
+                    current = self.get_session_state(session_id)
+                    return self._update_session_state_locked(
+                        session_id, current,
+                        autonomy_mode=autonomy_mode, mode=mode, current_goal=current_goal,
+                        pending_action=pending_action, step_budget=step_budget,
+                        steps_taken=steps_taken, verification_status=verification_status,
+                        active_object=active_object, last_options=last_options,
+                        task_queue=task_queue, pending_approvals=pending_approvals,
+                        last_checkpoint=last_checkpoint, rolling_summary=rolling_summary,
+                        last_turn_summary=last_turn_summary,
+                    )
+            except sqlite3.OperationalError as exc:
+                try:
+                    with self._lock:
+                        self._conn.rollback()
+                except Exception:
+                    logger.debug("session_state rollback failed after disk I/O error", exc_info=True)
+                if not wal_heal_attempted and heal_wal_after_disk_io(
+                    self.db_path, exc, context="MemoryStore.update_session_state"
+                ):
+                    wal_heal_attempted = True
+                    continue
+                raise
 
     def merge_active_object(
         self,

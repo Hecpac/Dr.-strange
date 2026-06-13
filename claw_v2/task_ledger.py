@@ -12,6 +12,7 @@ from claw_v2.redaction import redact_sensitive
 from claw_v2.sqlite_runtime import (
     connect_runtime_sqlite,
     heal_orphaned_wal,
+    heal_wal_after_disk_io,
     make_store_wal_heal,
     note_wal_generation,
     register_wal_heal,
@@ -315,8 +316,6 @@ class TaskLedger:
                 )
                 break
             except sqlite3.OperationalError as exc:
-                if "locked" not in str(exc).lower():
-                    raise
                 # rollback must run under the same lock as the writes
                 # (sqlite3.Connection is not thread-safe across methods).
                 try:
@@ -324,6 +323,14 @@ class TaskLedger:
                         self._conn.rollback()
                 except Exception:
                     pass
+                if "locked" not in str(exc).lower():
+                    if not wal_heal_attempted and heal_wal_after_disk_io(
+                        self.db_path, exc, context="TaskLedger.mark_terminal"
+                    ):
+                        wal_heal_attempted = True
+                        write_attempt = 0
+                        continue
+                    raise
                 if write_attempt >= _TERMINAL_WRITE_LOCKED_ATTEMPTS:
                     if not wal_heal_attempted and heal_orphaned_wal(self.db_path):
                         wal_heal_attempted = True

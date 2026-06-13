@@ -28,6 +28,9 @@ def connect_runtime_sqlite(
 ) -> sqlite3.Connection:
     """Open a SQLite connection configured for daemon/test concurrency."""
     path = Path(db_path)
+    degraded = runtime_db_degraded_error(path)
+    if degraded is not None:
+        raise degraded
     _verify_sqlite_file_header(path)
     try:
         conn = sqlite3.connect(path, check_same_thread=False, timeout=timeout)
@@ -38,6 +41,13 @@ def connect_runtime_sqlite(
         # so later writers can detect an external generation swap by inode.
         note_wal_generation(path)
     except sqlite3.DatabaseError as exc:
+        detail = sqlite_error_details(exc)
+        logger.exception(
+            "SQLite runtime connect/configure failed for %s%s%s",
+            path,
+            ": " if detail else "",
+            detail,
+        )
         raise RuntimeDatabaseError(
             f"Runtime database is not a readable SQLite database: {path}. "
             "Do not overwrite it; restore from a verified checkpoint or backup."
@@ -74,7 +84,9 @@ def configure_runtime_sqlite(conn: sqlite3.Connection) -> None:
 
 _WAL_HEAL_REGISTRY: dict[str, list["StoreWalHealHandle"]] = {}
 _WAL_HEAL_REGISTRY_LOCK = threading.Lock()
+_WAL_HEAL_LOCKS: dict[str, threading.Lock] = {}
 _NULL_STORE_LOCK = contextlib.nullcontext()
+_RUNTIME_DB_DEGRADED: dict[str, RuntimeDatabaseError] = {}
 
 
 def _registry_key(db_path: Path | str) -> str:
@@ -90,6 +102,79 @@ def register_wal_heal(db_path: Path | str, handle: "StoreWalHealHandle") -> None
         # create/destroy cycles (large test suites) never accumulate.
         bucket[:] = [h for h in bucket if h.alive]
         bucket.append(handle)
+
+
+def sqlite_error_details(exc: BaseException) -> str:
+    """Return sqlite extended error metadata when Python exposes it."""
+    details: list[str] = []
+    code = getattr(exc, "sqlite_errorcode", None)
+    name = getattr(exc, "sqlite_errorname", None)
+    if code is not None:
+        details.append(f"sqlite_errorcode={code}")
+    if name:
+        details.append(f"sqlite_errorname={name}")
+    return ", ".join(details)
+
+
+def is_sqlite_disk_io_error(exc: BaseException) -> bool:
+    """True for SQLite I/O errors, including extended SQLITE_IOERR variants."""
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    name = str(getattr(exc, "sqlite_errorname", "") or "").upper()
+    if name.startswith("SQLITE_IOERR"):
+        return True
+    return "disk i/o error" in str(exc).lower()
+
+
+def heal_wal_after_disk_io(db_path: Path | str, exc: BaseException, *, context: str) -> bool:
+    """Heal once for a disk I/O error that may be caused by stale WAL sidecars."""
+    if not is_sqlite_disk_io_error(exc):
+        return False
+    detail = sqlite_error_details(exc)
+    logger.warning(
+        "SQLite disk I/O error in %s for %s; attempting WAL heal%s%s",
+        context,
+        db_path,
+        ": " if detail else "",
+        detail,
+        exc_info=True,
+    )
+    return heal_orphaned_wal(db_path)
+
+
+def _heal_lock_for_key(key: str) -> threading.Lock:
+    with _WAL_HEAL_REGISTRY_LOCK:
+        return _WAL_HEAL_LOCKS.setdefault(key, threading.Lock())
+
+
+def _mark_runtime_db_degraded(db_path: Path | str, error: RuntimeDatabaseError) -> None:
+    _RUNTIME_DB_DEGRADED[_registry_key(db_path)] = error
+
+
+def runtime_db_degraded_error(db_path: Path | str) -> RuntimeDatabaseError | None:
+    return _RUNTIME_DB_DEGRADED.get(_registry_key(db_path))
+
+
+class _DegradedConnection:
+    """Connection sentinel that fails explicitly after a failed WAL heal."""
+
+    def __init__(self, error: RuntimeDatabaseError) -> None:
+        self._error = error
+
+    def execute(self, *args, **kwargs):
+        raise self._error
+
+    def executescript(self, *args, **kwargs):
+        raise self._error
+
+    def commit(self) -> None:
+        raise self._error
+
+    def rollback(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
 
 
 class StoreWalHealHandle:
@@ -131,9 +216,29 @@ class StoreWalHealHandle:
         if store is None:
             return
         with self._lock_ctx(store):
-            store._conn = connect_runtime_sqlite(
+            new_conn = connect_runtime_sqlite(
                 store.db_path, row_factory=self._row_factory
             )
+            store._conn = new_conn
+
+    def mark_degraded(self, error: RuntimeDatabaseError) -> None:
+        store = self._store_ref()
+        if store is None:
+            return
+        with self._lock_ctx(store):
+            current = getattr(store, "_conn", None)
+            if current is not None:
+                try:
+                    current.close()
+                except Exception:
+                    logger.debug("closing degraded connection failed", exc_info=True)
+            store._conn = _DegradedConnection(error)
+
+    def describe(self) -> str:
+        store = self._store_ref()
+        if store is None:
+            return "<dead store>"
+        return f"{store.__class__.__module__}.{store.__class__.__name__}@{id(store):x}"
 
 
 def make_store_wal_heal(store: object, *, row_factory: bool = True) -> StoreWalHealHandle:
@@ -196,43 +301,95 @@ def heal_orphaned_wal(db_path: Path | str) -> bool:
     locked-retry-exhausted path; idempotent (each heal callback reopens under
     its own store lock).
     """
-    if not wal_sidecars_orphaned(db_path):
-        return False
     key = _registry_key(db_path)
-    with _WAL_HEAL_REGISTRY_LOCK:
-        handles = [h for h in _WAL_HEAL_REGISTRY.get(key, ()) if h.alive]
-        _WAL_HEAL_REGISTRY[key] = handles
-    logger.critical(
-        "SQLite WAL sidecars for %s are missing while connections are open; "
-        "reopening %d registered connection(s) to rejoin one WAL generation.",
-        db_path,
-        len(handles),
-    )
-    for handle in handles:
-        try:
-            handle.close()
-        except Exception:
-            logger.exception("WAL heal close failed for %s", db_path)
-    # A reopen attempt that raced the unlink can leave an EMPTY recreated
-    # -wal without its -shm; that husk makes every subsequent open fail with
-    # "disk I/O error". Empty means zero frames, so removing it loses nothing.
-    # Use the resolved key so a relative/~ db_path targets the right files.
+    heal_lock = _heal_lock_for_key(key)
+    with heal_lock:
+        if not wal_sidecars_orphaned(db_path):
+            return False
+        with _WAL_HEAL_REGISTRY_LOCK:
+            handles = [h for h in _WAL_HEAL_REGISTRY.get(key, ()) if h.alive]
+            _WAL_HEAL_REGISTRY[key] = handles
+        logger.critical(
+            "SQLite WAL sidecars for %s are missing while connections are open; "
+            "reopening %d registered connection(s) to rejoin one WAL generation.",
+            db_path,
+            len(handles),
+        )
+        for handle in handles:
+            try:
+                handle.close()
+            except Exception:
+                logger.exception("WAL heal close failed for %s handle=%s", db_path, handle.describe())
+        _cleanup_recoverable_sidecars(key, db_path)
+        failures: list[tuple[StoreWalHealHandle, BaseException]] = []
+        for handle in handles:
+            try:
+                handle.reopen()
+            except Exception as exc:
+                detail = sqlite_error_details(exc)
+                logger.exception(
+                    "WAL heal reopen failed for %s handle=%s%s%s",
+                    db_path,
+                    handle.describe(),
+                    ": " if detail else "",
+                    detail,
+                )
+                failures.append((handle, exc))
+        if failures:
+            first_handle, first_exc = failures[0]
+            message = (
+                f"Runtime database WAL heal failed for {db_path}; "
+                f"{len(failures)} of {len(handles)} registered connection(s) did not reopen. "
+                f"First failed handle: {first_handle.describe()}. "
+                "Runtime DB marked degraded; restart or recover sidecars before continuing."
+            )
+            error = RuntimeDatabaseError(message)
+            _mark_runtime_db_degraded(db_path, error)
+            for handle in handles:
+                handle.mark_degraded(error)
+            raise error from first_exc
+        # The new generation has no wal until the first write; clear the stamp so
+        # the next successful persist records the fresh inode.
+        _WAL_GENERATION_INODES.pop(key, None)
+        _RUNTIME_DB_DEGRADED.pop(key, None)
+        return True
+
+
+def _cleanup_recoverable_sidecars(key: str, db_path: Path | str) -> None:
+    """Remove only WAL/SHM states that cannot contain committed frames."""
     wal = Path(f"{key}-wal")
     shm = Path(f"{key}-shm")
     try:
-        if wal.exists() and not shm.exists() and wal.stat().st_size == 0:
-            wal.unlink()
+        wal_size = wal.stat().st_size
+    except FileNotFoundError:
+        wal_size = None
     except OSError:
-        logger.debug("WAL husk cleanup failed for %s", db_path, exc_info=True)
-    for handle in handles:
-        try:
-            handle.reopen()
-        except Exception:
-            logger.exception("WAL heal reopen failed for %s", db_path)
-    # The new generation has no wal until the first write; clear the stamp so
-    # the next successful persist records the fresh inode.
-    _WAL_GENERATION_INODES.pop(key, None)
-    return True
+        logger.debug("WAL sidecar stat failed for %s", db_path, exc_info=True)
+        return
+    try:
+        if wal_size == 0:
+            wal.unlink(missing_ok=True)
+            shm.unlink(missing_ok=True)
+            logger.warning(
+                "Removed empty SQLite WAL and paired SHM sidecar for %s before reopen",
+                db_path,
+            )
+            return
+        if wal_size is None:
+            if shm.exists():
+                shm.unlink()
+                logger.warning(
+                    "Removed stale SQLite SHM sidecar for %s because WAL is missing",
+                    db_path,
+                )
+            return
+        logger.error(
+            "SQLite WAL sidecar for %s is non-empty (%d bytes); leaving WAL/SHM in place",
+            db_path,
+            wal_size,
+        )
+    except OSError:
+        logger.debug("WAL sidecar cleanup failed for %s", db_path, exc_info=True)
 
 
 def check_runtime_sqlite_health(db_path: Path | str, *, thorough: bool = False) -> None:
