@@ -1024,6 +1024,7 @@ class BotService:
             capability_check=self._capability_unavailable_message,
             brain_handle_message=lambda *args, **kwargs: self.brain.handle_message(*args, **kwargs),
             current_url_resolver=self._browse_handler.recent_browse_url,
+            capability_status_updater=self.set_capability_status,
         )
         # Option (b), 2026-06-13: route delegated CDP/browser jobs to the
         # in-process browser executor (ComputerHandler -> BrowserUseService /

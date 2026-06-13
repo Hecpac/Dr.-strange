@@ -6,9 +6,10 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 from claw_v2.computer import ComputerUseService, ComputerSession
+from claw_v2.computer_gate import ActionGate
 
 
 class ScreenshotTests(unittest.TestCase):
@@ -97,9 +98,6 @@ class ComputerSessionTests(unittest.TestCase):
         self.assertEqual(session.max_iterations, 30)
         self.assertIsNone(session.pending_action)
         self.assertIsNone(session.current_url)
-
-
-from claw_v2.computer_gate import ActionGate
 
 
 def _mock_openai_response(*, computer_calls=None, text=None, response_id="resp_1"):
@@ -915,6 +913,15 @@ class DelegatedBrowserTaskTests(unittest.TestCase):
     in-process executor TaskHandler routes CDP/browse jobs to (BrowserUseService
     in the daemon venv, not the network-denied Codex coordinator)."""
 
+    class _ReadyBrowserCapability:
+        def __init__(self, endpoint: str = "http://127.0.0.1:9250") -> None:
+            self.endpoint = endpoint
+            self.calls: list[tuple[int, str]] = []
+
+        def ensure_ready(self, *, port: int = 9250, profile_dir: str) -> str:
+            self.calls.append((port, profile_dir))
+            return self.endpoint
+
     def test_runs_browser_use_with_long_timeout(self) -> None:
         import types
 
@@ -925,6 +932,7 @@ class DelegatedBrowserTaskTests(unittest.TestCase):
 
             def __init__(self) -> None:
                 self.calls: list[tuple[str, object]] = []
+                self.cdp_url = "http://localhost:9250"
 
             async def run_task(self, task, **kwargs):
                 self.calls.append((task, kwargs.get("timeout")))
@@ -936,19 +944,162 @@ class DelegatedBrowserTaskTests(unittest.TestCase):
             sensitive_urls=[],
             computer_browser_use_timeout_seconds=0,
         )
-        handler = ComputerHandler(browser_use=fake, config=config)
+        capability = self._ReadyBrowserCapability()
+        handler = ComputerHandler(
+            browser_use=fake,
+            config=config,
+            browser_capability=capability,
+        )
         out = handler.run_delegated_browser_task("repaso por X", task_id="t-1", mode="browse")
         self.assertEqual(out, "feed capturado: 30 posts")
         self.assertEqual(fake.calls[0][0], "repaso por X")
         # Long browser/CDP budget (1200s), NOT the 180s interactive default.
         self.assertEqual(fake.calls[0][1], 1200)
+        self.assertEqual(capability.calls, [(9250, "~/.claw/chrome-profile")])
+        self.assertEqual(fake.cdp_url, "http://127.0.0.1:9250")
 
     def test_unavailable_browser_use_returns_clear_message(self) -> None:
         from claw_v2.computer_handler import ComputerHandler
 
-        handler = ComputerHandler(browser_use=None, config=None)
+        handler = ComputerHandler(
+            browser_use=None,
+            config=None,
+            browser_capability=self._ReadyBrowserCapability(),
+            browser_use_factory=lambda endpoint: None,
+        )
         out = handler.run_delegated_browser_task("abre la web", task_id="t-2", mode="browse")
         self.assertIn("no está disponible", out)
+
+    def test_degraded_capability_status_is_cleared_when_preflight_succeeds(self) -> None:
+        import types
+
+        from claw_v2.computer_handler import ComputerHandler
+
+        class FakeBrowserUse:
+            last_artifact_path = None
+
+            def __init__(self) -> None:
+                self.cdp_url = "http://localhost:9250"
+                self.called = False
+
+            async def run_task(self, task, **kwargs):
+                self.called = True
+                return "browse ok"
+
+        updates: list[tuple[str, bool, str | None]] = []
+
+        def set_status(name: str, *, available: bool, reason: str | None = None) -> None:
+            updates.append((name, available, reason))
+
+        fake = FakeBrowserUse()
+        handler = ComputerHandler(
+            browser_use=fake,
+            config=types.SimpleNamespace(
+                computer_auto_approve=True,
+                sensitive_urls=[],
+                computer_browser_use_timeout_seconds=0,
+            ),
+            browser_capability=self._ReadyBrowserCapability(),
+            capability_status_updater=set_status,
+            capability_check=lambda name, fallback: "old degraded status",
+        )
+
+        out = handler.run_delegated_browser_task("repaso por X", task_id="t-ok", mode="browse")
+
+        self.assertEqual(out, "browse ok")
+        self.assertTrue(fake.called)
+        self.assertIn(("chrome_cdp", True, None), updates)
+        self.assertIn(("browser_use", True, None), updates)
+
+    def test_preflight_failure_returns_human_error_and_does_not_run_browser_task(self) -> None:
+        import types
+
+        from claw_v2.browser_capability import BrowserCapabilityError
+        from claw_v2.computer_handler import ComputerHandler
+
+        class FailingCapability:
+            def ensure_ready(self, *, port: int = 9250, profile_dir: str) -> str:
+                raise BrowserCapabilityError(
+                    "Necesito abrir/login Chrome para esta tarea de navegador: perfil bloqueado.",
+                    endpoint=f"http://127.0.0.1:{port}",
+                )
+
+        class FakeBrowserUse:
+            last_artifact_path = None
+            cdp_url = "http://localhost:9250"
+
+            def __init__(self) -> None:
+                self.called = False
+
+            async def run_task(self, task, **kwargs):
+                self.called = True
+                return "should not run"
+
+        fake = FakeBrowserUse()
+        handler = ComputerHandler(
+            browser_use=fake,
+            config=types.SimpleNamespace(
+                computer_auto_approve=True,
+                sensitive_urls=[],
+                computer_browser_use_timeout_seconds=0,
+            ),
+            browser_capability=FailingCapability(),
+        )
+
+        out = handler.run_delegated_browser_task("repaso por X", task_id="t-fail", mode="browse")
+
+        self.assertIn("Necesito abrir/login Chrome", out)
+        self.assertIn("perfil bloqueado", out)
+        self.assertFalse(fake.called)
+
+    def test_browser_task_is_skipped_only_when_real_preflight_fails(self) -> None:
+        import types
+
+        from claw_v2.browser_capability import BrowserCapabilityError
+        from claw_v2.computer_handler import ComputerHandler
+
+        class SwitchableCapability:
+            def __init__(self) -> None:
+                self.fail = True
+
+            def ensure_ready(self, *, port: int = 9250, profile_dir: str) -> str:
+                if self.fail:
+                    raise BrowserCapabilityError(
+                        "Necesito abrir/login Chrome para esta tarea de navegador.",
+                        endpoint=f"http://127.0.0.1:{port}",
+                    )
+                return f"http://127.0.0.1:{port}"
+
+        class FakeBrowserUse:
+            last_artifact_path = None
+
+            def __init__(self) -> None:
+                self.cdp_url = "http://localhost:9250"
+                self.calls = 0
+
+            async def run_task(self, task, **kwargs):
+                self.calls += 1
+                return "ran"
+
+        capability = SwitchableCapability()
+        fake = FakeBrowserUse()
+        handler = ComputerHandler(
+            browser_use=fake,
+            config=types.SimpleNamespace(
+                computer_auto_approve=True,
+                sensitive_urls=[],
+                computer_browser_use_timeout_seconds=0,
+            ),
+            browser_capability=capability,
+        )
+
+        failed = handler.run_delegated_browser_task("repaso por X", task_id="t-fail", mode="browse")
+        capability.fail = False
+        succeeded = handler.run_delegated_browser_task("repaso por X", task_id="t-ok", mode="browse")
+
+        self.assertIn("Necesito abrir/login Chrome", failed)
+        self.assertEqual(succeeded, "ran")
+        self.assertEqual(fake.calls, 1)
 
 
 class ComputerHandlerTimeoutTests(_ComputerHandlerConfigTest):
