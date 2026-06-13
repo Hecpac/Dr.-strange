@@ -624,7 +624,8 @@ class InlineBrowserDriveGuardTests(unittest.TestCase):
 class DetachedProcessGuardTests(unittest.TestCase):
     """Backstop that keeps the brain from improvising ghost background
     processes (no ledger, no monitor, no notification) instead of delegating
-    durable work (T12, 2026-06-12)."""
+    durable work (T12, 2026-06-12). Background-based, not marker-based: in the
+    brain lane ANY real backgrounding `&` is denied (review #100 round 2)."""
 
     def test_detects_detached_launchers(self) -> None:
         for command in (
@@ -636,37 +637,47 @@ class DetachedProcessGuardTests(unittest.TestCase):
                 _detached_process_reason("Bash", {"command": command}), command
             )
 
-    def test_detects_long_running_background_tail(self) -> None:
+    def test_detects_any_backgrounded_command(self) -> None:
+        # Background-based: no long-running marker needed. A bare `python ... &`
+        # has no ledger in the brain turn and must be delegated.
         for command in (
-            "brew install ffmpeg && make -j8 &",
-            "curl -L -o model.bin https://example.com/model.bin &",
-            "wget https://example.com/dataset.tar.gz > /tmp/dl.log 2>&1 &",
-            "pip install torch > /tmp/pip.log &",
-            "sleep 600 && ./check.sh &",
+            "python long_job.py &",
+            "uv run python worker.py &",
+            "node server.js &",
+            "make -j8 &",
+            "git clone https://example.com/big.git &",
+            "rsync -av remote:bigdir . &",
+            "ls -la &",
         ):
             self.assertIsNotNone(
                 _detached_process_reason("Bash", {"command": command}), command
             )
 
-    def test_detects_background_tail_followed_by_more_commands(self) -> None:
-        # A trailing `&` is not always at the literal end: a `;` or newline can
-        # follow it (gemini review #100). The marker still gates it.
+    def test_detects_background_followed_by_more_commands(self) -> None:
+        # `&` is itself a shell separator: a command can follow it without a
+        # `;` or newline (review #100 round 2 — closes the `& cmd` bypass).
         for command in (
             'sleep 600 &; echo "started"',
             "curl -L -o model.bin https://example.com/model.bin &\necho started",
             "pip install torch &\nwait",
+            "sleep 600 & echo started",
+            "pip install torch & wait",
+            "curl -L -o model.bin https://example.com/model.bin & echo started",
         ):
             self.assertIsNotNone(
                 _detached_process_reason("Bash", {"command": command}), command
             )
 
-    def test_allows_trivial_background_and_foreground_commands(self) -> None:
+    def test_allows_foreground_commands(self) -> None:
         for command in (
-            "ls -la &",
             "git status",
             "curl -s https://api.example.com/health",
             "pip install requests",
-            "echo done && touch /tmp/marker &",
+            # `&` inside a URL query string is not a shell background operator.
+            'curl "https://api.example.com/search?q=a&page=2"',
+            "echo hi && ls",
+            "cmd &> /dev/null",
+            "grep -r foo . 2>&1",
             "",
         ):
             self.assertIsNone(

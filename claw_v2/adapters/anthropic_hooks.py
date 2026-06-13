@@ -48,22 +48,24 @@ _SCRIPT_SCAN_MAX_BYTES = 262_144
 # channel failed (T10 lock storm) the brain improvised detached background
 # processes — no ledger, no monitor, no completion notification — and the
 # work died silently. T10 removed the motive; this removes the means.
-# High-confidence markers only; worker lanes are NOT gated (the coordinator
-# legitimately runs long processes under its own monitoring).
+# Worker lanes are NOT gated (the coordinator legitimately runs long processes
+# under its own monitoring).
 _DETACHED_PROCESS_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bnohup\s"),
     re.compile(r"\bsetsid\s"),
     re.compile(r"\bdisown\b"),
 )
-# A trailing `&` alone is allowed (trivial short jobs); it is denied only
-# combined with markers of long-lived work (downloads, installs, sleeps).
-# MULTILINE + the `[;\n]` alternation catch a `&` that backgrounds a job and
-# is followed by another command (`sleep 600 &; echo x`, or a newline) instead
-# of ending the string — those bypassed the literal-`$` form (gemini review #100).
-_BACKGROUND_TAIL_RE = re.compile(r"(?<![&>])&\s*(?:[;\n]|$)", re.MULTILINE)
-_LONG_RUNNING_BACKGROUND_MARKERS = re.compile(
-    r"\b(?:sleep\s+\d|install\b|download\b|curl\b|wget\b)", re.IGNORECASE
-)
+# Background-based, not marker-based (review #100 round 2): in the brain lane
+# ANY real backgrounding `&` is denied — a detached job has no ledger/monitor
+# in the chat turn, so even `python long_job.py &` must be delegated. `&` is
+# itself a shell separator, so it is matched whether it ends the string, is
+# followed by `;`/newline, or is followed by another command (`& echo x`).
+# The negative lookbehind/alternation exclude the logical-AND `&&`, the
+# `&>`/`2>&1` redirections, and a `&` glued inside a token such as a URL query
+# string (`?a=1&b=2`) — those are not background operators. A `&` inside a
+# quoted string with spaces is a rare, tolerable false positive (the brain
+# reformulates to foreground or delegates).
+_BACKGROUND_TAIL_RE = re.compile(r"(?<![&>])&(?:\s*(?:[;\n]|$)|\s+\S)", re.MULTILINE)
 
 # SDK tools that cannot mutate external state. Anything outside this set
 # (Bash, Edit, Write, Task, MCP tools, ...) is treated as potentially mutating
@@ -122,10 +124,12 @@ def _detached_process_reason(
     tool_name: str, tool_input: dict[str, Any] | None
 ) -> str | None:
     """Return a deny reason if a Bash call would launch a detached or
-    long-lived background process from a chat turn.
+    backgrounded process from a chat turn.
 
-    Conservative by design: only high-confidence markers, so a miss is
-    preferred over blocking a benign everyday command.
+    Background-based: in the brain lane any real `&` backgrounding is denied,
+    not just long-running markers, because a detached job has no ledger in the
+    chat turn. The regex excludes `&&`, `&>`/`2>&1` and URL query strings, so
+    everyday foreground commands pass through.
     """
     if tool_name != "Bash":
         return None
@@ -135,10 +139,8 @@ def _detached_process_reason(
     for pattern in _DETACHED_PROCESS_PATTERNS:
         if pattern.search(command):
             return "detached background process launched from a chat turn"
-    if _BACKGROUND_TAIL_RE.search(command) and _LONG_RUNNING_BACKGROUND_MARKERS.search(
-        command
-    ):
-        return "long-running background process launched from a chat turn"
+    if _BACKGROUND_TAIL_RE.search(command):
+        return "background process launched from a chat turn"
     return None
 
 

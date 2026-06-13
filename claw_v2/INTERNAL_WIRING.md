@@ -634,13 +634,17 @@ fit the brain turn's 300s wall. Worker/`worker_heavy` lanes are NOT gated —
 delegated coordinator work legitimately drives CDP.
 
 **Detached-process backstop** (`_detached_process_reason`, same module and
-re-export; T12, 2026-06-12): the PreToolUse hook also denies — `brain` lane
-only — Bash that launches detached/long-lived background processes
-(`nohup`/`setsid`/`disown`, or a trailing `&` combined with long-life markers:
-sleep N / install / download / curl / wget). Motive: during the T10 lock storm
-the brain improvised ghost background processes with no ledger/monitor/
-notification and the work died silently. The deny nudges to `delegate_task`;
-a trivial short `cmd &` is allowed and worker lanes are not gated.
+re-export; T12, 2026-06-12, hardened in review #100): the PreToolUse hook also
+denies — `brain` lane only — Bash that launches detached or backgrounded
+processes. It is **background-based, not marker-based**: `nohup`/`setsid`/
+`disown`, OR any real `&` backgrounding (`_BACKGROUND_TAIL_RE`), so even a bare
+`python long_job.py &` is denied. The regex excludes the logical-AND `&&`, the
+`&>`/`2>&1` redirections and a `&` glued inside a URL query string
+(`?a=1&b=2`); a `&` inside a quoted string with spaces is a tolerated rare
+false positive. Motive: during the T10 lock storm the brain improvised ghost
+background processes with no ledger/monitor/notification and the work died
+silently. The deny nudges to `delegate_task`; worker lanes are not gated (the
+coordinator runs long processes under its own monitoring).
 
 ### output sanitization
 

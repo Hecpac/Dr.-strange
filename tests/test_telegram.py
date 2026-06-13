@@ -88,6 +88,12 @@ class RateLimitConfigTests(unittest.TestCase):
         self.assertFalse(transport._is_rate_limited("u"))
         self.assertTrue(transport._is_rate_limited("u"))
 
+    def test_rate_max_is_capped(self) -> None:
+        # A huge value must not silently disable rate limiting (review #100).
+        with patch.dict("os.environ", {"TELEGRAM_RATE_MAX": "999999"}):
+            transport = TelegramTransport(bot_service=MagicMock(), token="t")
+        self.assertEqual(transport._rate_max, 120)
+
 
 class TransportStartTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
