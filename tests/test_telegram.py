@@ -1398,6 +1398,102 @@ class ProactiveSendTextTests(unittest.IsolatedAsyncioTestCase):
         transport._app.bot.send_message.assert_awaited_once()
 
 
+class ReplyHtmlWiringTests(unittest.IsolatedAsyncioTestCase):
+    """Brain replies render to Telegram HTML, and a parse failure degrades the
+    part to plain text instead of losing the message (Fase 1,
+    reports/2026-06-13/telegram_rich_messages_mapping.md)."""
+
+    def _transport(self) -> TelegramTransport:
+        bot_service = MagicMock()
+        bot_service.observe = MagicMock()
+        transport = TelegramTransport(bot_service=bot_service, token="t")
+        transport._text_send_retry_delay = 0.0
+        # Force the flag on so the helper is hermetic to TELEGRAM_REPLY_HTML in
+        # the runner's environment.
+        transport._reply_html_enabled = True
+        return transport
+
+    async def test_markdown_rendered_as_html_with_parse_mode(self) -> None:
+        transport = self._transport()
+        update = MagicMock()
+        update.message.reply_text = AsyncMock()
+
+        sent = await transport._send_reply_text_part(
+            update,
+            "Esto es **negrita** y `code`",
+            session_id="tg-1",
+            user_id="1",
+            message_kind="text",
+            part_index=1,
+            part_count=1,
+        )
+
+        self.assertTrue(sent)
+        update.message.reply_text.assert_awaited_once()
+        text_arg = update.message.reply_text.await_args.args[0]
+        self.assertIn("<b>negrita</b>", text_arg)
+        self.assertIn("<code>code</code>", text_arg)
+        self.assertEqual(
+            update.message.reply_text.await_args.kwargs["parse_mode"], "HTML"
+        )
+
+    async def test_parse_error_degrades_to_plain_text(self) -> None:
+        transport = self._transport()
+        # 2 attempts so the same reply_text path can retry as plain after the
+        # HTML attempt is rejected.
+        transport._text_send_retries = 2
+        update = MagicMock()
+        update.message.reply_text = AsyncMock(
+            side_effect=[
+                BadRequest("Can't parse entities: unsupported start tag"),
+                SimpleNamespace(message_id=5),
+            ]
+        )
+
+        sent = await transport._send_reply_text_part(
+            update,
+            "texto con **negrita**",
+            session_id="tg-1",
+            user_id="1",
+            message_kind="text",
+            part_index=1,
+            part_count=1,
+        )
+
+        self.assertTrue(sent)
+        self.assertEqual(update.message.reply_text.await_count, 2)
+        first = update.message.reply_text.await_args_list[0]
+        second = update.message.reply_text.await_args_list[1]
+        self.assertEqual(first.kwargs["parse_mode"], "HTML")
+        # Degraded retry: plain text, no parse_mode, no HTML tags.
+        self.assertIsNone(second.kwargs["parse_mode"])
+        self.assertEqual(second.args[0], "texto con negrita")
+        event_names = [
+            call.args[0] for call in transport._bot_service.observe.emit.call_args_list
+        ]
+        self.assertIn("telegram_outbound_degraded", event_names)
+
+    async def test_html_disabled_sends_plain(self) -> None:
+        transport = self._transport()
+        transport._reply_html_enabled = False
+        update = MagicMock()
+        update.message.reply_text = AsyncMock()
+
+        await transport._send_reply_text_part(
+            update,
+            "deja **esto** crudo",
+            session_id="tg-1",
+            user_id="1",
+            message_kind="text",
+            part_index=1,
+            part_count=1,
+        )
+
+        text_arg = update.message.reply_text.await_args.args[0]
+        self.assertEqual(text_arg, "deja **esto** crudo")
+        self.assertIsNone(update.message.reply_text.await_args.kwargs["parse_mode"])
+
+
 class ObserveEmitOffloadTests(unittest.IsolatedAsyncioTestCase):
     """The transport persists diagnostic observe events on the event loop while
     handling Telegram traffic. ObserveStream._persist_event retries
