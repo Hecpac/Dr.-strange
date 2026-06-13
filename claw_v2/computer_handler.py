@@ -13,6 +13,12 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
 
+from claw_v2.browser_capability import (
+    DEFAULT_CDP_PORT,
+    DEFAULT_CDP_PROFILE_DIR,
+    BrowserCapability,
+    BrowserCapabilityError,
+)
 from claw_v2.bot_commands import BotCommand, CommandContext
 from claw_v2.bot_helpers import (
     _computer_instruction_requires_actions,
@@ -70,6 +76,9 @@ class ComputerHandler:
         capability_check: Callable[[str, str], str | None] | None = None,
         brain_handle_message: Callable[..., Any] | None = None,
         current_url_resolver: Callable[[str], str | None] | None = None,
+        browser_capability: Any | None = None,
+        capability_status_updater: Callable[..., None] | None = None,
+        browser_use_factory: Callable[[str], Any] | None = None,
     ) -> None:
         self.computer = computer
         self.browser_use = browser_use
@@ -83,9 +92,15 @@ class ComputerHandler:
         self._check_capability = capability_check or (lambda name, fallback: None)
         self._brain_handle_message = brain_handle_message
         self._current_url_resolver = current_url_resolver
+        self.browser_capability = browser_capability
+        self._capability_status_updater = capability_status_updater
+        self._browser_use_factory = browser_use_factory
         self._state_lock = threading.Lock()
         self._sessions: dict[str, Any] = {}
         self._client: Any | None = None
+        self._browser_use_lock = threading.Lock()
+        self._cdp_locks_guard = threading.Lock()
+        self._cdp_profile_locks: dict[str, threading.Lock] = {}
 
     def commands(self) -> list[BotCommand]:
         return [
@@ -803,19 +818,96 @@ class ComputerHandler:
 
         from claw_v2.bot_helpers import _LONG_BROWSER_OPERATION_TIMEOUT_SECONDS
 
-        if self.browser_use is None:
-            return (
-                "No puedo ejecutar la tarea de navegador: browser_use no está "
-                "disponible en este runtime."
+        cdp_port = self._delegated_browser_cdp_port()
+        cdp_profile = f"http://127.0.0.1:{cdp_port}"
+        lock = self._cdp_profile_lock(cdp_profile)
+        if not lock.acquire(blocking=False):
+            self._emit(
+                "delegated_browser_task_queued",
+                {"task_id": task_id, "mode": mode, "cdp_profile": cdp_profile},
             )
-        self._emit(
-            "delegated_browser_task_started",
-            {"task_id": task_id, "mode": mode, "objective": objective[:200]},
-        )
-        session = _types.SimpleNamespace(task=objective, screenshot_path=None)
-        return self._run_browser_use_task(
-            session, timeout_seconds=_LONG_BROWSER_OPERATION_TIMEOUT_SECONDS
-        )
+            lock.acquire()
+        try:
+            try:
+                cdp_endpoint = self._get_browser_capability().ensure_ready(
+                    port=cdp_port,
+                    profile_dir=DEFAULT_CDP_PROFILE_DIR,
+                )
+            except BrowserCapabilityError as exc:
+                return str(exc)
+            self._mark_capability_available("chrome_cdp")
+            with self._browser_use_lock:
+                self._ensure_browser_use_service(cdp_endpoint)
+                self._set_browser_use_cdp_url(cdp_endpoint)
+                if self.browser_use is None:
+                    return (
+                        "No puedo ejecutar la tarea de navegador: browser_use no está "
+                        "disponible en este runtime."
+                    )
+                self._mark_capability_available("browser_use")
+                self._emit(
+                    "delegated_browser_task_started",
+                    {"task_id": task_id, "mode": mode, "objective": objective[:200]},
+                )
+                session = _types.SimpleNamespace(task=objective, screenshot_path=None)
+                return self._run_browser_use_task(
+                    session, timeout_seconds=_LONG_BROWSER_OPERATION_TIMEOUT_SECONDS
+                )
+        finally:
+            lock.release()
+
+    def _delegated_browser_cdp_port(self) -> int:
+        cdp_url = str(getattr(self.browser_use, "cdp_url", "") or "").strip()
+        if cdp_url:
+            try:
+                parsed = urlparse(cdp_url)
+                if parsed.port is not None:
+                    return parsed.port
+            except ValueError:
+                logger.debug("invalid browser_use cdp_url ignored: %s", cdp_url)
+        configured = getattr(self.config, "claw_chrome_port", DEFAULT_CDP_PORT)
+        try:
+            return int(configured)
+        except (TypeError, ValueError):
+            return DEFAULT_CDP_PORT
+
+    def _get_browser_capability(self) -> Any:
+        if self.browser_capability is None:
+            self.browser_capability = BrowserCapability(observe=self.observe)
+        return self.browser_capability
+
+    def _ensure_browser_use_service(self, endpoint: str) -> None:
+        if self.browser_use is None:
+            if self._browser_use_factory is not None:
+                self.browser_use = self._browser_use_factory(endpoint)
+            else:
+                from claw_v2.computer import BrowserUseService
+
+                self.browser_use = BrowserUseService(cdp_url=endpoint)
+
+    def _set_browser_use_cdp_url(self, endpoint: str) -> None:
+        if self.browser_use is None:
+            return
+        try:
+            setattr(self.browser_use, "cdp_url", endpoint)
+        except Exception:
+            logger.debug("could not update browser_use cdp_url", exc_info=True)
+
+    def _mark_capability_available(self, name: str) -> None:
+        if self._capability_status_updater is None:
+            return
+        try:
+            self._capability_status_updater(name, available=True, reason=None)
+        except Exception:
+            logger.debug("capability status update failed for %s", name, exc_info=True)
+
+    def _cdp_profile_lock(self, cdp_profile: str) -> threading.Lock:
+        with self._cdp_locks_guard:
+            lock = self._cdp_profile_locks.get(cdp_profile)
+            if lock is None:
+                lock = threading.Lock()
+                self._cdp_profile_locks[cdp_profile] = lock
+            return lock
 
     def _capture_approval_screenshot(self, session_id: str, session: Any) -> dict[str, str]:
         if self.computer is None or not hasattr(self.computer, "capture_screenshot"):
