@@ -68,6 +68,16 @@ class TestInline:
         out = markdown_to_telegram_html("[x](https://e.com/a?b=1&c=2)")
         assert out == '<a href="https://e.com/a?b=1&amp;c=2">x</a>'
 
+    def test_link_with_quote_in_url_does_not_break_attr(self) -> None:
+        out = markdown_to_telegram_html('[x](https://e.com/a?q="z")')
+        assert out == '<a href="https://e.com/a?q=&quot;z&quot;">x</a>'
+
+    def test_placeholder_shaped_input_does_not_crash(self) -> None:
+        # A literal placeholder sequence must not raise IndexError; it has no
+        # protected span, so it survives as escaped text.
+        out = markdown_to_telegram_html("\x00TGRT9\x00")
+        assert out == "\x00TGRT9\x00"
+
     def test_underscore_in_identifier_not_italic(self) -> None:
         # snake_case must survive intact.
         assert markdown_to_telegram_html("send_text y parse_mode") == (

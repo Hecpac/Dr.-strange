@@ -47,6 +47,12 @@ def _esc(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def _esc_attr(text: str) -> str:
+    """Escape for an HTML attribute value: text markup plus the double quote
+    that would otherwise close the ``href="..."`` attribute early."""
+    return _esc(text).replace('"', "&quot;")
+
+
 def markdown_to_telegram_html(text: str) -> str:
     """Convert markdown to Telegram's HTML subset.
 
@@ -84,7 +90,7 @@ def markdown_to_telegram_html(text: str) -> str:
     # 3) Links — protect (escaped text + href) before escaping the rest.
     text = _LINK_RE.sub(
         lambda m: _protect(
-            f'<a href="{_esc(m.group(2))}">{_esc(m.group(1))}</a>'
+            f'<a href="{_esc_attr(m.group(2))}">{_esc(m.group(1))}</a>'
         ),
         text,
     )
@@ -119,7 +125,12 @@ def markdown_to_telegram_html(text: str) -> str:
 
     # 7) Restore protected spans.
     def _restore(match: re.Match[str]) -> str:
-        return protected[int(match.group(1))]
+        idx = int(match.group(1))
+        # Guard against an out-of-range index: a placeholder-shaped sequence in
+        # the original input must not raise IndexError. Leave it as literal text.
+        if 0 <= idx < len(protected):
+            return protected[idx]
+        return _esc(match.group(0))
 
     text = re.sub(r"\x00TGRT(\d+)\x00", _restore, text)
     return text
