@@ -1961,10 +1961,16 @@ def _build_coordinator_tasks(
 def _long_operation_timeout_for_mode(mode: str, objective: str) -> float | None:
     if mode == "browse":
         return _LONG_BROWSER_OPERATION_TIMEOUT_SECONDS
-    if mode in {"ops", "publish", "research"} and (
-        _BROWSER_OPERATION_SIGNAL_RE.search(objective or "")
-        or _looks_like_x_browser_request(objective or "")
+    text = objective or ""
+    if mode in {"ops", "publish"} and (
+        _BROWSER_OPERATION_SIGNAL_RE.search(text)
+        or _looks_like_x_browser_request(text)
     ):
+        return _LONG_BROWSER_OPERATION_TIMEOUT_SECONDS
+    # research: a bare platform mention ("investiga la historia de Twitter") must
+    # stay on the coordinator. Only an explicit browse ACTION (e.g. "haz un repaso
+    # por X" — action verb + platform) routes to the in-process browser executor.
+    if mode == "research" and _looks_like_x_browser_request(text):
         return _LONG_BROWSER_OPERATION_TIMEOUT_SECONDS
     return None
 

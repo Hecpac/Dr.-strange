@@ -459,6 +459,37 @@ class BrowserExecutorRoutingTests(unittest.TestCase):
         self.assertTrue(_should_use_browser_executor("ops", "Haz un repaso por X"))
         self.assertFalse(_should_use_browser_executor("research", "analiza x variable"))
 
+    def test_research_bare_platform_mention_stays_on_coordinator(self) -> None:
+        # A research task that merely names a platform must NOT hijack to the
+        # browser executor; only an explicit browse action does.
+        self.assertFalse(
+            _should_use_browser_executor("research", "investiga la historia de Twitter")
+        )
+        self.assertTrue(
+            _should_use_browser_executor("research", "Haz un repaso por X")
+        )
+
+    def test_blocked_profile_gate_message_classifies_as_failure(self) -> None:
+        # A named-profile gate that blocks (needs_login / challenge) returns a
+        # human status; it must terminate as failed, never as a false "passed".
+        from claw_v2.browser_profiles import (
+            BROWSER_PROFILES,
+            BrowserProfileHealth,
+            human_message,
+        )
+        from claw_v2.task_handler import _browser_output_indicates_failure
+
+        x = BROWSER_PROFILES["x"]
+        self.assertTrue(
+            _browser_output_indicates_failure(human_message(x, BrowserProfileHealth.NEEDS_LOGIN))
+        )
+        self.assertTrue(
+            _browser_output_indicates_failure(
+                human_message(x, BrowserProfileHealth.BLOCKED_BY_CHALLENGE)
+            )
+        )
+        self.assertFalse(_browser_output_indicates_failure("Capturé 32 posts del timeline"))
+
     def _handler(self, root: Path, recorded: dict, *, browser_executor):
         memory = MemoryStore(root / "claw.db")
         observe = ObserveStream(root / "observe.db")

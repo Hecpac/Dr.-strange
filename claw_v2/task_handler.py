@@ -110,6 +110,13 @@ _BROWSER_FAILURE_MARKERS = (
     "no pude conectar al navegador",
     "no puedo ejecutar la tarea de navegador",
     "browser_use no está disponible",
+    # Named-profile health gate blocked the task before the agent ran — the
+    # browser executor returns a human status (browser_profiles.human_message)
+    # that must NOT land as "passed". Keyed on the stable phrases of the
+    # needs_login / blocked_by_challenge messages; a regression test ties the two
+    # together so wording drift can't silently re-introduce a false pass.
+    "quedó deslogueado",
+    "muro de verificación",
 )
 
 
