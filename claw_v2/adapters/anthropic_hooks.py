@@ -57,7 +57,10 @@ _DETACHED_PROCESS_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 # A trailing `&` alone is allowed (trivial short jobs); it is denied only
 # combined with markers of long-lived work (downloads, installs, sleeps).
-_BACKGROUND_TAIL_RE = re.compile(r"(?<![&>])&\s*$")
+# MULTILINE + the `[;\n]` alternation catch a `&` that backgrounds a job and
+# is followed by another command (`sleep 600 &; echo x`, or a newline) instead
+# of ending the string — those bypassed the literal-`$` form (gemini review #100).
+_BACKGROUND_TAIL_RE = re.compile(r"(?<![&>])&\s*(?:[;\n]|$)", re.MULTILINE)
 _LONG_RUNNING_BACKGROUND_MARKERS = re.compile(
     r"\b(?:sleep\s+\d|install\b|download\b|curl\b|wget\b)", re.IGNORECASE
 )

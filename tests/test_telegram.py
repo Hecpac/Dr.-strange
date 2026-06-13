@@ -1358,6 +1358,29 @@ class ProactiveSendTextTests(unittest.IsolatedAsyncioTestCase):
             emitted.index("telegram_outbound_sent"),
         )
 
+    async def test_nowait_emit_survives_executor_shutdown_race(self) -> None:
+        """executor.submit can raise RuntimeError if the observe executor was
+        shut down between the lookup and the submit (stop() racing an in-flight
+        send). Telemetry must never crash delivery (gemini review #100)."""
+        transport, bot_service = self._transport()
+        executor = transport._observe_emit_executor()
+        executor.shutdown(wait=True)  # now submit() raises RuntimeError
+
+        # Must not raise, and must keep the audit event via the inline fallback.
+        transport._emit_outbound_text_event_nowait(
+            "telegram_outbound_attempt",
+            session_id="tg-1",
+            user_id="1",
+            message_kind="proactive",
+            method="send_message",
+            part_index=1,
+            part_count=1,
+            part_chars=5,
+            attempt=1,
+        )
+        emitted = [call.args[0] for call in bot_service.observe.emit.call_args_list]
+        self.assertIn("telegram_outbound_attempt", emitted)
+
     async def test_nonretryable_error_does_not_retry(self) -> None:
         transport, bot_service = self._transport()
         transport._app.bot.send_message.side_effect = BadRequest("MESSAGE_TOO_LONG")

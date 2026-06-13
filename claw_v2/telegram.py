@@ -801,7 +801,13 @@ class TelegramTransport:
             # Shutdown-tail emit: keep the audit event, accept the inline write.
             self._emit_transport_event(event_type, payload)
             return
-        executor.submit(self._emit_transport_event, event_type, payload)
+        try:
+            executor.submit(self._emit_transport_event, event_type, payload)
+        except RuntimeError:
+            # Executor shut down between the lookup and the submit (stop()
+            # racing an in-flight send). Telemetry never crashes delivery
+            # (gemini review #100): keep the audit event inline.
+            self._emit_transport_event(event_type, payload)
 
     async def _sleep_before_text_send_retry(self, exc: BaseException, attempt: int) -> None:
         retry_after = getattr(exc, "retry_after", None)

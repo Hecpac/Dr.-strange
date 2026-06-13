@@ -648,6 +648,18 @@ class DetachedProcessGuardTests(unittest.TestCase):
                 _detached_process_reason("Bash", {"command": command}), command
             )
 
+    def test_detects_background_tail_followed_by_more_commands(self) -> None:
+        # A trailing `&` is not always at the literal end: a `;` or newline can
+        # follow it (gemini review #100). The marker still gates it.
+        for command in (
+            'sleep 600 &; echo "started"',
+            "curl -L -o model.bin https://example.com/model.bin &\necho started",
+            "pip install torch &\nwait",
+        ):
+            self.assertIsNotNone(
+                _detached_process_reason("Bash", {"command": command}), command
+            )
+
     def test_allows_trivial_background_and_foreground_commands(self) -> None:
         for command in (
             "ls -la &",
