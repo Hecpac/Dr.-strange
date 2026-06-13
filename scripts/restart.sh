@@ -20,11 +20,23 @@ wait_for_process() {
 
 wait_for_port() {
   port="${WEB_CHAT_PORT:-8765}"
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
+  # Seconds to wait for the web port after a restart. The default 10s can be
+  # too short for a slow bootstrap (DB contention), which made the watchdog
+  # see port_listening=False and restart again; raise via env when needed.
+  attempts="${CLAW_RESTART_PORT_WAIT_S:-10}"
+  # A non-integer value would make the `-lt` test error and skip the wait
+  # entirely (port reported down immediately); fall back to the default.
+  case "$attempts" in
+    '' | *[!0-9]*) attempts=10 ;;
+  esac
+  [ "$attempts" -gt 0 ] || attempts=10
+  i=0
+  while [ "$i" -lt "$attempts" ]; do
     if lsof -nP "-iTCP:$port" -sTCP:LISTEN >/dev/null 2>&1; then
       return 0
     fi
     sleep 1
+    i=$((i + 1))
   done
   return 1
 }
