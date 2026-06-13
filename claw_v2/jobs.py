@@ -11,6 +11,7 @@ from typing import Any, Iterable
 
 from claw_v2.sqlite_runtime import (
     connect_runtime_sqlite,
+    heal_wal_after_disk_io,
     make_store_wal_heal,
     register_wal_heal,
 )
@@ -97,6 +98,19 @@ class JobService:
             self._conn.executescript(JOBS_INDEX_SCHEMA)
             self._conn.commit()
 
+    def _retry_once_after_disk_io(self, operation: str, callback):
+        wal_heal_attempted = False
+        while True:
+            try:
+                return callback()
+            except sqlite3.OperationalError as exc:
+                if not wal_heal_attempted and heal_wal_after_disk_io(
+                    self.db_path, exc, context=operation
+                ):
+                    wal_heal_attempted = True
+                    continue
+                raise
+
     def enqueue(
         self,
         *,
@@ -158,39 +172,44 @@ class JobService:
         now: float | None = None,
     ) -> JobRecord | None:
         now = time.time() if now is None else now
-        with self._lock:
-            try:
-                self._conn.execute("BEGIN IMMEDIATE")
-                row = self._conn.execute(
-                    """
-                    SELECT *
-                    FROM agent_jobs
-                    WHERE job_id = ?
-                      AND status IN ('queued', 'retrying')
-                    """,
-                    (job_id,),
-                ).fetchone()
-                if row is None:
+        def claim_once() -> bool:
+            with self._lock:
+                try:
+                    self._conn.execute("BEGIN IMMEDIATE")
+                    row = self._conn.execute(
+                        """
+                        SELECT *
+                        FROM agent_jobs
+                        WHERE job_id = ?
+                          AND status IN ('queued', 'retrying')
+                        """,
+                        (job_id,),
+                    ).fetchone()
+                    if row is None:
+                        self._conn.commit()
+                        return False
+                    attempts = int(row["attempts"] or 0) + 1
+                    self._conn.execute(
+                        """
+                        UPDATE agent_jobs
+                        SET status = 'running',
+                            worker_id = ?,
+                            attempts = ?,
+                            started_at = COALESCE(started_at, ?),
+                            updated_at = ?
+                        WHERE job_id = ?
+                          AND status IN ('queued', 'retrying')
+                        """,
+                        (worker_id, attempts, now, now, job_id),
+                    )
                     self._conn.commit()
-                    return None
-                attempts = int(row["attempts"] or 0) + 1
-                self._conn.execute(
-                    """
-                    UPDATE agent_jobs
-                    SET status = 'running',
-                        worker_id = ?,
-                        attempts = ?,
-                        started_at = COALESCE(started_at, ?),
-                        updated_at = ?
-                    WHERE job_id = ?
-                      AND status IN ('queued', 'retrying')
-                    """,
-                    (worker_id, attempts, now, now, job_id),
-                )
-                self._conn.commit()
-            except Exception:
-                self._conn.rollback()
-                raise
+                    return True
+                except Exception:
+                    self._conn.rollback()
+                    raise
+
+        if not self._retry_once_after_disk_io("JobService.claim", claim_once):
+            return None
         record = self.get(job_id)
         if record is not None:
             self._emit("job_claimed", record)
@@ -211,41 +230,47 @@ class JobService:
             placeholders = ", ".join("?" for _ in kind_list)
             where += f" AND kind IN ({placeholders})"
             params.extend(kind_list)
-        with self._lock:
-            try:
-                self._conn.execute("BEGIN IMMEDIATE")
-                row = self._conn.execute(
-                    f"""
-                    SELECT *
-                    FROM agent_jobs
-                    WHERE {where}
-                    ORDER BY created_at ASC
-                    LIMIT 1
-                    """,
-                    params,
-                ).fetchone()
-                if row is None:
+        def claim_next_once() -> str | None:
+            with self._lock:
+                try:
+                    self._conn.execute("BEGIN IMMEDIATE")
+                    row = self._conn.execute(
+                        f"""
+                        SELECT *
+                        FROM agent_jobs
+                        WHERE {where}
+                        ORDER BY created_at ASC
+                        LIMIT 1
+                        """,
+                        params,
+                    ).fetchone()
+                    if row is None:
+                        self._conn.commit()
+                        return None
+                    claimed_job_id = str(row["job_id"])
+                    attempts = int(row["attempts"] or 0) + 1
+                    self._conn.execute(
+                        """
+                        UPDATE agent_jobs
+                        SET status = 'running',
+                            worker_id = ?,
+                            attempts = ?,
+                            started_at = COALESCE(started_at, ?),
+                            updated_at = ?
+                        WHERE job_id = ?
+                          AND status IN ('queued', 'retrying')
+                        """,
+                        (worker_id, attempts, now, now, claimed_job_id),
+                    )
                     self._conn.commit()
-                    return None
-                job_id = str(row["job_id"])
-                attempts = int(row["attempts"] or 0) + 1
-                self._conn.execute(
-                    """
-                    UPDATE agent_jobs
-                    SET status = 'running',
-                        worker_id = ?,
-                        attempts = ?,
-                        started_at = COALESCE(started_at, ?),
-                        updated_at = ?
-                    WHERE job_id = ?
-                      AND status IN ('queued', 'retrying')
-                    """,
-                    (worker_id, attempts, now, now, job_id),
-                )
-                self._conn.commit()
-            except Exception:
-                self._conn.rollback()
-                raise
+                    return claimed_job_id
+                except Exception:
+                    self._conn.rollback()
+                    raise
+
+        job_id = self._retry_once_after_disk_io("JobService.claim_next", claim_next_once)
+        if job_id is None:
+            return None
         record = self.get(job_id)
         if record is not None:
             self._emit("job_claimed", record)
@@ -296,45 +321,51 @@ class JobService:
         checkpoint: dict[str, Any] | None = None,
     ) -> JobRecord | None:
         now = time.time()
-        with self._lock:
-            try:
-                self._conn.execute("BEGIN IMMEDIATE")
-                row = self._conn.execute("SELECT * FROM agent_jobs WHERE job_id = ?", (job_id,)).fetchone()
-                if row is None:
+        def fail_once() -> JobRecord | None:
+            with self._lock:
+                try:
+                    self._conn.execute("BEGIN IMMEDIATE")
+                    row = self._conn.execute("SELECT * FROM agent_jobs WHERE job_id = ?", (job_id,)).fetchone()
+                    if row is None:
+                        self._conn.commit()
+                        return None
+                    if row["status"] in JOB_TERMINAL_STATUSES:
+                        # Idempotent: a job already terminal must not be moved back to
+                        # failed/retrying. Return the row we just read (NOT self.get(),
+                        # which would re-acquire the non-reentrant lock).
+                        self._conn.commit()
+                        return self._row_to_record(row)
+                    should_retry = retry and int(row["attempts"] or 0) < int(row["max_attempts"] or 1)
+                    status = "retrying" if should_retry else "failed"
+                    completed_at = None if should_retry else now
+                    next_run_at = now + max(0.0, retry_delay_seconds) if should_retry else row["next_run_at"]
+                    checkpoint_json = (
+                        json.dumps(dict(checkpoint), sort_keys=True)
+                        if checkpoint is not None
+                        else row["checkpoint_json"]
+                    )
+                    self._conn.execute(
+                        """
+                        UPDATE agent_jobs
+                        SET status = ?,
+                            error = ?,
+                            checkpoint_json = ?,
+                            next_run_at = ?,
+                            completed_at = ?,
+                            updated_at = ?
+                        WHERE job_id = ?
+                        """,
+                        (status, error, checkpoint_json, next_run_at, completed_at, now, job_id),
+                    )
                     self._conn.commit()
                     return None
-                if row["status"] in JOB_TERMINAL_STATUSES:
-                    # Idempotent: a job already terminal must not be moved back to
-                    # failed/retrying. Return the row we just read (NOT self.get(),
-                    # which would re-acquire the non-reentrant lock).
-                    self._conn.commit()
-                    return self._row_to_record(row)
-                should_retry = retry and int(row["attempts"] or 0) < int(row["max_attempts"] or 1)
-                status = "retrying" if should_retry else "failed"
-                completed_at = None if should_retry else now
-                next_run_at = now + max(0.0, retry_delay_seconds) if should_retry else row["next_run_at"]
-                checkpoint_json = (
-                    json.dumps(dict(checkpoint), sort_keys=True)
-                    if checkpoint is not None
-                    else row["checkpoint_json"]
-                )
-                self._conn.execute(
-                    """
-                    UPDATE agent_jobs
-                    SET status = ?,
-                        error = ?,
-                        checkpoint_json = ?,
-                        next_run_at = ?,
-                        completed_at = ?,
-                        updated_at = ?
-                    WHERE job_id = ?
-                    """,
-                    (status, error, checkpoint_json, next_run_at, completed_at, now, job_id),
-                )
-                self._conn.commit()
-            except Exception:
-                self._conn.rollback()
-                raise
+                except Exception:
+                    self._conn.rollback()
+                    raise
+
+        terminal_record = self._retry_once_after_disk_io("JobService.fail", fail_once)
+        if terminal_record is not None:
+            return terminal_record
         record = self.get(job_id)
         if record is not None:
             self._emit("job_retrying" if record.status == "retrying" else "job_failed", record)
@@ -473,37 +504,43 @@ class JobService:
             assignments.append("completed_at = ?")
             params.append(completed_at)
         params.append(job_id)
-        with self._lock:
-            try:
-                self._conn.execute("BEGIN IMMEDIATE")
-                current = self._conn.execute(
-                    "SELECT * FROM agent_jobs WHERE job_id = ?", (job_id,)
-                ).fetchone()
-                if current is None:
+        def update_once() -> JobRecord | sqlite3.Row | None:
+            with self._lock:
+                try:
+                    self._conn.execute("BEGIN IMMEDIATE")
+                    current = self._conn.execute(
+                        "SELECT * FROM agent_jobs WHERE job_id = ?", (job_id,)
+                    ).fetchone()
+                    if current is None:
+                        self._conn.commit()
+                        return None
+                    if current["status"] in JOB_TERMINAL_STATUSES:
+                        # Idempotent: never resurrect a terminal job. BEGIN IMMEDIATE
+                        # holds the write lock across this read+UPDATE so a sibling
+                        # connection cannot flip the row terminal between them. Return
+                        # the row we just read (NOT self.get(), which would re-acquire
+                        # the non-reentrant lock).
+                        self._conn.commit()
+                        return self._row_to_record(current)
+                    self._conn.execute(
+                        f"UPDATE agent_jobs SET {', '.join(assignments)} WHERE job_id = ?",
+                        params,
+                    )
+                    # Read the fresh row inside the same locked transaction: a later
+                    # self.get() would re-acquire the lock and reopen a window for a
+                    # sibling connection to mutate the row before we read it back.
+                    updated = self._conn.execute(
+                        "SELECT * FROM agent_jobs WHERE job_id = ?", (job_id,)
+                    ).fetchone()
                     self._conn.commit()
-                    return None
-                if current["status"] in JOB_TERMINAL_STATUSES:
-                    # Idempotent: never resurrect a terminal job. BEGIN IMMEDIATE
-                    # holds the write lock across this read+UPDATE so a sibling
-                    # connection cannot flip the row terminal between them. Return
-                    # the row we just read (NOT self.get(), which would re-acquire
-                    # the non-reentrant lock).
-                    self._conn.commit()
-                    return self._row_to_record(current)
-                self._conn.execute(
-                    f"UPDATE agent_jobs SET {', '.join(assignments)} WHERE job_id = ?",
-                    params,
-                )
-                # Read the fresh row inside the same locked transaction: a later
-                # self.get() would re-acquire the lock and reopen a window for a
-                # sibling connection to mutate the row before we read it back.
-                updated = self._conn.execute(
-                    "SELECT * FROM agent_jobs WHERE job_id = ?", (job_id,)
-                ).fetchone()
-                self._conn.commit()
-            except Exception:
-                self._conn.rollback()
-                raise
+                    return updated
+                except Exception:
+                    self._conn.rollback()
+                    raise
+
+        updated = self._retry_once_after_disk_io(f"JobService.{event_type}", update_once)
+        if isinstance(updated, JobRecord):
+            return updated
         record = self._row_to_record(updated) if updated is not None else None
         if record is not None:
             self._emit(event_type, record)

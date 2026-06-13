@@ -11,6 +11,7 @@ from typing import Callable
 from claw_v2.sqlite_runtime import (
     connect_runtime_sqlite,
     heal_orphaned_wal,
+    heal_wal_after_disk_io,
     make_store_wal_heal,
     note_wal_generation,
     register_wal_heal,
@@ -223,12 +224,19 @@ class ObserveStream:
                     heal_orphaned_wal(self.db_path)
                 return True
             except sqlite3.OperationalError as exc:
-                if "locked" not in str(exc).lower():
-                    raise
                 try:
-                    self._conn.rollback()
+                    with self._lock:
+                        self._conn.rollback()
                 except Exception:
-                    logger.debug("observe rollback failed after locked DB", exc_info=True)
+                    logger.debug("observe rollback failed after SQLite write error", exc_info=True)
+                if "locked" not in str(exc).lower():
+                    if not wal_heal_attempted and heal_wal_after_disk_io(
+                        self.db_path, exc, context="ObserveStream._persist_event"
+                    ):
+                        wal_heal_attempted = True
+                        attempt = 0
+                        continue
+                    raise
                 if attempt >= OBSERVE_LOCKED_RETRY_ATTEMPTS and not wal_heal_attempted:
                     # T10 (2026-06-12): persistent locks with the -wal sidecar
                     # gone mean this process is wedged on orphaned WAL files.

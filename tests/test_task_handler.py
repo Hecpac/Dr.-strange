@@ -10,6 +10,7 @@ from claw_v2.coordinator import CoordinatorResult, WorkerResult
 from claw_v2.jobs import JobService
 from claw_v2.memory import MemoryStore
 from claw_v2.observe import ObserveStream
+from claw_v2.sqlite_runtime import RuntimeDatabaseError
 from claw_v2.task_handler import TaskHandler
 from claw_v2.task_ledger import TaskLedger
 
@@ -512,6 +513,77 @@ class BrowserExecutorRoutingTests(unittest.TestCase):
             )
             self.assertIn("No pude completar", out)
             self.assertNotIn("coordinator_ran", recorded)
+
+    def test_browser_task_session_state_db_error_is_not_classified_as_cdp_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            memory = MemoryStore(root / "claw.db")
+            observe = ObserveStream(root / "observe.db")
+            ledger = TaskLedger(root / "claw.db", observe=observe)
+            jobs = JobService(root / "claw.db", observe=observe)
+            task_id = "t-db"
+            job = jobs.enqueue(
+                kind="coordinator.autonomous_task",
+                payload={
+                    "task_id": task_id,
+                    "session_id": "tg-1",
+                    "objective": "repaso por X",
+                    "mode": "browse",
+                },
+            )
+            ledger.create(
+                task_id=task_id,
+                session_id="tg-1",
+                objective="repaso por X",
+                mode="browse",
+                runtime="coordinator",
+                provider="codex",
+                model="gpt",
+                status="running",
+            )
+            calls = {"executor": 0, "failed_update": 0}
+
+            def fake_exec(objective, *, task_id, mode):
+                calls["executor"] += 1
+                return "feed capturado: 30 posts"
+
+            def flaky_update(session_id, **kwargs):
+                if kwargs.get("verification_status") == "pending" and calls["failed_update"] == 0:
+                    calls["failed_update"] += 1
+                    raise RuntimeDatabaseError("Runtime database WAL heal failed for claw.db")
+                return memory.update_session_state(session_id, **kwargs)
+
+            handler = TaskHandler(
+                observe=observe,
+                task_ledger=ledger,
+                job_service=jobs,
+                browser_executor=fake_exec,
+                get_session_state=memory.get_session_state,
+                update_session_state=flaky_update,
+            )
+
+            handler._run_autonomous_task(
+                "tg-1",
+                task_id,
+                "repaso por X",
+                "browse",
+                job_id=job.job_id,
+            )
+
+            self.assertEqual(calls, {"executor": 1, "failed_update": 1})
+            events = observe.recent_events(limit=50)
+            event_types = [event["event_type"] for event in events]
+            self.assertIn("browser_executor_started", event_types)
+            self.assertNotIn("browser_executor_failed", event_types)
+            failures = [
+                event for event in events
+                if event["event_type"] == "autonomous_task_failed"
+            ]
+            self.assertTrue(failures)
+            error = failures[-1]["payload"].get("error", "")
+            self.assertIn("RuntimeDatabaseError", error)
+            self.assertIn("WAL heal failed", error)
+            self.assertNotIn("All connection attempts failed", error)
 
     def test_no_executor_falls_back_to_coordinator(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
