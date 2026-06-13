@@ -273,7 +273,7 @@ class BrowserUseServiceTests(unittest.TestCase):
     def test_init_defaults(self) -> None:
         from claw_v2.computer import BrowserUseService
         svc = BrowserUseService()
-        self.assertEqual(svc.cdp_url, "http://localhost:9222")
+        self.assertEqual(svc.cdp_url, "http://localhost:9250")
         self.assertTrue(svc.headless)
 
     def test_init_custom(self) -> None:
@@ -804,6 +804,59 @@ class ComputerHandlerSessionArtifactTests(unittest.TestCase):
             result = handler._resume_approved_computer_action(pending.approval_id)
 
         self.assertIn("contexto de computer cambió", result)
+
+    def test_approval_blocked_when_screenshot_capture_fails(self) -> None:
+        # Fail-closed: if the approval screenshot can't be captured, the action
+        # has no anti-TOCTOU visual binding, so no approval is created.
+        import types
+
+        from claw_v2.computer_handler import ComputerHandler
+
+        class FakeComputer:
+            codex_backend = object()  # non-None -> handler skips _get_client()
+
+            def capture_screenshot(self):
+                raise RuntimeError("cdp screenshot boom")
+
+            def run_agent_loop(self, *, session, **kwargs):
+                session.status = "awaiting_approval"
+                session.pending_action = {"action": "click", "x": 1, "y": 2}
+                return "paused"
+
+        events: list[tuple[str, dict]] = []
+
+        class FakeObserve:
+            def emit(self, event_type, payload=None):
+                events.append((event_type, payload or {}))
+
+        approvals = MagicMock()
+        config = types.SimpleNamespace(computer_auto_approve=False, sensitive_urls=[])
+        handler = ComputerHandler(
+            computer=FakeComputer(),
+            approvals=approvals,
+            config=config,
+            observe=FakeObserve(),
+            computer_gate=object(),
+        )
+        session = types.SimpleNamespace(
+            task="click something",
+            current_url="https://example.com",
+            status="running",
+            pending_action={"action": "click", "x": 1, "y": 2},
+            screenshot_path=None,
+        )
+        handler._sessions["s1"] = session
+
+        result = handler._run_session("s1")
+
+        approvals.create.assert_not_called()
+        self.assertEqual(session.status, "aborted")
+        self.assertNotIn("s1", handler._sessions)
+        self.assertTrue(
+            any(e[0] == "computer_approval_blocked_no_screenshot" for e in events),
+            f"events={[e[0] for e in events]}",
+        )
+        self.assertIn("aprobación segura", result)
 
 
 class ComputerHandlerTimeoutTests(_ComputerHandlerConfigTest):

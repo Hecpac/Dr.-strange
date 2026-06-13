@@ -308,6 +308,25 @@ class ComputerHandler:
                 return "computer action requires approval, but approvals are unavailable"
             pending = dict(session.pending_action or {})
             screenshot_metadata = self._capture_approval_screenshot(session_id, session)
+            if "screenshot_hash" not in screenshot_metadata:
+                # Fail-closed: an approval without a screenshot hash has no
+                # anti-TOCTOU visual binding (_validate_pending_approval_scope
+                # silently skips the comparison when the hash is absent), so we
+                # refuse to ask for approval rather than approve blind.
+                session.status = "aborted"
+                self._sessions.pop(session_id, None)
+                self._emit(
+                    "computer_approval_blocked_no_screenshot",
+                    {
+                        "session_id": session_id,
+                        "backend": backend,
+                        "screenshot_error": screenshot_metadata.get("screenshot_error"),
+                    },
+                )
+                return (
+                    "No puedo pedir aprobación segura: no pude capturar el estado visual "
+                    "actual. Reenvíame el objetivo cuando la captura de pantalla funcione."
+                )
             approval_scope = {
                 "backend": backend,
                 "action_hash": _approval_action_hash(pending),

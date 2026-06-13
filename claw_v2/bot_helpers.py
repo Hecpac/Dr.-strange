@@ -163,6 +163,14 @@ _VERIFICATION_STATUS_RE = re.compile(
     re.IGNORECASE,
 )
 _TASK_QUEUE_ITEM_TTL_SECONDS = 60 * 60
+_LONG_BROWSER_OPERATION_TIMEOUT_SECONDS = 1200.0
+_BROWSER_OPERATION_SIGNAL_RE = re.compile(
+    r"\b(?:cdp|chrome|chromium|playwright|selenium|chromedriver|notebooklm|computer[-_\s]?use)\b"
+    r"|localhost:9(?:250|222)\b"
+    r"|127\.0\.0\.1:9(?:250|222)\b"
+    r"|/json/(?:list|version)\b",
+    re.IGNORECASE,
+)
 
 
 @contextlib.contextmanager
@@ -1842,6 +1850,8 @@ def _build_coordinator_tasks(
         return research, implementation, verification
 
     if mode in {"ops", "publish", "browse"}:
+        operation_timeout = _long_operation_timeout_for_mode(mode, objective)
+        long_operation_directive = _long_operation_directive(operation_timeout)
         flavor = {
             "ops": (
                 "Execute the operation with the workspace tools (shell scripts, local CLIs, "
@@ -1874,6 +1884,7 @@ def _build_coordinator_tasks(
                 lane="worker",
                 instruction=(
                     f"{flavor} "
+                    f"{long_operation_directive}"
                     "Work in three explicit phases and emit each phase as its own labeled section in the response:\n"
                     "1) `## Actions` — every command/automation step executed, one per line.\n"
                     "2) `## Verify` — for each check that the operation took effect, "
@@ -1884,6 +1895,7 @@ def _build_coordinator_tasks(
                     "Do NOT skip any of the three sections. If a phase fails, still emit the section and state the failure.\n"
                     f"Objective: {objective}"
                 ),
+                timeout_seconds=operation_timeout,
             )
         ]
         verification = [
@@ -1929,6 +1941,26 @@ def _build_coordinator_tasks(
         )
     ]
     return research, None, verification
+
+
+def _long_operation_timeout_for_mode(mode: str, objective: str) -> float | None:
+    if mode == "browse":
+        return _LONG_BROWSER_OPERATION_TIMEOUT_SECONDS
+    if mode in {"ops", "publish"} and _BROWSER_OPERATION_SIGNAL_RE.search(objective or ""):
+        return _LONG_BROWSER_OPERATION_TIMEOUT_SECONDS
+    return None
+
+
+def _long_operation_directive(timeout_seconds: float | None) -> str:
+    if timeout_seconds is None:
+        return ""
+    timeout_label = int(timeout_seconds)
+    return (
+        f"Long-running browser/CDP guard: this worker may run for up to {timeout_label}s. "
+        "Split browser/CDP work into direct shell or script calls with explicit command-level timeouts; "
+        "do not make one opaque Codex CLI call the whole operation. "
+        "If the local execution layer blocks a step, report the blocker with evidence and a bounded retry plan. "
+    )
 
 
 def _coordinator_checkpoint(result: CoordinatorResult, *, objective: str) -> dict[str, str]:

@@ -584,7 +584,7 @@ class BrowserUseService:
     def __init__(
         self,
         *,
-        cdp_url: str | None = "http://localhost:9222",
+        cdp_url: str | None = "http://localhost:9250",
         headless: bool = True,
     ) -> None:
         self.cdp_url = cdp_url
