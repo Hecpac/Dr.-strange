@@ -30,6 +30,7 @@ from claw_v2.bot_helpers import (
     _infer_session_mode,
     _looks_like_proceed_request,
     _normalize_command_text,
+    _should_use_browser_executor,
     _stable_task_id,
     _task_approval_summary,
     detect_meta_introspection_request,
@@ -124,6 +125,7 @@ class TaskHandler:
         task_ledger: Any | None = None,
         job_service: Any | None = None,
         router: Any | None = None,
+        browser_executor: Callable[..., str] | None = None,
         get_session_state: Callable[[str], dict[str, Any]],
         update_session_state: Callable[..., Any],
         merge_active_object: Callable[..., Any] | None = None,
@@ -138,6 +140,12 @@ class TaskHandler:
         self.task_ledger = task_ledger
         self.job_service = job_service
         self.router = router
+        # Option (b), 2026-06-13: in-process browser executor for CDP/browser
+        # objectives. Codex coordinator workers run network-denied
+        # (--sandbox workspace-write), so browse/CDP work is routed here
+        # (BrowserUseService / Playwright in the daemon venv) instead. None ->
+        # fall back to the coordinator (current behavior).
+        self.browser_executor = browser_executor
         self._get_session_state = get_session_state
         self._update_session_state = update_session_state
         self._merge_active_object = merge_active_object
@@ -645,6 +653,17 @@ class TaskHandler:
         task_id: str,
         resumed: bool = False,
     ) -> str:
+        # Option (b), 2026-06-13: CDP/browser objectives run via the daemon's
+        # in-process browser executor (Playwright in the venv), NOT the Codex
+        # coordinator whose workers are network-denied (--sandbox workspace-write)
+        # and so cannot reach localhost:9250. Falls through to the coordinator
+        # when no executor is wired.
+        if self.browser_executor is not None and _should_use_browser_executor(
+            mode, objective
+        ):
+            return self._run_browser_executor_task(
+                session_id, objective, mode=mode, task_id=task_id
+            )
         research_tasks, implementation_tasks, verification_tasks = _build_coordinator_tasks(mode, objective)
         # F3.1 (2026-06-12): a resumed task loads completed-phase artifacts
         # from scratch instead of re-running coordinator.run() from zero
@@ -723,6 +742,53 @@ class TaskHandler:
             last_checkpoint=checkpoint,
         )
         return _format_coordinator_response(result, checkpoint=checkpoint, forced=forced)
+
+    def _run_browser_executor_task(
+        self,
+        session_id: str,
+        objective: str,
+        *,
+        mode: str,
+        task_id: str,
+    ) -> str:
+        """Run a CDP/browser objective via the in-process browser executor.
+
+        The executor drives Chrome CDP through the daemon's Playwright (in-venv,
+        not Codex-sandboxed), so it can reach localhost:9250 — unlike a Codex
+        coordinator worker. Returns the executor's text result; on failure,
+        records a failed checkpoint and returns a clear message (never raises).
+        """
+        self._emit(
+            "browser_executor_started",
+            {"session_id": session_id, "task_id": task_id, "mode": mode, "objective": objective[:200]},
+        )
+        try:
+            output = str(self.browser_executor(objective, task_id=task_id, mode=mode))
+            status = "pending"
+        except Exception as exc:  # noqa: BLE001 - executor failures must not crash the runner
+            logger.exception("browser executor failed for %s", task_id)
+            self._emit(
+                "browser_executor_failed",
+                {"session_id": session_id, "task_id": task_id, "error": str(exc)[:200]},
+            )
+            output = f"No pude completar la tarea de navegador: {str(exc)[:200]}"
+            status = "failed"
+        checkpoint = {
+            "summary": (output or objective)[:180],
+            "verification_status": status,
+            "task_id": task_id,
+        }
+        self._update_session_state(
+            session_id,
+            mode=mode,
+            verification_status=status,
+            last_checkpoint=checkpoint,
+        )
+        self._emit(
+            "browser_executor_completed",
+            {"session_id": session_id, "task_id": task_id, "status": status},
+        )
+        return output or "Tarea de navegador completada sin salida."
 
     def _run_autonomous_task(
         self,

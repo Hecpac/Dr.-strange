@@ -447,6 +447,82 @@ class ResumeWiringTests(unittest.TestCase):
             self.assertNotIn("detect_task_id", recorded)
 
 
+class BrowserExecutorRoutingTests(unittest.TestCase):
+    """Option (b), 2026-06-13: CDP/browser objectives route to the in-process
+    browser executor instead of the network-denied Codex coordinator."""
+
+    def _handler(self, root: Path, recorded: dict, *, browser_executor):
+        memory = MemoryStore(root / "claw.db")
+        observe = ObserveStream(root / "observe.db")
+
+        class _RecordingCoordinator:
+            def run(self, task_id, objective, research_tasks, **kwargs):
+                recorded["coordinator_ran"] = True
+                return CoordinatorResult(task_id=task_id, phase_results={}, synthesis="coord")
+
+        return TaskHandler(
+            coordinator=_RecordingCoordinator(),
+            observe=observe,
+            browser_executor=browser_executor,
+            get_session_state=memory.get_session_state,
+            update_session_state=memory.update_session_state,
+        )
+
+    def test_browse_objective_uses_browser_executor_not_coordinator(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorded: dict = {}
+
+            def fake_exec(objective, *, task_id, mode):
+                recorded["executor"] = (objective, task_id, mode)
+                return "feed capturado: 30 posts"
+
+            handler = self._handler(Path(tmpdir), recorded, browser_executor=fake_exec)
+            out = handler._run_coordinated_task(
+                "tg-1", "repaso por X", mode="browse", forced=False, task_id="t-1"
+            )
+            self.assertEqual(recorded["executor"], ("repaso por X", "t-1", "browse"))
+            self.assertNotIn("coordinator_ran", recorded)
+            self.assertIn("feed capturado", out)
+
+    def test_ops_without_cdp_signal_uses_coordinator(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorded: dict = {}
+
+            def fake_exec(objective, *, task_id, mode):
+                recorded["executor_called"] = True
+                return "x"
+
+            handler = self._handler(Path(tmpdir), recorded, browser_executor=fake_exec)
+            handler._run_coordinated_task(
+                "tg-1", "corre el script de backup", mode="ops", forced=False, task_id="t-2"
+            )
+            self.assertTrue(recorded["coordinator_ran"])
+            self.assertNotIn("executor_called", recorded)
+
+    def test_browser_executor_failure_is_contained(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorded: dict = {}
+
+            def boom(objective, *, task_id, mode):
+                raise RuntimeError("cdp blew up")
+
+            handler = self._handler(Path(tmpdir), recorded, browser_executor=boom)
+            out = handler._run_coordinated_task(
+                "tg-1", "abre la web", mode="browse", forced=False, task_id="t-3"
+            )
+            self.assertIn("No pude completar", out)
+            self.assertNotIn("coordinator_ran", recorded)
+
+    def test_no_executor_falls_back_to_coordinator(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorded: dict = {}
+            handler = self._handler(Path(tmpdir), recorded, browser_executor=None)
+            handler._run_coordinated_task(
+                "tg-1", "repaso por X", mode="browse", forced=False, task_id="t-4"
+            )
+            self.assertTrue(recorded["coordinator_ran"])
+
+
 class StaleMessageTests(unittest.TestCase):
     """AM-STALEMSG — the terminal message is formatted AFTER the gates."""
 

@@ -1966,6 +1966,20 @@ def _long_operation_directive(timeout_seconds: float | None) -> str:
     )
 
 
+def _should_use_browser_executor(mode: str, objective: str) -> bool:
+    """True when a delegated task must run via the daemon's in-process browser
+    executor (BrowserUseService / Playwright in the venv) instead of the Codex
+    coordinator.
+
+    Codex workers run under ``--sandbox workspace-write`` which denies network,
+    so CDP/browser objectives can never reach ``localhost:9250`` from there
+    (2026-06-13 X-sweep failed with EPERM despite Chrome CDP being up). Same
+    trigger as the long-operation timeout: ``browse`` always; ``ops``/``publish``
+    only when the objective signals browser/CDP work.
+    """
+    return _long_operation_timeout_for_mode(mode, objective) is not None
+
+
 def _coordinator_checkpoint(result: CoordinatorResult, *, objective: str) -> dict[str, str]:
     verification_results = result.phase_results.get("verification", [])
     implementation_results = result.phase_results.get("implementation", [])
