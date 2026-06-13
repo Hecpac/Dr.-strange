@@ -16,30 +16,29 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
 fi
 
 report_json="$("$PYTHON_BIN" -m claw_v2.diagnostics --json --limit 5)"
+
+# Live uptime of the daemon process, passed to the decision module so it can
+# apply the bootstrap grace (never restart a daemon that is still coming up).
+daemon_pid="$(pgrep -f 'claw_v2.main' 2>/dev/null | head -n 1 || true)"
+daemon_etime=""
+if [[ -n "$daemon_pid" ]]; then
+  daemon_etime="$(ps -p "$daemon_pid" -o etime= 2>/dev/null | tr -d ' ' || true)"
+fi
+
+# The decision is debounced (bootstrap grace + persistent N-strikes) in
+# claw_v2.watchdog; diagnostics' critical condition itself is unchanged.
 decision="$(
-  printf '%s' "$report_json" | "$PYTHON_BIN" -c 'import json, sys
-report = json.load(sys.stdin)
-checks = report.get("checks") or {}
-restartable = (
-    checks.get("status") == "critical"
-    and checks.get("database_readable")
-    and (
-        not checks.get("process_running")
-        or not checks.get("port_listening")
-        or checks.get("heartbeat_stale")
-        or checks.get("web_transport_serving") is False
-    )
-)
-print("restart" if restartable else checks.get("status", "unknown"))' 2>/dev/null || true
+  printf '%s' "$report_json" \
+    | "$PYTHON_BIN" -m claw_v2.watchdog --uptime "$daemon_etime" 2>/dev/null || true
 )"
-decision="${decision:-unknown}"
+decision="${decision:-ok}"
 
 if [[ "$decision" != "restart" ]]; then
-  echo "claw-watchdog: no restart needed (status=$decision)"
+  echo "claw-watchdog: no action ($decision)"
   exit 0
 fi
 
-echo "claw-watchdog: critical restartable condition detected; restarting Claw"
+echo "claw-watchdog: restart threshold reached; restarting Claw"
 bash "$REPO_ROOT/scripts/restart.sh"
 sleep 2
 "$PYTHON_BIN" -m claw_v2.diagnostics --limit 5
