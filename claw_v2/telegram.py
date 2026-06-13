@@ -222,13 +222,41 @@ _NONRETRYABLE_TEXT_SEND_ERRORS = {
 }
 
 
+# Telegram's 4096 limit counts UTF-16 code units, not Python code points:
+# a near-limit message with non-BMP emojis split by code points fails with
+# MESSAGE_TOO_LONG (BadRequest, non-retryable) and the part is lost (T3).
+# 4000 leaves margin; the newline window avoids mid-word cuts.
+_SAFE_TELEGRAM_UTF16_UNITS = 4000
+_SPLIT_NEWLINE_WINDOW = 400
+
+
+def _utf16_units(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
+
+
 def _split_message(text: str, max_len: int = MAX_TELEGRAM_LEN) -> list[str]:
     if not text:
         return [text]
+    limit = min(max_len, _SAFE_TELEGRAM_UTF16_UNITS)
     parts: list[str] = []
     while text:
-        parts.append(text[:max_len])
-        text = text[max_len:]
+        if _utf16_units(text) <= limit:
+            parts.append(text)
+            break
+        # Largest code-point prefix that fits in `limit` UTF-16 units.
+        lo, hi = 1, min(len(text), limit)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if _utf16_units(text[:mid]) <= limit:
+                lo = mid
+            else:
+                hi = mid - 1
+        cut = lo
+        newline = text.rfind("\n", max(0, cut - _SPLIT_NEWLINE_WINDOW), cut)
+        if newline != -1:
+            cut = newline + 1
+        parts.append(text[:cut])
+        text = text[cut:]
     return parts
 
 

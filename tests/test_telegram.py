@@ -44,11 +44,28 @@ class SplitMessageTests(unittest.TestCase):
         text = "a" * 5000
         parts = _split_message(text, max_len=4096)
         self.assertEqual(len(parts), 2)
-        self.assertEqual(len(parts[0]), 4096)
-        self.assertEqual(len(parts[1]), 904)
+        self.assertEqual(len(parts[0]), 4000)
+        self.assertEqual(len(parts[1]), 1000)
 
     def test_empty_message(self) -> None:
         self.assertEqual(_split_message(""), [""])
+
+    def test_split_counts_utf16_units_not_code_points(self) -> None:
+        # Telegram counts UTF-16 code units: 4096 non-BMP emojis are 8192
+        # units, so a code-point split would hit MESSAGE_TOO_LONG (T3).
+        text = "\U0001f600" * 4096
+        parts = _split_message(text)
+        self.assertEqual("".join(parts), text)
+        for part in parts:
+            self.assertLessEqual(len(part.encode("utf-16-le")) // 2, 4096)
+        self.assertEqual(len(parts), 3)
+
+    def test_split_prefers_newline_boundary(self) -> None:
+        text = "x" * 3900 + "\n" + "y" * 500
+        parts = _split_message(text)
+        self.assertEqual(parts[0], "x" * 3900 + "\n")
+        self.assertEqual(parts[1], "y" * 500)
+        self.assertEqual("".join(parts), text)
 
 
 class TransportStartTests(unittest.IsolatedAsyncioTestCase):
@@ -1233,7 +1250,7 @@ class ProactiveSendTextTests(unittest.IsolatedAsyncioTestCase):
             call.kwargs["text"]
             for call in transport._app.bot.send_message.await_args_list
         }
-        self.assertEqual(sent_texts, {"a" * 4096})
+        self.assertEqual(sent_texts, {"a" * 4000})
         transport._send_text_direct_bot_api.assert_awaited_once()
         events = self._events(bot_service)
         self.assertTrue(
