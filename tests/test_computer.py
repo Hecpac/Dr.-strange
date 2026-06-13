@@ -910,6 +910,47 @@ class ComputerHandlerSessionArtifactTests(unittest.TestCase):
         )
 
 
+class DelegatedBrowserTaskTests(unittest.TestCase):
+    """Option (b), 2026-06-13: ComputerHandler.run_delegated_browser_task is the
+    in-process executor TaskHandler routes CDP/browse jobs to (BrowserUseService
+    in the daemon venv, not the network-denied Codex coordinator)."""
+
+    def test_runs_browser_use_with_long_timeout(self) -> None:
+        import types
+
+        from claw_v2.computer_handler import ComputerHandler
+
+        class FakeBrowserUse:
+            last_artifact_path = None
+
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, object]] = []
+
+            async def run_task(self, task, **kwargs):
+                self.calls.append((task, kwargs.get("timeout")))
+                return "feed capturado: 30 posts"
+
+        fake = FakeBrowserUse()
+        config = types.SimpleNamespace(
+            computer_auto_approve=True,
+            sensitive_urls=[],
+            computer_browser_use_timeout_seconds=0,
+        )
+        handler = ComputerHandler(browser_use=fake, config=config)
+        out = handler.run_delegated_browser_task("repaso por X", task_id="t-1", mode="browse")
+        self.assertEqual(out, "feed capturado: 30 posts")
+        self.assertEqual(fake.calls[0][0], "repaso por X")
+        # Long browser/CDP budget (1200s), NOT the 180s interactive default.
+        self.assertEqual(fake.calls[0][1], 1200)
+
+    def test_unavailable_browser_use_returns_clear_message(self) -> None:
+        from claw_v2.computer_handler import ComputerHandler
+
+        handler = ComputerHandler(browser_use=None, config=None)
+        out = handler.run_delegated_browser_task("abre la web", task_id="t-2", mode="browse")
+        self.assertIn("no está disponible", out)
+
+
 class ComputerHandlerTimeoutTests(_ComputerHandlerConfigTest):
 
     def test_timeout_defaults_to_constant_without_config(self) -> None:

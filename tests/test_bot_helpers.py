@@ -10,6 +10,7 @@ from claw_v2.bot_helpers import (
     _extract_ratio_context_from_text,
     _looks_like_ratio_reference_request,
     _sanitize_chat_response,
+    _should_use_browser_executor,
 )
 from claw_v2.capability_preflight import CommandSpec, preflight_command, preflight_objective
 from claw_v2.sandbox import SandboxPolicy
@@ -432,6 +433,17 @@ class CoordinatorTaskBuilderTests(unittest.TestCase):
         _, impl_plain, _ = _build_coordinator_tasks("ops", "Corre el script de backup y reporta")
         self.assertIsNone(impl_plain[0].timeout_seconds)
         self.assertNotIn("browser/CDP guard", impl_plain[0].instruction)
+
+    def test_should_use_browser_executor(self) -> None:
+        # browse always routes to the in-process browser executor.
+        self.assertTrue(_should_use_browser_executor("browse", "abre la página"))
+        # ops/publish only when the objective signals browser/CDP work.
+        self.assertTrue(_should_use_browser_executor("ops", "driver Chrome CDP en localhost:9250"))
+        self.assertTrue(_should_use_browser_executor("publish", "publica el reel en Instagram"))
+        # plain ops/publish and code modes stay on the Codex coordinator.
+        self.assertFalse(_should_use_browser_executor("ops", "corre el script de backup"))
+        self.assertFalse(_should_use_browser_executor("coding", "arregla el bug"))
+        self.assertFalse(_should_use_browser_executor("research", "investiga el tema"))
 
 
 if __name__ == "__main__":

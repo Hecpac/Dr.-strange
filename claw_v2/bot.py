@@ -1025,6 +1025,13 @@ class BotService:
             brain_handle_message=lambda *args, **kwargs: self.brain.handle_message(*args, **kwargs),
             current_url_resolver=self._browse_handler.recent_browse_url,
         )
+        # Option (b), 2026-06-13: route delegated CDP/browser jobs to the
+        # in-process browser executor (ComputerHandler -> BrowserUseService /
+        # Playwright in the daemon venv) instead of the network-denied Codex
+        # coordinator (whose --sandbox workspace-write blocks localhost:9250).
+        self._task_handler.browser_executor = (
+            self._computer_handler.run_delegated_browser_task
+        )
         self._agent_handler = AgentHandler(
             auto_research=auto_research,
             pull_requests=pull_requests,
