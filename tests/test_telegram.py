@@ -11,12 +11,18 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from telegram.error import TimedOut
+from telegram.error import BadRequest, RetryAfter, TimedOut
 
 import claw_v2.observe as observe_module
 from claw_v2.memory import MemoryStore
 from claw_v2.observe import ObserveStream
-from claw_v2.telegram import TelegramTransport, _polling_lock_path, _split_message
+from claw_v2.telegram import (
+    TelegramTransport,
+    _build_image_content_blocks,
+    _build_video_content_blocks,
+    _polling_lock_path,
+    _split_message,
+)
 
 
 def _purge_polling_lock(token: str) -> None:
@@ -38,11 +44,55 @@ class SplitMessageTests(unittest.TestCase):
         text = "a" * 5000
         parts = _split_message(text, max_len=4096)
         self.assertEqual(len(parts), 2)
-        self.assertEqual(len(parts[0]), 4096)
-        self.assertEqual(len(parts[1]), 904)
+        self.assertEqual(len(parts[0]), 4000)
+        self.assertEqual(len(parts[1]), 1000)
 
     def test_empty_message(self) -> None:
         self.assertEqual(_split_message(""), [""])
+
+    def test_split_counts_utf16_units_not_code_points(self) -> None:
+        # Telegram counts UTF-16 code units: 4096 non-BMP emojis are 8192
+        # units, so a code-point split would hit MESSAGE_TOO_LONG (T3).
+        text = "\U0001f600" * 4096
+        parts = _split_message(text)
+        self.assertEqual("".join(parts), text)
+        for part in parts:
+            self.assertLessEqual(len(part.encode("utf-16-le")) // 2, 4096)
+        self.assertEqual(len(parts), 3)
+
+    def test_split_prefers_newline_boundary(self) -> None:
+        text = "x" * 3900 + "\n" + "y" * 500
+        parts = _split_message(text)
+        self.assertEqual(parts[0], "x" * 3900 + "\n")
+        self.assertEqual(parts[1], "y" * 500)
+        self.assertEqual("".join(parts), text)
+
+
+class RateLimitConfigTests(unittest.TestCase):
+    """T9: the 10/60s limiter silently dropped the single operator's 11th
+    message; the limits are now env-tunable with a 30/60s default."""
+
+    def test_defaults_to_30_per_60s(self) -> None:
+        transport = TelegramTransport(bot_service=MagicMock(), token="t")
+        self.assertEqual(transport._rate_max, 30)
+        self.assertEqual(transport._rate_window, 60.0)
+
+    def test_env_overrides_and_limit_enforced(self) -> None:
+        with patch.dict(
+            "os.environ", {"TELEGRAM_RATE_MAX": "2", "TELEGRAM_RATE_WINDOW": "30"}
+        ):
+            transport = TelegramTransport(bot_service=MagicMock(), token="t")
+        self.assertEqual(transport._rate_max, 2)
+        self.assertEqual(transport._rate_window, 30.0)
+        self.assertFalse(transport._is_rate_limited("u"))
+        self.assertFalse(transport._is_rate_limited("u"))
+        self.assertTrue(transport._is_rate_limited("u"))
+
+    def test_rate_max_is_capped(self) -> None:
+        # A huge value must not silently disable rate limiting (review #100).
+        with patch.dict("os.environ", {"TELEGRAM_RATE_MAX": "999999"}):
+            transport = TelegramTransport(bot_service=MagicMock(), token="t")
+        self.assertEqual(transport._rate_max, 120)
 
 
 class TransportStartTests(unittest.IsolatedAsyncioTestCase):
@@ -76,7 +126,29 @@ class TransportStartTests(unittest.IsolatedAsyncioTestCase):
         mock_builder.get_updates_pool_timeout.assert_called_once_with(30.0)
         mock_app.initialize.assert_awaited_once()
         mock_app.start.assert_awaited_once()
-        mock_app.updater.start_polling.assert_awaited_once()
+        mock_app.updater.start_polling.assert_awaited_once_with(
+            drop_pending_updates=False
+        )
+        await transport.stop()
+
+    @patch("claw_v2.telegram.ApplicationBuilder")
+    async def test_start_polling_drops_pending_updates_when_env_set(
+        self, mock_builder_cls
+    ) -> None:
+        mock_app = AsyncMock()
+        mock_app.updater = AsyncMock()
+        mock_app.add_handler = MagicMock()
+        mock_builder = MagicMock()
+        mock_builder.token.return_value = mock_builder
+        mock_builder.build.return_value = mock_app
+        mock_builder_cls.return_value = mock_builder
+
+        transport = TelegramTransport(bot_service=MagicMock(), token="test-token")
+        with patch.dict("os.environ", {"TELEGRAM_DROP_PENDING_UPDATES": "1"}):
+            await transport.start()
+        mock_app.updater.start_polling.assert_awaited_once_with(
+            drop_pending_updates=True
+        )
         await transport.stop()
 
     @patch("claw_v2.telegram.ApplicationBuilder")
@@ -840,13 +912,35 @@ class HandleImageTests(unittest.IsolatedAsyncioTestCase):
         mock_context = MagicMock()
         mock_context.bot.get_file = AsyncMock(return_value=mock_file)
 
-        with patch("claw_v2.telegram.asyncio.to_thread", new_callable=AsyncMock, return_value="image response") as mock_to_thread:
+        with patch(
+            "claw_v2.telegram.asyncio.to_thread",
+            new_callable=AsyncMock,
+            side_effect=lambda func, *a, **k: (
+                func(*a, **k) if func is _build_image_content_blocks else "image response"
+            ),
+        ) as mock_to_thread:
             await transport._handle_photo(update, mock_context)
 
         update.message.reply_text.assert_awaited_once()
         self.assertEqual(update.message.reply_text.await_args.args[0], "image response")
-        bot_service.observe.emit.assert_called_once()
-        payload = bot_service.observe.emit.call_args.kwargs["payload"]
+        # T6: the up-to-20MB read+base64 encode must run off the event loop.
+        self.assertTrue(
+            any(
+                call.args and call.args[0] is _build_image_content_blocks
+                for call in mock_to_thread.await_args_list
+            )
+        )
+        events = [
+            (call.args[0], call.kwargs["payload"])
+            for call in bot_service.observe.emit.call_args_list
+        ]
+        self.assertTrue(
+            any(
+                name == "telegram_outbound_sent" and payload["message_kind"] == "image"
+                for name, payload in events
+            )
+        )
+        payload = next(payload for name, payload in events if name == "telegram_latency")
         self.assertEqual(payload["message_kind"], "image")
         self.assertEqual(payload["response_parts"], 1)
         _, kwargs = mock_to_thread.await_args
@@ -888,7 +982,13 @@ class HandleImageTests(unittest.IsolatedAsyncioTestCase):
         mock_context = MagicMock()
         mock_context.bot.get_file = AsyncMock(return_value=mock_file)
 
-        with patch("claw_v2.telegram.asyncio.to_thread", new_callable=AsyncMock, return_value="doc response") as mock_to_thread:
+        with patch(
+            "claw_v2.telegram.asyncio.to_thread",
+            new_callable=AsyncMock,
+            side_effect=lambda func, *a, **k: (
+                func(*a, **k) if func is _build_image_content_blocks else "doc response"
+            ),
+        ) as mock_to_thread:
             await transport._handle_image_document(update, mock_context)
 
         update.message.reply_text.assert_awaited_once()
@@ -914,8 +1014,17 @@ class HandleImageTests(unittest.IsolatedAsyncioTestCase):
         with patch("claw_v2.telegram.asyncio.to_thread", new_callable=AsyncMock, return_value="voice response"):
             await transport._handle_text_content(update, "hola")
 
-        bot_service.observe.emit.assert_called_once()
-        payload = bot_service.observe.emit.call_args.kwargs["payload"]
+        events = [
+            (call.args[0], call.kwargs["payload"])
+            for call in bot_service.observe.emit.call_args_list
+        ]
+        self.assertTrue(
+            any(
+                name == "telegram_outbound_sent" and payload["message_kind"] == "transcript"
+                for name, payload in events
+            )
+        )
+        payload = next(payload for name, payload in events if name == "telegram_latency")
         self.assertEqual(payload["message_kind"], "transcript")
         self.assertEqual(payload["status"], "ok")
         self.assertEqual(payload["response_chars"], len("voice response"))
@@ -994,13 +1103,24 @@ class HandleVideoTests(unittest.IsolatedAsyncioTestCase):
                         with patch(
                             "claw_v2.telegram.asyncio.to_thread",
                             new_callable=AsyncMock,
-                            return_value="video response",
+                            side_effect=lambda func, *a, **k: (
+                                func(*a, **k)
+                                if func is _build_video_content_blocks
+                                else "video response"
+                            ),
                         ) as mock_to_thread:
                             await transport._handle_video(update, mock_context)
 
         update.message.reply_text.assert_awaited()
         self.assertEqual(update.message.reply_text.await_args.args[0], "video response")
         mock_frames.assert_awaited_once()
+        # T6: the frame read+base64 encode must run off the event loop.
+        self.assertTrue(
+            any(
+                call.args and call.args[0] is _build_video_content_blocks
+                for call in mock_to_thread.await_args_list
+            )
+        )
         _, kwargs = mock_to_thread.await_args
         self.assertEqual(kwargs["user_id"], "123")
         self.assertEqual(kwargs["session_id"], "tg-1")
@@ -1064,6 +1184,25 @@ class SendPhotoTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(sent)
 
+    async def test_send_photo_returns_false_on_unexpected_error(self) -> None:
+        transport = TelegramTransport(
+            bot_service=MagicMock(), token="t", allowed_user_id="123",
+        )
+        transport._app = MagicMock()
+        transport._app.bot = AsyncMock()
+        transport._app.bot.send_photo.side_effect = BadRequest("PHOTO_INVALID_DIMENSIONS")
+
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            tmp.write(b"\x89PNG\r\n\x1a\n")
+            tmp_path = tmp.name
+
+        try:
+            sent = await transport.send_photo(chat_id=1, photo_path=tmp_path)
+        finally:
+            Path(tmp_path).unlink(missing_ok=True)
+
+        self.assertFalse(sent)
+
     async def test_send_text_treats_connection_reset_as_nonfatal(self) -> None:
         transport = TelegramTransport(
             bot_service=MagicMock(), token="t", allowed_user_id="123",
@@ -1071,9 +1210,11 @@ class SendPhotoTests(unittest.IsolatedAsyncioTestCase):
         transport._app = MagicMock()
         transport._app.bot = AsyncMock()
         transport._app.bot.send_message.side_effect = ConnectionResetError("reset")
+        transport._send_text_direct_bot_api = AsyncMock(return_value=False)
 
-        await transport.send_text(chat_id=1, text="hello")
+        delivered = await transport.send_text(chat_id=1, text="hello")
 
+        self.assertFalse(delivered)
         transport._app.bot.send_message.assert_awaited_once()
 
     async def test_send_text_sanitizes_proactive_internal_details(self) -> None:
@@ -1096,6 +1237,165 @@ class SendPhotoTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("tg-574707975", sent_text)
         self.assertNotIn("runtime lost authoritative backing state", sent_text)
         self.assertIn("se perdio el estado ejecutable", sent_text)
+
+
+class ProactiveSendTextTests(unittest.IsolatedAsyncioTestCase):
+    """send_text is the proactive path (task-completion notifications,
+    observability alerts, NotebookLM): it must retry retryable errors,
+    fall back to the direct Bot API, report failure as False, and never
+    deliver a later part after an earlier part was lost (T1, 2026-06-12)."""
+
+    def _transport(self) -> tuple[TelegramTransport, MagicMock]:
+        bot_service = MagicMock()
+        bot_service.observe = MagicMock()
+        transport = TelegramTransport(
+            bot_service=bot_service, token="t", allowed_user_id="123",
+        )
+        transport._text_send_retries = 2
+        transport._text_send_retry_delay = 0.0
+        transport._app = MagicMock()
+        transport._app.bot = AsyncMock()
+        return transport, bot_service
+
+    @staticmethod
+    def _events(bot_service: MagicMock) -> list[tuple[str, dict]]:
+        return [
+            (call.args[0], call.kwargs["payload"])
+            for call in bot_service.observe.emit.call_args_list
+        ]
+
+    async def test_retries_flood_control_then_delivers(self) -> None:
+        transport, bot_service = self._transport()
+        transport._app.bot.send_message.side_effect = [
+            RetryAfter(retry_after=0),
+            SimpleNamespace(message_id=5),
+        ]
+
+        delivered = await transport.send_text(chat_id=1, text="hello")
+
+        self.assertTrue(delivered)
+        self.assertEqual(transport._app.bot.send_message.await_count, 2)
+        events = self._events(bot_service)
+        self.assertTrue(
+            any(
+                name == "telegram_outbound_sent"
+                and payload["message_kind"] == "proactive"
+                and payload["attempt"] == 2
+                and payload["message_id"] == 5
+                for name, payload in events
+            )
+        )
+
+    async def test_exhausted_part_returns_false_and_skips_remaining_parts(self) -> None:
+        transport, bot_service = self._transport()
+        transport._app.bot.send_message.side_effect = TimedOut("Timed out")
+        transport._send_text_direct_bot_api = AsyncMock(return_value=False)
+
+        delivered = await transport.send_text(chat_id=1, text="a" * 5000)
+
+        self.assertFalse(delivered)
+        # Both attempts belong to part 1; part 2 is never attempted.
+        sent_texts = {
+            call.kwargs["text"]
+            for call in transport._app.bot.send_message.await_args_list
+        }
+        self.assertEqual(sent_texts, {"a" * 4000})
+        transport._send_text_direct_bot_api.assert_awaited_once()
+        events = self._events(bot_service)
+        self.assertTrue(
+            any(
+                name == "telegram_outbound_error"
+                and payload["message_kind"] == "proactive"
+                and payload["error_type"] == "TimedOut"
+                for name, payload in events
+            )
+        )
+
+    async def test_falls_back_to_direct_bot_api_when_ptb_exhausted(self) -> None:
+        transport, bot_service = self._transport()
+        transport._app.bot.send_message.side_effect = TimedOut("Timed out")
+        transport._send_text_direct_bot_api = AsyncMock(return_value=True)
+
+        delivered = await transport.send_text(chat_id=1, text="hello")
+
+        self.assertTrue(delivered)
+        transport._send_text_direct_bot_api.assert_awaited_once()
+        self.assertEqual(
+            transport._send_text_direct_bot_api.await_args.kwargs["message_kind"],
+            "proactive",
+        )
+
+    async def test_parse_mode_blocks_direct_fallback(self) -> None:
+        transport, bot_service = self._transport()
+        transport._app.bot.send_message.side_effect = TimedOut("Timed out")
+        transport._send_text_direct_bot_api = AsyncMock(return_value=True)
+
+        delivered = await transport.send_text(
+            chat_id=1, text="hello", parse_mode="Markdown"
+        )
+
+        self.assertFalse(delivered)
+        transport._send_text_direct_bot_api.assert_not_awaited()
+
+    async def test_attempt_telemetry_is_not_awaited_in_send_path(self) -> None:
+        """telegram_outbound_attempt rides the single-worker executor without
+        an await: under SQLite contention each awaited emit adds up to ~0.3s
+        per part to the send path (T5, 2026-06-12). The awaited final
+        sent/error emit doubles as the ordering barrier."""
+        transport, bot_service = self._transport()
+        transport._app.bot.send_message.return_value = SimpleNamespace(message_id=1)
+        awaited_types: list[str] = []
+        original = transport._aemit_transport_event
+
+        async def spy(event_type: str, payload: dict) -> None:
+            awaited_types.append(event_type)
+            await original(event_type, payload)
+
+        transport._aemit_transport_event = spy
+
+        delivered = await transport.send_text(chat_id=1, text="hello")
+
+        self.assertTrue(delivered)
+        self.assertNotIn("telegram_outbound_attempt", awaited_types)
+        emitted = [call.args[0] for call in bot_service.observe.emit.call_args_list]
+        self.assertIn("telegram_outbound_attempt", emitted)
+        self.assertLess(
+            emitted.index("telegram_outbound_attempt"),
+            emitted.index("telegram_outbound_sent"),
+        )
+
+    async def test_nowait_emit_survives_executor_shutdown_race(self) -> None:
+        """executor.submit can raise RuntimeError if the observe executor was
+        shut down between the lookup and the submit (stop() racing an in-flight
+        send). Telemetry must never crash delivery (gemini review #100)."""
+        transport, bot_service = self._transport()
+        executor = transport._observe_emit_executor()
+        executor.shutdown(wait=True)  # now submit() raises RuntimeError
+
+        # Must not raise, and must keep the audit event via the inline fallback.
+        transport._emit_outbound_text_event_nowait(
+            "telegram_outbound_attempt",
+            session_id="tg-1",
+            user_id="1",
+            message_kind="proactive",
+            method="send_message",
+            part_index=1,
+            part_count=1,
+            part_chars=5,
+            attempt=1,
+        )
+        emitted = [call.args[0] for call in bot_service.observe.emit.call_args_list]
+        self.assertIn("telegram_outbound_attempt", emitted)
+
+    async def test_nonretryable_error_does_not_retry(self) -> None:
+        transport, bot_service = self._transport()
+        transport._app.bot.send_message.side_effect = BadRequest("MESSAGE_TOO_LONG")
+        transport._send_text_direct_bot_api = AsyncMock(return_value=False)
+
+        delivered = await transport.send_text(chat_id=1, text="hello")
+
+        self.assertFalse(delivered)
+        transport._app.bot.send_message.assert_awaited_once()
 
 
 class ObserveEmitOffloadTests(unittest.IsolatedAsyncioTestCase):

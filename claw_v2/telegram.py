@@ -222,13 +222,41 @@ _NONRETRYABLE_TEXT_SEND_ERRORS = {
 }
 
 
+# Telegram's 4096 limit counts UTF-16 code units, not Python code points:
+# a near-limit message with non-BMP emojis split by code points fails with
+# MESSAGE_TOO_LONG (BadRequest, non-retryable) and the part is lost (T3).
+# 4000 leaves margin; the newline window avoids mid-word cuts.
+_SAFE_TELEGRAM_UTF16_UNITS = 4000
+_SPLIT_NEWLINE_WINDOW = 400
+
+
+def _utf16_units(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
+
+
 def _split_message(text: str, max_len: int = MAX_TELEGRAM_LEN) -> list[str]:
     if not text:
         return [text]
+    limit = min(max_len, _SAFE_TELEGRAM_UTF16_UNITS)
     parts: list[str] = []
     while text:
-        parts.append(text[:max_len])
-        text = text[max_len:]
+        if _utf16_units(text) <= limit:
+            parts.append(text)
+            break
+        # Largest code-point prefix that fits in `limit` UTF-16 units.
+        lo, hi = 1, min(len(text), limit)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if _utf16_units(text[:mid]) <= limit:
+                lo = mid
+            else:
+                hi = mid - 1
+        cut = lo
+        newline = text.rfind("\n", max(0, cut - _SPLIT_NEWLINE_WINDOW), cut)
+        if newline != -1:
+            cut = newline + 1
+        parts.append(text[:cut])
+        text = text[cut:]
     return parts
 
 
@@ -577,8 +605,11 @@ class TelegramTransport:
         self._xai_api_key = xai_api_key or os.environ.get("XAI_API_KEY")
         self._app = None
         self._rate_limits: dict[str, list[float]] = {}
-        self._rate_max = 10  # max requests per window
-        self._rate_window = 60.0  # seconds
+        # The sole operator hit the old hardcoded 10/60s ceiling and the 11th
+        # message was silently dropped (T9, 2026-06-12). Capped at 120 so a
+        # mistyped env value cannot silently disable the limiter (review #100).
+        self._rate_max = min(120, max(1, _env_int("TELEGRAM_RATE_MAX", 30)))
+        self._rate_window = max(1.0, _env_float("TELEGRAM_RATE_WINDOW", 60.0))
         self._connection_pool_size = _env_int("TELEGRAM_CONNECTION_POOL_SIZE", DEFAULT_CONNECTION_POOL_SIZE)
         self._pool_timeout = _env_float("TELEGRAM_POOL_TIMEOUT", DEFAULT_POOL_TIMEOUT)
         self._request_timeout = _env_float("TELEGRAM_REQUEST_TIMEOUT", DEFAULT_REQUEST_TIMEOUT)
@@ -618,28 +649,6 @@ class TelegramTransport:
         if lock is None:
             lock = self._chat_locks.setdefault(session_id, asyncio.Lock())
         return lock
-
-    async def _reply_parts(self, update: Update, parts: list[str]) -> bool:
-        """Send reply parts with flood-control retry.
-
-        Returns False when delivery ultimately failed so callers can emit
-        status="send_failed" — previously the exception propagated after the
-        assistant turn was already persisted, so the agent believed it
-        answered and no telemetry recorded the loss (2026-06-10 audit C2).
-        """
-        for part in parts:
-            for attempt in range(3):
-                try:
-                    await update.message.reply_text(part, link_preview_options=_NO_PREVIEW)
-                    break
-                except Exception as exc:
-                    retry_after = getattr(exc, "retry_after", None)
-                    if attempt >= 2:
-                        logger.warning("Telegram reply failed after retries", exc_info=True)
-                        return False
-                    delay = float(retry_after) + 0.5 if retry_after is not None else 1.5 * (attempt + 1)
-                    await asyncio.sleep(delay)
-        return True
 
     def _emit_transport_event(self, event_type: str, payload: dict[str, Any]) -> None:
         observe = getattr(self._bot_service, "observe", None)
@@ -733,9 +742,8 @@ class TelegramTransport:
             },
         )
 
-    async def _emit_outbound_text_event(
-        self,
-        event_type: str,
+    @staticmethod
+    def _outbound_text_payload(
         *,
         session_id: str,
         user_id: str,
@@ -747,7 +755,7 @@ class TelegramTransport:
         attempt: int | None = None,
         error: BaseException | None = None,
         message_id: int | None = None,
-    ) -> None:
+    ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "session_id": session_id,
             "user_id": user_id,
@@ -764,7 +772,43 @@ class TelegramTransport:
         if error is not None:
             payload["error_type"] = type(error).__name__
             payload["error"] = str(error)[:300]
-        await self._aemit_transport_event(event_type, payload)
+        return payload
+
+    async def _emit_outbound_text_event(
+        self,
+        event_type: str,
+        **kwargs: Any,
+    ) -> None:
+        await self._aemit_transport_event(
+            event_type, self._outbound_text_payload(**kwargs)
+        )
+
+    def _emit_outbound_text_event_nowait(
+        self,
+        event_type: str,
+        **kwargs: Any,
+    ) -> None:
+        """Fire-and-forget emit on the single-worker executor.
+
+        For per-attempt telemetry on the send critical path: under SQLite
+        contention an awaited emit costs up to ~0.3s per write, which a
+        multipart reply pays 2-3 times per part (T5, 2026-06-12). The single
+        worker preserves ordering; the final sent/error emit stays awaited
+        and acts as the barrier.
+        """
+        payload = self._outbound_text_payload(**kwargs)
+        executor = self._observe_emit_executor()
+        if executor is None:
+            # Shutdown-tail emit: keep the audit event, accept the inline write.
+            self._emit_transport_event(event_type, payload)
+            return
+        try:
+            executor.submit(self._emit_transport_event, event_type, payload)
+        except RuntimeError:
+            # Executor shut down between the lookup and the submit (stop()
+            # racing an in-flight send). Telemetry never crashes delivery
+            # (gemini review #100): keep the audit event inline.
+            self._emit_transport_event(event_type, payload)
 
     async def _sleep_before_text_send_retry(self, exc: BaseException, attempt: int) -> None:
         retry_after = getattr(exc, "retry_after", None)
@@ -822,7 +866,7 @@ class TelegramTransport:
     ) -> bool:
         timeout_kwargs = self._send_text_timeout_kwargs()
         for attempt in range(1, self._text_send_retries + 1):
-            await self._emit_outbound_text_event(
+            self._emit_outbound_text_event_nowait(
                 "telegram_outbound_attempt",
                 session_id=session_id,
                 user_id=user_id,
@@ -899,7 +943,7 @@ class TelegramTransport:
             return True
 
         for attempt in range(1, self._text_send_retries + 1):
-            await self._emit_outbound_text_event(
+            self._emit_outbound_text_event_nowait(
                 "telegram_outbound_attempt",
                 session_id=session_id,
                 user_id=user_id,
@@ -971,7 +1015,7 @@ class TelegramTransport:
     ) -> bool:
         if not self._token:
             return False
-        await self._emit_outbound_text_event(
+        self._emit_outbound_text_event_nowait(
             "telegram_outbound_attempt",
             session_id=session_id,
             user_id=user_id,
@@ -1123,7 +1167,11 @@ class TelegramTransport:
         ))
         await self._app.initialize()
         await self._app.start()
-        await self._app.updater.start_polling()
+        # Default 0: after downtime the backlog is processed, never dropped.
+        # Set TELEGRAM_DROP_PENDING_UPDATES=1 to skip a stale backlog (T7).
+        await self._app.updater.start_polling(
+            drop_pending_updates=_env_int("TELEGRAM_DROP_PENDING_UPDATES", 0) == 1
+        )
         await self._set_commands()
         await self._notify_startup()
 
@@ -1644,7 +1692,9 @@ class TelegramTransport:
             )
             caption = update.message.caption or ""
             if frame_paths:
-                content_blocks, memory_text = _build_video_content_blocks(
+                # Reads + base64-encodes every frame: off the event loop (T6).
+                content_blocks, memory_text = await asyncio.to_thread(
+                    _build_video_content_blocks,
                     frame_paths,
                     caption=caption,
                     durable_video_path=durable_video,
@@ -1789,7 +1839,13 @@ class TelegramTransport:
             # A failed download used to abort the handler in total silence
             # (the voice/document handlers already apologize) — C1.
             logger.exception("Error downloading image message")
-            await self._reply_parts(update, ["No pude descargar la imagen. Reenvíala e intento de nuevo."])
+            await self._send_reply_text_parts(
+                update,
+                ["No pude descargar la imagen. Reenvíala e intento de nuevo."],
+                session_id=session_id,
+                user_id=user_id,
+                message_kind="image",
+            )
             await self._emit_latency(
                 session_id=session_id,
                 user_id=user_id,
@@ -1808,7 +1864,9 @@ class TelegramTransport:
         except Exception:
             durable_path = tmp_path
         try:
-            content_blocks, memory_text = _build_image_content_blocks(
+            # Reads + base64-encodes up to 20MB: off the event loop (T6).
+            content_blocks, memory_text = await asyncio.to_thread(
+                _build_image_content_blocks,
                 tmp_path,
                 caption=caption,
                 mime_type=mime_type,
@@ -1832,7 +1890,13 @@ class TelegramTransport:
             response = "(procesando... intenta de nuevo en unos segundos)"
         response = self._sanitize_outbound_response(session_id, response)
         parts = _split_message(response)
-        delivered = await self._reply_parts(update, parts)
+        _, delivered = await self._send_reply_text_parts(
+            update,
+            parts,
+            session_id=session_id,
+            user_id=user_id,
+            message_kind="image",
+        )
         finished_at = time.perf_counter()
         await self._emit_latency(
             session_id=session_id,
@@ -1897,7 +1961,13 @@ class TelegramTransport:
             response = "(procesando... intenta de nuevo en unos segundos)"
         response = self._sanitize_outbound_response(session_id, response)
         parts = _split_message(response)
-        delivered = await self._reply_parts(update, parts)
+        _, delivered = await self._send_reply_text_parts(
+            update,
+            parts,
+            session_id=session_id,
+            user_id=user_id,
+            message_kind="document",
+        )
         finished_at = time.perf_counter()
         await self._emit_latency(
             session_id=session_id,
@@ -1926,6 +1996,12 @@ class TelegramTransport:
         except _NONFATAL_SEND_ERRORS as exc:
             _log_nonfatal_send_error("send_photo", exc)
             return False
+        except Exception:
+            # A BadRequest here used to blow up the whole text handler
+            # (_maybe_send_latest_generated_image) into "Error procesando
+            # tu mensaje" (2026-06-12 audit T4).
+            logger.warning("send_photo failed", exc_info=True)
+            return False
         return True
 
     async def send_video_url(self, *, chat_id: int, video_url: str, caption: str | None = None) -> None:
@@ -1937,21 +2013,119 @@ class TelegramTransport:
         except _NONFATAL_SEND_ERRORS as exc:
             _log_nonfatal_send_error("send_video_url", exc)
 
-    async def send_text(self, *, chat_id: int, text: str, parse_mode: str | None = None) -> None:
-        """Send a proactive text message, split to Telegram's message limit."""
+    async def send_text(self, *, chat_id: int, text: str, parse_mode: str | None = None) -> bool:
+        """Send a proactive text message, split to Telegram's message limit.
+
+        This is the delivery path for task-completion notifications,
+        observability alerts and NotebookLM. Returns False when a part
+        ultimately failed; later parts are never attempted so the caller
+        sees the message as lost instead of delivered with a hole in the
+        middle (2026-06-12 audit T1).
+        """
         if self._app is None:
-            return
-        response = self._sanitize_outbound_response(f"tg-{chat_id}", text)
-        for part in _split_message(response):
+            return False
+        session_id = f"tg-{chat_id}"
+        response = self._sanitize_outbound_response(session_id, text)
+        parts = _split_message(response)
+        part_count = len(parts)
+        for index, part in enumerate(parts, start=1):
+            sent = await self._send_proactive_text_part(
+                part,
+                chat_id=chat_id,
+                parse_mode=parse_mode,
+                session_id=session_id,
+                part_index=index,
+                part_count=part_count,
+            )
+            if not sent:
+                return False
+        return True
+
+    async def _send_proactive_text_part(
+        self,
+        part: str,
+        *,
+        chat_id: int,
+        parse_mode: str | None,
+        session_id: str,
+        part_index: int,
+        part_count: int,
+    ) -> bool:
+        user_id = str(chat_id)
+        timeout_kwargs = self._send_text_timeout_kwargs()
+        for attempt in range(1, self._text_send_retries + 1):
+            self._emit_outbound_text_event_nowait(
+                "telegram_outbound_attempt",
+                session_id=session_id,
+                user_id=user_id,
+                message_kind="proactive",
+                method="send_message",
+                part_index=part_index,
+                part_count=part_count,
+                part_chars=len(part),
+                attempt=attempt,
+            )
             try:
-                await self._app.bot.send_message(
+                result = await self._app.bot.send_message(
                     chat_id=chat_id,
                     text=part,
                     parse_mode=parse_mode,
                     link_preview_options=_NO_PREVIEW,
+                    **timeout_kwargs,
                 )
-            except _NONFATAL_SEND_ERRORS as exc:
-                _log_nonfatal_send_error("send_text", exc)
+            except Exception as exc:
+                retryable = _is_retryable_text_send_error(exc)
+                logger.warning(
+                    "Telegram proactive send_message failed%s",
+                    "; retrying" if retryable and attempt < self._text_send_retries else "",
+                    exc_info=True,
+                )
+                await self._emit_outbound_text_event(
+                    "telegram_outbound_error",
+                    session_id=session_id,
+                    user_id=user_id,
+                    message_kind="proactive",
+                    method="send_message",
+                    part_index=part_index,
+                    part_count=part_count,
+                    part_chars=len(part),
+                    attempt=attempt,
+                    error=exc,
+                )
+                if not retryable:
+                    break
+                if attempt < self._text_send_retries:
+                    await self._sleep_before_text_send_retry(exc, attempt)
+            else:
+                message_id = getattr(result, "message_id", None)
+                await self._emit_outbound_text_event(
+                    "telegram_outbound_sent",
+                    session_id=session_id,
+                    user_id=user_id,
+                    message_kind="proactive",
+                    method="send_message",
+                    part_index=part_index,
+                    part_count=part_count,
+                    part_chars=len(part),
+                    attempt=attempt,
+                    message_id=message_id if isinstance(message_id, int) else None,
+                )
+                return True
+
+        # The direct Bot API fallback sends plain text only; with a
+        # parse_mode the silently-unformatted message could change meaning,
+        # so report the loss instead.
+        if parse_mode is not None:
+            return False
+        return await self._send_text_direct_bot_api(
+            part,
+            chat_id=chat_id,
+            session_id=session_id,
+            user_id=user_id,
+            message_kind="proactive",
+            part_index=part_index,
+            part_count=part_count,
+        )
 
     async def _handle_text_content(
         self,
@@ -2003,11 +2177,23 @@ class TelegramTransport:
                     ogg_path.unlink(missing_ok=True)
             except Exception:
                 logger.warning("TTS failed, falling back to text", exc_info=True)
-                delivered = await self._reply_parts(update, parts)
+                _, delivered = await self._send_reply_text_parts(
+                    update,
+                    parts,
+                    session_id=session_id,
+                    user_id=user_id,
+                    message_kind="transcript",
+                )
             else:
                 delivered = True
         else:
-            delivered = await self._reply_parts(update, parts)
+            _, delivered = await self._send_reply_text_parts(
+                update,
+                parts,
+                session_id=session_id,
+                user_id=user_id,
+                message_kind="transcript",
+            )
         finished_at = time.perf_counter()
         await self._emit_latency(
             session_id=session_id,

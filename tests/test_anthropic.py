@@ -12,11 +12,13 @@ from claw_v2.adapters.anthropic import (
     IDENTITY_OVERRIDE,
     SILENCE_DIRECTIVE,
     create_claude_sdk_executor,
+    _detached_process_reason,
     _inline_browser_drive_reason,
     _safe_runtime_policy_reason,
     _tool_input_evidence,
     _tool_response_evidence,
 )
+from claw_v2.adapters.anthropic_hooks import make_pre_tool_use_hook
 from claw_v2.adapters.base import AdapterError, AdapterUnavailableError, LLMRequest
 from claw_v2.llm import LLMRouter
 from claw_v2.observe import ObserveStream
@@ -617,6 +619,114 @@ class InlineBrowserDriveGuardTests(unittest.TestCase):
                 "Bash", {"command": "/usr/bin/python3 /nonexistent/run.py --flag"}
             )
         )
+
+
+class DetachedProcessGuardTests(unittest.TestCase):
+    """Backstop that keeps the brain from improvising ghost background
+    processes (no ledger, no monitor, no notification) instead of delegating
+    durable work (T12, 2026-06-12). Background-based, not marker-based: in the
+    brain lane ANY real backgrounding `&` is denied (review #100 round 2)."""
+
+    def test_detects_detached_launchers(self) -> None:
+        for command in (
+            "nohup python3 fetch_model.py > /tmp/fetch.log 2>&1 &",
+            "setsid brew install ffmpeg",
+            "python3 long_job.py & disown",
+        ):
+            self.assertIsNotNone(
+                _detached_process_reason("Bash", {"command": command}), command
+            )
+
+    def test_detects_any_backgrounded_command(self) -> None:
+        # Background-based: no long-running marker needed. A bare `python ... &`
+        # has no ledger in the brain turn and must be delegated.
+        for command in (
+            "python long_job.py &",
+            "uv run python worker.py &",
+            "node server.js &",
+            "make -j8 &",
+            "git clone https://example.com/big.git &",
+            "rsync -av remote:bigdir . &",
+            "ls -la &",
+        ):
+            self.assertIsNotNone(
+                _detached_process_reason("Bash", {"command": command}), command
+            )
+
+    def test_detects_background_followed_by_more_commands(self) -> None:
+        # `&` is itself a shell separator: a command can follow it without a
+        # `;` or newline (review #100 round 2 — closes the `& cmd` bypass).
+        for command in (
+            'sleep 600 &; echo "started"',
+            "curl -L -o model.bin https://example.com/model.bin &\necho started",
+            "pip install torch &\nwait",
+            "sleep 600 & echo started",
+            "pip install torch & wait",
+            "curl -L -o model.bin https://example.com/model.bin & echo started",
+        ):
+            self.assertIsNotNone(
+                _detached_process_reason("Bash", {"command": command}), command
+            )
+
+    def test_allows_foreground_commands(self) -> None:
+        for command in (
+            "git status",
+            "curl -s https://api.example.com/health",
+            "pip install requests",
+            # `&` inside a URL query string is not a shell background operator.
+            'curl "https://api.example.com/search?q=a&page=2"',
+            "echo hi && ls",
+            "cmd &> /dev/null",
+            "grep -r foo . 2>&1",
+            "",
+        ):
+            self.assertIsNone(
+                _detached_process_reason("Bash", {"command": command}), command
+            )
+
+    def test_ignores_non_bash(self) -> None:
+        self.assertIsNone(
+            _detached_process_reason("Read", {"file_path": "/x/nohup.out"})
+        )
+
+
+class DetachedProcessHookLaneTests(unittest.IsolatedAsyncioTestCase):
+    """Brain lane denies detached launches; worker lanes are not gated."""
+
+    @staticmethod
+    def _hook(lane: str):
+        request = SimpleNamespace(lane=lane, model="m", evidence_pack=None)
+        runtime_policy = SimpleNamespace(enforce=lambda *a, **k: None)
+        return make_pre_tool_use_hook(
+            request, runtime_policy=runtime_policy, observe=None
+        )
+
+    async def test_brain_lane_denies_detached_launch(self) -> None:
+        hook = self._hook("brain")
+        result = await hook(
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": "nohup python3 fetch.py > /tmp/f.log 2>&1 &"},
+            },
+            None,
+            None,
+        )
+        self.assertEqual(
+            result["hookSpecificOutput"]["permissionDecision"], "deny"
+        )
+        self.assertIn("delegate_task", result["hookSpecificOutput"]["permissionDecisionReason"])
+
+    async def test_worker_lane_allows_detached_launch(self) -> None:
+        hook = self._hook("worker")
+        result = await hook(
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": "nohup python3 fetch.py > /tmp/f.log 2>&1 &"},
+            },
+            None,
+            None,
+        )
+        self.assertEqual(result, {"continue_": True})
 
 
 if __name__ == "__main__":

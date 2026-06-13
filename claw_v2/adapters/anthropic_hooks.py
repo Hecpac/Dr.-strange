@@ -44,6 +44,29 @@ _INLINE_BROWSER_DRIVE_PATTERNS: tuple[re.Pattern[str], ...] = (
 _SCRIPT_PATH_RE = re.compile(r"(/[^\s'\"]+\.py)\b")
 _SCRIPT_SCAN_MAX_BYTES = 262_144
 
+# Backstop for the durable-task contract (T12, 2026-06-12): when the durable
+# channel failed (T10 lock storm) the brain improvised detached background
+# processes — no ledger, no monitor, no completion notification — and the
+# work died silently. T10 removed the motive; this removes the means.
+# Worker lanes are NOT gated (the coordinator legitimately runs long processes
+# under its own monitoring).
+_DETACHED_PROCESS_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bnohup\s"),
+    re.compile(r"\bsetsid\s"),
+    re.compile(r"\bdisown\b"),
+)
+# Background-based, not marker-based (review #100 round 2): in the brain lane
+# ANY real backgrounding `&` is denied — a detached job has no ledger/monitor
+# in the chat turn, so even `python long_job.py &` must be delegated. `&` is
+# itself a shell separator, so it is matched whether it ends the string, is
+# followed by `;`/newline, or is followed by another command (`& echo x`).
+# The negative lookbehind/alternation exclude the logical-AND `&&`, the
+# `&>`/`2>&1` redirections, and a `&` glued inside a token such as a URL query
+# string (`?a=1&b=2`) — those are not background operators. A `&` inside a
+# quoted string with spaces is a rare, tolerable false positive (the brain
+# reformulates to foreground or delegates).
+_BACKGROUND_TAIL_RE = re.compile(r"(?<![&>])&(?:\s*(?:[;\n]|$)|\s+\S)", re.MULTILINE)
+
 # SDK tools that cannot mutate external state. Anything outside this set
 # (Bash, Edit, Write, Task, MCP tools, ...) is treated as potentially mutating
 # so a failed turn that already ran one is never replayed by fallback/retry.
@@ -94,6 +117,30 @@ def _inline_browser_drive_reason(
     for pattern in _INLINE_BROWSER_DRIVE_PATTERNS:
         if pattern.search(blob):
             return "inline browser/CDP/computer-use drive in a chat turn"
+    return None
+
+
+def _detached_process_reason(
+    tool_name: str, tool_input: dict[str, Any] | None
+) -> str | None:
+    """Return a deny reason if a Bash call would launch a detached or
+    backgrounded process from a chat turn.
+
+    Background-based: in the brain lane any real `&` backgrounding is denied,
+    not just long-running markers, because a detached job has no ledger in the
+    chat turn. The regex excludes `&&`, `&>`/`2>&1` and URL query strings, so
+    everyday foreground commands pass through.
+    """
+    if tool_name != "Bash":
+        return None
+    command = str((tool_input or {}).get("command") or "")
+    if not command:
+        return None
+    for pattern in _DETACHED_PROCESS_PATTERNS:
+        if pattern.search(command):
+            return "detached background process launched from a chat turn"
+    if _BACKGROUND_TAIL_RE.search(command):
+        return "background process launched from a chat turn"
     return None
 
 
@@ -152,6 +199,43 @@ def make_pre_tool_use_hook(
                     except Exception:
                         logger.debug(
                             "brain_inline_browser_drive_blocked emit failed",
+                            exc_info=True,
+                        )
+                return {
+                    "systemMessage": f"Tool invocation blocked: {nudge}",
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": nudge,
+                    },
+                }
+            detach_reason = _detached_process_reason(
+                str(input_data.get("tool_name", "")),
+                input_data.get("tool_input", {}),
+            )
+            if detach_reason:
+                nudge = (
+                    "Detached/background processes cannot be launched from a chat turn: "
+                    "they have no ledger, no monitor and no completion notification. "
+                    "Delegate the work with the delegate_task tool so it runs durable "
+                    "and reports back when it finishes."
+                )
+                if observe is not None:
+                    try:
+                        observe.emit(
+                            "brain_detached_process_blocked",
+                            lane=request.lane,
+                            provider="anthropic",
+                            model=request.model,
+                            **trace_metadata(request.evidence_pack),
+                            payload={
+                                "tool_name": str(input_data.get("tool_name", "")),
+                                "reason": detach_reason,
+                            },
+                        )
+                    except Exception:
+                        logger.debug(
+                            "brain_detached_process_blocked emit failed",
                             exc_info=True,
                         )
                 return {

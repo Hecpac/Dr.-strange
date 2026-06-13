@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
 from claw_v2.adapters.anthropic_hooks import (
+    _detached_process_reason as _detached_process_reason,
     _inline_browser_drive_reason as _inline_browser_drive_reason,
     _safe_runtime_policy_reason as _safe_runtime_policy_reason,
     _tool_input_evidence as _tool_input_evidence,

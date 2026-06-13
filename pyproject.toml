@@ -9,7 +9,7 @@ dependencies = [
     "openai",
     "google-genai",
     "ollama",
-    "python-telegram-bot",
+    "python-telegram-bot>=22.7,<23",
     "anthropic",
     "pyautogui",
     "rank-bm25",

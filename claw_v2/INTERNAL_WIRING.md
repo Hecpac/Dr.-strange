@@ -8,7 +8,7 @@
 ## meta
 
 ```yaml
-describes_commit: fe99808+spec-002-self-improve-promotion-hotfix+spec-002-subprocess-bounded-pr-c+spec-002-approval-manager-pr-d+spec-002-promotion-tooling-phase-4+brain-delegation-tool+recovery-jobs-drain-c1+audit-m3-m4-offloop-emits-nonblocking-checkpoint-backup+audit-high-2026-06-11+audit-waves-2-3-2026-06-12+adapters-d1-split-2026-06-12+pasos-6-7-coordinator-resumable-2026-06-12+wal-generation-guard-2026-06-12
+describes_commit: fe99808+spec-002-self-improve-promotion-hotfix+spec-002-subprocess-bounded-pr-c+spec-002-approval-manager-pr-d+spec-002-promotion-tooling-phase-4+brain-delegation-tool+recovery-jobs-drain-c1+audit-m3-m4-offloop-emits-nonblocking-checkpoint-backup+audit-high-2026-06-11+audit-waves-2-3-2026-06-12+adapters-d1-split-2026-06-12+pasos-6-7-coordinator-resumable-2026-06-12+wal-generation-guard-2026-06-12+telegram-t1-t12-2026-06-12
 doc_version: 2.21
 last_verified: 2026-06-12
 verification_method: manual + pytest + AST sentinel cross-check
@@ -632,6 +632,19 @@ caught). The deny nudges the model to `delegate_task` instead. This is the
 structural backstop to the prompt-level DELEGATION_CONTRACT: such work does not
 fit the brain turn's 300s wall. Worker/`worker_heavy` lanes are NOT gated —
 delegated coordinator work legitimately drives CDP.
+
+**Detached-process backstop** (`_detached_process_reason`, same module and
+re-export; T12, 2026-06-12, hardened in review #100): the PreToolUse hook also
+denies — `brain` lane only — Bash that launches detached or backgrounded
+processes. It is **background-based, not marker-based**: `nohup`/`setsid`/
+`disown`, OR any real `&` backgrounding (`_BACKGROUND_TAIL_RE`), so even a bare
+`python long_job.py &` is denied. The regex excludes the logical-AND `&&`, the
+`&>`/`2>&1` redirections and a `&` glued inside a URL query string
+(`?a=1&b=2`); a `&` inside a quoted string with spaces is a tolerated rare
+false positive. Motive: during the T10 lock storm the brain improvised ghost
+background processes with no ledger/monitor/notification and the work died
+silently. The deny nudges to `delegate_task`; worker lanes are not gated (the
+coordinator runs long processes under its own monitoring).
 
 ### output sanitization
 
