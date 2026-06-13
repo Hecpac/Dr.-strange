@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 from claw_v2.coordinator import CoordinatorResult, WorkerResult
+from claw_v2.bot_helpers import _infer_session_mode, _should_use_browser_executor
 from claw_v2.jobs import JobService
 from claw_v2.memory import MemoryStore
 from claw_v2.observe import ObserveStream
@@ -452,6 +453,12 @@ class BrowserExecutorRoutingTests(unittest.TestCase):
     """Option (b), 2026-06-13: CDP/browser objectives route to the in-process
     browser executor instead of the network-denied Codex coordinator."""
 
+    def test_x_sweep_objective_infers_browse_mode(self) -> None:
+        self.assertEqual(_infer_session_mode("Haz un repaso por X"), "browse")
+        self.assertEqual(_infer_session_mode("lee X por CDP"), "browse")
+        self.assertTrue(_should_use_browser_executor("ops", "Haz un repaso por X"))
+        self.assertFalse(_should_use_browser_executor("research", "analiza x variable"))
+
     def _handler(self, root: Path, recorded: dict, *, browser_executor):
         memory = MemoryStore(root / "claw.db")
         observe = ObserveStream(root / "observe.db")
@@ -482,6 +489,22 @@ class BrowserExecutorRoutingTests(unittest.TestCase):
                 "tg-1", "repaso por X", mode="browse", forced=False, task_id="t-1"
             )
             self.assertEqual(recorded["executor"], ("repaso por X", "t-1", "browse"))
+            self.assertNotIn("coordinator_ran", recorded)
+            self.assertIn("feed capturado", out)
+
+    def test_ops_x_sweep_uses_browser_executor_not_coordinator(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorded: dict = {}
+
+            def fake_exec(objective, *, task_id, mode):
+                recorded["executor"] = (objective, task_id, mode)
+                return "feed capturado: 30 posts"
+
+            handler = self._handler(Path(tmpdir), recorded, browser_executor=fake_exec)
+            out = handler._run_coordinated_task(
+                "tg-1", "Haz un repaso por X", mode="ops", forced=False, task_id="t-x"
+            )
+            self.assertEqual(recorded["executor"], ("Haz un repaso por X", "t-x", "ops"))
             self.assertNotIn("coordinator_ran", recorded)
             self.assertIn("feed capturado", out)
 
