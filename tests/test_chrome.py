@@ -39,7 +39,7 @@ class ManagedChromeTests(unittest.TestCase):
         mc.start()
         args = mock_popen.call_args[0][0]
         self.assertIn("--remote-debugging-port=9250", args)
-        self.assertIn("--user-data-dir=/tmp/test-profile", args)
+        self.assertIn(f"--user-data-dir={Path('/tmp/test-profile').resolve(strict=False)}", args)
         self.assertIn("--headless=new", args)
         self.assertIn("--no-first-run", args)
 
@@ -50,6 +50,9 @@ class ManagedChromeTests(unittest.TestCase):
     @patch("claw_v2.chrome._wait_for_cdp_ready")
     def test_start_kills_existing_chrome(self, mock_ready, mock_popen, mock_wait, mock_kill, mock_pids) -> None:
         mock_pids.return_value = [(1234, "Google Chrome")]
+        # PID 1234 holds OUR managed profile, so it is reclaimable. Subsequent
+        # lookups (wait_for_profile_free, _reclaim_profile_if_busy) see it gone.
+        self.mock_profile_user_data_pids.side_effect = [[1234], [], []]
         proc = MagicMock()
         proc.poll.return_value = None
         mock_popen.return_value = proc
@@ -111,11 +114,56 @@ class ManagedChromeTests(unittest.TestCase):
     @patch("subprocess.Popen")
     def test_start_reuses_existing_ready_cdp_chrome(self, mock_popen, mock_pids) -> None:
         mock_pids.return_value = [(1234, "Google Chrome")]
+        # The ready CDP Chrome is running OUR managed profile, so it is reused.
+        self.mock_profile_user_data_pids.return_value = [1234]
         self.mock_cdp_ready.return_value = True
         mc = ManagedChrome(port=9250, profile_dir="/tmp/test-profile")
         mc.start()
         mock_popen.assert_not_called()
         self.assertIsNone(mc._process)
+        self.assertEqual(mc._attached_pid, 1234)
+
+    @patch("claw_v2.chrome._check_port_pids")
+    @patch("subprocess.Popen")
+    def test_start_refuses_ready_cdp_chrome_with_different_profile(self, mock_popen, mock_pids) -> None:
+        # A ready CDP Chrome on the port that is NOT our managed profile must
+        # not be hijacked: refuse rather than attach to a foreign profile.
+        mock_pids.return_value = [(1234, "Google Chrome")]
+        self.mock_profile_user_data_pids.return_value = []
+        self.mock_cdp_ready.return_value = True
+        mc = ManagedChrome(port=9250, profile_dir="/tmp/test-profile")
+        with self.assertRaises(ChromeStartError) as ctx:
+            mc.start()
+        self.assertIn("different profile", str(ctx.exception))
+        self.assertIn("/tmp/test-profile", str(ctx.exception))
+        mock_popen.assert_not_called()
+
+    @patch("claw_v2.chrome._check_port_pids")
+    @patch("claw_v2.chrome._kill_pid")
+    def test_start_refuses_to_kill_chrome_with_different_profile(self, mock_kill, mock_pids) -> None:
+        # A Chrome on the port that is NOT our managed profile must not be
+        # killed (it could be the user's own Chrome bound to that port).
+        mock_pids.return_value = [(1234, "Google Chrome")]
+        self.mock_profile_user_data_pids.return_value = []
+        mc = ManagedChrome(port=9250, profile_dir="/tmp/test-profile")
+        with self.assertRaises(ChromeStartError) as ctx:
+            mc.start()
+        self.assertIn("different profile", str(ctx.exception))
+        self.assertIn("9250", str(ctx.exception))
+        mock_kill.assert_not_called()
+
+    def test_profile_dir_is_canonicalized(self) -> None:
+        # profile_dir is resolved so the path compared against ps --user-data-dir
+        # (also resolved) matches even through a symlink.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            real_profile = Path(tmpdir) / "real-profile"
+            symlink_profile = Path(tmpdir) / "linked-profile"
+            real_profile.mkdir()
+            symlink_profile.symlink_to(real_profile, target_is_directory=True)
+
+            mc = ManagedChrome(port=9250, profile_dir=str(symlink_profile))
+
+            self.assertEqual(mc.profile_dir, str(real_profile.resolve(strict=False)))
 
     @patch("claw_v2.chrome._check_port_pids")
     @patch("claw_v2.chrome._wait_for_profile_free")
@@ -176,6 +224,7 @@ class ManagedChromeAttachStopTests(unittest.TestCase):
             with (
                 patch("claw_v2.chrome._check_port_pids", return_value=[(9999, "Google Chrome")]),
                 patch("claw_v2.chrome._is_cdp_ready", return_value=True),
+                patch("claw_v2.chrome._profile_user_data_pids", return_value=[9999]),
             ):
                 mc.start()
             self.assertIsNone(mc._process)
@@ -200,6 +249,7 @@ class ManagedChromeAttachStopTests(unittest.TestCase):
             with (
                 patch("claw_v2.chrome._check_port_pids", return_value=[(1234, "Google Chrome")]),
                 patch("claw_v2.chrome._is_cdp_ready", return_value=True),
+                patch("claw_v2.chrome._profile_user_data_pids", return_value=[1234]),
             ):
                 mc.start()
             self.assertEqual(mc._attached_pid, 1234)

@@ -410,6 +410,29 @@ class CoordinatorTaskBuilderTests(unittest.TestCase):
         self.assertIsNotNone(implementation)
         self.assertEqual(implementation[0].name, "implement_change")
 
+    def test_build_coordinator_tasks_long_browser_timeout(self) -> None:
+        # browse always gets the long browser/CDP timeout + the guard directive.
+        _, implementation, _ = _build_coordinator_tasks("browse", "Abre la página y extrae la tabla")
+        self.assertEqual(implementation[0].timeout_seconds, 1200.0)
+        self.assertIn("browser/CDP guard", implementation[0].instruction)
+
+        # ops/publish get it only when the objective signals browser/CDP work.
+        _, impl_cdp, _ = _build_coordinator_tasks("ops", "Driver Chrome CDP en localhost:9250 y screenshotea")
+        self.assertEqual(impl_cdp[0].timeout_seconds, 1200.0)
+
+        _, impl_nlm, _ = _build_coordinator_tasks("publish", "Genera el podcast en NotebookLM")
+        self.assertEqual(impl_nlm[0].timeout_seconds, 1200.0)
+
+        # Instagram publishing is CDP-based (claw_v2/instagram_publish.py) even
+        # when the objective only says "Instagram"/"reel", not "Chrome/CDP".
+        _, impl_ig, _ = _build_coordinator_tasks("publish", "Publica el reel en Instagram @pachanodesign")
+        self.assertEqual(impl_ig[0].timeout_seconds, 1200.0)
+
+        # plain ops without browser signals keeps the default (no override).
+        _, impl_plain, _ = _build_coordinator_tasks("ops", "Corre el script de backup y reporta")
+        self.assertIsNone(impl_plain[0].timeout_seconds)
+        self.assertNotIn("browser/CDP guard", impl_plain[0].instruction)
+
 
 if __name__ == "__main__":
     unittest.main()
