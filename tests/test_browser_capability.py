@@ -19,6 +19,19 @@ class _FakeResponse:
         return b'{"Browser":"Chrome/148","User-Agent":"HeadlessChrome"}'
 
 
+class _ClosableResponse:
+    status = 200
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    def read(self, _limit: int = -1) -> bytes:
+        return b'{"Browser":"Chrome/148"}'
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class _FakeObserve:
     def __init__(self) -> None:
         self.events: list[tuple[str, dict]] = []
@@ -123,6 +136,29 @@ class BrowserCapabilityTests(unittest.TestCase):
             ],
         )
         self.assertEqual(observe.events[-1][1]["stage"], "start_chrome")
+
+    def test_ensure_ready_rejects_port_above_tcp_range(self) -> None:
+        urlopen = MagicMock(return_value=_FakeResponse())
+        chrome_factory = MagicMock()
+        capability = BrowserCapability(
+            chrome_factory=chrome_factory,
+            urlopen=urlopen,
+        )
+
+        with self.assertRaises(BrowserCapabilityError) as ctx:
+            capability.ensure_ready(port=65536)
+
+        self.assertIn("puerto CDP invalido", str(ctx.exception))
+        urlopen.assert_not_called()
+        chrome_factory.assert_not_called()
+
+    def test_probe_closes_non_context_manager_response(self) -> None:
+        response = _ClosableResponse()
+        capability = BrowserCapability(urlopen=MagicMock(return_value=response))
+
+        self.assertIsNone(capability._probe_json_version("http://127.0.0.1:9250"))
+
+        self.assertTrue(response.closed)
 
 
 if __name__ == "__main__":

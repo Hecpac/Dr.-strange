@@ -98,6 +98,7 @@ class ComputerHandler:
         self._state_lock = threading.Lock()
         self._sessions: dict[str, Any] = {}
         self._client: Any | None = None
+        self._browser_use_lock = threading.Lock()
         self._cdp_locks_guard = threading.Lock()
         self._cdp_profile_locks: dict[str, threading.Lock] = {}
 
@@ -835,22 +836,23 @@ class ComputerHandler:
             except BrowserCapabilityError as exc:
                 return str(exc)
             self._mark_capability_available("chrome_cdp")
-            self._ensure_browser_use_service(cdp_endpoint)
-            self._set_browser_use_cdp_url(cdp_endpoint)
-            if self.browser_use is None:
-                return (
-                    "No puedo ejecutar la tarea de navegador: browser_use no está "
-                    "disponible en este runtime."
+            with self._browser_use_lock:
+                self._ensure_browser_use_service(cdp_endpoint)
+                self._set_browser_use_cdp_url(cdp_endpoint)
+                if self.browser_use is None:
+                    return (
+                        "No puedo ejecutar la tarea de navegador: browser_use no está "
+                        "disponible en este runtime."
+                    )
+                self._mark_capability_available("browser_use")
+                self._emit(
+                    "delegated_browser_task_started",
+                    {"task_id": task_id, "mode": mode, "objective": objective[:200]},
                 )
-            self._mark_capability_available("browser_use")
-            self._emit(
-                "delegated_browser_task_started",
-                {"task_id": task_id, "mode": mode, "objective": objective[:200]},
-            )
-            session = _types.SimpleNamespace(task=objective, screenshot_path=None)
-            return self._run_browser_use_task(
-                session, timeout_seconds=_LONG_BROWSER_OPERATION_TIMEOUT_SECONDS
-            )
+                session = _types.SimpleNamespace(task=objective, screenshot_path=None)
+                return self._run_browser_use_task(
+                    session, timeout_seconds=_LONG_BROWSER_OPERATION_TIMEOUT_SECONDS
+                )
         finally:
             lock.release()
 

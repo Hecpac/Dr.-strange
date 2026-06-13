@@ -1101,6 +1101,112 @@ class DelegatedBrowserTaskTests(unittest.TestCase):
         self.assertEqual(succeeded, "ran")
         self.assertEqual(fake.calls, 1)
 
+    def test_delegated_browser_task_serializes_shared_browser_use_cdp_url(self) -> None:
+        import threading
+        import time
+        import types
+
+        from claw_v2.computer_handler import ComputerHandler
+
+        class PortEchoCapability:
+            def __init__(self) -> None:
+                self.second_preflight_done = threading.Event()
+
+            def ensure_ready(self, *, port: int = 9250, profile_dir: str) -> str:
+                if port == 9251:
+                    self.second_preflight_done.set()
+                return f"http://127.0.0.1:{port}"
+
+        class SharedBrowserUse:
+            last_artifact_path = None
+
+            def __init__(self) -> None:
+                self.cdp_url = "http://localhost:9250"
+                self.first_started = threading.Event()
+                self.release_first = threading.Event()
+                self.guard = threading.Lock()
+                self.active = 0
+                self.max_active = 0
+                self.observations: list[tuple[str, str, str]] = []
+                self.mismatches: list[tuple[str, str, str]] = []
+
+            async def run_task(self, task, **kwargs):
+                start_url = self.cdp_url
+                with self.guard:
+                    self.active += 1
+                    self.max_active = max(self.max_active, self.active)
+                    self.observations.append(("start", task, start_url))
+                if task == "first":
+                    self.first_started.set()
+                    self.release_first.wait(3)
+                with self.guard:
+                    end_url = self.cdp_url
+                    self.observations.append(("end", task, end_url))
+                    if end_url != start_url:
+                        self.mismatches.append((task, start_url, end_url))
+                    self.active -= 1
+                return f"{task}:{start_url}"
+
+        fake = SharedBrowserUse()
+        capability = PortEchoCapability()
+        handler = ComputerHandler(
+            browser_use=fake,
+            config=types.SimpleNamespace(
+                computer_auto_approve=True,
+                sensitive_urls=[],
+                computer_browser_use_timeout_seconds=0,
+            ),
+            browser_capability=capability,
+        )
+        ports_by_thread = {"browser-first": 9250, "browser-second": 9251}
+        handler._delegated_browser_cdp_port = lambda: ports_by_thread[threading.current_thread().name]
+        results: dict[str, str] = {}
+        errors: list[BaseException] = []
+
+        def run_task(name: str) -> None:
+            try:
+                results[name] = handler.run_delegated_browser_task(
+                    name,
+                    task_id=f"task-{name}",
+                    mode="browse",
+                )
+            except BaseException as exc:
+                errors.append(exc)
+
+        first = threading.Thread(target=run_task, args=("first",), name="browser-first")
+        second = threading.Thread(target=run_task, args=("second",), name="browser-second")
+
+        first.start()
+        self.assertTrue(fake.first_started.wait(2), "first task did not start")
+        second.start()
+        self.assertTrue(
+            capability.second_preflight_done.wait(2),
+            "second task did not reach CDP preflight",
+        )
+        time.sleep(0.1)
+        self.assertEqual(fake.cdp_url, "http://127.0.0.1:9250")
+        self.assertEqual(fake.max_active, 1)
+
+        fake.release_first.set()
+        first.join(2)
+        second.join(2)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(
+            fake.observations,
+            [
+                ("start", "first", "http://127.0.0.1:9250"),
+                ("end", "first", "http://127.0.0.1:9250"),
+                ("start", "second", "http://127.0.0.1:9251"),
+                ("end", "second", "http://127.0.0.1:9251"),
+            ],
+        )
+        self.assertEqual(fake.mismatches, [])
+        self.assertEqual(results["first"], "first:http://127.0.0.1:9250")
+        self.assertEqual(results["second"], "second:http://127.0.0.1:9251")
+
 
 class ComputerHandlerTimeoutTests(_ComputerHandlerConfigTest):
 

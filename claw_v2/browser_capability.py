@@ -103,7 +103,12 @@ class BrowserCapability:
                 with response as opened:
                     self._read_version_response(opened)
             else:
-                self._read_version_response(response)
+                try:
+                    self._read_version_response(response)
+                finally:
+                    close = getattr(response, "close", None)
+                    if callable(close):
+                        close()
             return None
         except Exception as exc:
             return _error_message(exc)
@@ -159,7 +164,7 @@ def _normalize_port(port: int) -> int:
             f"Necesito abrir/login Chrome para esta tarea de navegador: puerto CDP invalido ({port!r}).",
             endpoint=f"http://{DEFAULT_CDP_HOST}:{DEFAULT_CDP_PORT}",
         ) from exc
-    if normalized <= 0:
+    if normalized <= 0 or normalized > 65535:
         raise BrowserCapabilityError(
             f"Necesito abrir/login Chrome para esta tarea de navegador: puerto CDP invalido ({port!r}).",
             endpoint=f"http://{DEFAULT_CDP_HOST}:{DEFAULT_CDP_PORT}",
