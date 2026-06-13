@@ -165,7 +165,10 @@ _VERIFICATION_STATUS_RE = re.compile(
 _TASK_QUEUE_ITEM_TTL_SECONDS = 60 * 60
 _LONG_BROWSER_OPERATION_TIMEOUT_SECONDS = 1200.0
 _BROWSER_OPERATION_SIGNAL_RE = re.compile(
-    r"\b(?:cdp|chrome|chromium|playwright|selenium|chromedriver|notebooklm|computer[-_\s]?use)\b"
+    # instagram/reel: the IG publish path (claw_v2/instagram_publish.py) drives
+    # CDP Chrome, but objectives say "Instagram"/"reel", not "Chrome/CDP".
+    r"\b(?:cdp|chrome|chromium|playwright|selenium|chromedriver|notebooklm"
+    r"|instagram|reels?|computer[-_\s]?use)\b"
     r"|localhost:9(?:250|222)\b"
     r"|127\.0\.0\.1:9(?:250|222)\b"
     r"|/json/(?:list|version)\b",

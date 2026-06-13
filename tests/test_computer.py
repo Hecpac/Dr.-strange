@@ -858,6 +858,57 @@ class ComputerHandlerSessionArtifactTests(unittest.TestCase):
         )
         self.assertIn("aprobación segura", result)
 
+    def test_browser_use_approval_not_blocked_without_screenshot_backend(self) -> None:
+        # Regression: browser_use-only deploys (computer=None) have no desktop
+        # screenshot backend, so the fail-closed check must NOT block their
+        # approvals (they never had screenshot binding to begin with).
+        import types
+
+        from claw_v2.computer_handler import ComputerHandler
+
+        events: list[tuple[str, dict]] = []
+
+        class FakeObserve:
+            def emit(self, event_type, payload=None):
+                events.append((event_type, payload or {}))
+
+        approvals = MagicMock()
+        approvals.create.return_value = types.SimpleNamespace(approval_id="a1", token="t1")
+        config = types.SimpleNamespace(computer_auto_approve=False, sensitive_urls=[])
+        handler = ComputerHandler(
+            browser_use=object(),
+            computer=None,
+            approvals=approvals,
+            config=config,
+            observe=FakeObserve(),
+        )
+        session = types.SimpleNamespace(
+            task="navega y continúa",
+            current_url="https://example.com",
+            status="running",
+            pending_action={"action": "browser_use_task", "backend": "browser_use"},
+            screenshot_path=None,
+        )
+        handler._sessions["s1"] = session
+
+        def fake_browser_use(sess):
+            sess.status = "awaiting_approval"
+            sess.pending_action = {
+                "action": "browser_use_task",
+                "backend": "browser_use",
+                "interrupted_action": {"action": "navigate"},
+            }
+            return "needs approval"
+
+        with patch.object(handler, "_run_browser_use_session", side_effect=fake_browser_use):
+            result = handler._run_session("s1")
+
+        approvals.create.assert_called_once()
+        self.assertNotIn("aprobación segura", result)
+        self.assertFalse(
+            any(e[0] == "computer_approval_blocked_no_screenshot" for e in events)
+        )
+
 
 class ComputerHandlerTimeoutTests(_ComputerHandlerConfigTest):
 

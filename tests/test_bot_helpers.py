@@ -423,6 +423,11 @@ class CoordinatorTaskBuilderTests(unittest.TestCase):
         _, impl_nlm, _ = _build_coordinator_tasks("publish", "Genera el podcast en NotebookLM")
         self.assertEqual(impl_nlm[0].timeout_seconds, 1200.0)
 
+        # Instagram publishing is CDP-based (claw_v2/instagram_publish.py) even
+        # when the objective only says "Instagram"/"reel", not "Chrome/CDP".
+        _, impl_ig, _ = _build_coordinator_tasks("publish", "Publica el reel en Instagram @pachanodesign")
+        self.assertEqual(impl_ig[0].timeout_seconds, 1200.0)
+
         # plain ops without browser signals keeps the default (no override).
         _, impl_plain, _ = _build_coordinator_tasks("ops", "Corre el script de backup y reporta")
         self.assertIsNone(impl_plain[0].timeout_seconds)
