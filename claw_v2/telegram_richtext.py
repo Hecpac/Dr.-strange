@@ -53,6 +53,15 @@ def _esc_attr(text: str) -> str:
     return _esc(text).replace('"', "&quot;")
 
 
+def _render_emphasis(escaped: str) -> str:
+    """Apply inline emphasis (bold/strike/italic) to already-escaped text."""
+    escaped = _BOLD_RE.sub(lambda m: f"<b>{m.group(1)}</b>", escaped)
+    escaped = _STRIKE_RE.sub(lambda m: f"<s>{m.group(1)}</s>", escaped)
+    escaped = _ITALIC_STAR_RE.sub(lambda m: f"<i>{m.group(1)}</i>", escaped)
+    escaped = _ITALIC_UND_RE.sub(lambda m: f"<i>{m.group(1)}</i>", escaped)
+    return escaped
+
+
 def markdown_to_telegram_html(text: str) -> str:
     """Convert markdown to Telegram's HTML subset.
 
@@ -87,10 +96,13 @@ def markdown_to_telegram_html(text: str) -> str:
         lambda m: _protect(f"<code>{_esc(m.group(1))}</code>"), text
     )
 
-    # 3) Links — protect (escaped text + href) before escaping the rest.
+    # 3) Links — protect (rendered text + href) before escaping the rest. The
+    #    link text keeps inline emphasis; inline code inside it is already a
+    #    placeholder from step 2 and passes through untouched.
     text = _LINK_RE.sub(
         lambda m: _protect(
-            f'<a href="{_esc_attr(m.group(2))}">{_esc(m.group(1))}</a>'
+            f'<a href="{_esc_attr(m.group(2))}">'
+            f"{_render_emphasis(_esc(m.group(1)))}</a>"
         ),
         text,
     )
@@ -100,10 +112,7 @@ def markdown_to_telegram_html(text: str) -> str:
     text = _esc(text)
 
     # 5) Inline emphasis on the escaped text.
-    text = _BOLD_RE.sub(lambda m: f"<b>{m.group(1)}</b>", text)
-    text = _STRIKE_RE.sub(lambda m: f"<s>{m.group(1)}</s>", text)
-    text = _ITALIC_STAR_RE.sub(lambda m: f"<i>{m.group(1)}</i>", text)
-    text = _ITALIC_UND_RE.sub(lambda m: f"<i>{m.group(1)}</i>", text)
+    text = _render_emphasis(text)
 
     # 6) Block-level, line by line.
     out_lines: list[str] = []
@@ -132,7 +141,13 @@ def markdown_to_telegram_html(text: str) -> str:
             return protected[idx]
         return _esc(match.group(0))
 
-    text = re.sub(r"\x00TGRT(\d+)\x00", _restore, text)
+    # Loop so a placeholder nested inside another restored span (e.g. inline
+    # code inside link text) is also expanded. Bounded by the protected count.
+    placeholder_re = re.compile(r"\x00TGRT(\d+)\x00")
+    for _ in range(len(protected) + 1):
+        text, n = placeholder_re.subn(_restore, text)
+        if n == 0:
+            break
     return text
 
 

@@ -78,6 +78,14 @@ class TestInline:
         out = markdown_to_telegram_html("\x00TGRT9\x00")
         assert out == "\x00TGRT9\x00"
 
+    def test_link_text_keeps_bold(self) -> None:
+        out = markdown_to_telegram_html("[**bold** label](https://e.com)")
+        assert out == '<a href="https://e.com"><b>bold</b> label</a>'
+
+    def test_link_text_keeps_inline_code(self) -> None:
+        out = markdown_to_telegram_html("[`run`](https://e.com)")
+        assert out == '<a href="https://e.com"><code>run</code></a>'
+
     def test_underscore_in_identifier_not_italic(self) -> None:
         # snake_case must survive intact.
         assert markdown_to_telegram_html("send_text y parse_mode") == (
