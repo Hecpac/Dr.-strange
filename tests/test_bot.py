@@ -1151,6 +1151,30 @@ class BotTests(unittest.TestCase):
                 self.assertEqual(kwargs["source_text"], "Debes actualizarlas tú")
                 self.assertTrue(kwargs["preflight"]["allowed"])
 
+    def test_brain_delegated_x_sweep_infers_browse_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                runtime.bot._task_handler.start_autonomous_task = MagicMock(return_value="started")
+
+                delegate = runtime.bot._delegation_handler_for_session("s1")
+                result = delegate({"objective": "Haz un repaso por X", "reason": "user asked"})
+
+                self.assertEqual(result["mode"], "browse")
+                runtime.bot._task_handler.start_autonomous_task.assert_called_once()
+                args, kwargs = runtime.bot._task_handler.start_autonomous_task.call_args
+                self.assertEqual(args[:2], ("s1", "Haz un repaso por X"))
+                self.assertEqual(kwargs["mode"], "browse")
+
     def test_telegram_actionable_router_disabled_reports_blocker_not_chat(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

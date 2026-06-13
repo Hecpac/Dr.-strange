@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 from claw_v2.coordinator import CoordinatorResult, WorkerResult
+from claw_v2.bot_helpers import _infer_session_mode, _should_use_browser_executor
 from claw_v2.jobs import JobService
 from claw_v2.memory import MemoryStore
 from claw_v2.observe import ObserveStream
@@ -452,6 +453,43 @@ class BrowserExecutorRoutingTests(unittest.TestCase):
     """Option (b), 2026-06-13: CDP/browser objectives route to the in-process
     browser executor instead of the network-denied Codex coordinator."""
 
+    def test_x_sweep_objective_infers_browse_mode(self) -> None:
+        self.assertEqual(_infer_session_mode("Haz un repaso por X"), "browse")
+        self.assertEqual(_infer_session_mode("lee X por CDP"), "browse")
+        self.assertTrue(_should_use_browser_executor("ops", "Haz un repaso por X"))
+        self.assertFalse(_should_use_browser_executor("research", "analiza x variable"))
+
+    def test_research_bare_platform_mention_stays_on_coordinator(self) -> None:
+        # A research task that merely names a platform must NOT hijack to the
+        # browser executor; only an explicit browse action does.
+        self.assertFalse(
+            _should_use_browser_executor("research", "investiga la historia de Twitter")
+        )
+        self.assertTrue(
+            _should_use_browser_executor("research", "Haz un repaso por X")
+        )
+
+    def test_blocked_profile_gate_message_classifies_as_failure(self) -> None:
+        # A named-profile gate that blocks (needs_login / challenge) returns a
+        # human status; it must terminate as failed, never as a false "passed".
+        from claw_v2.browser_profiles import (
+            BROWSER_PROFILES,
+            BrowserProfileHealth,
+            human_message,
+        )
+        from claw_v2.task_handler import _browser_output_indicates_failure
+
+        x = BROWSER_PROFILES["x"]
+        self.assertTrue(
+            _browser_output_indicates_failure(human_message(x, BrowserProfileHealth.NEEDS_LOGIN))
+        )
+        self.assertTrue(
+            _browser_output_indicates_failure(
+                human_message(x, BrowserProfileHealth.BLOCKED_BY_CHALLENGE)
+            )
+        )
+        self.assertFalse(_browser_output_indicates_failure("Capturé 32 posts del timeline"))
+
     def _handler(self, root: Path, recorded: dict, *, browser_executor):
         memory = MemoryStore(root / "claw.db")
         observe = ObserveStream(root / "observe.db")
@@ -482,6 +520,22 @@ class BrowserExecutorRoutingTests(unittest.TestCase):
                 "tg-1", "repaso por X", mode="browse", forced=False, task_id="t-1"
             )
             self.assertEqual(recorded["executor"], ("repaso por X", "t-1", "browse"))
+            self.assertNotIn("coordinator_ran", recorded)
+            self.assertIn("feed capturado", out)
+
+    def test_ops_x_sweep_uses_browser_executor_not_coordinator(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorded: dict = {}
+
+            def fake_exec(objective, *, task_id, mode):
+                recorded["executor"] = (objective, task_id, mode)
+                return "feed capturado: 30 posts"
+
+            handler = self._handler(Path(tmpdir), recorded, browser_executor=fake_exec)
+            out = handler._run_coordinated_task(
+                "tg-1", "Haz un repaso por X", mode="ops", forced=False, task_id="t-x"
+            )
+            self.assertEqual(recorded["executor"], ("Haz un repaso por X", "t-x", "ops"))
             self.assertNotIn("coordinator_ran", recorded)
             self.assertIn("feed capturado", out)
 
@@ -548,7 +602,7 @@ class BrowserExecutorRoutingTests(unittest.TestCase):
                 return "feed capturado: 30 posts"
 
             def flaky_update(session_id, **kwargs):
-                if kwargs.get("verification_status") == "pending" and calls["failed_update"] == 0:
+                if kwargs.get("verification_status") == "passed" and calls["failed_update"] == 0:
                     calls["failed_update"] += 1
                     raise RuntimeDatabaseError("Runtime database WAL heal failed for claw.db")
                 return memory.update_session_state(session_id, **kwargs)
@@ -593,6 +647,64 @@ class BrowserExecutorRoutingTests(unittest.TestCase):
                 "tg-1", "repaso por X", mode="browse", forced=False, task_id="t-4"
             )
             self.assertTrue(recorded["coordinator_ran"])
+
+    def _autonomous_handler(self, root: Path, *, browser_executor):
+        memory = MemoryStore(root / "claw.db")
+        observe = ObserveStream(root / "observe.db")
+        ledger = TaskLedger(root / "claw.db", observe=observe)
+        jobs = JobService(root / "claw.db", observe=observe)
+        handler = TaskHandler(
+            observe=observe,
+            task_ledger=ledger,
+            job_service=jobs,
+            browser_executor=browser_executor,
+            get_session_state=memory.get_session_state,
+            update_session_state=memory.update_session_state,
+        )
+        return handler, ledger, jobs
+
+    def _run_autonomous_browser(self, handler, ledger, jobs, *, task_id, objective):
+        job = jobs.enqueue(
+            kind="coordinator.autonomous_task",
+            payload={"task_id": task_id, "session_id": "tg-1", "objective": objective, "mode": "browse"},
+        )
+        ledger.create(
+            task_id=task_id, session_id="tg-1", objective=objective, mode="browse",
+            runtime="coordinator", provider="codex", model="gpt", status="running",
+        )
+        handler._run_autonomous_task("tg-1", task_id, objective, "browse", job_id=job.job_id)
+
+    def test_browser_executor_no_result_terminates_failed_not_pending(self) -> None:
+        # Regression: a "(no result)" report (e.g. planning LLM rate-limited) used
+        # to land verification_status="pending", which never terminates and the
+        # lifecycle watchdog resumes the task forever. It must terminate as failed.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            handler, ledger, jobs = self._autonomous_handler(
+                Path(tmpdir), browser_executor=lambda o, *, task_id, mode: "(no result)"
+            )
+            self._run_autonomous_browser(
+                handler, ledger, jobs, task_id="t-nores", objective="repaso por X"
+            )
+            event_types = [e["event_type"] for e in handler.observe.recent_events(limit=50)]
+            self.assertIn("autonomous_task_failed", event_types)
+            self.assertNotIn("autonomous_task_pending", event_types)
+            record = ledger.get("t-nores")
+            self.assertEqual(record.status, "failed")
+
+    def test_browser_executor_real_result_terminates_succeeded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            handler, ledger, jobs = self._autonomous_handler(
+                Path(tmpdir),
+                browser_executor=lambda o, *, task_id, mode: "Capturé 32 posts del timeline: ...",
+            )
+            self._run_autonomous_browser(
+                handler, ledger, jobs, task_id="t-ok", objective="repaso por X"
+            )
+            event_types = [e["event_type"] for e in handler.observe.recent_events(limit=50)]
+            self.assertIn("autonomous_task_completed", event_types)
+            self.assertNotIn("autonomous_task_pending", event_types)
+            record = ledger.get("t-ok")
+            self.assertEqual(record.status, "succeeded")
 
 
 class StaleMessageTests(unittest.TestCase):

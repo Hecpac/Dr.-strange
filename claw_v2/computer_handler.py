@@ -834,8 +834,15 @@ class ComputerHandler:
                     profile_dir=DEFAULT_CDP_PROFILE_DIR,
                 )
             except BrowserCapabilityError as exc:
-                return str(exc)
+                return f"No pude conectar al navegador (CDP): {exc}"
             self._mark_capability_available("chrome_cdp")
+            # Named-profile health gate (X-first): a cheap, deterministic CDP
+            # probe BEFORE spending the LLM. If the session is logged out or
+            # behind an anti-bot challenge, return a clear human state and do NOT
+            # attempt evasion. Generic browse → gate returns None → normal path.
+            gate = self._browser_profile_gate(objective, cdp_endpoint, task_id=task_id)
+            if gate is not None:
+                return gate
             with self._browser_use_lock:
                 self._ensure_browser_use_service(cdp_endpoint)
                 self._set_browser_use_cdp_url(cdp_endpoint)
@@ -855,6 +862,45 @@ class ComputerHandler:
                 )
         finally:
             lock.release()
+
+    def _browser_profile_gate(
+        self, objective: str, cdp_endpoint: str, *, task_id: str | None
+    ) -> str | None:
+        """Run the named-profile login/challenge health check (X-first).
+
+        Returns a human-facing message when the task must NOT run (logged out or
+        anti-bot challenge), else None to proceed. ``ok`` and ``unavailable``
+        both proceed — we never block real work on a flaky probe, only on a
+        confirmed bad state.
+        """
+        from claw_v2.browser_profiles import (
+            BrowserProfileHealth,
+            check_profile_health,
+            human_message,
+            resolve_profile_for_objective,
+        )
+
+        profile = resolve_profile_for_objective(objective)
+        if profile is None:
+            return None
+        health, detail = check_profile_health(profile, cdp_endpoint)
+        self._emit(
+            "browser_profile_health_checked",
+            {"task_id": task_id, "profile": profile.name, "health": health.value},
+        )
+        if health is BrowserProfileHealth.NEEDS_LOGIN:
+            self._emit(
+                "browser_profile_needs_login",
+                {"task_id": task_id, "profile": profile.name},
+            )
+            return human_message(profile, health, detail)
+        if health is BrowserProfileHealth.BLOCKED_BY_CHALLENGE:
+            self._emit(
+                "browser_profile_blocked_by_challenge",
+                {"task_id": task_id, "profile": profile.name},
+            )
+            return human_message(profile, health, detail)
+        return None
 
     def _delegated_browser_cdp_port(self) -> int:
         cdp_url = str(getattr(self.browser_use, "cdp_url", "") or "").strip()

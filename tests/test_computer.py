@@ -280,6 +280,64 @@ class BrowserUseServiceTests(unittest.TestCase):
         self.assertEqual(svc.cdp_url, "http://localhost:9333")
         self.assertFalse(svc.headless)
 
+    def _fake_browser_use_llm_module(self):
+        # Mock browser_use via sys.modules so `_build_browser_llm`'s
+        # `from browser_use import ChatAnthropic, ChatOpenAI` resolves to fakes.
+        # NEVER patch("browser_use.X") here: that imports the real browser_use,
+        # which loads the repo .env into os.environ and pollutes later tests.
+        import types
+        module = types.SimpleNamespace(ChatAnthropic=MagicMock(), ChatOpenAI=MagicMock())
+        return module
+
+    def test_build_llm_claude_uses_max_oauth_token_and_fallback(self) -> None:
+        import sys
+        from claw_v2.computer import BrowserUseService
+        svc = BrowserUseService()
+        module = self._fake_browser_use_llm_module()
+        with patch.dict(sys.modules, {"browser_use": module}), \
+                patch("claw_v2.computer._resolve_claude_oauth_token", return_value="tok123"):
+            primary, fallback = svc._build_browser_llm("claude-sonnet-4-6")
+        module.ChatOpenAI.assert_not_called()
+        self.assertEqual(module.ChatAnthropic.call_count, 2)  # primary + fallback
+        first = module.ChatAnthropic.call_args_list[0].kwargs
+        self.assertEqual(first["model"], "claude-sonnet-4-6")
+        self.assertEqual(first["auth_token"], "tok123")
+        self.assertEqual(first["default_headers"], {"anthropic-beta": "oauth-2025-04-20"})
+        self.assertEqual(module.ChatAnthropic.call_args_list[1].kwargs["model"], "claude-haiku-4-5")
+        self.assertIsNotNone(fallback)
+
+    def test_build_llm_claude_without_token_raises(self) -> None:
+        import sys
+        from claw_v2.computer import BrowserUseService
+        svc = BrowserUseService()
+        module = self._fake_browser_use_llm_module()
+        with patch.dict(sys.modules, {"browser_use": module}), \
+                patch("claw_v2.computer._resolve_claude_oauth_token", return_value=None):
+            with self.assertRaises(RuntimeError):
+                svc._build_browser_llm("claude-sonnet-4-6")
+
+    def test_build_llm_non_claude_uses_openai_no_fallback(self) -> None:
+        import sys
+        from claw_v2.computer import BrowserUseService
+        svc = BrowserUseService()
+        module = self._fake_browser_use_llm_module()
+        with patch.dict(sys.modules, {"browser_use": module}):
+            primary, fallback = svc._build_browser_llm("gpt-5.4")
+        module.ChatAnthropic.assert_not_called()
+        module.ChatOpenAI.assert_called_once()
+        self.assertIsNone(fallback)
+
+    def test_suppress_anthropic_api_key_guard(self) -> None:
+        import os
+        from claw_v2.computer import _suppress_anthropic_api_key
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-api03-x"}, clear=False):
+            with _suppress_anthropic_api_key(True):
+                self.assertNotIn("ANTHROPIC_API_KEY", os.environ)
+            self.assertEqual(os.environ.get("ANTHROPIC_API_KEY"), "sk-ant-api03-x")
+            # inactive: leave the env untouched
+            with _suppress_anthropic_api_key(False):
+                self.assertEqual(os.environ.get("ANTHROPIC_API_KEY"), "sk-ant-api03-x")
+
 
 class CodexComputerBackendTests(unittest.TestCase):
     def test_transport_override_returns_fixed_result(self) -> None:
@@ -356,9 +414,11 @@ class BrowserUseModelTests(unittest.TestCase):
 
         captured: dict = {}
 
-        class FakeChatOpenAI:
+        class FakeChatLLM:
             def __init__(self, **kwargs):
-                captured["model"] = kwargs.get("model")
+                # First instance wins: the primary LLM (the claude path also
+                # builds a fallback haiku model we don't want to capture).
+                captured.setdefault("model", kwargs.get("model"))
 
         class FakeBrowserSession:
             def __init__(self, **kwargs):
@@ -382,9 +442,13 @@ class BrowserUseModelTests(unittest.TestCase):
                 return FakeResult()
 
         module = types.SimpleNamespace(
-            Agent=FakeAgent, BrowserSession=FakeBrowserSession, ChatOpenAI=FakeChatOpenAI
+            Agent=FakeAgent,
+            BrowserSession=FakeBrowserSession,
+            ChatOpenAI=FakeChatLLM,
+            ChatAnthropic=FakeChatLLM,
         )
-        with patch.dict(sys.modules, {"browser_use": module}):
+        with patch.dict(sys.modules, {"browser_use": module}), \
+                patch("claw_v2.computer._resolve_claude_oauth_token", return_value="tok"):
             svc = BrowserUseService()
             if explicit is None:
                 asyncio.run(svc.run_task("t"))
@@ -392,11 +456,11 @@ class BrowserUseModelTests(unittest.TestCase):
                 asyncio.run(svc.run_task("t", model=explicit))
         return captured["model"]
 
-    def test_default_model_updated_from_gpt4o(self) -> None:
+    def test_default_model_is_claude_subscription(self) -> None:
         from claw_v2.computer import DEFAULT_BROWSER_USE_MODEL
 
-        self.assertEqual(DEFAULT_BROWSER_USE_MODEL, "gpt-5.4")
-        self.assertEqual(self._capture_model(), "gpt-5.4")
+        self.assertEqual(DEFAULT_BROWSER_USE_MODEL, "claude-sonnet-4-6")
+        self.assertEqual(self._capture_model(), "claude-sonnet-4-6")
 
     def test_explicit_model_passed_through(self) -> None:
         self.assertEqual(self._capture_model(explicit="gpt-5.5"), "gpt-5.5")
@@ -482,7 +546,8 @@ class BrowserUseArtifactTests(unittest.TestCase):
 
         module, events = self._fakes()
         with tempfile.TemporaryDirectory() as tmp:
-            with patch.dict(sys.modules, {"browser_use": module}):
+            with patch.dict(sys.modules, {"browser_use": module}), \
+                    patch.object(BrowserUseService, "_build_browser_llm", return_value=(object(), None)):
                 svc = BrowserUseService()
                 result = asyncio.run(svc.run_task("crea imagen", artifact_dir=tmp))
             self.assertIn("imagen creada", result)
@@ -499,7 +564,8 @@ class BrowserUseArtifactTests(unittest.TestCase):
         from claw_v2.computer import BrowserUseService
 
         module, _ = self._fakes(screenshot_raises=True, final="texto resultado")
-        with patch.dict(sys.modules, {"browser_use": module}):
+        with patch.dict(sys.modules, {"browser_use": module}), \
+                patch.object(BrowserUseService, "_build_browser_llm", return_value=(object(), None)):
             svc = BrowserUseService()
             result = asyncio.run(svc.run_task("hola"))
         self.assertEqual(result, "texto resultado")
@@ -534,7 +600,8 @@ class BrowserUseArtifactTests(unittest.TestCase):
         module = types.SimpleNamespace(
             Agent=FakeAgent, BrowserSession=FakeBrowserSession, ChatOpenAI=FakeChatOpenAI
         )
-        with patch.dict(sys.modules, {"browser_use": module}):
+        with patch.dict(sys.modules, {"browser_use": module}), \
+                patch.object(BrowserUseService, "_build_browser_llm", return_value=(object(), None)):
             svc = BrowserUseService()
             with self.assertRaises(asyncio.TimeoutError):
                 asyncio.run(svc.run_task("t", timeout=0.05))
@@ -581,7 +648,8 @@ class BrowserUseArtifactTests(unittest.TestCase):
             Agent=FakeAgent, BrowserSession=FakeBrowserSession, ChatOpenAI=FakeChatOpenAI
         )
         with patch.object(computer_mod, "_BROWSER_USE_CAPTURE_TIMEOUT_SECONDS", 0.05):
-            with patch.dict(sys.modules, {"browser_use": module}):
+            with patch.dict(sys.modules, {"browser_use": module}), \
+                    patch.object(BrowserUseService, "_build_browser_llm", return_value=(object(), None)):
                 svc = BrowserUseService()
                 result = asyncio.run(svc.run_task("t", timeout=5))
         self.assertEqual(result, "completado")
@@ -623,7 +691,8 @@ class BrowserUseArtifactTests(unittest.TestCase):
         module = types.SimpleNamespace(
             Agent=FakeAgent, BrowserSession=FakeBrowserSession, ChatOpenAI=FakeChatOpenAI
         )
-        with patch.dict(sys.modules, {"browser_use": module}):
+        with patch.dict(sys.modules, {"browser_use": module}), \
+                patch.object(BrowserUseService, "_build_browser_llm", return_value=(object(), None)):
             svc = BrowserUseService()
             result = asyncio.run(
                 svc.run_task(

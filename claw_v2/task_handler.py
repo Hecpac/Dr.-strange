@@ -97,6 +97,36 @@ def normalize_task_queue_status(value: Any) -> str:
 # ...) never reach chat — the summary already carries the public framing.
 _INTERNAL_ERROR_CODE_RE = re.compile(r"^[a-z0-9_]+:\S")
 
+# Substrings that mean the in-process browser executor returned WITHOUT raising
+# but produced no usable result — the planning LLM was rate-limited, the agent
+# gave up, CDP was unreachable, or browser_use was missing. Matching these maps
+# the run to a terminal "failed" (with the real text) instead of a non-terminal
+# "pending" that the lifecycle watchdog resumes forever. See computer.py /
+# computer_handler.py for where each string is emitted.
+_BROWSER_FAILURE_MARKERS = (
+    "(no result)",
+    "tarea de navegador completada sin salida",
+    "no pude completar la tarea de navegador",
+    "no pude conectar al navegador",
+    "no puedo ejecutar la tarea de navegador",
+    "browser_use no está disponible",
+    # Named-profile health gate blocked the task before the agent ran — the
+    # browser executor returns a human status (browser_profiles.human_message)
+    # that must NOT land as "passed". Keyed on the stable phrases of the
+    # needs_login / blocked_by_challenge messages; a regression test ties the two
+    # together so wording drift can't silently re-introduce a false pass.
+    "quedó deslogueado",
+    "muro de verificación",
+)
+
+
+def _browser_output_indicates_failure(output: str) -> bool:
+    """True when a browser-executor result is empty or a known failure sentinel."""
+    text = (output or "").strip().lower()
+    if not text:
+        return True
+    return any(marker in text for marker in _BROWSER_FAILURE_MARKERS)
+
 
 def _failure_response_text(
     *,
@@ -762,9 +792,19 @@ class TaskHandler:
             "browser_executor_started",
             {"session_id": session_id, "task_id": task_id, "mode": mode, "objective": objective[:200]},
         )
+        error_text = ""
         try:
             output = str(self.browser_executor(objective, task_id=task_id, mode=mode))
-            status = "pending"
+            # The executor returns the agent's own report; it does NOT raise when
+            # the agent merely failed to produce a result (LLM rate-limited, CDP
+            # unreachable, agent gave up). Classify that as a terminal failure —
+            # otherwise "pending" is non-terminal and the lifecycle watchdog
+            # resumes the task forever while the real error never reaches the user.
+            if _browser_output_indicates_failure(output):
+                status = "failed"
+                error_text = output.strip() or "el agente de navegador no produjo resultado"
+            else:
+                status = "passed"
         except Exception as exc:  # noqa: BLE001 - executor failures must not crash the runner
             logger.exception("browser executor failed for %s", task_id)
             self._emit(
@@ -773,11 +813,14 @@ class TaskHandler:
             )
             output = f"No pude completar la tarea de navegador: {str(exc)[:200]}"
             status = "failed"
+            error_text = str(exc)[:200]
         checkpoint = {
             "summary": (output or objective)[:180],
             "verification_status": status,
             "task_id": task_id,
         }
+        if status == "failed":
+            checkpoint["error"] = error_text
         self._update_session_state(
             session_id,
             mode=mode,

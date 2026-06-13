@@ -168,10 +168,22 @@ _BROWSER_OPERATION_SIGNAL_RE = re.compile(
     # instagram/reel: the IG publish path (claw_v2/instagram_publish.py) drives
     # CDP Chrome, but objectives say "Instagram"/"reel", not "Chrome/CDP".
     r"\b(?:cdp|chrome|chromium|playwright|selenium|chromedriver|notebooklm"
-    r"|instagram|reels?|computer[-_\s]?use)\b"
+    r"|instagram|reels?|twitter|computer[-_\s]?use)\b"
+    r"|x/twitter\b"
     r"|localhost:9(?:250|222)\b"
     r"|127\.0\.0\.1:9(?:250|222)\b"
     r"|/json/(?:list|version)\b",
+    re.IGNORECASE,
+)
+
+_X_BROWSER_ACTION_RE = re.compile(
+    r"\b(?:repaso|sweep|timeline|feed|posts?|captura|capturar|lee|leer|revisa|review|analiza|abre|navega)\b",
+    re.IGNORECASE,
+)
+_X_PLATFORM_RE = re.compile(
+    r"\b(?:x/twitter|twitter|x\.com)\b"
+    r"|\b(?:por|de|en|a|abre|abrir|lee|leer|revisa|repaso|sweep)\s+x\b"
+    r"|\bx\s+(?:por\s+)?cdp\b",
     re.IGNORECASE,
 )
 
@@ -1949,7 +1961,16 @@ def _build_coordinator_tasks(
 def _long_operation_timeout_for_mode(mode: str, objective: str) -> float | None:
     if mode == "browse":
         return _LONG_BROWSER_OPERATION_TIMEOUT_SECONDS
-    if mode in {"ops", "publish"} and _BROWSER_OPERATION_SIGNAL_RE.search(objective or ""):
+    text = objective or ""
+    if mode in {"ops", "publish"} and (
+        _BROWSER_OPERATION_SIGNAL_RE.search(text)
+        or _looks_like_x_browser_request(text)
+    ):
+        return _LONG_BROWSER_OPERATION_TIMEOUT_SECONDS
+    # research: a bare platform mention ("investiga la historia de Twitter") must
+    # stay on the coordinator. Only an explicit browse ACTION (e.g. "haz un repaso
+    # por X" — action verb + platform) routes to the in-process browser executor.
+    if mode == "research" and _looks_like_x_browser_request(text):
         return _LONG_BROWSER_OPERATION_TIMEOUT_SECONDS
     return None
 
@@ -1978,6 +1999,16 @@ def _should_use_browser_executor(mode: str, objective: str) -> bool:
     only when the objective signals browser/CDP work.
     """
     return _long_operation_timeout_for_mode(mode, objective) is not None
+
+
+def _looks_like_x_browser_request(text: str) -> bool:
+    normalized = _normalize_command_text(text)
+    if "cdp" in normalized and _X_PLATFORM_RE.search(normalized):
+        return True
+    return (
+        _X_PLATFORM_RE.search(normalized) is not None
+        and _X_BROWSER_ACTION_RE.search(normalized) is not None
+    )
 
 
 def _coordinator_checkpoint(result: CoordinatorResult, *, objective: str) -> dict[str, str]:
@@ -2320,7 +2351,10 @@ def _classify_task_actions(normalized_text: str, *, mode: str) -> list[str]:
 
 def _infer_session_mode(user_text: str, reply_text: str | None = None) -> str:
     normalized = _normalize_command_text(f"{user_text}\n{reply_text or ''}")
-    if any(token in normalized for token in ("browse", "http://", "https://", "www.")):
+    if (
+        any(token in normalized for token in ("browse", "http://", "https://", "www."))
+        or _looks_like_x_browser_request(normalized)
+    ):
         return "browse"
     if any(token in normalized for token in ("terminal", "chrome", "screen", "computer", "click", "scroll", "sesion")):
         return "ops"
