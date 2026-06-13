@@ -268,7 +268,8 @@ async def run() -> int:
                 ),
                 _loop,
             )
-            future.result(timeout=20)
+            if not future.result(timeout=20):
+                raise RuntimeError("Telegram owner message was not delivered")
 
         def _send_observability_telegram_message(message: str) -> None:
             chat_id_raw = _normalize_chat_id(getattr(runtime.config, "observability_telegram_chat_id", None))
@@ -278,7 +279,8 @@ async def run() -> int:
                 transport.send_text(chat_id=int(chat_id_raw), text=message),
                 _loop,
             )
-            future.result(timeout=20)
+            if not future.result(timeout=20):
+                raise RuntimeError("Telegram observability message was not delivered")
 
         def _send_observability_stream_message(message: str) -> None:
             chat_id_raw = _normalize_chat_id(getattr(runtime.config, "observability_telegram_chat_id", None))
@@ -288,7 +290,8 @@ async def run() -> int:
                 transport.send_text(chat_id=int(chat_id_raw), text=message),
                 _loop,
             )
-            future.result(timeout=20)
+            if not future.result(timeout=20):
+                raise RuntimeError("Telegram observability stream message was not delivered")
 
         if runtime.observation_window is not None and observability_telegram_enabled:
             runtime.observation_window.set_alert_notifier(_send_observability_telegram_message)
@@ -317,6 +320,9 @@ async def run() -> int:
                 return
             if exc is not None:
                 logger.warning("Telegram session notification failed: %s", exc)
+                return
+            if not done.result():
+                logger.warning("Telegram session notification was not delivered")
 
         _notified_task_ids: set[str] = set()
 

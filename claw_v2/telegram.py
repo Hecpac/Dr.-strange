@@ -1937,21 +1937,119 @@ class TelegramTransport:
         except _NONFATAL_SEND_ERRORS as exc:
             _log_nonfatal_send_error("send_video_url", exc)
 
-    async def send_text(self, *, chat_id: int, text: str, parse_mode: str | None = None) -> None:
-        """Send a proactive text message, split to Telegram's message limit."""
+    async def send_text(self, *, chat_id: int, text: str, parse_mode: str | None = None) -> bool:
+        """Send a proactive text message, split to Telegram's message limit.
+
+        This is the delivery path for task-completion notifications,
+        observability alerts and NotebookLM. Returns False when a part
+        ultimately failed; later parts are never attempted so the caller
+        sees the message as lost instead of delivered with a hole in the
+        middle (2026-06-12 audit T1).
+        """
         if self._app is None:
-            return
-        response = self._sanitize_outbound_response(f"tg-{chat_id}", text)
-        for part in _split_message(response):
+            return False
+        session_id = f"tg-{chat_id}"
+        response = self._sanitize_outbound_response(session_id, text)
+        parts = _split_message(response)
+        part_count = len(parts)
+        for index, part in enumerate(parts, start=1):
+            sent = await self._send_proactive_text_part(
+                part,
+                chat_id=chat_id,
+                parse_mode=parse_mode,
+                session_id=session_id,
+                part_index=index,
+                part_count=part_count,
+            )
+            if not sent:
+                return False
+        return True
+
+    async def _send_proactive_text_part(
+        self,
+        part: str,
+        *,
+        chat_id: int,
+        parse_mode: str | None,
+        session_id: str,
+        part_index: int,
+        part_count: int,
+    ) -> bool:
+        user_id = str(chat_id)
+        timeout_kwargs = self._send_text_timeout_kwargs()
+        for attempt in range(1, self._text_send_retries + 1):
+            await self._emit_outbound_text_event(
+                "telegram_outbound_attempt",
+                session_id=session_id,
+                user_id=user_id,
+                message_kind="proactive",
+                method="send_message",
+                part_index=part_index,
+                part_count=part_count,
+                part_chars=len(part),
+                attempt=attempt,
+            )
             try:
-                await self._app.bot.send_message(
+                result = await self._app.bot.send_message(
                     chat_id=chat_id,
                     text=part,
                     parse_mode=parse_mode,
                     link_preview_options=_NO_PREVIEW,
+                    **timeout_kwargs,
                 )
-            except _NONFATAL_SEND_ERRORS as exc:
-                _log_nonfatal_send_error("send_text", exc)
+            except Exception as exc:
+                retryable = _is_retryable_text_send_error(exc)
+                logger.warning(
+                    "Telegram proactive send_message failed%s",
+                    "; retrying" if retryable and attempt < self._text_send_retries else "",
+                    exc_info=True,
+                )
+                await self._emit_outbound_text_event(
+                    "telegram_outbound_error",
+                    session_id=session_id,
+                    user_id=user_id,
+                    message_kind="proactive",
+                    method="send_message",
+                    part_index=part_index,
+                    part_count=part_count,
+                    part_chars=len(part),
+                    attempt=attempt,
+                    error=exc,
+                )
+                if not retryable:
+                    break
+                if attempt < self._text_send_retries:
+                    await self._sleep_before_text_send_retry(exc, attempt)
+            else:
+                message_id = getattr(result, "message_id", None)
+                await self._emit_outbound_text_event(
+                    "telegram_outbound_sent",
+                    session_id=session_id,
+                    user_id=user_id,
+                    message_kind="proactive",
+                    method="send_message",
+                    part_index=part_index,
+                    part_count=part_count,
+                    part_chars=len(part),
+                    attempt=attempt,
+                    message_id=message_id if isinstance(message_id, int) else None,
+                )
+                return True
+
+        # The direct Bot API fallback sends plain text only; with a
+        # parse_mode the silently-unformatted message could change meaning,
+        # so report the loss instead.
+        if parse_mode is not None:
+            return False
+        return await self._send_text_direct_bot_api(
+            part,
+            chat_id=chat_id,
+            session_id=session_id,
+            user_id=user_id,
+            message_kind="proactive",
+            part_index=part_index,
+            part_count=part_count,
+        )
 
     async def _handle_text_content(
         self,

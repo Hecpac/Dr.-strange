@@ -11,7 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from telegram.error import TimedOut
+from telegram.error import BadRequest, RetryAfter, TimedOut
 
 import claw_v2.observe as observe_module
 from claw_v2.memory import MemoryStore
@@ -1071,9 +1071,11 @@ class SendPhotoTests(unittest.IsolatedAsyncioTestCase):
         transport._app = MagicMock()
         transport._app.bot = AsyncMock()
         transport._app.bot.send_message.side_effect = ConnectionResetError("reset")
+        transport._send_text_direct_bot_api = AsyncMock(return_value=False)
 
-        await transport.send_text(chat_id=1, text="hello")
+        delivered = await transport.send_text(chat_id=1, text="hello")
 
+        self.assertFalse(delivered)
         transport._app.bot.send_message.assert_awaited_once()
 
     async def test_send_text_sanitizes_proactive_internal_details(self) -> None:
@@ -1096,6 +1098,115 @@ class SendPhotoTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("tg-574707975", sent_text)
         self.assertNotIn("runtime lost authoritative backing state", sent_text)
         self.assertIn("se perdio el estado ejecutable", sent_text)
+
+
+class ProactiveSendTextTests(unittest.IsolatedAsyncioTestCase):
+    """send_text is the proactive path (task-completion notifications,
+    observability alerts, NotebookLM): it must retry retryable errors,
+    fall back to the direct Bot API, report failure as False, and never
+    deliver a later part after an earlier part was lost (T1, 2026-06-12)."""
+
+    def _transport(self) -> tuple[TelegramTransport, MagicMock]:
+        bot_service = MagicMock()
+        bot_service.observe = MagicMock()
+        transport = TelegramTransport(
+            bot_service=bot_service, token="t", allowed_user_id="123",
+        )
+        transport._text_send_retries = 2
+        transport._text_send_retry_delay = 0.0
+        transport._app = MagicMock()
+        transport._app.bot = AsyncMock()
+        return transport, bot_service
+
+    @staticmethod
+    def _events(bot_service: MagicMock) -> list[tuple[str, dict]]:
+        return [
+            (call.args[0], call.kwargs["payload"])
+            for call in bot_service.observe.emit.call_args_list
+        ]
+
+    async def test_retries_flood_control_then_delivers(self) -> None:
+        transport, bot_service = self._transport()
+        transport._app.bot.send_message.side_effect = [
+            RetryAfter(retry_after=0),
+            SimpleNamespace(message_id=5),
+        ]
+
+        delivered = await transport.send_text(chat_id=1, text="hello")
+
+        self.assertTrue(delivered)
+        self.assertEqual(transport._app.bot.send_message.await_count, 2)
+        events = self._events(bot_service)
+        self.assertTrue(
+            any(
+                name == "telegram_outbound_sent"
+                and payload["message_kind"] == "proactive"
+                and payload["attempt"] == 2
+                and payload["message_id"] == 5
+                for name, payload in events
+            )
+        )
+
+    async def test_exhausted_part_returns_false_and_skips_remaining_parts(self) -> None:
+        transport, bot_service = self._transport()
+        transport._app.bot.send_message.side_effect = TimedOut("Timed out")
+        transport._send_text_direct_bot_api = AsyncMock(return_value=False)
+
+        delivered = await transport.send_text(chat_id=1, text="a" * 5000)
+
+        self.assertFalse(delivered)
+        # Both attempts belong to part 1; part 2 is never attempted.
+        sent_texts = {
+            call.kwargs["text"]
+            for call in transport._app.bot.send_message.await_args_list
+        }
+        self.assertEqual(sent_texts, {"a" * 4096})
+        transport._send_text_direct_bot_api.assert_awaited_once()
+        events = self._events(bot_service)
+        self.assertTrue(
+            any(
+                name == "telegram_outbound_error"
+                and payload["message_kind"] == "proactive"
+                and payload["error_type"] == "TimedOut"
+                for name, payload in events
+            )
+        )
+
+    async def test_falls_back_to_direct_bot_api_when_ptb_exhausted(self) -> None:
+        transport, bot_service = self._transport()
+        transport._app.bot.send_message.side_effect = TimedOut("Timed out")
+        transport._send_text_direct_bot_api = AsyncMock(return_value=True)
+
+        delivered = await transport.send_text(chat_id=1, text="hello")
+
+        self.assertTrue(delivered)
+        transport._send_text_direct_bot_api.assert_awaited_once()
+        self.assertEqual(
+            transport._send_text_direct_bot_api.await_args.kwargs["message_kind"],
+            "proactive",
+        )
+
+    async def test_parse_mode_blocks_direct_fallback(self) -> None:
+        transport, bot_service = self._transport()
+        transport._app.bot.send_message.side_effect = TimedOut("Timed out")
+        transport._send_text_direct_bot_api = AsyncMock(return_value=True)
+
+        delivered = await transport.send_text(
+            chat_id=1, text="hello", parse_mode="Markdown"
+        )
+
+        self.assertFalse(delivered)
+        transport._send_text_direct_bot_api.assert_not_awaited()
+
+    async def test_nonretryable_error_does_not_retry(self) -> None:
+        transport, bot_service = self._transport()
+        transport._app.bot.send_message.side_effect = BadRequest("MESSAGE_TOO_LONG")
+        transport._send_text_direct_bot_api = AsyncMock(return_value=False)
+
+        delivered = await transport.send_text(chat_id=1, text="hello")
+
+        self.assertFalse(delivered)
+        transport._app.bot.send_message.assert_awaited_once()
 
 
 class ObserveEmitOffloadTests(unittest.IsolatedAsyncioTestCase):
