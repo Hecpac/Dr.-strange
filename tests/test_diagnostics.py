@@ -389,7 +389,13 @@ class DiagnosticsRunbookTests(unittest.TestCase):
             self.assertIn(expected, text)
         self.assertIn("--ack-current", text)
         self.assertIn("launchctl kickstart -k", restart)
-        self.assertIn("critical restartable condition", watchdog)
+        # Restart decision is debounced in the testable module (2026-06-13).
+        self.assertIn("claw_v2.watchdog", watchdog)
+        self.assertIn("restart threshold reached", watchdog)
+        # The runbook documents the debounce knobs.
+        self.assertIn("CLAW_WATCHDOG_STRIKES", text)
+        self.assertIn("CLAW_WATCHDOG_BOOTSTRAP_GRACE_S", text)
+        self.assertIn("CLAW_RESTART_PORT_WAIT_S", text)
 
 
 if __name__ == "__main__":

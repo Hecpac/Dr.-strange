@@ -55,6 +55,21 @@ restart Claw for ordinary `attention` states; it restarts only when diagnostics
 reports a `critical` condition tied to process, port, heartbeat, or web transport
 liveness.
 
+The restart *action* is debounced in the testable `claw_v2.watchdog` module so a
+transient `critical` reading during the daemon's own bootstrap never triggers a
+restart (which historically self-perpetuated into a restart loop). The diagnostics
+`critical` condition itself is unchanged; only the watchdog's reaction is gated:
+
+- **Bootstrap grace** — `CLAW_WATCHDOG_BOOTSTRAP_GRACE_S` (default `120`): the
+  watchdog holds while the daemon process has been up for fewer than this many
+  seconds, giving a slow bootstrap time to finish coming up.
+- **N-strikes** — `CLAW_WATCHDOG_STRIKES` (default `2`): the watchdog requires
+  this many consecutive `critical` + restartable readings before it reaches the
+  restart threshold; the counter persists in `~/.claw/watchdog_state.json`.
+- **Port wait** — `CLAW_RESTART_PORT_WAIT_S` (default `10`): seconds
+  `scripts/restart.sh` waits for the web port to listen after a restart; raise it
+  when a slow bootstrap (e.g. DB contention) makes the port come up late.
+
 Chrome CDP is managed by `ops/chrome-cdp-launcher.sh` when installed via
 `ops/com.claw.chrome-cdp.plist`. The launcher reuses a healthy CDP process and
 refuses to remove `SingletonLock` while the configured profile is active.
