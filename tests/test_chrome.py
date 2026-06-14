@@ -350,10 +350,15 @@ class ManagedChromeAttachStopTests(unittest.TestCase):
     def test_stop_kills_attached_pid(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             mc = self._make_mc(tmpdir)
+            # Hermetic: the attach path calls _ensure_visible_window (real CDP
+            # HTTP to :9250) and _pid_is_headless (real `ps`); stub both so the
+            # test exercises stop()-after-attach without a live Chrome.
             with (
                 patch("claw_v2.chrome._check_port_pids", return_value=[(9999, "Google Chrome")]),
                 patch("claw_v2.chrome._is_cdp_ready", return_value=True),
                 patch("claw_v2.chrome._profile_user_data_pids", return_value=[9999]),
+                patch("claw_v2.chrome._pid_is_headless", return_value=False),
+                patch.object(ManagedChrome, "_ensure_visible_window"),
             ):
                 mc.start()
             self.assertIsNone(mc._process)
@@ -379,6 +384,8 @@ class ManagedChromeAttachStopTests(unittest.TestCase):
                 patch("claw_v2.chrome._check_port_pids", return_value=[(1234, "Google Chrome")]),
                 patch("claw_v2.chrome._is_cdp_ready", return_value=True),
                 patch("claw_v2.chrome._profile_user_data_pids", return_value=[1234]),
+                patch("claw_v2.chrome._pid_is_headless", return_value=False),
+                patch.object(ManagedChrome, "_ensure_visible_window"),
             ):
                 mc.start()
             self.assertEqual(mc._attached_pid, 1234)
