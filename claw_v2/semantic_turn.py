@@ -126,7 +126,7 @@ _NEW_TASK_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"\b(?:haz|has|hacer|hazme|commitea|commitealo|commit|comitea|comitealo)\b.+\b(?:commit|commitea|comitea|reinicia|reiniciar|restart|reboot|daemon|servicio|launchd)\b",
         r"\b(?:reinicia|reiniciar|restart|reboot|relanza|relanzar)\b.+\b(?:daemon|servicio|bot|runtime|launchd|chrome|cdp)\b",
         r"(?=.*\b(?:x|twitter)\b)(?=.*\b(?:noticias|news|feed|timeline)\b)\b(?:revisa|revisame|repasa|repasame|mira|consulta)\b",
-        r"^(?:abre|abrir|navega|navegar|entra|entrar)\b.+\b(?:instagram|x|twitter|chrome|navegador|browser)\b",
+        r"^(?:abre|abrir|navega|navegar|entra|entrar)\b.+\b(?:instagram|x|twitter)\b",
         r"\b(?:create|generate|prepare|implement|patch|fix|add|modify|update|complete|finish|review|investigate|audit)\b",
     )
 )

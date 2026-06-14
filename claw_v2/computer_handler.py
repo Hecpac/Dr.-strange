@@ -77,7 +77,8 @@ def _instagram_target_url(objective: str) -> str | None:
         return None
     for raw_url in _URL_RE.findall(text):
         url = raw_url.rstrip(".,;:!?)]}")
-        if "instagram.com" in url.lower():
+        host = _host_from_url(url)
+        if host and (host == "instagram.com" or host.endswith(".instagram.com")):
             return url
     return "https://www.instagram.com/"
 
@@ -932,6 +933,28 @@ class ComputerHandler:
         title = str(getattr(result, "title", "") or getattr(screenshot, "title", "") or "").strip()
         screenshot_path = str(getattr(screenshot, "screenshot_path", "") or "").strip()
         content = str(getattr(result, "content", "") or getattr(screenshot, "content", "") or "").strip()
+        # Don't claim success on a login/challenge wall (no_silent_degrade): the
+        # named-profile gate above is X-first, so a logged-out Instagram lands here
+        # and would otherwise be reported as a completed open. The returned message
+        # carries a _BROWSER_FAILURE_MARKERS phrase so the executor never marks it passed.
+        wall_probe = " ".join((final_url, title, content)).lower()
+        wall_markers = ("accounts/login", "iniciar sesión", "log in", "checkpoint", "challenge")
+        if any(marker in wall_probe for marker in wall_markers):
+            message = (
+                f"login/challenge wall en {final_url}; inicia sesión en el perfil de Chrome y reintenta."
+            )
+            self._emit(
+                "deterministic_browser_task_unverifiable_result",
+                {
+                    "task_id": task_id,
+                    "mode": mode,
+                    "target_url": target_url,
+                    "final_url": final_url,
+                    "title": title,
+                    "screenshot_path": screenshot_path,
+                },
+            )
+            return f"No pude completar la tarea de navegador determinística: {message}"
         content_hint = ""
         if content:
             compact = " ".join(content.split())

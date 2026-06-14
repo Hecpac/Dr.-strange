@@ -150,14 +150,14 @@ class BrowserCapability:
         message: str,
         *,
         stage: str,
-        first_error: str,
+        first_error: str | None,
     ) -> None:
         self._emit(
             "browser_capability_preflight_failed",
             {
                 **payload,
                 "stage": stage,
-                "first_probe_error": first_error[:200],
+                "first_probe_error": (first_error or "")[:200],
                 "error": message[:300],
             },
         )

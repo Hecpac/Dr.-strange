@@ -20,6 +20,7 @@ from asyncio import create_task as _asyncio_create_task
 from asyncio import get_running_loop as _asyncio_get_running_loop
 from asyncio import shield as _asyncio_shield
 from asyncio import sleep as _asyncio_sleep
+from asyncio import wait_for as _asyncio_wait_for
 from concurrent.futures import ThreadPoolExecutor
 
 from telegram import LinkPreviewOptions, Update
@@ -682,15 +683,22 @@ class _ProgressIndicator:
         if self._task is not None:
             self._task.cancel()
             try:
-                await self._task
-            except (_AsyncioCancelledError, Exception):
+                await _asyncio_wait_for(self._task, timeout=0.5)
+            except (_AsyncioCancelledError, TimeoutError):
                 pass
+            except Exception:
+                logger.debug("progress indicator clear wait failed", exc_info=True)
             self._task = None
         if self._placeholder_id is not None and self._bot is not None:
             try:
-                await self._bot.delete_message(
-                    chat_id=self._chat_id, message_id=self._placeholder_id
+                await _asyncio_wait_for(
+                    self._bot.delete_message(
+                        chat_id=self._chat_id, message_id=self._placeholder_id
+                    ),
+                    timeout=1.0,
                 )
+            except TimeoutError:
+                logger.debug("progress placeholder delete timed out")
             except Exception:
                 logger.debug("progress placeholder delete failed", exc_info=True)
             self._placeholder_id = None

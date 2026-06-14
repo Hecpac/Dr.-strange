@@ -2868,7 +2868,9 @@ def _extract_prefetched_evidence_context(text: str) -> dict[str, str] | None:
     if tweet_match is None:
         return None
     urls = _extract_url_candidates(text)
-    tweet_url = next((url for url in urls if _is_tweet_url(url)), urls[0] if urls else "")
+    tweet_url = next((url for url in urls if _is_tweet_url(url)), "")
+    if not tweet_url:
+        return None
     return {
         "url": tweet_url,
         "fetched_content": tweet_match.group(1).strip(),

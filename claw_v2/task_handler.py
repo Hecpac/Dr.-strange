@@ -128,10 +128,10 @@ _BROWSER_FAILURE_MARKERS = (
 
 def _browser_output_indicates_failure(output: str) -> bool:
     """True when a browser-executor result is empty or a known failure sentinel."""
-    text = (output or "").strip().lower()
+    text = _normalize_command_text(output or "")
     if not text:
         return True
-    return any(marker in text for marker in _BROWSER_FAILURE_MARKERS)
+    return any(_normalize_command_text(marker) in text for marker in _BROWSER_FAILURE_MARKERS)
 
 
 def _failure_response_text(

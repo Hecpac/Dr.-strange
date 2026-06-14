@@ -2807,8 +2807,11 @@ class BotService:
                 },
             )
             return False
-        evidence_context = prefetched_evidence_context or link_analysis_context
-        if self._link_analysis_context_has_evidence(evidence_context):
+        # Check each context independently: a present-but-empty prefetched context
+        # must not shadow a usable link-analysis context (false-negative gate).
+        if self._link_analysis_context_has_evidence(prefetched_evidence_context):
+            return False
+        if self._link_analysis_context_has_evidence(link_analysis_context):
             return False
         if self._response_has_evidence_signal(response):
             return False

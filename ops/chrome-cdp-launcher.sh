@@ -6,6 +6,10 @@ CDP_PORT="${CLAW_CHROME_PORT:-9250}"
 CDP_DIR="${CLAW_CHROME_PROFILE_DIR:-$HOME/.claw/chrome-profile}"
 CHROME_BIN="${CLAW_CHROME_BIN:-/Applications/Google Chrome.app/Contents/MacOS/Google Chrome}"
 CHECK_INTERVAL_SECONDS="${CLAW_CHROME_CHECK_INTERVAL_SECONDS:-30}"
+# Refocus/resize Chrome on every healthy poll (steals window focus). Off by
+# default; focus on launch is unconditional below. Set to 1 to restore the old
+# always-front behavior.
+AUTOFOCUS_ON_READY="${CLAW_CHROME_AUTOFOCUS_ON_READY:-0}"
 BLOCKED_INTERVAL_SECONDS="${CLAW_CHROME_BLOCKED_INTERVAL_SECONDS:-60}"
 
 cdp_ready() {
@@ -71,7 +75,9 @@ mkdir -p "$CDP_DIR/Default"
 
 while true; do
     if cdp_ready; then
-        ensure_chrome_window
+        if [ "$AUTOFOCUS_ON_READY" = "1" ]; then
+            ensure_chrome_window
+        fi
         sleep "$CHECK_INTERVAL_SECONDS"
         continue
     fi
