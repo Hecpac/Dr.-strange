@@ -163,3 +163,26 @@ class BrowserToolService:
                 return BrowserToolResult(success=False, error=str(exc)[:300],
                                          backend=self._backend.name)
             return self._ingest(sess, page)
+
+    def _act(self, session_id: str, ref: str, action: str, text: str | None = None) -> BrowserToolResult:
+        with self._lock:
+            sess = self._session(session_id)
+            target = sess.refs.get(ref)
+            if target is None or not target.selector:
+                return BrowserToolResult(
+                    success=False, url=sess.current_url, backend=self._backend.name,
+                    error=f"stale_ref: {ref} not in current snapshot",
+                    metadata={"ref_version": sess.ref_version},
+                )
+            try:
+                page = self._backend.act(target.selector, action, text)
+            except Exception as exc:
+                return BrowserToolResult(success=False, url=sess.current_url,
+                                         backend=self._backend.name, error=str(exc)[:300])
+            return self._ingest(sess, page)
+
+    def click(self, session_id: str, ref: str) -> BrowserToolResult:
+        return self._act(session_id, ref, "click")
+
+    def type(self, session_id: str, ref: str, text: str, clear: bool = True) -> BrowserToolResult:
+        return self._act(session_id, ref, "type", text)

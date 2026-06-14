@@ -102,5 +102,36 @@ class NavigateRefTests(unittest.TestCase):
         self.assertEqual(sess.refs["@e1"].selector, "#b")
 
 
+class InteractionTests(unittest.TestCase):
+    def test_click_resolves_ref_to_selector(self) -> None:
+        p1 = _page("https://x.test", RawElement("#post", "button", "Post", "Post", None, None))
+        p2 = _page("https://x.test/done", RawElement("#ok", "button", "OK", "OK", None, None))
+        backend = _FakeBackend([p1, p2])
+        svc = BrowserToolService(backend=backend)
+        svc.navigate("s", "https://x.test")
+        r = svc.click("s", "@e1")
+        self.assertTrue(r.success)
+        self.assertEqual(backend.acted[-1], ("#post", "click", None))
+
+    def test_type_passes_text(self) -> None:
+        p1 = _page("https://x.test", RawElement("#q", "textbox", "Search", "", None, "text"))
+        backend = _FakeBackend([p1, p1])
+        svc = BrowserToolService(backend=backend)
+        svc.navigate("s", "https://x.test")
+        r = svc.type("s", "@e1", "hello")
+        self.assertTrue(r.success)
+        self.assertEqual(backend.acted[-1], ("#q", "type", "hello"))
+
+    def test_stale_ref_after_version_change_fails_clearly(self) -> None:
+        p1 = _page("https://a.test", RawElement("#a", "button", "A", "A", None, None))
+        p2 = _page("https://b.test", RawElement("#b", "button", "B", "B", None, None))
+        svc = BrowserToolService(backend=_FakeBackend([p1, p2]))
+        svc.navigate("s", "https://a.test")
+        svc.navigate("s", "https://b.test")  # ref map replaced
+        r = svc.click("s", "@e99")
+        self.assertFalse(r.success)
+        self.assertEqual(r.error, "stale_ref: @e99 not in current snapshot")
+
+
 if __name__ == "__main__":
     unittest.main()
