@@ -84,6 +84,23 @@ class _DiskIoOnceConn:
         return getattr(self._real, name)
 
 
+class _ClosedOnceConn:
+    """Delegates to a real connection after one closed-database failure."""
+
+    def __init__(self, real: sqlite3.Connection) -> None:
+        self._real = real
+        self.failures = 1
+
+    def execute(self, *args, **kwargs):
+        if self.failures > 0:
+            self.failures -= 1
+            raise sqlite3.ProgrammingError("Cannot operate on a closed database.")
+        return self._real.execute(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
 class _CloseTrackingConn:
     def __init__(self) -> None:
         self.closed = False
@@ -519,6 +536,30 @@ class ObservePersistHealTests(unittest.TestCase):
             events = [e["event_type"] for e in observe.recent_events(limit=5)]
             self.assertIn("disk_io_probe", events)
 
+    def test_persist_retries_once_after_closed_connection_when_heal_succeeds(self) -> None:
+        import claw_v2.observe as observe_module
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "obs.db"
+            observe = ObserveStream(db_path)
+            observe._conn = _ClosedOnceConn(observe._conn)
+            heal_calls: list[str] = []
+            original_heal = observe_module.heal_wal_after_closed_connection
+
+            def fake_heal(path, exc, *, context):
+                heal_calls.append(context)
+                return True
+
+            observe_module.heal_wal_after_closed_connection = fake_heal
+            try:
+                observe.emit("closed_connection_probe", payload={"ok": True})
+            finally:
+                observe_module.heal_wal_after_closed_connection = original_heal
+
+            self.assertEqual(heal_calls, ["ObserveStream._persist_event"])
+            events = [e["event_type"] for e in observe.recent_events(limit=5)]
+            self.assertIn("closed_connection_probe", events)
+
 
 class TerminalWriteRetryTests(unittest.TestCase):
     def test_mark_terminal_retries_through_transient_locks(self) -> None:
@@ -629,6 +670,56 @@ class StoreDiskIoRetryTests(unittest.TestCase):
 
             self.assertEqual(heal_calls, ["MemoryStore.update_session_state"])
             self.assertEqual(state["verification_status"], "running")
+
+    def test_memory_read_retries_once_after_closed_connection(self) -> None:
+        # A WAL heal on another connection can close the store handle mid-read;
+        # the _synchronized wrapper must heal once and retry instead of raising
+        # "Cannot operate on a closed database" up to the caller.
+        import claw_v2.memory as memory_module
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "memory.db"
+            memory = MemoryStore(db_path)
+            memory.update_session_state("s1", verification_status="running")
+            memory._conn = _ClosedOnceConn(memory._conn)
+            heal_calls: list[str] = []
+            original_heal = memory_module.heal_wal_after_closed_connection
+
+            def fake_heal(path, exc, *, context):
+                heal_calls.append(context)
+                return True
+
+            memory_module.heal_wal_after_closed_connection = fake_heal
+            try:
+                state = memory.get_session_state("s1")
+            finally:
+                memory_module.heal_wal_after_closed_connection = original_heal
+
+            self.assertEqual(heal_calls, ["MemoryStore.get_session_state"])
+            self.assertEqual(state["verification_status"], "running")
+
+    def test_synchronized_reraises_when_heal_declines(self) -> None:
+        # When the error is not a closed-connection (heal declines), the
+        # wrapper must re-raise without retrying.
+        import claw_v2.memory as memory_module
+        from types import SimpleNamespace
+
+        calls: list[int] = []
+
+        @memory_module._synchronized
+        def probe(self):
+            calls.append(1)
+            raise sqlite3.ProgrammingError("no such column: bogus")
+
+        fake = SimpleNamespace(_lock=threading.RLock(), db_path="x")
+        original_heal = memory_module.heal_wal_after_closed_connection
+        memory_module.heal_wal_after_closed_connection = lambda *a, **k: False
+        try:
+            with self.assertRaises(sqlite3.ProgrammingError):
+                probe(fake)
+        finally:
+            memory_module.heal_wal_after_closed_connection = original_heal
+        self.assertEqual(calls, [1])  # no retry
 
     def test_job_claim_next_retries_once_after_disk_io(self) -> None:
         import claw_v2.jobs as jobs_module

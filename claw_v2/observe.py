@@ -11,6 +11,7 @@ from typing import Callable
 from claw_v2.sqlite_runtime import (
     connect_runtime_sqlite,
     heal_orphaned_wal,
+    heal_wal_after_closed_connection,
     heal_wal_after_disk_io,
     make_store_wal_heal,
     note_wal_generation,
@@ -270,6 +271,14 @@ class ObserveStream:
                     )
                     return False
                 time.sleep(OBSERVE_LOCKED_RETRY_DELAY_SECONDS * attempt)
+            except sqlite3.ProgrammingError as exc:
+                if not wal_heal_attempted and heal_wal_after_closed_connection(
+                    self.db_path, exc, context="ObserveStream._persist_event"
+                ):
+                    wal_heal_attempted = True
+                    attempt = 0
+                    continue
+                raise
         return False
 
     def _spill_dropped_event(self, event_type: str, *, payload_json: str, **columns: str | None) -> None:
