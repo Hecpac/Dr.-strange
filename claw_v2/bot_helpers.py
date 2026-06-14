@@ -182,10 +182,14 @@ _SOCIAL_BROWSER_PLATFORM_RE = re.compile(
     r"\b(?:instagram|insta|linkedin|tiktok|facebook|threads)\b",
     re.IGNORECASE,
 )
+# Verbs only — bare nouns (feed/timeline/perfil/profile) were removed so a
+# conversational mention ("¿cómo va el feed de instagram?") no longer reads as a
+# navigation command. Per the Routing Contract, capture only when the literal
+# text is an unambiguous browse intent.
 _SOCIAL_BROWSER_ACTION_RE = re.compile(
     r"\b(?:abre|abrir|open|navega|navegar|entra|entrar|"
     r"revisa|review|check|lee|leer|repaso|sweep|captura|"
-    r"capturar|screenshot|feed|timeline|perfil|profile|scroll|click)\b",
+    r"capturar|screenshot|scroll|click)\b",
     re.IGNORECASE,
 )
 
@@ -496,9 +500,13 @@ _AUTONOMY_ACTION_PATTERNS: dict[str, tuple[str, ...]] = {
         r"\bgit\s+push\s+--force\b",
     ),
 }
+# Inactivity-describing forms only (infinitive/gerund/participle/imperfect) —
+# NOT the bare imperative ("publica"/"postea"/"sube"). Otherwise the lazy
+# "(?:no|sin) ... {verb}" span ends on a real imperative command and strips it,
+# letting "no publiques todavía pero igual publica esto" slip past the block.
 _PUBLISH_CONTEXT_ONLY_VERB = (
-    r"(?:publica(?:r|do|ndo|ba|bamos)?|post(?:ea|ear|eado|eando|eaba|eabamos)?|"
-    r"tweet(?:ea|ear|eado|eando)?|twittea(?:r|do|ndo)?|sub(?:ir|ido|iendo))"
+    r"(?:publica(?:r|do|ndo|ba|bamos)|post(?:ear|eado|eando|eaba|eabamos)|"
+    r"tweet(?:ear|eado|eando)|twittea(?:r|do|ndo)|sub(?:ir|ido|iendo))"
 )
 _PUBLISH_CONTEXT_ONLY_RE = re.compile(
     rf"\b(?:"

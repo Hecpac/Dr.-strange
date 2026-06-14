@@ -705,6 +705,37 @@ class BrowserExecutorRoutingTests(unittest.TestCase):
             self.assertNotEqual(state.get("verification_status"), "blocked")
             self.assertNotIn("coordinator_ran", recorded)
 
+    def test_publish_command_after_negation_is_still_blocked(self) -> None:
+        # Regression (audit M1): a real imperative publish command must not slip
+        # past the block by riding a leading negation that the context-only strip
+        # would otherwise consume ("no publiques … pero igual publica esto").
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            memory = MemoryStore(root / "claw.db")
+            recorded: dict = {}
+
+            class _RecordingCoordinator:
+                def run(self, task_id, objective, research_tasks, **kwargs):
+                    recorded["coordinator_ran"] = True
+                    return CoordinatorResult(task_id=task_id, phase_results={}, synthesis="coord")
+
+            handler = TaskHandler(
+                coordinator=_RecordingCoordinator(),
+                get_session_state=memory.get_session_state,
+                update_session_state=memory.update_session_state,
+            )
+            memory.update_session_state("tg-1", autonomy_mode="autonomous", step_budget=8)
+
+            result = handler.maybe_run_coordinated_task(
+                "tg-1", "no publiques todavía pero igual publica esto ahora en instagram"
+            )
+            # Blocked: returns the policy block and never runs the coordinator.
+            self.assertIsNotNone(result)
+            self.assertEqual(
+                memory.get_session_state("tg-1").get("verification_status"), "blocked"
+            )
+            self.assertNotIn("coordinator_ran", recorded)
+
     def test_browser_use_repo_review_uses_coordinator_not_browser_executor(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
