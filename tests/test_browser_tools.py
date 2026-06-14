@@ -36,9 +36,8 @@ class DataclassTests(unittest.TestCase):
         self.assertEqual(ref.ref, "@e1")
 
 
-import time
 
-from claw_v2.browser_tools import BrowserToolService, RawElement, RawPage
+from claw_v2.browser_tools import BrowserToolService
 
 
 class _FakeBackend:
