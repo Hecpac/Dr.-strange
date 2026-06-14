@@ -994,7 +994,8 @@ def _resolve_claude_oauth_token() -> str | None:
 
 def _resolve_api_key() -> str | None:
     """Resolve Anthropic API key from env or shell profiles."""
-    import os, re
+    import os
+    import re
     if value := os.getenv("ANTHROPIC_API_KEY"):
         return value.strip() or None
     pattern = re.compile(r"^\s*(?:export\s+)?ANTHROPIC_API_KEY=(?P<value>.+?)\s*$")

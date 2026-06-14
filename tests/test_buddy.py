@@ -12,7 +12,6 @@ from claw_v2.buddy import (
     BuddyService,
     BuddyState,
     XP_PER_LEVEL,
-    _SPECIES_BY_RARITY,
     _mood_label,
 )
 
@@ -51,7 +50,7 @@ class HatchTests(unittest.TestCase):
 
     def test_hatch_replaces_existing(self) -> None:
         svc, _ = _make_service()
-        first = svc.hatch()
+        _first = svc.hatch()
         second = svc.hatch()
         pet = svc.get_pet()
         self.assertEqual(pet.hatched_at, second.hatched_at)
@@ -192,7 +191,7 @@ class TickTests(unittest.TestCase):
         state = svc.get_pet()
         state.last_fed_at = past
         svc._save("default", state)
-        reactions = svc.tick(observe)
+        _reactions = svc.tick(observe)
         pet = svc.get_pet()
         self.assertGreater(pet.total_events_witnessed, 0)
 

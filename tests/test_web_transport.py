@@ -11,7 +11,6 @@ from unittest.mock import MagicMock, patch
 from urllib.request import Request, urlopen
 
 from claw_v2 import web_transport as web_transport_module
-from claw_v2.bot import BotService
 from claw_v2.chat_api import LocalChatAPI
 from claw_v2.observation_window import ObservationWindowState
 from claw_v2.observability_dashboard import ObservabilityDashboard

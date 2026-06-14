@@ -98,7 +98,9 @@ class PipelineService:
         try:
             for attempt in range(self.max_retries + 1):
                 prompt = _build_code_prompt(issue, run, past_lessons=past_lessons)
-                response = self.router.ask(
+                # The coding agent's effect is the worktree diff collected below;
+                # its text response is intentionally not consumed.
+                _response = self.router.ask(
                     prompt, lane="worker", system_prompt="You are a coding agent. Implement the requested change.",
                     evidence_pack={"issue": issue.id, "description": issue.description},
                     cwd=str(wt_path),
@@ -461,7 +463,7 @@ def _build_code_prompt(issue: LinearIssue, run: PipelineRun, *, past_lessons: st
     if past_lessons:
         parts.extend(["", "# Lessons from similar past tasks", past_lessons])
     if run.retries > 0 and run.test_output:
-        parts.extend(["", f"Previous attempt failed. Test output:", f"```\n{run.test_output[:2000]}\n```", "Fix the failing tests."])
+        parts.extend(["", "Previous attempt failed. Test output:", f"```\n{run.test_output[:2000]}\n```", "Fix the failing tests."])
     return "\n".join(parts)
 
 

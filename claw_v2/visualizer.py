@@ -5,7 +5,6 @@ import json
 from dataclasses import dataclass, field
 from html import escape
 from pathlib import Path
-from typing import Any
 
 from claw_v2.observe import ObserveStream
 

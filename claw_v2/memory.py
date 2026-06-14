@@ -19,6 +19,7 @@ from claw_v2.memory_retention import (
 )
 from claw_v2.sqlite_runtime import (
     connect_runtime_sqlite,
+    heal_wal_after_closed_connection,
     heal_wal_after_disk_io,
     make_store_wal_heal,
     register_wal_heal,
@@ -417,6 +418,26 @@ def _synchronized(method):
 
     @functools.wraps(method)
     def wrapper(self, *args, **kwargs):
+        try:
+            with self._lock:
+                return method(self, *args, **kwargs)
+        except sqlite3.ProgrammingError as exc:
+            # A WAL heal triggered on another connection can close this store's
+            # shared handle mid-call ("Cannot operate on a closed database").
+            # Heal once — which reopens the registered connections — then retry,
+            # mirroring ObserveStream._persist_event. Non-closed ProgrammingErrors
+            # (real SQL bugs) are re-raised untouched.
+            #
+            # The heal MUST run with the store lock released: the heal closes and
+            # reopens every registered connection, and each reopen() re-acquires
+            # that store's lock. Holding self._lock here while the heal needs
+            # another store's lock (under the global heal_lock) would invert lock
+            # order and deadlock — so the disk-io path and ObserveStream both heal
+            # outside their lock, and this must too.
+            if not heal_wal_after_closed_connection(
+                self.db_path, exc, context=f"MemoryStore.{method.__name__}"
+            ):
+                raise
         with self._lock:
             return method(self, *args, **kwargs)
 
@@ -1432,7 +1453,16 @@ class MemoryStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    @_synchronized
+    # NOT @_synchronized on purpose (A2 deadlock fix, audit 2026-06-14). This
+    # method only composes other @_synchronized reads (get_session_state /
+    # get_profile_facts / get_learning_facts / get_recent_messages), each of which
+    # locks individually — it never touches self._conn directly, so the store lock
+    # buys no extra safety here. Holding it across the observe.emit below was an
+    # AB-BA hazard: emit -> ObserveStream._persist_event -> WAL heal acquires the
+    # global heal_lock and then reopen()s every store (re-acquiring Memory._lock),
+    # while a writer holding heal_lock would block on Memory._lock. Keeping the
+    # emit (and the whole body) lock-free upholds the "heal outside the store lock"
+    # discipline used everywhere else.
     def build_context(
         self,
         session_id: str,

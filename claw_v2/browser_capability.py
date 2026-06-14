@@ -43,6 +43,7 @@ class BrowserCapability:
         self,
         port: int = DEFAULT_CDP_PORT,
         profile_dir: str = DEFAULT_CDP_PROFILE_DIR,
+        visible: bool = True,
     ) -> str:
         """Ensure Chrome CDP responds on /json/version, starting it if needed."""
         port = _normalize_port(port)
@@ -55,11 +56,27 @@ class BrowserCapability:
         }
         self._emit("browser_capability_preflight_started", payload)
 
-        first_error = self._probe_json_version(endpoint)
+        first_error = self._probe_json_version(endpoint, visible=visible)
         if first_error is None:
+            if visible:
+                try:
+                    chrome = self._chrome_factory(
+                        port=port,
+                        profile_dir=profile_dir,
+                        observe=self._managed_chrome_observe,
+                    )
+                    chrome.ensure(headless=False)
+                except Exception as exc:
+                    message = (
+                        "Necesito abrir/login Chrome para esta tarea de navegador. "
+                        f"CDP responde en {endpoint}, pero no pude preparar una "
+                        f"ventana visible con perfil {profile_path}: {_error_message(exc)}"
+                    )
+                    self._fail(payload, message, stage="focus_existing_chrome", first_error=first_error)
+                    raise BrowserCapabilityError(message, endpoint=endpoint) from exc
             self._emit(
                 "browser_capability_preflight_ok",
-                {**payload, "started_chrome": False},
+                {**payload, "started_chrome": False, "focused_chrome": bool(visible)},
             )
             return endpoint
 
@@ -69,7 +86,7 @@ class BrowserCapability:
                 profile_dir=profile_dir,
                 observe=self._managed_chrome_observe,
             )
-            chrome.ensure()
+            chrome.ensure(headless=not visible)
         except Exception as exc:
             message = (
                 "Necesito abrir/login Chrome para esta tarea de navegador. "
@@ -79,7 +96,7 @@ class BrowserCapability:
             self._fail(payload, message, stage="start_chrome", first_error=first_error)
             raise BrowserCapabilityError(message, endpoint=endpoint) from exc
 
-        second_error = self._probe_json_version(endpoint)
+        second_error = self._probe_json_version(endpoint, visible=visible)
         if second_error is not None:
             message = (
                 "Necesito abrir/login Chrome para esta tarea de navegador. "
@@ -95,16 +112,16 @@ class BrowserCapability:
         )
         return endpoint
 
-    def _probe_json_version(self, endpoint: str) -> str | None:
+    def _probe_json_version(self, endpoint: str, *, visible: bool = True) -> str | None:
         url = f"{endpoint}/json/version"
         try:
             response = self._urlopen(url, timeout=self._probe_timeout)
             if hasattr(response, "__enter__"):
                 with response as opened:
-                    self._read_version_response(opened)
+                    self._read_version_response(opened, visible=visible)
             else:
                 try:
-                    self._read_version_response(response)
+                    self._read_version_response(response, visible=visible)
                 finally:
                     close = getattr(response, "close", None)
                     if callable(close):
@@ -114,13 +131,18 @@ class BrowserCapability:
             return _error_message(exc)
 
     @staticmethod
-    def _read_version_response(response: Any) -> None:
+    def _read_version_response(response: Any, *, visible: bool = True) -> None:
         status = getattr(response, "status", getattr(response, "code", None))
         if status is not None and int(status) >= 400:
             raise RuntimeError(f"HTTP {status}")
         raw = response.read(8192)
         if raw:
-            json.loads(raw.decode("utf-8"))
+            data = json.loads(raw.decode("utf-8"))
+            if visible:
+                browser = str(data.get("Browser") or "")
+                user_agent = str(data.get("User-Agent") or "")
+                if "HeadlessChrome" in browser or "HeadlessChrome" in user_agent:
+                    raise RuntimeError("Chrome CDP is headless; visible Chrome required")
 
     def _fail(
         self,
@@ -128,14 +150,14 @@ class BrowserCapability:
         message: str,
         *,
         stage: str,
-        first_error: str,
+        first_error: str | None,
     ) -> None:
         self._emit(
             "browser_capability_preflight_failed",
             {
                 **payload,
                 "stage": stage,
-                "first_probe_error": first_error[:200],
+                "first_probe_error": (first_error or "")[:200],
                 "error": message[:300],
             },
         )

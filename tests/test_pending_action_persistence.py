@@ -31,7 +31,6 @@ from pathlib import Path
 
 from claw_v2.bot_helpers import (
     OwnerDelegationIntent,
-    detect_owner_delegation,
 )
 from claw_v2.memory import MemoryStore
 from claw_v2.state_handler import (

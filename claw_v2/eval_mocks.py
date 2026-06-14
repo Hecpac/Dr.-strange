@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
 from typing import Callable
 
 from claw_v2.adapters.base import LLMRequest, ProviderAdapter

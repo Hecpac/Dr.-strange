@@ -8,7 +8,7 @@ import subprocess
 import threading
 from contextlib import contextmanager
 from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable, Generator
 
 _pool_logger = logging.getLogger(__name__)
@@ -651,7 +651,7 @@ class BrowserPool:
         pool.shutdown()
     """
 
-    def __init__(self, *, cdp_url: str = "http://localhost:9222", max_sessions: int = 8) -> None:
+    def __init__(self, *, cdp_url: str = "http://localhost:9250", max_sessions: int = 8) -> None:
         self._cdp_url = cdp_url
         self._max_sessions = max_sessions
         self._pw: Any = None

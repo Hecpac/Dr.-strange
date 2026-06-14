@@ -5,7 +5,6 @@ import unittest
 
 from claw_v2.agent_loop import (
     AgentLoop,
-    AgentLoopOutcome,
     IterationTrace,
     VerifierVerdict,
 )

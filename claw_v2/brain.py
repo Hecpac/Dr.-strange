@@ -7,6 +7,7 @@ from html import escape
 import json
 import logging
 import re
+import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Callable, TYPE_CHECKING
@@ -288,6 +289,7 @@ CONVERSATIONAL_STYLE_CONTRACT = """# Conversational style
 Hector wants the agent to sound fluid, direct, and human, not like a rigid status machine.
 Default to Spanish when Hector writes in Spanish. Use natural short paragraphs.
 Lead with the actual answer or action, then include technical status only when it helps.
+Ajusta la longitud a la pregunta. Una pregunta simple o factual se responde en 1-3 frases; no la expandas. NO agregues contexto que no se pidió, ni advertencias, ni alternativas A/B/C, ni resúmenes de cierre, ni "además…" de relleno. Ve largo SOLO cuando la tarea de verdad lo exige (un análisis, una explicación multi-paso que Hector pidió, un reporte). La verbosidad cuesta latencia real (la respuesta se genera token a token) y va en contra de cómo Hector quiere leerte: responde lo justo y para.
 Avoid robotic labels like "Estado:", "Modo:", "Verification Status:", or generic templates in casual replies unless the user asked for raw diagnostics.
 Sin Checkpoint, sin tablas, sin headers en turnos conversacionales. Esos formatos son para diagnóstico explícito o reportes técnicos cuando el usuario los pide.
 Do not over-apologize or add cheerleading. Be calm, practical, and specific.
@@ -298,6 +300,12 @@ For operational work, translate machine states into plain language:
 - succeeded/passed → "quedó verificada con X"
 - failed → "intenté y falló por Y"
 Keep command names, task IDs, and exact errors when they matter, but wrap them in normal prose."""
+
+TELEGRAM_FORMAT_CONTRACT = """# Formato colapsable (Telegram)
+Para contenido secundario y largo —trace operativo, pasos intermedios, contexto opcional, logs, detalle técnico que no es la respuesta principal— enciérralo en un bloque colapsable usando ">>>" al inicio de cada línea. Telegram lo muestra plegado y Hector lo expande si quiere.
+- Líneas con ">>>" = bloque colapsable (detalle largo).
+- Líneas con ">" = cita corta normal (no se pliega).
+Deja SIEMPRE la respuesta o el resultado principal fuera del bloque, arriba y en texto normal. No metas la respuesta dentro del colapsable. Úsalo solo cuando de verdad hay detalle extenso que estorbaría; un mensaje corto no necesita bloque."""
 
 BRAIN_PUSHBACK_CONTRACT = """# Pushback contract
 Compliance ≠ utilidad.
@@ -480,6 +488,7 @@ class BrainService:
             if self.delegation_handler_factory is not None
             else None
         )
+        _build_started = time.perf_counter()
         prompt = self._build_prompt(
             session_id=session_id,
             message=message,
@@ -489,6 +498,7 @@ class BrainService:
             catchup_after_id=provider_cursor,
             task_type=task_type,
         )
+        _build_ms = (time.perf_counter() - _build_started) * 1000
         try:
             if self.observe is not None:
                 self.observe.emit(
@@ -516,6 +526,24 @@ class BrainService:
                             "summary_only_context": True,
                         },
                     )
+            if self.observe is not None:
+                # Latency attribution: build_ms isolates local prompt assembly
+                # (history/context/experience-replay) from the provider call that
+                # follows. dispatch_ts → llm_response measures Opus TTFT+gen.
+                self.observe.emit(
+                    "brain_llm_dispatch",
+                    lane="brain",
+                    provider=session_provider,
+                    trace_id=trace["trace_id"],
+                    root_trace_id=trace["root_trace_id"],
+                    span_id=trace["span_id"],
+                    parent_span_id=trace["parent_span_id"],
+                    artifact_id=trace["artifact_id"],
+                    payload={
+                        "app_session_id": session_id,
+                        "build_ms": round(_build_ms, 1),
+                    },
+                )
             response = self.router.ask(
                 prompt,
                 system_prompt=_brain_system_prompt(
@@ -1639,6 +1667,7 @@ def _brain_system_prompt(system_prompt: str, *, include_delegation: bool = False
         f"{system_prompt.rstrip()}\n\n"
         f"{BRAIN_RESPONSE_CONTRACT}\n\n"
         f"{CONVERSATIONAL_STYLE_CONTRACT}\n\n"
+        f"{TELEGRAM_FORMAT_CONTRACT}\n\n"
         f"{BRAIN_PUSHBACK_CONTRACT}\n\n"
         f"{SELF_HEALING_LOOP_CONTRACT}\n\n"
         f"{AUTONOMY_EXECUTION_CONTRACT}\n\n"

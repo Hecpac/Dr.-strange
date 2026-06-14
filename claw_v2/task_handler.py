@@ -105,10 +105,16 @@ _INTERNAL_ERROR_CODE_RE = re.compile(r"^[a-z0-9_]+:\S")
 # computer_handler.py for where each string is emitted.
 _BROWSER_FAILURE_MARKERS = (
     "(no result)",
+    "limitacion critica",
     "tarea de navegador completada sin salida",
     "no pude completar la tarea de navegador",
     "no pude conectar al navegador",
+    "no puedo completar esta tarea",
+    "no puedo ejecutar esta tarea",
     "no puedo ejecutar la tarea de navegador",
+    "no tengo capacidad para ejecutar",
+    "no tengo acceso terminal",
+    "fuera de mi scope",
     "browser_use no está disponible",
     # Named-profile health gate blocked the task before the agent ran — the
     # browser executor returns a human status (browser_profiles.human_message)
@@ -122,10 +128,10 @@ _BROWSER_FAILURE_MARKERS = (
 
 def _browser_output_indicates_failure(output: str) -> bool:
     """True when a browser-executor result is empty or a known failure sentinel."""
-    text = (output or "").strip().lower()
+    text = _normalize_command_text(output or "")
     if not text:
         return True
-    return any(marker in text for marker in _BROWSER_FAILURE_MARKERS)
+    return any(_normalize_command_text(marker) in text for marker in _BROWSER_FAILURE_MARKERS)
 
 
 def _failure_response_text(
@@ -303,7 +309,7 @@ class TaskHandler:
                 pending_action="",
             )
             return _format_autonomy_policy_block(policy)
-        if mode not in {"coding", "research"}:
+        if mode not in {"coding", "research", "browse", "ops"}:
             return None
         return self.start_autonomous_task(session_id, text, mode=mode)
 
@@ -2088,6 +2094,12 @@ class TaskHandler:
         if not normalized:
             return False
         contradiction_markers = (
+            "limitacion critica",
+            "no puedo completar esta tarea",
+            "no puedo ejecutar esta tarea",
+            "no tengo capacidad para ejecutar",
+            "no tengo acceso terminal",
+            "fuera de mi scope",
             "no verificado",
             "sin verificar",
             "not verified",

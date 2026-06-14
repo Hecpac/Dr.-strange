@@ -17,11 +17,9 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
 
 from claw_v2.bot import BotService
 from claw_v2.observe import ObserveStream
-from claw_v2.task_ledger import TaskLedger
 from claw_v2.turn_context import (
     CRITICAL_OBSERVE_EVENTS_REQUIRING_TURN_ID,
     current_turn_id,

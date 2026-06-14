@@ -126,6 +126,34 @@ def is_sqlite_disk_io_error(exc: BaseException) -> bool:
     return "disk i/o error" in str(exc).lower()
 
 
+def is_sqlite_closed_connection_error(exc: BaseException) -> bool:
+    """True when a stale handle is used after a registry-wide reopen."""
+    return isinstance(exc, sqlite3.ProgrammingError) and "closed database" in str(exc).lower()
+
+
+def heal_wal_after_closed_connection(
+    db_path: Path | str,
+    exc: BaseException,
+    *,
+    context: str,
+) -> bool:
+    """Heal once when a writer observes a connection closed by WAL recovery."""
+    if not is_sqlite_closed_connection_error(exc):
+        return False
+    logger.warning(
+        "SQLite closed connection in %s for %s; forcing conservative WAL heal",
+        context,
+        db_path,
+        exc_info=True,
+    )
+    return _force_conservative_wal_heal(
+        db_path,
+        reason="sqlite_closed_connection",
+        context=context,
+        cause=exc,
+    )
+
+
 def heal_wal_after_disk_io(db_path: Path | str, exc: BaseException, *, context: str) -> bool:
     """Heal once for a disk I/O error that may be caused by stale WAL sidecars."""
     if not is_sqlite_disk_io_error(exc):

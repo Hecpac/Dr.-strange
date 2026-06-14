@@ -29,3 +29,25 @@ include = ["claw_v2*"]
 dev = [
     "pytest>=9.0.3",
 ]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+# Default select (E,F) plus an explicit ignore list for patterns this codebase
+# uses on purpose, so `ruff check` is real signal and the self-improve promotion
+# gate is deterministic (audit 2026-06-14 B6).
+ignore = [
+    "F403",  # `from claw_v2.bot_helpers import *` — intentional re-export hub
+    "F405",  # names resolved through the star import above
+    "E402",  # module-level import not at top — conditional/lazy imports are intentional
+    "E741",  # ambiguous one-letter names — stylistic, not a defect
+    "E731",  # lambda assigned to a variable — stylistic
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Forward-reference string annotations whose targets are imported lazily / under
+# TYPE_CHECKING; ruff can't resolve them but they resolve fine at runtime.
+"tests/test_brain_verify.py" = ["F821"]
+"tests/test_checkpoint.py" = ["F821"]
+"tests/test_notebooklm.py" = ["F821"]

@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import logging
+import json
 import re
 import shutil
 import subprocess
 import time
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Callable
 
@@ -40,7 +43,7 @@ class ManagedChrome:
     def cdp_url(self) -> str:
         return f"http://localhost:{self.port}"
 
-    def start(self, *, headless: bool = True) -> None:
+    def start(self, *, headless: bool = False) -> None:
         """Start or attach to a Chrome CDP process without corrupting profiles."""
         pids = _check_port_pids(self.port)
         profile_pids = set(_profile_user_data_pids(self.profile_dir)) if pids else set()
@@ -55,10 +58,21 @@ class ManagedChrome:
                         f"not using managed profile {self.profile_dir} (different profile). "
                         f"Stop that Chrome or set CLAW_CHROME_PORT to a different port."
                     )
-                self._process = None
-                self._attached_pid = matching_profile_pids[0]
-                logger.info("ManagedChrome reusing existing CDP Chrome on port %d (PID %d)", self.port, self._attached_pid)
-                return
+                if not headless and any(_pid_is_headless(pid) for pid in matching_profile_pids):
+                    logger.info(
+                        "Ready CDP Chrome on port %d is headless; relaunching visible",
+                        self.port,
+                    )
+                    for pid in matching_profile_pids:
+                        _kill_pid(pid)
+                    _wait_for_port_free(self.port, timeout=5)
+                else:
+                    self._process = None
+                    self._attached_pid = matching_profile_pids[0]
+                    if not headless:
+                        self._ensure_visible_window(self._attached_pid)
+                    logger.info("ManagedChrome reusing existing CDP Chrome on port %d (PID %d)", self.port, self._attached_pid)
+                    return
         for pid, name in pids:
             if any(cn in name.lower() for cn in _CHROME_NAMES):
                 if pid not in profile_pids:
@@ -143,20 +157,45 @@ class ManagedChrome:
         cmd = [
             chrome_path,
             f"--remote-debugging-port={self.port}",
+            # Scope the DevTools origin allowlist to the loopback client instead of
+            # "*": a wildcard lets any local web origin attach to and drive this
+            # authenticated profile over CDP. The executor connects via 127.0.0.1.
+            f"--remote-allow-origins=http://127.0.0.1:{self.port},http://localhost:{self.port}",
             f"--user-data-dir={self.profile_dir}",
             "--no-first-run",
             "--disable-default-apps",
         ]
         if headless:
             cmd.append("--headless=new")
+        else:
+            cmd.extend([
+                "--start-maximized",
+                "--window-position=0,0",
+                "--window-size=1440,1000",
+            ])
 
         self._process = subprocess.Popen(
             cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
         _wait_for_cdp_ready(self.port, timeout=10)
+        if not headless:
+            self._ensure_visible_window(self._process.pid)
         logger.info(
             "ManagedChrome started on port %d (PID %d)", self.port, self._process.pid
         )
+
+    def _ensure_visible_window(self, pid: int) -> None:
+        if _focus_visible_chrome(pid=pid):
+            return
+        if _focus_existing_cdp_page(self.port):
+            time.sleep(0.5)
+            _focus_visible_chrome(pid=pid)
+            return
+        if _cdp_page_targets(self.port):
+            return
+        _open_cdp_target(self.port, "about:blank")
+        time.sleep(0.5)
+        _focus_visible_chrome(pid=pid)
 
     def _emit_observe(self, event_type: str, payload: dict) -> None:
         if self._observe is None:
@@ -178,7 +217,8 @@ class ManagedChrome:
             self._process = None
             logger.info("ManagedChrome stopped")
         elif self._attached_pid is not None:
-            import os, signal
+            import os
+            import signal
             pid = self._attached_pid
             try:
                 os.kill(pid, signal.SIGTERM)
@@ -193,10 +233,10 @@ class ManagedChrome:
             self._attached_pid = None
             logger.info("ManagedChrome detached and killed attached Chrome PID %d", pid)
 
-    def ensure(self) -> None:
+    def ensure(self, *, headless: bool = False) -> None:
         if self._process is not None and self._process.poll() is None:
             return
-        self.start()
+        self.start(headless=headless)
 
     @property
     def is_running(self) -> bool:
@@ -217,9 +257,9 @@ def _find_chrome() -> str:
 def _check_port_pids(port: int) -> list[tuple[int, str]]:
     try:
         output = subprocess.check_output(
-            ["lsof", "-ti", f":{port}"], text=True, stderr=subprocess.DEVNULL,
+            ["lsof", "-ti", f":{port}"], text=True, stderr=subprocess.DEVNULL, timeout=5,
         ).strip()
-    except (subprocess.CalledProcessError, FileNotFoundError):
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
         return []
     if not output:
         return []
@@ -228,12 +268,132 @@ def _check_port_pids(port: int) -> list[tuple[int, str]]:
         pid = int(line.strip())
         try:
             name = subprocess.check_output(
-                ["ps", "-p", str(pid), "-o", "comm="], text=True, stderr=subprocess.DEVNULL,
+                ["ps", "-p", str(pid), "-o", "comm="], text=True, stderr=subprocess.DEVNULL, timeout=5,
             ).strip()
-        except (subprocess.CalledProcessError, FileNotFoundError):
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
             name = "unknown"
         results.append((pid, name))
     return results
+
+
+def _pid_command(pid: int) -> str:
+    try:
+        return subprocess.check_output(
+            ["ps", "-p", str(pid), "-o", "command="],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        return ""
+
+
+def _pid_is_headless(pid: int) -> bool:
+    return "--headless" in _pid_command(pid).lower()
+
+
+def _focus_visible_chrome(*, pid: int | None = None) -> bool:
+    process_condition = "((count windows of p) > 0)"
+    if pid is not None:
+        process_condition = (
+            f"((count windows of p) > 0) and (((unix id of p) as integer) is {int(pid)})"
+        )
+    script = f"""
+tell application "Finder" to set desktopBounds to bounds of window of desktop
+set targetPid to missing value
+tell application "System Events"
+  repeat with p in (processes whose name is "Google Chrome")
+    if {process_condition} then
+      set targetPid to ((unix id of p) as integer)
+      set visible of p to true
+      set frontmost of p to true
+      set position of window 1 of p to {{item 1 of desktopBounds, item 2 of desktopBounds}}
+      set size of window 1 of p to {{(item 3 of desktopBounds) - (item 1 of desktopBounds), (item 4 of desktopBounds) - (item 2 of desktopBounds)}}
+      return "focused"
+      exit repeat
+    end if
+  end repeat
+end tell
+if targetPid is missing value then
+  tell application "Google Chrome"
+    activate
+    if (count of windows) > 0 then
+      set bounds of window 1 to desktopBounds
+      return "focused"
+    end if
+  end tell
+end if
+return "missing"
+"""
+    try:
+        result = subprocess.run(
+            ["osascript"],
+            input=script,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
+        return "focused" in (result.stdout or "")
+    except Exception:
+        logger.debug("Could not focus visible Chrome", exc_info=True)
+        return False
+
+
+def _open_cdp_target(port: int, url: str) -> None:
+    encoded = urllib.parse.quote(url, safe=":/?=&%#")
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/json/new?{encoded}",
+        method="PUT",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=3):
+            return
+    except Exception as exc:
+        raise ChromeStartError(f"Could not create visible Chrome CDP tab on port {port}: {exc}") from exc
+
+
+def _focus_existing_cdp_page(port: int) -> bool:
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
+            try:
+                for context in browser.contexts:
+                    for page in context.pages:
+                        if page.url.startswith("chrome://"):
+                            continue
+                        page.bring_to_front()
+                        return True
+            finally:
+                browser.close()
+    except Exception:
+        logger.debug("Could not focus existing CDP page", exc_info=True)
+    return False
+
+
+def _cdp_page_targets(port: int) -> list[dict[str, str]]:
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=3) as response:
+            raw = response.read(256_000)
+    except Exception:
+        return []
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    targets: list[dict[str, str]] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") != "page":
+            continue
+        targets.append({str(key): str(value) for key, value in item.items()})
+    return targets
 
 
 def _profile_user_data_pids(profile_dir: str) -> list[int]:
@@ -243,8 +403,9 @@ def _profile_user_data_pids(profile_dir: str) -> list[int]:
             ["ps", "-axww", "-o", "pid=,command="],
             text=True,
             stderr=subprocess.DEVNULL,
+            timeout=5,
         )
-    except (subprocess.CalledProcessError, FileNotFoundError):
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
         return []
 
     pids: list[int] = []

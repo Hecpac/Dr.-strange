@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from claw_v2.ecosystem import EcosystemHealthService, EcosystemHealth, EcosystemMetric
+from claw_v2.ecosystem import EcosystemHealthService
 
 
 class CollectTests(unittest.TestCase):

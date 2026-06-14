@@ -314,7 +314,7 @@ class DeleteTests(unittest.TestCase):
         svc._save_graph()
         svc.index_path.write_text("## Test\n- [[test-page]] — desc\n- [[other]] — keep\n", encoding="utf-8")
 
-        result = svc.delete("test-page")
+        _result = svc.delete("test-page")
 
         self.assertFalse((svc.raw_dir / "test-page.md").exists())
         self.assertFalse((svc.wiki_dir / "test-page.md").exists())

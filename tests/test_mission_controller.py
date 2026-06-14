@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from typing import Any
 
-from claw_v2.mission_controller import MissionController, MissionRecord
+from claw_v2.mission_controller import MissionController
 
 
 class _FakeStateStore:

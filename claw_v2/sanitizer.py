@@ -6,7 +6,7 @@ import re
 import time
 import unicodedata
 from collections import Counter
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 
 from claw_v2.types import AgentClass, SanitizedContent

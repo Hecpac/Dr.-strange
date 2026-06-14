@@ -27,7 +27,6 @@ DEBT TRACKED (per Hector F3b.0 trailing notes):
 """
 from __future__ import annotations
 
-from typing import Any
 
 from claw_v2.verification.success_contract import (
     ExternalCheckSpec,

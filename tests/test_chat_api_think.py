@@ -14,7 +14,6 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from claw_v2.chat_api import LocalChatAPI
-from claw_v2.observe import ObserveStream
 from claw_v2.task_board import TaskBoard
 
 

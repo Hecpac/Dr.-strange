@@ -753,7 +753,7 @@ class BrainToolUseLedgerTests(unittest.TestCase):
             source_text=f"context: {fake_token}",
             runtime_channel="telegram",
         )
-        task = self.ledger.list(limit=10)[0]
+        _task = self.ledger.list(limit=10)[0]
         # TaskLedger.create runs `redact_sensitive` on metadata + artifacts
         # before persistence; the fake token (mixed alphanumeric, 20 chars)
         # may pass the redactor's heuristics, so the contract we assert is

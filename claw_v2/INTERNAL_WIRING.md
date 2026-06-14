@@ -8,9 +8,9 @@
 ## meta
 
 ```yaml
-describes_commit: fe99808+spec-002-self-improve-promotion-hotfix+spec-002-subprocess-bounded-pr-c+spec-002-approval-manager-pr-d+spec-002-promotion-tooling-phase-4+brain-delegation-tool+recovery-jobs-drain-c1+audit-m3-m4-offloop-emits-nonblocking-checkpoint-backup+audit-high-2026-06-11+audit-waves-2-3-2026-06-12+adapters-d1-split-2026-06-12+pasos-6-7-coordinator-resumable-2026-06-12+wal-generation-guard-2026-06-12+telegram-t1-t12-2026-06-12
-doc_version: 2.21
-last_verified: 2026-06-12
+describes_commit: fe99808+spec-002-self-improve-promotion-hotfix+spec-002-subprocess-bounded-pr-c+spec-002-approval-manager-pr-d+spec-002-promotion-tooling-phase-4+brain-delegation-tool+recovery-jobs-drain-c1+audit-m3-m4-offloop-emits-nonblocking-checkpoint-backup+audit-high-2026-06-11+audit-waves-2-3-2026-06-12+adapters-d1-split-2026-06-12+pasos-6-7-coordinator-resumable-2026-06-12+wal-generation-guard-2026-06-12+telegram-t1-t12-2026-06-12+m2-pre-brain-browse-ops-gate-2026-06-14
+doc_version: 2.22
+last_verified: 2026-06-14
 verification_method: manual + pytest + AST sentinel cross-check
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
@@ -435,7 +435,9 @@ Telegram → BotService.handle_text
    │   the factory into BrainService at __init__; ack returned to the turn,
    │   result delivered later via autonomous_task_completed/_failed)
    ├─ entry B: pre-brain coordinated_task handler (autonomy_mode=autonomous
-   │   + mode ∈ {coding, research} only)
+   │   + mode ∈ {coding, research, browse, ops}; browse/ops admitted 2026-06-14
+   │   so the deterministic visible-Chrome flow runs pre-brain. Guarded by the
+   │   matcher, not the gate — see §5.4. publish never admitted.)
    ├─ TaskLedger.create (SQLite ledger in data/claw.db)
    ├─ CoordinatorService — research → synthesis → impl → verify
    ├─ AgentLoop wrap (plan/exec/observe/verify/critique/replan)
@@ -769,9 +771,17 @@ parallelism:
 mode_phases:  # planned_phases_for_mode (artifacts.py) + _build_coordinator_tasks (bot_helpers.py)
   coding|ops|publish|browse: [research, synthesis, implementation, verification]
     # implementation worker: lane=worker (tool-capable claude_code preset),
-    # cwd=workspace_root; ops/publish/browse added 2026-06-10 — reachable
-    # ONLY via brain delegation (entry A in §2), the pre-brain gate stays
-    # {coding, research}.
+    # cwd=workspace_root. ops/publish/browse added 2026-06-10. UPDATE 2026-06-14:
+    # the pre-brain coordinator gate (maybe_run_coordinated_task / autonomy matrix
+    # automatic_coordinator_modes) now ALSO admits {browse, ops} so the
+    # deterministic visible-Chrome / Instagram flow runs pre-brain without a brain
+    # round-trip. Safety rests on the matcher, not the gate: _looks_like_social_browser_request
+    # requires an explicit navigation VERB + platform (bare nouns feed/timeline/
+    # perfil/profile removed), so ambiguous/conversational turns still fall through
+    # to the brain per the Routing Contract. publish stays blocked in every
+    # autonomy mode. The executor-only contract holds: browser/CDP runs through the
+    # in-process executor (a PreToolUse backstop still denies brain-lane Bash that
+    # drives Chrome/CDP), never a brain-lane shell.
   research: [research, synthesis, verification]
   other: [research, synthesis, verification]  # text-only fallback
 

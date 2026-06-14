@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import MagicMock
 
-from claw_v2.linear import LinearService, LinearIssue
+from claw_v2.linear import LinearService
 
 
 class ListActionableTests(unittest.TestCase):

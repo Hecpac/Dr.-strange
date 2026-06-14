@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from claw_v2.dream import AutoDreamService, DreamResult
+from claw_v2.dream import AutoDreamService
 
 
 def _make_service(**overrides):

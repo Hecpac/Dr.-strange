@@ -82,6 +82,7 @@ __all__ = [
     "_enrich_tweet_urls",
     "_evaluate_autonomy_policy",
     "_extract_link_analysis_context",
+    "_extract_prefetched_evidence_context",
     "_extract_nlm_artifact_kind",
     "_extract_nlm_create_topic",
     "_extract_numbered_options",
@@ -173,6 +174,22 @@ _BROWSER_OPERATION_SIGNAL_RE = re.compile(
     r"|localhost:9(?:250|222)\b"
     r"|127\.0\.0\.1:9(?:250|222)\b"
     r"|/json/(?:list|version)\b",
+    re.IGNORECASE,
+)
+_BROWSE_MODE_SIGNAL_RE = re.compile(r"\b(?:browse)\b|https?://|www\.", re.IGNORECASE)
+
+_SOCIAL_BROWSER_PLATFORM_RE = re.compile(
+    r"\b(?:instagram|insta|linkedin|tiktok|facebook|threads)\b",
+    re.IGNORECASE,
+)
+# Verbs only — bare nouns (feed/timeline/perfil/profile) were removed so a
+# conversational mention ("¿cómo va el feed de instagram?") no longer reads as a
+# navigation command. Per the Routing Contract, capture only when the literal
+# text is an unambiguous browse intent.
+_SOCIAL_BROWSER_ACTION_RE = re.compile(
+    r"\b(?:abre|abrir|open|navega|navegar|entra|entrar|"
+    r"revisa|review|check|lee|leer|repaso|sweep|captura|"
+    r"capturar|screenshot|scroll|click)\b",
     re.IGNORECASE,
 )
 
@@ -450,13 +467,78 @@ _OPTION_ORDINALS = {
 }
 _AUTONOMY_ACTION_PATTERNS: dict[str, tuple[str, ...]] = {
     "deploy": (r"\bdeploy\b", r"\bdespliega\b", r"\bproduction\b", r"\bprod\b"),
-    "publish": (r"\bpublica\b", r"\bpublish\b", r"\btweet\b", r"\bpost\b"),
-    "destructive": (r"\bdelete\b", r"\bborra\b", r"\belimina\b", r"\brm\s+-", r"\bdrop\s+table\b", r"\btruncate\b"),
+    "publish": (
+        r"\bpublica(?:lo|la|los|las)?\b",
+        r"\bpostea(?:lo|la|los|las)?\b",
+        r"\b(?:twittea|tuitea)(?:lo|la|los|las)?\b",
+        r"\btweet(?:ea|ealo|alo)?\b",
+        r"\bpublish\s+(?:this|it|the|a|an|our|to|on|in|at|esto)\b",
+        r"\bpost\s+(?:this|it|the|a|an|our|to|on|in|at|esto)\b",
+        r"\b(?:hay\s+que|tenemos\s+que|necesitamos|hace\s+falta)\s+(?:publicar|postear|subir)\s+(?:esto|el|la|los|las|un|una|este|esta|estos|estas|reel|post|tweet|video|imagen|foto|carrusel|story|historia)\b",
+        r"\bsube(?:lo|la|los|las)?(?:\s+\w+){0,5}\s+(?:a|en)\s+(?:x|twitter|instagram|linkedin|tiktok|threads|facebook)\b",
+        r"\bupload\s+(?:this|it|the|a|an|our|\w+)(?:\s+\w+){0,5}\s+(?:to|on)\s+(?:x|twitter|instagram|linkedin|tiktok|threads|facebook)\b",
+        r"\bshare\s+(?:this|it|esto|post|tweet|on|en|to|a)\b",
+    ),
+    "merge": (r"\bmerge\b", r"\bmergea(?:r|lo)?\b"),
+    "send": (
+        r"\b(?:send|envia|enviar|manda|mandar)\s+(?:el|la|un|una|the|a|an)?\s*(?:dm|mensaje|email|correo|sms|telegram|whatsapp|slack|notification|notificacion)\b",
+        r"\bdm\s+(?:a|to)\b",
+    ),
+    "purchase": (
+        r"\b(?:buy|purchase|comprar|compra)\b",
+        r"\bcheckout\s+(?:cart|basket|payment|purchase)\b",
+        r"\b(?:pay|paga|pagar|payment|charge|cobra|cobrar|spend|gasta|gastar)\b",
+    ),
+    "destructive": (
+        r"\bdelete\b",
+        r"\bborra\b",
+        r"\belimina\b",
+        r"\brm\s+-",
+        r"\bdrop\s+table\b",
+        r"\btruncate\b",
+        r"\bforce\s*push\b",
+        r"\bgit\s+push\s+--force\b",
+    ),
 }
+# Inactivity-describing forms only (infinitive/gerund/participle/imperfect) —
+# NOT the bare imperative ("publica"/"postea"/"sube"). Otherwise the lazy
+# "(?:no|sin) ... {verb}" span ends on a real imperative command and strips it,
+# letting "no publiques todavía pero igual publica esto" slip past the block.
+_PUBLISH_CONTEXT_ONLY_VERB = (
+    r"(?:publica(?:r|do|ndo|ba|bamos)|post(?:ear|eado|eando|eaba|eabamos)|"
+    r"tweet(?:ear|eado|eando)|twittea(?:r|do|ndo)|sub(?:ir|ido|iendo))"
+)
+_PUBLISH_CONTEXT_ONLY_RE = re.compile(
+    rf"\b(?:"
+    rf"(?:sin|no|nunca|aun\s+no|todavia\s+no)\s+(?:\w+\s+){{0,8}}?{_PUBLISH_CONTEXT_ONLY_VERB}"
+    rf"|(?:dias?|semanas?|meses|tiempo)\s+sin\s+(?:\w+\s+){{0,4}}?{_PUBLISH_CONTEXT_ONLY_VERB}"
+    rf"|hay\s+(?:varios|muchos|\d+)\s+dias\s+sin\s+(?:\w+\s+){{0,4}}?{_PUBLISH_CONTEXT_ONLY_VERB}"
+    rf"|lleva(?:mos|n)?\s+(?:\w+\s+){{0,10}}?sin\s+(?:\w+\s+){{0,4}}?{_PUBLISH_CONTEXT_ONLY_VERB}"
+    rf")\b",
+    re.IGNORECASE,
+)
 _AUTONOMY_TASK_ACTION_PATTERNS: dict[str, tuple[str, ...]] = {
     "inspect": (r"\brevisa\b", r"\binspect\b", r"\banaliza\b", r"\bdebug\b", r"\bcheck\b"),
     "edit": (r"\bcorrige\b", r"\barregla\b", r"\bfix\b", r"\bimplementa\b", r"\bedit\b", r"\bpatch\b"),
     "test": (r"\btest\b", r"\bpytest\b", r"\bverifica\b", r"\bverify\b"),
+    "browse": (
+        r"\bbrowse\b",
+        r"\bchrome\b",
+        r"\bcdp\b",
+        r"\bnavega\b",
+        r"\babre\b",
+        r"\bopen\b",
+        r"\bscreenshot\b",
+        r"\bscroll\b",
+        r"\bclick\b",
+        r"\bfeed\b",
+        r"\btimeline\b",
+        r"\bperfil\b",
+        r"\bprofile\b",
+        r"\binstagram\b",
+        r"\binsta\b",
+        r"\bx\.com\b",
+    ),
     "commit": (r"\bcommit\b", r"\bcommitea\b"),
     "push": (r"\bgit\s+push\b", r"\bpush\b", r"\bpushea\b", r"\bempuja\b"),
     "research": (r"\binvestiga\b", r"\bresearch\b", r"\bfind\b", r"\bgather\b"),
@@ -466,7 +548,7 @@ _AUTONOMY_TASK_ACTION_PATTERNS: dict[str, tuple[str, ...]] = {
 _AUTONOMY_POLICY_MATRIX: dict[str, dict[str, Any]] = {
     "manual": {
         "automatic_coordinator_modes": [],
-        "blocked_actions": ("deploy", "publish", "destructive"),
+        "blocked_actions": ("deploy", "publish", "merge", "send", "purchase", "destructive"),
         "approval_required_actions": ("commit", "push"),
         "allowed_task_actions": (),
         "notes": [
@@ -476,23 +558,23 @@ _AUTONOMY_POLICY_MATRIX: dict[str, dict[str, Any]] = {
     },
     "assisted": {
         "automatic_coordinator_modes": [],
-        "blocked_actions": ("deploy", "publish", "destructive"),
+        "blocked_actions": ("deploy", "publish", "merge", "send", "purchase", "destructive"),
         "approval_required_actions": ("commit", "push"),
-        "allowed_task_actions": ("inspect", "edit", "test", "research", "summarize"),
+        "allowed_task_actions": ("inspect", "edit", "test", "browse", "research", "summarize"),
         "notes": [
             "Coordinated runs require explicit `/task_run` in assisted mode.",
-            "Commit and git push require confirmation. Publish, deploy, and destructive actions remain blocked.",
+            "Commit and git push require confirmation. Publish, deploy, merge, outbound sends, purchases, and destructive actions remain blocked.",
         ],
     },
     "autonomous": {
-        "automatic_coordinator_modes": ["coding", "research"],
-        "blocked_actions": ("deploy", "publish", "destructive"),
+        "automatic_coordinator_modes": ["coding", "research", "browse", "ops"],
+        "blocked_actions": ("deploy", "publish", "merge", "send", "purchase", "destructive"),
         "approval_required_actions": (),
-        "allowed_task_actions": ("inspect", "edit", "test", "commit", "push", "research", "summarize"),
+        "allowed_task_actions": ("inspect", "edit", "test", "browse", "commit", "push", "research", "summarize"),
         "notes": [
-            "Autonomous coordinator runs are limited to coding and research.",
-            "Operational/browser/authenticated flows stay outside the autonomous coordinator path.",
-            "Commit and git push are allowed for development tasks after local verification. Publish, deploy, and destructive actions remain blocked.",
+            "Autonomous coordinator runs are limited to coding, research, browse, and browser/CDP-shaped ops.",
+            "Browser/CDP flows may run through the daemon in-process browser executor; generic ops still require explicit routing.",
+            "Commit and git push are allowed for development tasks after local verification. Publish, deploy, merge, outbound sends, purchases, and destructive actions remain blocked.",
         ],
     },
 }
@@ -518,7 +600,7 @@ def _default_step_budget(autonomy_mode: str) -> int:
     if autonomy_mode == "manual":
         return 1
     if autonomy_mode == "autonomous":
-        return 4
+        return 8
     return 2
 
 
@@ -1970,7 +2052,10 @@ def _long_operation_timeout_for_mode(mode: str, objective: str) -> float | None:
     # research: a bare platform mention ("investiga la historia de Twitter") must
     # stay on the coordinator. Only an explicit browse ACTION (e.g. "haz un repaso
     # por X" — action verb + platform) routes to the in-process browser executor.
-    if mode == "research" and _looks_like_x_browser_request(text):
+    if mode == "research" and (
+        _looks_like_x_browser_request(text)
+        or _looks_like_social_browser_request(text)
+    ):
         return _LONG_BROWSER_OPERATION_TIMEOUT_SECONDS
     return None
 
@@ -2008,6 +2093,16 @@ def _looks_like_x_browser_request(text: str) -> bool:
     return (
         _X_PLATFORM_RE.search(normalized) is not None
         and _X_BROWSER_ACTION_RE.search(normalized) is not None
+    )
+
+
+def _looks_like_social_browser_request(text: str) -> bool:
+    normalized = _normalize_command_text(text)
+    if "cdp" in normalized and _SOCIAL_BROWSER_PLATFORM_RE.search(normalized):
+        return True
+    return (
+        _SOCIAL_BROWSER_PLATFORM_RE.search(normalized) is not None
+        and _SOCIAL_BROWSER_ACTION_RE.search(normalized) is not None
     )
 
 
@@ -2251,11 +2346,17 @@ def _evaluate_autonomy_policy(
             "summary": f"La tarea requiere aprobación para estas acciones: {labels}.",
             "matched_approval_actions": approval_actions,
         }
-    if mode not in {"coding", "research"}:
+    if mode not in {"coding", "research", "browse", "ops"}:
         return {
             "allowed": False,
             "reason": "unsupported_mode",
             "summary": f"Modo {mode} fuera del coordinador autónomo.",
+        }
+    if mode == "ops" and not _should_use_browser_executor(mode, text):
+        return {
+            "allowed": False,
+            "reason": "unsupported_mode",
+            "summary": "Modo ops solo entra al coordinador autónomo cuando la tarea tiene señal explícita de browser/CDP.",
         }
     if not forced and mode not in policy["automatic_coordinator_modes"]:
         return {
@@ -2287,8 +2388,8 @@ def _format_autonomy_policy_block(policy: dict[str, str | bool]) -> str:
         "autonomy policy blocked coordinated execution.\n"
         f"Reason: {reason}\n"
         f"Summary: {summary}\n"
-        "Allowed automatic scopes: coding, research.\n"
-        "Blocked automatic scopes: publish, deploy, destructive actions."
+        "Allowed automatic scopes: coding, research, browse, browser/CDP ops.\n"
+        "Blocked automatic scopes: publish, deploy, merge, outbound sends, purchases, destructive actions."
     )
 
 
@@ -2317,7 +2418,32 @@ def _policy_for_mode(autonomy_mode: str) -> dict[str, Any]:
 
 
 def _matched_policy_actions(normalized_text: str, *, blocked_actions: tuple[str, ...] | list[str]) -> list[str]:
-    return _matched_named_actions(normalized_text, names=blocked_actions, pattern_map=_AUTONOMY_ACTION_PATTERNS)
+    matches = _matched_named_actions(
+        normalized_text,
+        names=blocked_actions,
+        pattern_map=_AUTONOMY_ACTION_PATTERNS,
+    )
+    if "publish" in matches and _publish_mentions_are_context_only(normalized_text):
+        matches = [match for match in matches if match != "publish"]
+    return matches
+
+
+def _publish_mentions_are_context_only(normalized_text: str) -> bool:
+    """True when publish-shaped words describe inactivity, not an action.
+
+    Example: "Abre Instagram, hay varios dias sin postear nada" should route as
+    browse. A separate explicit command in the same message still blocks, e.g.
+    "sin postear nada; publica esto".
+    """
+    publish_patterns = _AUTONOMY_ACTION_PATTERNS.get("publish", ())
+    if not any(re.search(pattern, normalized_text, re.IGNORECASE) for pattern in publish_patterns):
+        return False
+    stripped = _PUBLISH_CONTEXT_ONLY_RE.sub(" ", normalized_text)
+    return not any(re.search(pattern, stripped, re.IGNORECASE) for pattern in publish_patterns)
+
+
+def _looks_like_publish_execution_request(normalized_text: str) -> bool:
+    return bool(_matched_policy_actions(normalized_text, blocked_actions=("publish",)))
 
 
 def _matched_named_actions(
@@ -2346,14 +2472,19 @@ def _classify_task_actions(normalized_text: str, *, mode: str) -> list[str]:
         return ["inspect", "edit", "test"]
     if mode == "research":
         return ["research", "summarize"]
+    if mode == "browse" or (
+        mode == "ops" and _should_use_browser_executor(mode, normalized_text)
+    ):
+        return ["browse"]
     return []
 
 
 def _infer_session_mode(user_text: str, reply_text: str | None = None) -> str:
     normalized = _normalize_command_text(f"{user_text}\n{reply_text or ''}")
     if (
-        any(token in normalized for token in ("browse", "http://", "https://", "www."))
+        _BROWSE_MODE_SIGNAL_RE.search(normalized)
         or _looks_like_x_browser_request(normalized)
+        or _looks_like_social_browser_request(normalized)
     ):
         return "browse"
     if any(token in normalized for token in ("terminal", "chrome", "screen", "computer", "click", "scroll", "sesion")):
@@ -2390,7 +2521,7 @@ def _infer_session_mode(user_text: str, reply_text: str | None = None) -> str:
         "ga4",
     )):
         return "coding"
-    if any(token in normalized for token in ("tweet", "post", "publica", "publish", "x.com", "social")):
+    if _looks_like_publish_execution_request(normalized):
         return "publish"
     if any(token in normalized for token in ("investiga", "research", "analiza", "notebook", "cuaderno")):
         return "research"
@@ -2730,6 +2861,27 @@ def _extract_link_analysis_context(text: str) -> dict[str, str] | None:
     return {
         "url": url_match.group(1).strip(),
         "fetched_content": content_match.group(1).strip(),
+    }
+
+
+def _extract_prefetched_evidence_context(text: str) -> dict[str, str] | None:
+    """Return preloaded link/tweet content that can satisfy evidence gates."""
+    link_context = _extract_link_analysis_context(text)
+    if link_context is not None:
+        return link_context
+    tweet_match = re.search(
+        r"(?ms)^\[Contenido del tweet pre-cargado\]:\n(.*)$",
+        text or "",
+    )
+    if tweet_match is None:
+        return None
+    urls = _extract_url_candidates(text)
+    tweet_url = next((url for url in urls if _is_tweet_url(url)), "")
+    if not tweet_url:
+        return None
+    return {
+        "url": tweet_url,
+        "fetched_content": tweet_match.group(1).strip(),
     }
 
 

@@ -19,6 +19,7 @@ from claw_v2.browser_capability import (
     BrowserCapability,
     BrowserCapabilityError,
 )
+from claw_v2.browser import DevBrowserService
 from claw_v2.bot_commands import BotCommand, CommandContext
 from claw_v2.bot_helpers import (
     _computer_instruction_requires_actions,
@@ -34,6 +35,14 @@ BROWSER_USE_TIMEOUT_SECONDS = 180
 # to cover the bounded post-task screenshot capture plus browser cleanup.
 BROWSER_USE_TASK_GRACE_SECONDS = 60
 _NO_RESULT_SENTINEL = "(no result)"
+_INSTAGRAM_OPEN_RE = re.compile(
+    r"\b(?:instagram|insta|instagram\.com)\b",
+    re.IGNORECASE,
+)
+_SIMPLE_SOCIAL_BROWSER_ACTION_RE = re.compile(
+    r"\b(?:abre|abrir|open|revisa|review|check|navega|navegar|entra|entrar|perfil|feed)\b",
+    re.IGNORECASE,
+)
 
 
 def _error_message(exc: BaseException) -> str:
@@ -58,6 +67,20 @@ def _format_unverifiable_browser_result(session: Any) -> str:
     if artifact_path:
         lines.append(f"Captura disponible: {artifact_path}")
     return "\n".join(lines)
+
+
+def _instagram_target_url(objective: str) -> str | None:
+    text = str(objective or "").strip()
+    if not text or _INSTAGRAM_OPEN_RE.search(text) is None:
+        return None
+    if _SIMPLE_SOCIAL_BROWSER_ACTION_RE.search(text) is None:
+        return None
+    for raw_url in _URL_RE.findall(text):
+        url = raw_url.rstrip(".,;:!?)]}")
+        host = _host_from_url(url)
+        if host and (host == "instagram.com" or host.endswith(".instagram.com")):
+            return url
+    return "https://www.instagram.com/"
 
 
 class ComputerHandler:
@@ -843,6 +866,14 @@ class ComputerHandler:
             gate = self._browser_profile_gate(objective, cdp_endpoint, task_id=task_id)
             if gate is not None:
                 return gate
+            deterministic = self._run_deterministic_social_browser_task(
+                objective,
+                cdp_endpoint=cdp_endpoint,
+                task_id=task_id,
+                mode=mode,
+            )
+            if deterministic is not None:
+                return deterministic
             with self._browser_use_lock:
                 self._ensure_browser_use_service(cdp_endpoint)
                 self._set_browser_use_cdp_url(cdp_endpoint)
@@ -862,6 +893,94 @@ class ComputerHandler:
                 )
         finally:
             lock.release()
+
+    def _run_deterministic_social_browser_task(
+        self,
+        objective: str,
+        *,
+        cdp_endpoint: str,
+        task_id: str | None,
+        mode: str | None,
+    ) -> str | None:
+        target_url = _instagram_target_url(objective)
+        if target_url is None:
+            return None
+        self._emit(
+            "deterministic_browser_task_started",
+            {"task_id": task_id, "mode": mode, "target_url": target_url},
+        )
+        try:
+            browser = DevBrowserService()
+            result = browser.chrome_navigate(
+                target_url,
+                cdp_url=cdp_endpoint,
+                page_url_pattern="instagram.com",
+            )
+            screenshot = browser.chrome_screenshot(
+                cdp_url=cdp_endpoint,
+                page_url_pattern="instagram.com",
+                name="instagram-open.png",
+            )
+        except Exception as exc:
+            message = _error_message(exc)
+            self._emit(
+                "deterministic_browser_task_failed",
+                {"task_id": task_id, "mode": mode, "target_url": target_url, "error": message},
+            )
+            return f"No pude completar la tarea de navegador determinística: {message}"
+
+        final_url = str(getattr(result, "url", "") or getattr(screenshot, "url", "") or target_url)
+        title = str(getattr(result, "title", "") or getattr(screenshot, "title", "") or "").strip()
+        screenshot_path = str(getattr(screenshot, "screenshot_path", "") or "").strip()
+        content = str(getattr(result, "content", "") or getattr(screenshot, "content", "") or "").strip()
+        # Don't claim success on a login/challenge wall (no_silent_degrade): the
+        # named-profile gate above is X-first, so a logged-out Instagram lands here
+        # and would otherwise be reported as a completed open. The returned message
+        # carries a _BROWSER_FAILURE_MARKERS phrase so the executor never marks it passed.
+        wall_probe = " ".join((final_url, title, content)).lower()
+        wall_markers = ("accounts/login", "iniciar sesión", "log in", "checkpoint", "challenge")
+        if any(marker in wall_probe for marker in wall_markers):
+            message = (
+                f"login/challenge wall en {final_url}; inicia sesión en el perfil de Chrome y reintenta."
+            )
+            self._emit(
+                "deterministic_browser_task_unverifiable_result",
+                {
+                    "task_id": task_id,
+                    "mode": mode,
+                    "target_url": target_url,
+                    "final_url": final_url,
+                    "title": title,
+                    "screenshot_path": screenshot_path,
+                },
+            )
+            return f"No pude completar la tarea de navegador determinística: {message}"
+        content_hint = ""
+        if content:
+            compact = " ".join(content.split())
+            content_hint = f"\nTexto visible: {compact[:240]}"
+        self._emit(
+            "deterministic_browser_task_completed",
+            {
+                "task_id": task_id,
+                "mode": mode,
+                "target_url": target_url,
+                "final_url": final_url,
+                "title": title,
+                "screenshot_path": screenshot_path,
+            },
+        )
+        lines = [
+            "Instagram abierto en Chrome CDP.",
+            f"URL final: {final_url}",
+        ]
+        if title:
+            lines.append(f"Título: {title}")
+        if screenshot_path:
+            lines.append(f"Captura guardada: {screenshot_path}")
+        if content_hint:
+            lines.append(content_hint.strip())
+        return "\n".join(lines)
 
     def _browser_profile_gate(
         self, objective: str, cdp_endpoint: str, *, task_id: str | None

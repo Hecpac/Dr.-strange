@@ -396,7 +396,7 @@ class CheckpointHandlerTests(unittest.TestCase):
 
     def test_rollback_by_id_schedules_exact(self) -> None:
         a = self.service.create(trigger_reason="a")
-        b = self.service.create(trigger_reason="b")
+        _b = self.service.create(trigger_reason="b")
         reply = self.handler.handle_command(self._ctx(f"/rollback {a}"))
         self.assertIn(a, reply)
         row = self.store._conn.execute(

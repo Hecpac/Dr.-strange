@@ -5,7 +5,6 @@ import time
 from typing import Any, Callable
 from urllib.parse import urlparse
 
-from claw_v2.bot_commands import BotCommand, CommandContext
 from claw_v2.bot_helpers import (
     _extract_title_from_url,
     _format_chrome_cdp_error,

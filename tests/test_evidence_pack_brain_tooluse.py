@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import json
 import tempfile
-import time
 import unittest
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -435,7 +434,7 @@ class BrainToolUseEvidencePackTests(unittest.TestCase):
             source_text=f"context: {fake_token}",
             runtime_channel="telegram",
         )
-        task = self.ledger.list(limit=10)[0]
+        _task = self.ledger.list(limit=10)[0]
         # The token may appear in user_message_summary (capped to 200
         # chars by the source-text truncation), but it must NOT appear
         # in any observability event payload.

@@ -1341,7 +1341,7 @@ class TestAggregateVerifierVotes(unittest.TestCase):
         self.assertEqual(result["consensus_status"], "unanimous_approve")
 
     def test_single_voter_high_risk_still_needs_approval(self) -> None:
-        from claw_v2.brain import _aggregate_verifier_votes, _apply_policy_floor
+        from claw_v2.brain import _aggregate_verifier_votes
         result = _aggregate_verifier_votes([self._vote(risk="high")])
         # high risk: consensus_approve condition fails (highest_risk not in {low,medium})
         self.assertEqual(result["recommendation"], "needs_approval")
@@ -1363,7 +1363,8 @@ class TestSessionIdIsolation(unittest.TestCase):
     def _brain_with_observe(self):
         from claw_v2.brain import BrainService
         from claw_v2.memory import MemoryStore
-        import tempfile, os
+        import tempfile
+        import os
         tmpdir = tempfile.mkdtemp()
         memory = MemoryStore(os.path.join(tmpdir, "mem.db"))
         observe = ObserveStream(os.path.join(tmpdir, "events.db"))

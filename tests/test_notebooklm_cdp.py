@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from claw_v2 import notebooklm_cdp
 from claw_v2.notebooklm_cdp import (
     DR_STATE_COMPLETED,
     DR_STATE_IN_PROGRESS,

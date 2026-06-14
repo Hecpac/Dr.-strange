@@ -26,12 +26,11 @@ import fnmatch
 import json
 import logging
 import secrets
-import sqlite3
 import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from claw_v2.sqlite_runtime import (
     connect_runtime_sqlite,

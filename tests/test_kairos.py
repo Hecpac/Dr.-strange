@@ -12,7 +12,7 @@ from unittest.mock import ANY, MagicMock, patch
 
 from claw_v2.approval import ApprovalManager
 from claw_v2.bus import AgentBus, _new_message
-from claw_v2.kairos import KairosService, TickDecision, KairosState, _classify_decide_error
+from claw_v2.kairos import KairosService, TickDecision, _classify_decide_error
 
 
 @dataclass

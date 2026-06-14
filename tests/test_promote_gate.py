@@ -23,7 +23,6 @@ from claw_v2.verification.success_contract import (
     SuccessCondition,
 )
 from claw_v2.verification.promote_gate import (
-    GateOutcome,
     gate_terminal_status,
 )
 

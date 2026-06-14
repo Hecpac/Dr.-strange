@@ -4,7 +4,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 from claw_v2.chrome import ManagedChrome, ChromeStartError, _profile_user_data_pids
 
@@ -26,6 +26,10 @@ class ManagedChromeTests(unittest.TestCase):
         self.mock_profile_user_data_pids = self._profile_pids_patcher.start()
         self.addCleanup(self._profile_pids_patcher.stop)
 
+        self._focus_visible_chrome_patcher = patch("claw_v2.chrome._focus_visible_chrome")
+        self.mock_focus_visible_chrome = self._focus_visible_chrome_patcher.start()
+        self.addCleanup(self._focus_visible_chrome_patcher.stop)
+
     @patch("claw_v2.chrome._check_port_pids")
     @patch("claw_v2.chrome._wait_for_port_free")
     @patch("subprocess.Popen")
@@ -39,8 +43,16 @@ class ManagedChromeTests(unittest.TestCase):
         mc.start()
         args = mock_popen.call_args[0][0]
         self.assertIn("--remote-debugging-port=9250", args)
+        # Origin allowlist scoped to the loopback client, never "*".
+        self.assertIn(
+            "--remote-allow-origins=http://127.0.0.1:9250,http://localhost:9250", args
+        )
+        self.assertNotIn("--remote-allow-origins=*", args)
         self.assertIn(f"--user-data-dir={Path('/tmp/test-profile').resolve(strict=False)}", args)
-        self.assertIn("--headless=new", args)
+        self.assertNotIn("--headless=new", args)
+        self.assertIn("--start-maximized", args)
+        self.assertIn("--window-position=0,0", args)
+        self.assertIn("--window-size=1440,1000", args)
         self.assertIn("--no-first-run", args)
 
     @patch("claw_v2.chrome._check_port_pids")
@@ -100,19 +112,21 @@ class ManagedChromeTests(unittest.TestCase):
     @patch("claw_v2.chrome._wait_for_port_free")
     @patch("subprocess.Popen")
     @patch("claw_v2.chrome._wait_for_cdp_ready")
-    def test_start_headless_false(self, mock_ready, mock_popen, mock_wait, mock_pids) -> None:
+    def test_start_headless_true(self, mock_ready, mock_popen, mock_wait, mock_pids) -> None:
         mock_pids.return_value = []
         proc = MagicMock()
         proc.poll.return_value = None
         mock_popen.return_value = proc
         mc = ManagedChrome(port=9250, profile_dir="/tmp/test-profile")
-        mc.start(headless=False)
+        mc.start(headless=True)
         args = mock_popen.call_args[0][0]
-        self.assertNotIn("--headless=new", args)
+        self.assertIn("--headless=new", args)
+        self.assertNotIn("--start-maximized", args)
 
     @patch("claw_v2.chrome._check_port_pids")
+    @patch("claw_v2.chrome._pid_is_headless", return_value=False)
     @patch("subprocess.Popen")
-    def test_start_reuses_existing_ready_cdp_chrome(self, mock_popen, mock_pids) -> None:
+    def test_start_reuses_existing_ready_cdp_chrome(self, mock_popen, mock_is_headless, mock_pids) -> None:
         mock_pids.return_value = [(1234, "Google Chrome")]
         # The ready CDP Chrome is running OUR managed profile, so it is reused.
         self.mock_profile_user_data_pids.return_value = [1234]
@@ -122,6 +136,121 @@ class ManagedChromeTests(unittest.TestCase):
         mock_popen.assert_not_called()
         self.assertIsNone(mc._process)
         self.assertEqual(mc._attached_pid, 1234)
+        self.mock_focus_visible_chrome.assert_called_once_with(pid=1234)
+
+    @patch("claw_v2.chrome._check_port_pids")
+    @patch("claw_v2.chrome._pid_is_headless", return_value=False)
+    @patch("claw_v2.chrome._focus_existing_cdp_page", return_value=False)
+    @patch("claw_v2.chrome._cdp_page_targets", return_value=[])
+    @patch("claw_v2.chrome._open_cdp_target")
+    @patch("subprocess.Popen")
+    def test_start_creates_visible_tab_when_ready_cdp_has_no_window(
+        self,
+        mock_popen,
+        mock_open_target,
+        mock_page_targets,
+        mock_focus_cdp,
+        mock_is_headless,
+        mock_pids,
+    ) -> None:
+        mock_pids.return_value = [(1234, "Google Chrome")]
+        self.mock_profile_user_data_pids.return_value = [1234]
+        self.mock_cdp_ready.return_value = True
+        self.mock_focus_visible_chrome.side_effect = [False, True]
+        mc = ManagedChrome(port=9250, profile_dir="/tmp/test-profile")
+
+        mc.start()
+
+        mock_popen.assert_not_called()
+        mock_open_target.assert_called_once_with(9250, "about:blank")
+        self.assertEqual(
+            self.mock_focus_visible_chrome.call_args_list,
+            [call(pid=1234), call(pid=1234)],
+        )
+
+    @patch("claw_v2.chrome._check_port_pids")
+    @patch("claw_v2.chrome._pid_is_headless", return_value=False)
+    @patch("claw_v2.chrome._focus_existing_cdp_page", return_value=True)
+    @patch("claw_v2.chrome._cdp_page_targets")
+    @patch("claw_v2.chrome._open_cdp_target")
+    @patch("subprocess.Popen")
+    def test_start_focuses_existing_cdp_page_before_creating_new_tab(
+        self,
+        mock_popen,
+        mock_open_target,
+        mock_page_targets,
+        mock_focus_cdp,
+        mock_is_headless,
+        mock_pids,
+    ) -> None:
+        mock_pids.return_value = [(1234, "Google Chrome")]
+        self.mock_profile_user_data_pids.return_value = [1234]
+        self.mock_cdp_ready.return_value = True
+        self.mock_focus_visible_chrome.side_effect = [False, True]
+        mc = ManagedChrome(port=9250, profile_dir="/tmp/test-profile")
+
+        mc.start()
+
+        mock_popen.assert_not_called()
+        mock_focus_cdp.assert_called_once_with(9250)
+        mock_open_target.assert_not_called()
+        mock_page_targets.assert_not_called()
+
+    @patch("claw_v2.chrome._check_port_pids")
+    @patch("claw_v2.chrome._pid_is_headless", return_value=False)
+    @patch("claw_v2.chrome._focus_existing_cdp_page", return_value=False)
+    @patch("claw_v2.chrome._cdp_page_targets", return_value=[{"type": "page", "url": "https://www.google.com/"}])
+    @patch("claw_v2.chrome._open_cdp_target")
+    @patch("subprocess.Popen")
+    def test_start_does_not_create_extra_tab_when_ready_cdp_already_has_pages(
+        self,
+        mock_popen,
+        mock_open_target,
+        mock_page_targets,
+        mock_focus_cdp,
+        mock_is_headless,
+        mock_pids,
+    ) -> None:
+        mock_pids.return_value = [(1234, "Google Chrome")]
+        self.mock_profile_user_data_pids.return_value = [1234]
+        self.mock_cdp_ready.return_value = True
+        self.mock_focus_visible_chrome.return_value = False
+        mc = ManagedChrome(port=9250, profile_dir="/tmp/test-profile")
+
+        mc.start()
+
+        mock_popen.assert_not_called()
+        mock_open_target.assert_not_called()
+        mock_page_targets.assert_called_once_with(9250)
+
+    @patch("claw_v2.chrome._check_port_pids")
+    @patch("claw_v2.chrome._kill_pid")
+    @patch("claw_v2.chrome._wait_for_port_free")
+    @patch("claw_v2.chrome._pid_is_headless", return_value=True)
+    @patch("subprocess.Popen")
+    @patch("claw_v2.chrome._wait_for_cdp_ready")
+    def test_start_relaunches_existing_headless_cdp_when_visible_requested(
+        self,
+        mock_ready,
+        mock_popen,
+        mock_is_headless,
+        mock_wait_port,
+        mock_kill,
+        mock_pids,
+    ) -> None:
+        mock_pids.return_value = [(1234, "Google Chrome")]
+        self.mock_profile_user_data_pids.side_effect = [[1234], [], []]
+        self.mock_cdp_ready.return_value = True
+        proc = MagicMock()
+        proc.poll.return_value = None
+        mock_popen.return_value = proc
+        mc = ManagedChrome(port=9250, profile_dir="/tmp/test-profile")
+        mc.start()
+        mock_kill.assert_called_with(1234)
+        self.assertGreaterEqual(mock_wait_port.call_count, 1)
+        mock_popen.assert_called_once()
+        args = mock_popen.call_args[0][0]
+        self.assertNotIn("--headless=new", args)
 
     @patch("claw_v2.chrome._check_port_pids")
     @patch("subprocess.Popen")
@@ -276,7 +405,7 @@ class ProfileUserDataPidsTests(unittest.TestCase):
     def test_misses_user_data_dir_when_line_truncated(self) -> None:
         profile = "/Users/hector/.claw/chrome-profile"
         # Simulate what ps without -ww would return: line cut before the flag appears
-        truncated = f"  1234 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --remote"
+        truncated = "  1234 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --remote"
         with patch("claw_v2.chrome.subprocess.check_output", return_value=truncated):
             pids = _profile_user_data_pids(profile)
         self.assertEqual(pids, [])

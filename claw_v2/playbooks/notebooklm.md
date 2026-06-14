@@ -12,15 +12,15 @@ priority: 10
 # NotebookLM — Workflow de Creación de Cuadernos y Podcasts
 
 ## Prerequisitos
-- Chrome CDP corriendo (puerto 9222 ó 9250 según launcher; verificar con `curl http://localhost:9250/json/version` o `lsof -i :9222`).
+- Chrome CDP corriendo en el puerto runtime `9250`; verificar con `curl http://localhost:9250/json/version` o `lsof -i :9250`.
 - Si no está corriendo: `bash scripts/launch-chrome-cdp.sh`.
-- Google login activo en el perfil CDP (`~/.claw-chrome-cdp`).
+- Google login activo en el perfil CDP (`~/.claw/chrome-profile`).
 
 ## Conexión Playwright
 ```python
 from playwright.sync_api import sync_playwright
 pw = sync_playwright().start()
-browser = pw.chromium.connect_over_cdp("http://localhost:9222")
+browser = pw.chromium.connect_over_cdp("http://localhost:9250")
 context = browser.contexts[0]
 # Encontrar tab de NotebookLM o crear uno nuevo
 page = context.new_page()
@@ -81,4 +81,4 @@ NotebookLM categoriza fuentes automáticamente cuando el cuaderno tiene 5+ fuent
 - El control del search input cambia de `<input>` (Fast Research) a `<textarea>` (Deep Research) tras el toggle.
 - UI mixta: en algunas builds el chip dice "Fast Research" en inglés aunque el resto del UI esté en español. Tener selectores para ambas variantes.
 - Título del notebook se auto-genera al importar fuentes.
-- En Chrome CDP custom de Claw el puerto puede ser 9250 (no 9222). Verificar con `curl localhost:9250/json/version`.
+- En Chrome CDP custom de Claw el puerto runtime es 9250. Verificar con `curl localhost:9250/json/version`.

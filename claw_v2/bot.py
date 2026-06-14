@@ -46,6 +46,7 @@ from claw_v2.natural_language_renderer import NaturalLanguageRenderer
 from claw_v2.state_handler import StateHandler, _BrainShortcut, reply_context_fresh
 from claw_v2.semantic_turn import SemanticTurn, classify_semantic_turn
 from claw_v2.terminal_handler import TerminalHandler
+from claw_v2.task_ledger import TERMINAL_STATUSES
 from claw_v2.wiki_handler import WikiHandler
 from claw_v2.coordinator import CoordinatorService
 from claw_v2.content import ContentEngine
@@ -2504,6 +2505,7 @@ class BotService:
         response: Any | None = None,
         runtime_capability_question: bool,
         link_analysis_context: dict[str, Any] | None,
+        prefetched_evidence_context: dict[str, Any] | None = None,
     ) -> str:
         content = raw_content.strip()
         meta_evidence_skip_reason = self._meta_evidence_skip_reason(content)
@@ -2590,6 +2592,7 @@ class BotService:
             content=content,
             response=response,
             link_analysis_context=link_analysis_context,
+            prefetched_evidence_context=prefetched_evidence_context,
         ):
             meta_kind = current_meta_introspection_kind()
             if meta_kind is not None:
@@ -2775,6 +2778,7 @@ class BotService:
         content: str,
         response: Any | None,
         link_analysis_context: dict[str, Any] | None = None,
+        prefetched_evidence_context: dict[str, Any] | None = None,
     ) -> bool:
         if not _looks_like_operator_action_request(source_text):
             return False
@@ -2802,6 +2806,10 @@ class BotService:
                     "reason": skip_reason,
                 },
             )
+            return False
+        # Check each context independently: a present-but-empty prefetched context
+        # must not shadow a usable link-analysis context (false-negative gate).
+        if self._link_analysis_context_has_evidence(prefetched_evidence_context):
             return False
         if self._link_analysis_context_has_evidence(link_analysis_context):
             return False
@@ -2933,6 +2941,7 @@ class BotService:
         link_analysis_context: dict[str, Any] | None,
         runtime_channel: str | None,
         pre_turn_message_id: int,
+        prefetched_evidence_context: dict[str, Any] | None = None,
     ) -> str:
         suppression_reason = self._suppressed_response_reason(response)
         pending_action = self._pending_action_for_sanitizer_recovery(session_id)
@@ -3059,6 +3068,7 @@ class BotService:
             raw_retry_content,
             runtime_capability_question=runtime_capability_question,
             link_analysis_context=link_analysis_context,
+            prefetched_evidence_context=prefetched_evidence_context,
         )
         if content != raw_retry_content:
             self.brain.memory.replace_latest_assistant_message(session_id, raw_retry_content, content)
@@ -4879,11 +4889,20 @@ class BotService:
         source_text = memory_text or text
         runtime_capability_question = _looks_like_runtime_capability_question(text)
         link_analysis_context = _extract_link_analysis_context(text)
+        prefetched_evidence_context = _extract_prefetched_evidence_context(text)
         enriched = _enrich_tweet_urls(text)
         if enriched != text:
             prompt_text = _format_tweet_analysis_prompt(text, enriched)
+            prefetched_evidence_context = (
+                _extract_prefetched_evidence_context(prompt_text)
+                or prefetched_evidence_context
+            )
         if runtime_capability_question:
             prompt_text = _format_runtime_capability_prompt(prompt_text)
+            prefetched_evidence_context = (
+                _extract_prefetched_evidence_context(prompt_text)
+                or prefetched_evidence_context
+            )
         prompt_text = self._with_runtime_capability_context(prompt_text, runtime_channel=runtime_channel)
         pre_turn_message_id = self.brain.memory.last_message_id(session_id)
         try:
@@ -4909,6 +4928,7 @@ class BotService:
                 response=response,
                 runtime_capability_question=runtime_capability_question,
                 link_analysis_context=link_analysis_context,
+                prefetched_evidence_context=prefetched_evidence_context,
                 runtime_channel=runtime_channel,
                 pre_turn_message_id=pre_turn_message_id,
             )
@@ -4921,6 +4941,7 @@ class BotService:
             response=response,
             runtime_capability_question=runtime_capability_question,
             link_analysis_context=link_analysis_context,
+            prefetched_evidence_context=prefetched_evidence_context,
         )
         content = self._quality_guard_response(
             session_id,
@@ -5130,6 +5151,46 @@ class BotService:
         # usable_reply_unverified rather than silently inflating success.
         return "usable_reply_unverified"
 
+    def _terminal_task_record(self, task_id: str) -> Any | None:
+        if self.task_ledger is None or not task_id:
+            return None
+        try:
+            record = self.task_ledger.get(task_id)
+        except Exception:
+            logger.debug("terminal task lookup failed for %s", task_id, exc_info=True)
+            return None
+        status = str(getattr(record, "status", "") or "").lower() if record is not None else ""
+        return record if status in TERMINAL_STATUSES else None
+
+    def _clear_stale_active_task(self, session_id: str, task_id: str) -> None:
+        try:
+            state = self.brain.memory.get_session_state(session_id)
+        except Exception:
+            return
+        active_object = state.get("active_object") or {} if isinstance(state, dict) else {}
+        active_task = active_object.get("active_task") or {} if isinstance(active_object, dict) else {}
+        if not isinstance(active_task, dict) or str(active_task.get("task_id") or "") != task_id:
+            return
+        try:
+            merge_active_object = getattr(self.brain.memory, "merge_active_object", None)
+            if callable(merge_active_object):
+                merge_active_object(session_id, {}, remove=("active_task",))
+            else:
+                active_object = dict(active_object)
+                active_object.pop("active_task", None)
+                self.brain.memory.update_session_state(session_id, active_object=active_object)
+        except Exception:
+            logger.debug("stale active_task clear failed for %s", task_id, exc_info=True)
+            return
+        self._emit_safe(
+            "stale_active_task_cleared",
+            {
+                "session_id": session_id,
+                "task_id": task_id,
+                "reason": "ledger_terminal",
+            },
+        )
+
     def _attach_brain_tool_use_ledger(
         self,
         *,
@@ -5216,20 +5277,25 @@ class BotService:
             if existing_task_id and existing_status not in ("running",):
                 existing_task_id = ""
         if existing_task_id:
-            try:
-                self.observe.emit(
-                    "brain_tooluse_ledger_attached_existing",
-                    payload={
-                        "session_id": session_id,
-                        "existing_task_id": existing_task_id,
-                        "trace_id": trace_id,
-                        "tools_count": len(tool_events),
-                        "failures_count": len(tool_failure_events),
-                    },
-                )
-            except Exception:
-                logger.debug("brain_tooluse_ledger_attached_existing emit failed", exc_info=True)
-            return
+            terminal_record = self._terminal_task_record(existing_task_id)
+            if terminal_record is not None:
+                self._clear_stale_active_task(session_id, existing_task_id)
+                existing_task_id = ""
+            else:
+                try:
+                    self.observe.emit(
+                        "brain_tooluse_ledger_attached_existing",
+                        payload={
+                            "session_id": session_id,
+                            "existing_task_id": existing_task_id,
+                            "trace_id": trace_id,
+                            "tools_count": len(tool_events),
+                            "failures_count": len(tool_failure_events),
+                        },
+                    )
+                except Exception:
+                    logger.debug("brain_tooluse_ledger_attached_existing emit failed", exc_info=True)
+                return
         # Approval-required tool was blocked — record as skipped/sensitive,
         # do NOT mark success.
         if approval_events and not tool_events and not tool_failure_events:
@@ -7564,7 +7630,7 @@ class BotService:
         if not approvals:
             return []
         approvals_for_audit = self._sorted_approvals_for_audit(approvals)
-        audit = self._classify_pending_approvals(approvals_for_audit)
+        _audit = self._classify_pending_approvals(approvals_for_audit)
         seen_actions: set[str] = set()
         active_items: list[tuple[dict[str, Any], str]] = []
         duplicate_count = 0

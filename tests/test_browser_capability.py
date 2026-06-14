@@ -16,7 +16,12 @@ class _FakeResponse:
         return None
 
     def read(self, _limit: int = -1) -> bytes:
-        return b'{"Browser":"Chrome/148","User-Agent":"HeadlessChrome"}'
+        return b'{"Browser":"Chrome/148","User-Agent":"Chrome"}'
+
+
+class _FakeHeadlessResponse(_FakeResponse):
+    def read(self, _limit: int = -1) -> bytes:
+        return b'{"Browser":"HeadlessChrome/148","User-Agent":"HeadlessChrome"}'
 
 
 class _ClosableResponse:
@@ -41,10 +46,11 @@ class _FakeObserve:
 
 
 class BrowserCapabilityTests(unittest.TestCase):
-    def test_ensure_ready_does_not_relaunch_when_cdp_already_responds(self) -> None:
+    def test_ensure_ready_focuses_existing_visible_cdp_when_cdp_already_responds(self) -> None:
         observe = _FakeObserve()
         urlopen = MagicMock(return_value=_FakeResponse())
-        chrome_factory = MagicMock()
+        chrome = MagicMock()
+        chrome_factory = MagicMock(return_value=chrome)
         capability = BrowserCapability(
             observe=observe,
             chrome_factory=chrome_factory,
@@ -58,7 +64,10 @@ class BrowserCapabilityTests(unittest.TestCase):
             "http://127.0.0.1:9250/json/version",
             timeout=2.0,
         )
-        chrome_factory.assert_not_called()
+        chrome_factory.assert_called_once()
+        self.assertEqual(chrome_factory.call_args.kwargs["port"], 9250)
+        self.assertEqual(chrome_factory.call_args.kwargs["profile_dir"], "~/.claw/chrome-profile")
+        chrome.ensure.assert_called_once_with(headless=False)
         self.assertEqual(
             [event_type for event_type, _ in observe.events],
             [
@@ -67,6 +76,24 @@ class BrowserCapabilityTests(unittest.TestCase):
             ],
         )
         self.assertFalse(observe.events[-1][1]["started_chrome"])
+        self.assertTrue(observe.events[-1][1]["focused_chrome"])
+
+    def test_ensure_ready_can_skip_visible_focus_for_readonly_probe(self) -> None:
+        observe = _FakeObserve()
+        urlopen = MagicMock(return_value=_FakeResponse())
+        chrome_factory = MagicMock()
+        capability = BrowserCapability(
+            observe=observe,
+            chrome_factory=chrome_factory,
+            urlopen=urlopen,
+        )
+
+        endpoint = capability.ensure_ready(visible=False)
+
+        self.assertEqual(endpoint, "http://127.0.0.1:9250")
+        chrome_factory.assert_not_called()
+        self.assertFalse(observe.events[-1][1]["started_chrome"])
+        self.assertFalse(observe.events[-1][1]["focused_chrome"])
 
     def test_ensure_ready_starts_managed_chrome_when_initial_probe_fails(self) -> None:
         observe = _FakeObserve()
@@ -97,7 +124,7 @@ class BrowserCapabilityTests(unittest.TestCase):
             ],
         )
         chrome_factory.assert_called_once()
-        chrome.ensure.assert_called_once()
+        chrome.ensure.assert_called_once_with(headless=False)
         self.assertEqual(
             [event_type for event_type, _ in observe.events],
             [
@@ -136,6 +163,31 @@ class BrowserCapabilityTests(unittest.TestCase):
             ],
         )
         self.assertEqual(observe.events[-1][1]["stage"], "start_chrome")
+
+    def test_ensure_ready_relaunches_when_existing_cdp_is_headless(self) -> None:
+        observe = _FakeObserve()
+        probe_calls = 0
+
+        def fake_urlopen(url: str, *, timeout: float):
+            nonlocal probe_calls
+            probe_calls += 1
+            if probe_calls == 1:
+                return _FakeHeadlessResponse()
+            return _FakeResponse()
+
+        chrome = MagicMock()
+        chrome_factory = MagicMock(return_value=chrome)
+        capability = BrowserCapability(
+            observe=observe,
+            chrome_factory=chrome_factory,
+            urlopen=fake_urlopen,
+        )
+
+        endpoint = capability.ensure_ready()
+
+        self.assertEqual(endpoint, "http://127.0.0.1:9250")
+        chrome.ensure.assert_called_once_with(headless=False)
+        self.assertTrue(observe.events[-1][1]["started_chrome"])
 
     def test_ensure_ready_rejects_port_above_tcp_range(self) -> None:
         urlopen = MagicMock(return_value=_FakeResponse())

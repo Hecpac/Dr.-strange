@@ -8,6 +8,7 @@ from typing import Any
 
 from claw_v2.bot_helpers import is_destructive_or_external_objective
 from claw_v2.telemetry import append_jsonl, now_iso
+from claw_v2.task_ledger import TERMINAL_STATUSES
 
 
 IDLE_EXECUTOR_ENV_FLAG = "CLAW_IDLE_EXECUTOR_ENABLED"
@@ -143,11 +144,15 @@ class IdleOwnershipExecutor:
             if isinstance(active_task, dict):
                 objective = str(active_task.get("objective") or "").strip()
                 status = str(active_task.get("status") or "").lower()
+                task_id = _optional_str(active_task.get("task_id"))
                 if objective and status in {"pending", "running", "in_progress"}:
+                    if task_id and self._stale_terminal_record(task_id) is not None:
+                        self._clear_stale_active_task(session_id, task_id)
+                        return None
                     return IdleCandidate(
                         source="session_state.active_task",
                         session_id=session_id,
-                        task_id=_optional_str(active_task.get("task_id")),
+                        task_id=task_id,
                         objective=objective,
                         mode=str(active_task.get("mode") or state.get("mode") or "chat"),
                         verification_status=str(state.get("verification_status") or "unknown"),
@@ -486,6 +491,43 @@ class IdleOwnershipExecutor:
         except Exception:
             return {}
         return state if isinstance(state, dict) else {}
+
+    def _stale_terminal_record(self, task_id: str) -> Any | None:
+        if self._task_ledger is None:
+            return None
+        get = getattr(self._task_ledger, "get", None)
+        if not callable(get):
+            return None
+        try:
+            record = get(task_id)
+        except Exception:
+            return None
+        status = str(getattr(record, "status", "") or "").lower() if record is not None else ""
+        return record if status in TERMINAL_STATUSES else None
+
+    def _clear_stale_active_task(self, session_id: str, task_id: str) -> None:
+        state = self._safe_state(session_id)
+        active_object = dict(state.get("active_object") or {})
+        active_task = active_object.get("active_task") or {}
+        if not isinstance(active_task, dict) or str(active_task.get("task_id") or "") != task_id:
+            return
+        merge_active_object = getattr(self._memory, "merge_active_object", None)
+        try:
+            if callable(merge_active_object):
+                merge_active_object(session_id, {}, remove=("active_task",))
+            else:
+                active_object.pop("active_task", None)
+                self._memory.update_session_state(session_id, active_object=active_object)
+        except Exception:
+            return
+        self._emit(
+            "idle_executor_stale_active_task_cleared",
+            {
+                "session_id": session_id,
+                "task_id": task_id,
+                "reason": "ledger_terminal",
+            },
+        )
 
     def _candidate_payload(self, candidate: IdleCandidate) -> dict[str, Any]:
         return {

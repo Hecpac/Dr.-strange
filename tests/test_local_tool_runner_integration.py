@@ -14,7 +14,6 @@ sockets/urllib. NO X/LinkedIn/HeyGen/deploy/GitHub remote, no browser/CDP.
 """
 from __future__ import annotations
 
-import hashlib
 import pytest
 
 from claw_v2.tools import ToolDefinition, ToolRegistry
@@ -31,7 +30,8 @@ from claw_v2.verification.promote_gate import apply_promote_gate_to_checkpoint
 def _no_network(monkeypatch):
     def _boom(*a, **kw):
         raise RuntimeError("Network call attempted from runner integration test — forbidden")
-    import socket, urllib.request
+    import socket
+    import urllib.request
     monkeypatch.setattr(socket.socket, "connect", _boom)
     monkeypatch.setattr(urllib.request, "urlopen", _boom)
     yield
