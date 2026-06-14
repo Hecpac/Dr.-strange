@@ -18,9 +18,11 @@ from claw_v2.memory import MemoryStore
 from claw_v2.observe import ObserveStream
 from claw_v2.telegram import (
     TelegramTransport,
+    _ProgressIndicator,
     _build_image_content_blocks,
     _build_video_content_blocks,
     _polling_lock_path,
+    _progress_text,
     _split_message,
 )
 
@@ -34,6 +36,90 @@ def _purge_polling_lock(token: str) -> None:
         _polling_lock_path(token).unlink(missing_ok=True)
     except OSError:
         pass
+
+
+class ProgressTextTests(unittest.TestCase):
+    def test_progress_text_shows_integer_elapsed(self) -> None:
+        assert _progress_text(0) == "⏳ Trabajando… (0s)"
+        assert _progress_text(15.9) == "⏳ Trabajando… (15s)"
+
+
+class ProgressIndicatorTests(unittest.IsolatedAsyncioTestCase):
+    def _bot(self) -> AsyncMock:
+        bot = AsyncMock()
+        bot.send_message.return_value = SimpleNamespace(message_id=4242)
+        return bot
+
+    async def test_disabled_never_sends_placeholder(self) -> None:
+        bot = self._bot()
+        ind = _ProgressIndicator(
+            bot, 1, MagicMock(), enabled=False,
+            threshold_seconds=0.01, interval_seconds=0.01,
+        )
+
+        async def slow() -> str:
+            await asyncio.sleep(0.1)
+            return "done"
+
+        task = asyncio.create_task(slow())
+        ind.arm(task)
+        await task
+        await ind.clear()
+        bot.send_message.assert_not_called()
+
+    async def test_fast_turn_posts_no_placeholder(self) -> None:
+        bot = self._bot()
+        ind = _ProgressIndicator(
+            bot, 1, MagicMock(), enabled=True,
+            threshold_seconds=5.0, interval_seconds=1.0,
+        )
+
+        async def fast() -> str:
+            return "quick"
+
+        task = asyncio.create_task(fast())
+        ind.arm(task)
+        await task
+        await ind.clear()
+        bot.send_message.assert_not_called()
+        bot.delete_message.assert_not_called()
+
+    async def test_slow_turn_posts_then_clears_placeholder(self) -> None:
+        bot = self._bot()
+        ind = _ProgressIndicator(
+            bot, 99, MagicMock(), enabled=True,
+            threshold_seconds=0.02, interval_seconds=0.02,
+        )
+
+        async def slow() -> str:
+            await asyncio.sleep(0.2)
+            return "result"
+
+        task = asyncio.create_task(slow())
+        ind.arm(task)
+        await task
+        await ind.clear()
+        bot.send_message.assert_awaited_once()
+        bot.delete_message.assert_awaited_once_with(chat_id=99, message_id=4242)
+
+    async def test_send_failure_is_swallowed(self) -> None:
+        bot = self._bot()
+        bot.send_message.side_effect = RuntimeError("network down")
+        ind = _ProgressIndicator(
+            bot, 1, MagicMock(), enabled=True,
+            threshold_seconds=0.02, interval_seconds=0.02,
+        )
+
+        async def slow() -> str:
+            await asyncio.sleep(0.15)
+            return "ok"
+
+        task = asyncio.create_task(slow())
+        ind.arm(task)
+        # Must not raise despite the failing placeholder send.
+        await task
+        await ind.clear()
+        bot.delete_message.assert_not_called()
 
 
 class SplitMessageTests(unittest.TestCase):

@@ -602,6 +602,100 @@ async def _maybe_send_chat_action(message: Any, action: str) -> None:
         logger.debug("chat action %s failed", action, exc_info=True)
 
 
+def _progress_text(elapsed_seconds: float) -> str:
+    """Placeholder body shown while a slow turn is still running."""
+    return f"⏳ Trabajando… ({int(elapsed_seconds)}s)"
+
+
+class _ProgressIndicator:
+    """Posts a 'working' placeholder when a turn runs slow and refreshes it.
+
+    Entirely best-effort: any send/edit/delete failure is swallowed so it can
+    never block, delay, or replace the real reply. The placeholder is deleted by
+    ``clear()`` before the final answer is delivered through the normal path.
+    """
+
+    def __init__(
+        self,
+        bot: Any,
+        chat_id: int | None,
+        message: Any,
+        *,
+        enabled: bool,
+        threshold_seconds: float,
+        interval_seconds: float,
+    ) -> None:
+        self._bot = bot
+        self._chat_id = chat_id
+        self._message = message
+        self._enabled = enabled and bot is not None and chat_id is not None
+        self._threshold = threshold_seconds
+        self._interval = interval_seconds
+        self._started_at = time.perf_counter()
+        self._placeholder_id: int | None = None
+        self._task: "asyncio.Task[None] | None" = None
+
+    def arm(self, response_task: "asyncio.Task[Any]") -> None:
+        """Start watching ``response_task`` without blocking the caller."""
+        if not self._enabled:
+            return
+        try:
+            self._task = _asyncio_create_task(self._run(response_task))
+        except RuntimeError:
+            logger.debug("Could not arm Telegram progress indicator", exc_info=True)
+
+    async def _run(self, response_task: "asyncio.Task[Any]") -> None:
+        try:
+            await asyncio.wait({response_task}, timeout=self._threshold)
+            if response_task.done():
+                return
+            elapsed = time.perf_counter() - self._started_at
+            try:
+                sent = await self._bot.send_message(
+                    chat_id=self._chat_id, text=_progress_text(elapsed)
+                )
+                self._placeholder_id = getattr(sent, "message_id", None)
+            except Exception:
+                logger.debug("progress placeholder send failed", exc_info=True)
+                return
+            while not response_task.done():
+                await _asyncio_sleep(self._interval)
+                if response_task.done():
+                    break
+                elapsed = time.perf_counter() - self._started_at
+                try:
+                    await self._bot.edit_message_text(
+                        text=_progress_text(elapsed),
+                        chat_id=self._chat_id,
+                        message_id=self._placeholder_id,
+                    )
+                except Exception:
+                    logger.debug("progress placeholder edit failed", exc_info=True)
+                await _maybe_send_chat_action(self._message, "typing")
+        except _AsyncioCancelledError:
+            raise
+        except Exception:
+            logger.debug("progress indicator loop failed", exc_info=True)
+
+    async def clear(self) -> None:
+        """Cancel the heartbeat and remove the placeholder (best-effort)."""
+        if self._task is not None:
+            self._task.cancel()
+            try:
+                await self._task
+            except (_AsyncioCancelledError, Exception):
+                pass
+            self._task = None
+        if self._placeholder_id is not None and self._bot is not None:
+            try:
+                await self._bot.delete_message(
+                    chat_id=self._chat_id, message_id=self._placeholder_id
+                )
+            except Exception:
+                logger.debug("progress placeholder delete failed", exc_info=True)
+            self._placeholder_id = None
+
+
 class TelegramTransport:
     def __init__(
         self,
@@ -650,6 +744,17 @@ class TelegramTransport:
         self._late_delivery_grace_seconds = max(
             0.0,
             _env_float("TELEGRAM_LATE_DELIVERY_GRACE_SECONDS", DEFAULT_LATE_DELIVERY_GRACE_SECONDS),
+        )
+        # Progress indicator: on turns slower than the threshold, post a "working"
+        # placeholder and refresh it on an interval so long/tool-heavy turns don't
+        # look frozen. Best-effort and cleared before the real reply; never blocks
+        # or replaces it. Set TELEGRAM_PROGRESS_INDICATOR=0 to disable.
+        self._progress_enabled = _env_int("TELEGRAM_PROGRESS_INDICATOR", 1) == 1
+        self._progress_threshold_seconds = max(
+            0.5, _env_float("TELEGRAM_PROGRESS_THRESHOLD_SECONDS", 4.0)
+        )
+        self._progress_interval_seconds = max(
+            2.0, _env_float("TELEGRAM_PROGRESS_INTERVAL_SECONDS", 5.0)
         )
         # P0 hotfix E: held for the lifetime of the polling loop.
         self._polling_lock_fh: IO[str] | None = None
@@ -1317,6 +1422,7 @@ class TelegramTransport:
         started_at = time.perf_counter()
         delivery_state = {"normal_send_started": False}
         await _maybe_send_chat_action(update.message, "typing")
+        progress: "_ProgressIndicator | None" = None
         try:
             direct_response = await self._maybe_send_latest_generated_image(
                 update=update,
@@ -1343,6 +1449,15 @@ class TelegramTransport:
                     started_at=started_at,
                     delivery_state=delivery_state,
                 )
+                progress = _ProgressIndicator(
+                    getattr(self._app, "bot", None),
+                    getattr(getattr(update, "effective_chat", None), "id", None),
+                    update.message,
+                    enabled=self._progress_enabled,
+                    threshold_seconds=self._progress_threshold_seconds,
+                    interval_seconds=self._progress_interval_seconds,
+                )
+                progress.arm(response_task)
                 response = await _asyncio_shield(response_task)
         except _AsyncioCancelledError:
             logger.warning("Telegram text handler cancelled before normal delivery; late delivery guard armed")
@@ -1370,6 +1485,9 @@ class TelegramTransport:
                 response = "El runtime local tuvo contención de base de datos. Intenta de nuevo en unos segundos."
             else:
                 response = "Error procesando tu mensaje. Intenta de nuevo."
+        finally:
+            if progress is not None:
+                await progress.clear()
         bot_done_at = time.perf_counter()
         if response is None:
             finished_at = time.perf_counter()
