@@ -1453,7 +1453,16 @@ class MemoryStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    @_synchronized
+    # NOT @_synchronized on purpose (A2 deadlock fix, audit 2026-06-14). This
+    # method only composes other @_synchronized reads (get_session_state /
+    # get_profile_facts / get_learning_facts / get_recent_messages), each of which
+    # locks individually — it never touches self._conn directly, so the store lock
+    # buys no extra safety here. Holding it across the observe.emit below was an
+    # AB-BA hazard: emit -> ObserveStream._persist_event -> WAL heal acquires the
+    # global heal_lock and then reopen()s every store (re-acquiring Memory._lock),
+    # while a writer holding heal_lock would block on Memory._lock. Keeping the
+    # emit (and the whole body) lock-free upholds the "heal outside the store lock"
+    # discipline used everywhere else.
     def build_context(
         self,
         session_id: str,
