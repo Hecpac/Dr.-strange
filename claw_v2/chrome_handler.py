@@ -136,7 +136,7 @@ class ChromeHandler:
         if self.managed_chrome is None:
             return "Chrome no disponible."
         try:
-            self.managed_chrome.stop()
+            self.managed_chrome.stop(kill_attached=True)
             self.managed_chrome.start(headless=False)
             return "Chrome reiniciado en modo visible. Haz login en los sitios que necesites. Cuando termines: /chrome_headless"
         except Exception as exc:
@@ -169,7 +169,7 @@ class ChromeHandler:
         if self.managed_chrome is None:
             return "Chrome no disponible."
         try:
-            self.managed_chrome.stop()
+            self.managed_chrome.stop(kill_attached=True)
             self.managed_chrome.start(headless=True)
             return "Chrome reiniciado en modo headless."
         except Exception as exc:
