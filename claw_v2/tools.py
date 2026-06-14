@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import subprocess
+import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
@@ -226,15 +227,31 @@ DEFAULT_TOOL_AGENT_CLASSES: dict[str, tuple[AgentClass, ...]] = {
 }
 
 
-def _browser_tool_service():
-    from claw_v2.browser_capability import BrowserCapability
-    from claw_v2.browser_tools import build_chrome_cdp_service
+_browser_svc = None
+_browser_svc_lock = threading.Lock()
 
-    endpoint = BrowserCapability().ensure_ready(visible=True)
-    return build_chrome_cdp_service(cdp_endpoint=endpoint)
+
+def _browser_tool_service():
+    # Process-wide singleton: the @eN ref map lives in BrowserToolService._sessions,
+    # so navigate/click/type must share one instance or refs go stale. Also avoids
+    # re-running ensure_ready() (which focuses/launches Chrome) on every tool call.
+    # Lazy + lock-guarded; never caches on failure so the handler try/except still degrades.
+    global _browser_svc
+    if _browser_svc is not None:
+        return _browser_svc
+    with _browser_svc_lock:
+        if _browser_svc is None:
+            from claw_v2.browser_capability import BrowserCapability
+            from claw_v2.browser_tools import build_chrome_cdp_service
+
+            endpoint = BrowserCapability().ensure_ready(visible=True)
+            _browser_svc = build_chrome_cdp_service(cdp_endpoint=endpoint)
+    return _browser_svc
 
 
 def _run_off_loop(fn, *a, **kw):
+    # Offloads a sync Playwright call (which cannot run inside a live asyncio loop)
+    # to a worker thread when one is running; otherwise runs inline.
     import asyncio
 
     try:
@@ -292,6 +309,7 @@ def _browser_screenshot(args: dict) -> dict:
         svc = _browser_tool_service()
         path = str(args.get("path") or f"/tmp/browser_shot_{int(_t.time())}.png")
         _os.makedirs(_os.path.dirname(path) or ".", exist_ok=True)
+        # TODO(PR3): expose BrowserToolService.screenshot() so the handler stops reaching into svc._backend
         ok = svc._backend.screenshot(path)
         return path if ok else None
 
@@ -2238,10 +2256,6 @@ class ToolRegistry:
                         "path": {
                             "type": "string",
                             "description": "Output file path (default: auto-generated /tmp path)",
-                        },
-                        "session_id": {
-                            "type": "string",
-                            "description": "Browser session id (default: brain)",
                         },
                     },
                     "required": [],

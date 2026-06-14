@@ -513,6 +513,12 @@ class ObservationWindowToolTests(unittest.TestCase):
 
 
 class BrowserReadToolsTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        # Never leak a monkeypatched singleton into other tests.
+        import claw_v2.tools as tools_mod
+
+        tools_mod._browser_svc = None
+
     def test_browser_read_tools_registered_for_researcher(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir) / "workspace"
@@ -597,6 +603,59 @@ class BrowserReadToolsTests(unittest.TestCase):
         self.assertIs(result.get("ok"), False)
         self.assertIn("error", result)
         self.assertIn("CDP down", result["error"])
+
+    def test_browser_tool_service_is_singleton(self) -> None:
+        import claw_v2.tools as tools_mod
+        from claw_v2 import browser_capability as bc
+        from claw_v2 import browser_tools as bt
+
+        tools_mod._browser_svc = None  # reset cache
+        calls = {"n": 0}
+
+        class _FakeBackend:
+            name = "chrome_cdp"
+
+        orig_build = bt.build_chrome_cdp_service
+        orig_ensure = bc.BrowserCapability.ensure_ready
+        bc.BrowserCapability.ensure_ready = lambda self, *a, **k: "http://127.0.0.1:9250"
+
+        def _fake_build(*, cdp_endpoint, observe=None):
+            calls["n"] += 1
+            return bt.BrowserToolService(backend=_FakeBackend(), cdp_endpoint=cdp_endpoint)
+
+        # _browser_tool_service imports build_chrome_cdp_service from claw_v2.browser_tools
+        # at call time, so patch the symbol on that module.
+        bt.build_chrome_cdp_service = _fake_build
+        try:
+            s1 = tools_mod._browser_tool_service()
+            s2 = tools_mod._browser_tool_service()
+            self.assertIs(s1, s2)
+            self.assertEqual(calls["n"], 1)
+        finally:
+            bt.build_chrome_cdp_service = orig_build
+            bc.BrowserCapability.ensure_ready = orig_ensure
+            tools_mod._browser_svc = None  # clean up so other tests aren't poisoned
+
+    def test_browser_tools_have_runtime_policies(self) -> None:
+        from claw_v2.tool_policy import TOOL_POLICIES
+
+        for name in (
+            "BrowserNavigate",
+            "BrowserSnapshot",
+            "BrowserScreenshot",
+            "BrowserClick",
+            "BrowserType",
+        ):
+            self.assertIn(
+                name, TOOL_POLICIES, f"{name} missing from tool_policies.json (fail-closed)"
+            )
+        # read tools brain-callable (C3 inline); interaction tools are not
+        self.assertIn("brain", TOOL_POLICIES["BrowserNavigate"].allowed_contexts)
+        self.assertIn("brain", TOOL_POLICIES["BrowserSnapshot"].allowed_contexts)
+        self.assertNotIn("brain", TOOL_POLICIES["BrowserClick"].allowed_contexts)
+        # interaction tools are mutations
+        self.assertFalse(TOOL_POLICIES["BrowserClick"].read_only)
+        self.assertTrue(TOOL_POLICIES["BrowserNavigate"].read_only)
 
 
 if __name__ == "__main__":
