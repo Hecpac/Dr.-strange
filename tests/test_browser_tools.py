@@ -180,5 +180,35 @@ class ObserveTests(unittest.TestCase):
             self.assertNotIn("token=abcd", str(payload))
 
 
+import os
+import urllib.request
+
+from claw_v2.browser_tools import ChromeCdpBrowserBackend
+
+
+def _cdp_up(endpoint: str = "http://127.0.0.1:9250") -> bool:
+    try:
+        with urllib.request.urlopen(f"{endpoint}/json/version", timeout=2):
+            return True
+    except Exception:
+        return False
+
+
+class ChromeCdpBackendTests(unittest.TestCase):
+    @unittest.skipUnless(
+        os.getenv("CLAW_BROWSER_CDP_SMOKE") == "1" and _cdp_up(),
+        "set CLAW_BROWSER_CDP_SMOKE=1 with Chrome CDP on :9250 to run",
+    )
+    def test_navigate_example_returns_title_and_refs(self) -> None:
+        backend = ChromeCdpBrowserBackend(cdp_endpoint="http://127.0.0.1:9250")
+        page = backend.navigate("https://example.com")
+        self.assertIn("example", (page.title or "").lower())
+        self.assertFalse(page.login_or_challenge)
+
+    def test_backend_name_is_chrome_cdp(self) -> None:
+        backend = ChromeCdpBrowserBackend(cdp_endpoint="http://127.0.0.1:9250")
+        self.assertEqual(backend.name, "chrome_cdp")
+
+
 if __name__ == "__main__":
     unittest.main()
