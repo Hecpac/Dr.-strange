@@ -7,6 +7,7 @@ from html import escape
 import json
 import logging
 import re
+import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Callable, TYPE_CHECKING
@@ -486,6 +487,7 @@ class BrainService:
             if self.delegation_handler_factory is not None
             else None
         )
+        _build_started = time.perf_counter()
         prompt = self._build_prompt(
             session_id=session_id,
             message=message,
@@ -495,6 +497,7 @@ class BrainService:
             catchup_after_id=provider_cursor,
             task_type=task_type,
         )
+        _build_ms = (time.perf_counter() - _build_started) * 1000
         try:
             if self.observe is not None:
                 self.observe.emit(
@@ -522,6 +525,24 @@ class BrainService:
                             "summary_only_context": True,
                         },
                     )
+            if self.observe is not None:
+                # Latency attribution: build_ms isolates local prompt assembly
+                # (history/context/experience-replay) from the provider call that
+                # follows. dispatch_ts → llm_response measures Opus TTFT+gen.
+                self.observe.emit(
+                    "brain_llm_dispatch",
+                    lane="brain",
+                    provider=session_provider,
+                    trace_id=trace["trace_id"],
+                    root_trace_id=trace["root_trace_id"],
+                    span_id=trace["span_id"],
+                    parent_span_id=trace["parent_span_id"],
+                    artifact_id=trace["artifact_id"],
+                    payload={
+                        "app_session_id": session_id,
+                        "build_ms": round(_build_ms, 1),
+                    },
+                )
             response = self.router.ask(
                 prompt,
                 system_prompt=_brain_system_prompt(
