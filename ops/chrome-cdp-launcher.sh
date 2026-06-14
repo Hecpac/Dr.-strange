@@ -93,7 +93,7 @@ while true; do
     rm -f "$CDP_DIR/SingletonLock"
     "$CHROME_BIN" \
         --remote-debugging-port="$CDP_PORT" \
-        --remote-allow-origins="*" \
+        --remote-allow-origins="http://127.0.0.1:${CDP_PORT},http://localhost:${CDP_PORT}" \
         --user-data-dir="$CDP_DIR" \
         --no-first-run \
         --disable-default-apps \

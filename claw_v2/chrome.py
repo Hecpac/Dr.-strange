@@ -157,7 +157,10 @@ class ManagedChrome:
         cmd = [
             chrome_path,
             f"--remote-debugging-port={self.port}",
-            "--remote-allow-origins=*",
+            # Scope the DevTools origin allowlist to the loopback client instead of
+            # "*": a wildcard lets any local web origin attach to and drive this
+            # authenticated profile over CDP. The executor connects via 127.0.0.1.
+            f"--remote-allow-origins=http://127.0.0.1:{self.port},http://localhost:{self.port}",
             f"--user-data-dir={self.profile_dir}",
             "--no-first-run",
             "--disable-default-apps",
@@ -253,9 +256,9 @@ def _find_chrome() -> str:
 def _check_port_pids(port: int) -> list[tuple[int, str]]:
     try:
         output = subprocess.check_output(
-            ["lsof", "-ti", f":{port}"], text=True, stderr=subprocess.DEVNULL,
+            ["lsof", "-ti", f":{port}"], text=True, stderr=subprocess.DEVNULL, timeout=5,
         ).strip()
-    except (subprocess.CalledProcessError, FileNotFoundError):
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
         return []
     if not output:
         return []
@@ -264,9 +267,9 @@ def _check_port_pids(port: int) -> list[tuple[int, str]]:
         pid = int(line.strip())
         try:
             name = subprocess.check_output(
-                ["ps", "-p", str(pid), "-o", "comm="], text=True, stderr=subprocess.DEVNULL,
+                ["ps", "-p", str(pid), "-o", "comm="], text=True, stderr=subprocess.DEVNULL, timeout=5,
             ).strip()
-        except (subprocess.CalledProcessError, FileNotFoundError):
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
             name = "unknown"
         results.append((pid, name))
     return results
@@ -278,8 +281,9 @@ def _pid_command(pid: int) -> str:
             ["ps", "-p", str(pid), "-o", "command="],
             text=True,
             stderr=subprocess.DEVNULL,
+            timeout=5,
         ).strip()
-    except (subprocess.CalledProcessError, FileNotFoundError):
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
         return ""
 
 
@@ -398,8 +402,9 @@ def _profile_user_data_pids(profile_dir: str) -> list[int]:
             ["ps", "-axww", "-o", "pid=,command="],
             text=True,
             stderr=subprocess.DEVNULL,
+            timeout=5,
         )
-    except (subprocess.CalledProcessError, FileNotFoundError):
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
         return []
 
     pids: list[int] = []

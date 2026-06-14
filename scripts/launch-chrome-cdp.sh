@@ -108,7 +108,7 @@ fi
 
 open -na "Google Chrome" --args \
     --remote-debugging-port="$CDP_PORT" \
-    --remote-allow-origins="*" \
+    --remote-allow-origins="http://127.0.0.1:${CDP_PORT},http://localhost:${CDP_PORT}" \
     --user-data-dir="$CDP_DIR" \
     --no-first-run \
     --start-maximized \

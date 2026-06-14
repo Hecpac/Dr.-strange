@@ -19,7 +19,7 @@ rm -f "$PROFILE/SingletonLock" 2>/dev/null || true
 echo "3/3 Abriendo Chrome VISIBLE en Instagram (perfil @pachanodesign, CDP :9250)..."
 open -na "Google Chrome" --args \
     --remote-debugging-port=9250 \
-    --remote-allow-origins="*" \
+    --remote-allow-origins="http://127.0.0.1:9250,http://localhost:9250" \
     --user-data-dir="$PROFILE" \
     --no-first-run \
     --start-maximized \

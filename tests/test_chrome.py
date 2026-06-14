@@ -43,7 +43,11 @@ class ManagedChromeTests(unittest.TestCase):
         mc.start()
         args = mock_popen.call_args[0][0]
         self.assertIn("--remote-debugging-port=9250", args)
-        self.assertIn("--remote-allow-origins=*", args)
+        # Origin allowlist scoped to the loopback client, never "*".
+        self.assertIn(
+            "--remote-allow-origins=http://127.0.0.1:9250,http://localhost:9250", args
+        )
+        self.assertNotIn("--remote-allow-origins=*", args)
         self.assertIn(f"--user-data-dir={Path('/tmp/test-profile').resolve(strict=False)}", args)
         self.assertNotIn("--headless=new", args)
         self.assertIn("--start-maximized", args)
