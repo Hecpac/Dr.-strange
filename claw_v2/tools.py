@@ -33,7 +33,6 @@ def _is_systemic_block(exc: Exception) -> bool:
     msg = str(exc).lower()
     return "observation window frozen" in msg or "tool_calls_per_minute breaker" in msg
 
-
 if TYPE_CHECKING:
     from claw_v2.a2a import A2AService
     from claw_v2.skills import SkillRegistry
@@ -74,10 +73,7 @@ def classify_firecrawl_error(text: str, *, status_code: int | None = None) -> st
     normalized = (text or "").lower()
     if any(pattern in normalized for pattern in _FIRECRAWL_CREDIT_PATTERNS) or status_code == 402:
         return "insufficient_credits"
-    if (
-        any(pattern in normalized for pattern in _FIRECRAWL_RATE_LIMIT_PATTERNS)
-        or status_code == 429
-    ):
+    if any(pattern in normalized for pattern in _FIRECRAWL_RATE_LIMIT_PATTERNS) or status_code == 429:
         return "rate_limited"
     return None
 
@@ -136,7 +132,6 @@ def _looks_like_supported_image(raw: bytes, suffix: str) -> bool:
     if normalized == ".webp":
         return len(raw) >= 12 and raw[:4] == b"RIFF" and raw[8:12] == b"WEBP"
     return False
-
 
 # Autonomy tiers (per SOUL.md). Enforced in code, not prompt.
 #   1 = read-only / local-safe / observation  -> auto-execute, no approval
@@ -353,9 +348,7 @@ def is_valid_agent_class(value: str) -> bool:
 def default_allowed_tools_for(agent_class: AgentClass) -> list[str]:
     if not is_valid_agent_class(agent_class):
         raise ValueError(f"agent_class must be one of: {', '.join(SUPPORTED_AGENT_CLASSES)}")
-    return sorted(
-        name for name, classes in DEFAULT_TOOL_AGENT_CLASSES.items() if agent_class in classes
-    )
+    return sorted(name for name, classes in DEFAULT_TOOL_AGENT_CLASSES.items() if agent_class in classes)
 
 
 def _ensure_strict_schema(schema: dict) -> dict:
@@ -384,7 +377,8 @@ def _openai_tool_name(name: str) -> str:
     if _OPENAI_TOOL_NAME_RE.fullmatch(name):
         return name
     return "".join(
-        char if re.fullmatch(r"[a-zA-Z0-9_-]", char) else f"_x{ord(char):02x}_" for char in name
+        char if re.fullmatch(r"[a-zA-Z0-9_-]", char) else f"_x{ord(char):02x}_"
+        for char in name
     )
 
 
@@ -404,8 +398,8 @@ class ToolDefinition:
     # The actual evaluator lives in claw_v2.verification and is invoked by
     # callers in F3 (task_handler / coordinator_schema). Default None preserves
     # full backward compatibility with all existing tool registrations.
-    success_condition: "object | None" = None  # SuccessCondition; quoted to avoid import cycle
-    preflight: "object | None" = None  # PreflightSpec
+    success_condition: "object | None" = None      # SuccessCondition; quoted to avoid import cycle
+    preflight: "object | None" = None              # PreflightSpec
     memory_load_bearing_keys: tuple[str, ...] = ()
 
 
@@ -437,9 +431,7 @@ def _collect_strings(value: object) -> list[str]:
 
 def _extract_sanitizable_text(result: dict, fields: tuple[str, ...]) -> tuple[str, str | None]:
     """Return (text_to_scan, field_used). Checks declared fields first, then falls back to common keys."""
-    candidates = (
-        list(fields) if fields else ["content", "text", "body", "markdown", "result", "output"]
-    )
+    candidates = list(fields) if fields else ["content", "text", "body", "markdown", "result", "output"]
     for field_name in candidates:
         value = result.get(field_name)
         if value is None:
@@ -505,9 +497,7 @@ class ToolRegistry:
         self.workspace_root = Path(workspace_root)
         self.memory = memory
         self.observe = observe
-        self.telemetry_root = (
-            Path(telemetry_root).expanduser() if telemetry_root is not None else None
-        )
+        self.telemetry_root = Path(telemetry_root).expanduser() if telemetry_root is not None else None
         self.observation_window = observation_window
         self.autoexec_max_tier = autoexec_max_tier
         self._runtime_goal_id: str | None = None
@@ -520,11 +510,7 @@ class ToolRegistry:
         # Avoids breaking any existing tool registration while making the
         # contract violation visible in logs / pytest warnings.
         try:
-            from claw_v2.verification import (
-                warn_if_contract_missing,
-                ToolContractWarning,
-            )  # local import to avoid cycle
-
+            from claw_v2.verification import warn_if_contract_missing, ToolContractWarning  # local import to avoid cycle
             msg = warn_if_contract_missing(
                 tool_name=definition.name,
                 tier=int(definition.tier),
@@ -533,14 +519,8 @@ class ToolRegistry:
             )
             if msg:
                 import warnings
-
                 warnings.warn(msg, ToolContractWarning, stacklevel=2)
-                logger.warning(
-                    "tool_contract_warning name=%s tier=%s msg=%s",
-                    definition.name,
-                    definition.tier,
-                    msg,
-                )
+                logger.warning("tool_contract_warning name=%s tier=%s msg=%s", definition.name, definition.tier, msg)
         except Exception:  # pragma: no cover — never block real registration on the contract check
             logger.exception("warn_if_contract_missing failed for tool %s", definition.name)
         self._definitions[definition.name] = definition
@@ -572,14 +552,12 @@ class ToolRegistry:
                     f"OpenAI tool name collision: {seen_names[openai_name]} and {defn.name}"
                 )
             seen_names[openai_name] = defn.name
-            schemas.append(
-                {
-                    "type": "function",
-                    "name": openai_name,
-                    "description": defn.description,
-                    "parameters": defn.parameter_schema,
-                }
-            )
+            schemas.append({
+                "type": "function",
+                "name": openai_name,
+                "description": defn.description,
+                "parameters": defn.parameter_schema,
+            })
         return schemas
 
     def original_tool_name_from_openai(self, name: str) -> str:
@@ -658,7 +636,6 @@ class ToolRegistry:
         if definition.success_condition is not None:
             try:
                 from claw_v2.verification.local_tool_runner import observe_pre_state
-
                 _pre_state = observe_pre_state(definition.name, args)
             except Exception as exc:
                 _pre_state_error = f"{type(exc).__name__}: {exc}"[:200]
@@ -687,9 +664,7 @@ class ToolRegistry:
                 goal_id=p0_goal_id,
                 session_id=p0_session_id,
                 originating_event_id=proposed_event_id,
-                result=ActionResult(
-                    status="failure", output_hash="", error=f"{type(exc).__name__}: {exc}"
-                ),
+                result=ActionResult(status="failure", output_hash="", error=f"{type(exc).__name__}: {exc}"),
                 claims=[claim_id] if claim_id else [],
             )
             raise
@@ -720,7 +695,6 @@ class ToolRegistry:
                 CONTRACT_REQUIRED_KEY,
                 attach_artifact_to_result,
             )
-
             result[CONTRACT_REQUIRED_KEY] = True
             if _pre_state_error is not None:
                 # Pre-state observation failed → record cause so gate event is descriptive.
@@ -731,9 +705,7 @@ class ToolRegistry:
                     args=args,
                     result=result,
                     pre_state=_pre_state or {},
-                    workspace_root=str(self.workspace_root)
-                    if hasattr(self, "workspace_root")
-                    else None,
+                    workspace_root=str(self.workspace_root) if hasattr(self, "workspace_root") else None,
                 )
             except Exception as exc:
                 # The marker is already on the result; the gate will detect
@@ -861,11 +833,7 @@ class ToolRegistry:
                     else f"Tool {definition.name} failed with {error[:180]}."
                 ),
                 claim_type="fact",
-                evidence_refs=[
-                    EvidenceRef(
-                        kind="tool_call", ref=f"tool_registry.execute:{definition.name}:{status}"
-                    )
-                ],
+                evidence_refs=[EvidenceRef(kind="tool_call", ref=f"tool_registry.execute:{definition.name}:{status}")],
                 verification_status="verified",
                 confidence=1.0,
                 observe=self.observe,
@@ -922,7 +890,9 @@ class ToolRegistry:
             )
             return event.event_id
         except Exception:
-            logger.exception("P0 emit_event %s failed for %s", event_type, definition.name)
+            logger.exception(
+                "P0 emit_event %s failed for %s", event_type, definition.name
+            )
             if self.observe is not None:
                 try:
                     self.observe.emit(
@@ -1113,9 +1083,7 @@ class ToolRegistry:
                     continue
                 for line_number, line in enumerate(content.splitlines(), start=1):
                     if needle in line:
-                        matches.append(
-                            {"path": str(readable), "line_number": line_number, "line": line}
-                        )
+                        matches.append({"path": str(readable), "line_number": line_number, "line": line})
                         if len(matches) >= 100:
                             return {"matches": matches}
             return {"matches": matches}
@@ -1131,11 +1099,7 @@ class ToolRegistry:
                         limit=int(args.get("limit", 10)),
                     )
                 }
-            return {
-                "matches": memory.search_facts(
-                    args.get("query", ""), limit=int(args.get("limit", 10))
-                )
-            }
+            return {"matches": memory.search_facts(args.get("query", ""), limit=int(args.get("limit", 10)))}
 
         def external_stub(args: dict) -> dict:
             return {
@@ -1150,11 +1114,7 @@ class ToolRegistry:
                 allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["Read"],
                 handler=read_file,
                 tier=TIER_READ_ONLY,
-                parameter_schema={
-                    "type": "object",
-                    "properties": {"path": {"type": "string", "description": "Absolute file path"}},
-                    "required": ["path"],
-                },
+                parameter_schema={"type": "object", "properties": {"path": {"type": "string", "description": "Absolute file path"}}, "required": ["path"]},
             )
         )
         registry.register(
@@ -1177,16 +1137,12 @@ class ToolRegistry:
             )
         )
         # F3a (2026-05-26) — local Tier-2 tools declare success conditions.
-        from claw_v2.verification.local_tool_contracts import (
-            LOCAL_TOOL_SUCCESS_CONDITIONS,
-        )  # local import to avoid cycle
-
+        from claw_v2.verification.local_tool_contracts import LOCAL_TOOL_SUCCESS_CONDITIONS  # local import to avoid cycle
         # F3b.0 (2026-05-26) — Tier-3 external tools declare contracts + preflight.
         from claw_v2.verification.external_tool_contracts import (
             EXTERNAL_TOOL_PREFLIGHTS,
             EXTERNAL_TOOL_SUCCESS_CONDITIONS,
         )
-
         registry.register(
             ToolDefinition(
                 name="Write",
@@ -1194,11 +1150,7 @@ class ToolRegistry:
                 allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["Write"],
                 handler=write_file,
                 mutates_state=True,
-                parameter_schema={
-                    "type": "object",
-                    "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
-                    "required": ["path", "content"],
-                },
+                parameter_schema={"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]},
                 success_condition=LOCAL_TOOL_SUCCESS_CONDITIONS["Write"],
             )
         )
@@ -1209,15 +1161,7 @@ class ToolRegistry:
                 allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["Edit"],
                 handler=edit_file,
                 mutates_state=True,
-                parameter_schema={
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string"},
-                        "old_text": {"type": "string"},
-                        "new_text": {"type": "string"},
-                    },
-                    "required": ["path", "old_text", "new_text"],
-                },
+                parameter_schema={"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]},
                 success_condition=LOCAL_TOOL_SUCCESS_CONDITIONS["Edit"],
             )
         )
@@ -1228,14 +1172,7 @@ class ToolRegistry:
                 allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["Glob"],
                 handler=glob_files,
                 tier=TIER_READ_ONLY,
-                parameter_schema={
-                    "type": "object",
-                    "properties": {
-                        "pattern": {"type": "string", "description": "Glob pattern (e.g. **/*.py)"},
-                        "root": {"type": "string", "description": "Root directory (optional)"},
-                    },
-                    "required": ["pattern"],
-                },
+                parameter_schema={"type": "object", "properties": {"pattern": {"type": "string", "description": "Glob pattern (e.g. **/*.py)"}, "root": {"type": "string", "description": "Root directory (optional)"}}, "required": ["pattern"]},
             )
         )
         registry.register(
@@ -1245,14 +1182,7 @@ class ToolRegistry:
                 allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["Grep"],
                 handler=grep_files,
                 tier=TIER_READ_ONLY,
-                parameter_schema={
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "Text to search for"},
-                        "root": {"type": "string", "description": "Root directory (optional)"},
-                    },
-                    "required": ["query"],
-                },
+                parameter_schema={"type": "object", "properties": {"query": {"type": "string", "description": "Text to search for"}, "root": {"type": "string", "description": "Root directory (optional)"}}, "required": ["query"]},
             )
         )
         registry.register(
@@ -1297,14 +1227,7 @@ class ToolRegistry:
                 allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["SearchMemory"],
                 handler=search_memory,
                 tier=TIER_READ_ONLY,
-                parameter_schema={
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string"},
-                        "limit": {"type": "integer", "default": 10},
-                    },
-                    "required": ["query"],
-                },
+                parameter_schema={"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer", "default": 10}}, "required": ["query"]},
             )
         )
 
@@ -1328,14 +1251,7 @@ class ToolRegistry:
                 allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["WikiSearch"],
                 handler=wiki_search,
                 tier=TIER_READ_ONLY,
-                parameter_schema={
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string"},
-                        "limit": {"type": "integer", "default": 5},
-                    },
-                    "required": ["query"],
-                },
+                parameter_schema={"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer", "default": 5}}, "required": ["query"]},
             )
         )
         registry.register(
@@ -1345,14 +1261,7 @@ class ToolRegistry:
                 allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["WikiLint"],
                 handler=wiki_lint,
                 tier=TIER_LOCAL_MUTATION,
-                parameter_schema={
-                    "type": "object",
-                    "properties": {
-                        "deep": {"type": "boolean", "default": False},
-                        "auto_fix": {"type": "boolean", "default": False},
-                    },
-                    "required": [],
-                },
+                parameter_schema={"type": "object", "properties": {"deep": {"type": "boolean", "default": False}, "auto_fix": {"type": "boolean", "default": False}}, "required": []},
                 success_condition=LOCAL_TOOL_SUCCESS_CONDITIONS["WikiLint"],
             )
         )
@@ -1388,11 +1297,7 @@ class ToolRegistry:
                 tier=TIER_REQUIRES_APPROVAL,
                 success_condition=EXTERNAL_TOOL_SUCCESS_CONDITIONS["WikiDelete"],
                 preflight=EXTERNAL_TOOL_PREFLIGHTS["WikiDelete"],
-                parameter_schema={
-                    "type": "object",
-                    "properties": {"slug": {"type": "string"}},
-                    "required": ["slug"],
-                },
+                parameter_schema={"type": "object", "properties": {"slug": {"type": "string"}}, "required": ["slug"]},
             )
         )
         registry.register(
@@ -1402,14 +1307,7 @@ class ToolRegistry:
                 allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["WikiGraph"],
                 handler=wiki_graph,
                 tier=TIER_READ_ONLY,
-                parameter_schema={
-                    "type": "object",
-                    "properties": {
-                        "slug": {"type": "string"},
-                        "depth": {"type": "integer", "default": 1},
-                    },
-                    "required": [],
-                },
+                parameter_schema={"type": "object", "properties": {"slug": {"type": "string"}, "depth": {"type": "integer", "default": 1}}, "required": []},
             )
         )
 
@@ -1433,38 +1331,28 @@ class ToolRegistry:
             kwargs = args.get("kwargs", {})
             return skill_registry.execute_skill(name, **kwargs)
 
-        registry.register(
-            ToolDefinition(
-                name="SkillList",
-                description="List all registered skills and stats.",
-                allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["SkillList"],
-                handler=skill_list,
-                tier=TIER_READ_ONLY,
-            )
-        )
-        registry.register(
-            ToolDefinition(
-                name="SkillGenerate",
-                description="Generate a new skill from description. Args: task (str), tags (list[str], optional).",
-                allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["SkillGenerate"],
-                handler=skill_generate,
-                mutates_state=True,
-                tier=TIER_LOCAL_MUTATION,
-                success_condition=LOCAL_TOOL_SUCCESS_CONDITIONS["SkillGenerate"],
-            )
-        )
-        registry.register(
-            ToolDefinition(
-                name="SkillExecute",
-                description="Execute a registered skill. Args: name (str), kwargs (dict, optional).",
-                allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["SkillExecute"],
-                handler=skill_execute,
-                mutates_state=True,
-                tier=TIER_REQUIRES_APPROVAL,
-                success_condition=EXTERNAL_TOOL_SUCCESS_CONDITIONS["SkillExecute"],
-                preflight=EXTERNAL_TOOL_PREFLIGHTS["SkillExecute"],
-            )
-        )
+        registry.register(ToolDefinition(
+            name="SkillList", description="List all registered skills and stats.",
+            allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["SkillList"], handler=skill_list,
+            tier=TIER_READ_ONLY,
+        ))
+        registry.register(ToolDefinition(
+            name="SkillGenerate",
+            description="Generate a new skill from description. Args: task (str), tags (list[str], optional).",
+            allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["SkillGenerate"],
+            handler=skill_generate, mutates_state=True,
+            tier=TIER_LOCAL_MUTATION,
+            success_condition=LOCAL_TOOL_SUCCESS_CONDITIONS["SkillGenerate"],
+        ))
+        registry.register(ToolDefinition(
+            name="SkillExecute",
+            description="Execute a registered skill. Args: name (str), kwargs (dict, optional).",
+            allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["SkillExecute"],
+            handler=skill_execute, mutates_state=True,
+            tier=TIER_REQUIRES_APPROVAL,
+            success_condition=EXTERNAL_TOOL_SUCCESS_CONDITIONS["SkillExecute"],
+            preflight=EXTERNAL_TOOL_PREFLIGHTS["SkillExecute"],
+        ))
 
         # --- A2A Protocol tools ---
         def a2a_card(args: dict) -> dict:
@@ -1486,45 +1374,31 @@ class ToolRegistry:
                 payload=args.get("payload", {}),
             )
 
-        registry.register(
-            ToolDefinition(
-                name="A2ACard",
-                description="Get this agent's A2A identity card.",
-                allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["A2ACard"],
-                handler=a2a_card,
-                tier=TIER_READ_ONLY,
-            )
-        )
-        registry.register(
-            ToolDefinition(
-                name="A2APeers",
-                description="List registered A2A peer agents and stats.",
-                allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["A2APeers"],
-                handler=a2a_peers,
-                tier=TIER_READ_ONLY,
-            )
-        )
-        registry.register(
-            ToolDefinition(
-                name="A2ASend",
-                description="Send a task to an A2A peer. Args: to_agent (str), action (str), payload (dict).",
-                allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["A2ASend"],
-                handler=a2a_send,
-                mutates_state=True,
-                requires_network=True,
-                tier=TIER_REQUIRES_APPROVAL,
-                success_condition=EXTERNAL_TOOL_SUCCESS_CONDITIONS["A2ASend"],
-                preflight=EXTERNAL_TOOL_PREFLIGHTS["A2ASend"],
-            )
-        )
+        registry.register(ToolDefinition(
+            name="A2ACard", description="Get this agent's A2A identity card.",
+            allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["A2ACard"], handler=a2a_card,
+            tier=TIER_READ_ONLY,
+        ))
+        registry.register(ToolDefinition(
+            name="A2APeers", description="List registered A2A peer agents and stats.",
+            allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["A2APeers"], handler=a2a_peers,
+            tier=TIER_READ_ONLY,
+        ))
+        registry.register(ToolDefinition(
+            name="A2ASend",
+            description="Send a task to an A2A peer. Args: to_agent (str), action (str), payload (dict).",
+            allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["A2ASend"],
+            handler=a2a_send, mutates_state=True, requires_network=True,
+            tier=TIER_REQUIRES_APPROVAL,
+            success_condition=EXTERNAL_TOOL_SUCCESS_CONDITIONS["A2ASend"],
+            preflight=EXTERNAL_TOOL_PREFLIGHTS["A2ASend"],
+        ))
 
         # --- HeyGen Video tool ---
         def _heygen_api_key() -> str:
             result = subprocess.run(
                 ["security", "find-generic-password", "-a", "heygen", "-s", "HEYGEN_API_KEY", "-w"],
-                capture_output=True,
-                text=True,
-                timeout=5,
+                capture_output=True, text=True, timeout=5,
             )
             key = result.stdout.strip()
             if not key:
@@ -1540,22 +1414,14 @@ class ToolRegistry:
             title = args.get("title", "Claw Briefing")
 
             api_key = _heygen_api_key()
-            payload = json.dumps(
-                {
-                    "video_inputs": [
-                        {
-                            "character": {
-                                "type": "avatar",
-                                "avatar_id": avatar_id,
-                                "avatar_style": "normal",
-                            },
-                            "voice": {"type": "text", "input_text": text, "voice_id": voice_id},
-                        }
-                    ],
-                    "title": title,
-                    "dimension": {"width": 1280, "height": 720},
-                }
-            ).encode()
+            payload = json.dumps({
+                "video_inputs": [{
+                    "character": {"type": "avatar", "avatar_id": avatar_id, "avatar_style": "normal"},
+                    "voice": {"type": "text", "input_text": text, "voice_id": voice_id},
+                }],
+                "title": title,
+                "dimension": {"width": 1280, "height": 720},
+            }).encode()
             req = Request(
                 "https://api.heygen.com/v2/video/generate",
                 data=payload,
@@ -1568,34 +1434,18 @@ class ToolRegistry:
             )
             with urlopen(req, timeout=30) as resp:
                 body = json.loads(resp.read())
-            return {
-                "video_id": body.get("data", {}).get("video_id"),
-                "status": body.get("data", {}).get("status"),
-            }
+            return {"video_id": body.get("data", {}).get("video_id"), "status": body.get("data", {}).get("status")}
 
-        registry.register(
-            ToolDefinition(
-                name="HeyGenVideo",
-                description="Generate a video with a talking avatar. Args: text (str, required), avatar_id (str, optional), voice_id (str, optional), title (str, optional).",
-                allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["HeyGenVideo"],
-                handler=heygen_video,
-                mutates_state=True,
-                requires_network=True,
-                tier=TIER_REQUIRES_APPROVAL,
-                success_condition=EXTERNAL_TOOL_SUCCESS_CONDITIONS["HeyGenVideo"],
-                preflight=EXTERNAL_TOOL_PREFLIGHTS["HeyGenVideo"],
-                parameter_schema={
-                    "type": "object",
-                    "properties": {
-                        "text": {"type": "string"},
-                        "avatar_id": {"type": "string"},
-                        "voice_id": {"type": "string"},
-                        "title": {"type": "string"},
-                    },
-                    "required": ["text"],
-                },
-            )
-        )
+        registry.register(ToolDefinition(
+            name="HeyGenVideo",
+            description="Generate a video with a talking avatar. Args: text (str, required), avatar_id (str, optional), voice_id (str, optional), title (str, optional).",
+            allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["HeyGenVideo"],
+            handler=heygen_video, mutates_state=True, requires_network=True,
+            tier=TIER_REQUIRES_APPROVAL,
+            success_condition=EXTERNAL_TOOL_SUCCESS_CONDITIONS["HeyGenVideo"],
+            preflight=EXTERNAL_TOOL_PREFLIGHTS["HeyGenVideo"],
+            parameter_schema={"type": "object", "properties": {"text": {"type": "string"}, "avatar_id": {"type": "string"}, "voice_id": {"type": "string"}, "title": {"type": "string"}}, "required": ["text"]},
+        ))
 
         # --- HeyGen Deliver tool: poll → download → compress → send to Telegram ---
         def heygen_deliver(args: dict) -> dict:
@@ -1646,45 +1496,41 @@ class ToolRegistry:
             )
             return result.to_dict()
 
-        registry.register(
-            ToolDefinition(
-                name="HeyGenDeliver",
-                description=(
-                    "Poll a HeyGen render until complete, download, transcode for "
-                    "Telegram's 50MB Bot API cap, and deliver via sendVideo. "
-                    "Args: video_id (str, optional if latest=true), latest (bool, "
-                    "optional - picks most recent), caption (str, optional), "
-                    "chat_id (str, optional - defaults to TELEGRAM_ALLOWED_USER_ID), "
-                    "slug (str, optional - filename slug). For F3b.2, "
-                    "mode=read_only_live performs gated HeyGen status inspection only. "
-                    "Legacy v1 endpoints require allow_legacy_v1=true."
-                ),
-                allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["HeyGenDeliver"],
-                handler=heygen_deliver,
-                mutates_state=True,
-                requires_network=True,
-                tier=TIER_REQUIRES_APPROVAL,
-                success_condition=EXTERNAL_TOOL_SUCCESS_CONDITIONS["HeyGenDeliver"],
-                preflight=EXTERNAL_TOOL_PREFLIGHTS["HeyGenDeliver"],
-                parameter_schema={
-                    "type": "object",
-                    "properties": {
-                        "mode": {"type": "string", "enum": ["delivery", "read_only_live"]},
-                        "endpoint": {
-                            "type": "string",
-                            "enum": ["quota", "video_status", "video_list"],
-                        },
-                        "video_id": {"type": "string"},
-                        "latest": {"type": "boolean"},
-                        "limit": {"type": "integer"},
-                        "allow_legacy_v1": {"type": "boolean"},
-                        "caption": {"type": "string"},
-                        "chat_id": {"type": "string"},
-                        "slug": {"type": "string"},
+        registry.register(ToolDefinition(
+            name="HeyGenDeliver",
+            description=(
+                "Poll a HeyGen render until complete, download, transcode for "
+                "Telegram's 50MB Bot API cap, and deliver via sendVideo. "
+                "Args: video_id (str, optional if latest=true), latest (bool, "
+                "optional - picks most recent), caption (str, optional), "
+                "chat_id (str, optional - defaults to TELEGRAM_ALLOWED_USER_ID), "
+                "slug (str, optional - filename slug). For F3b.2, "
+                "mode=read_only_live performs gated HeyGen status inspection only. "
+                "Legacy v1 endpoints require allow_legacy_v1=true."
+            ),
+            allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["HeyGenDeliver"],
+            handler=heygen_deliver, mutates_state=True, requires_network=True,
+            tier=TIER_REQUIRES_APPROVAL,
+            success_condition=EXTERNAL_TOOL_SUCCESS_CONDITIONS["HeyGenDeliver"],
+            preflight=EXTERNAL_TOOL_PREFLIGHTS["HeyGenDeliver"],
+            parameter_schema={
+                "type": "object",
+                "properties": {
+                    "mode": {"type": "string", "enum": ["delivery", "read_only_live"]},
+                    "endpoint": {
+                        "type": "string",
+                        "enum": ["quota", "video_status", "video_list"],
                     },
+                    "video_id": {"type": "string"},
+                    "latest": {"type": "boolean"},
+                    "limit": {"type": "integer"},
+                    "allow_legacy_v1": {"type": "boolean"},
+                    "caption": {"type": "string"},
+                    "chat_id": {"type": "string"},
+                    "slug": {"type": "string"},
                 },
-            )
-        )
+            },
+        ))
 
         def instagram_publish(args: dict) -> dict:
             from claw_v2.instagram_publish import InstagramPublishService
@@ -1719,44 +1565,39 @@ class ToolRegistry:
                 )
             return result.to_dict()
 
-        registry.register(
-            ToolDefinition(
-                name="InstagramPublish",
-                description=(
-                    "Publish a local video Reel or photo post via the logged-in "
-                    "Instagram CDP Chrome session: create flow, upload, caption, "
-                    "share, then verify via Instagram's share confirmation. "
-                    "Photo posts also verify profile/top-post change. "
-                    "Args: media_type (reel|photo), video_path/photo_path/media_path, "
-                    "caption (str, optional), account (str, optional - expected handle, guards against "
-                    "posting from the wrong account). Tier 3: external publication."
-                ),
-                allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["InstagramPublish"],
-                handler=instagram_publish,
-                mutates_state=True,
-                requires_network=True,
-                tier=TIER_REQUIRES_APPROVAL,
-                success_condition=EXTERNAL_TOOL_SUCCESS_CONDITIONS["InstagramPublish"],
-                preflight=EXTERNAL_TOOL_PREFLIGHTS["InstagramPublish"],
-                parameter_schema={
-                    "type": "object",
-                    "properties": {
-                        "video_path": {"type": "string"},
-                        "photo_path": {"type": "string"},
-                        "media_path": {"type": "string"},
-                        "media_type": {"type": "string", "enum": ["reel", "photo"]},
-                        "caption": {"type": "string"},
-                        "account": {"type": "string"},
-                    },
-                    "required": [],
+        registry.register(ToolDefinition(
+            name="InstagramPublish",
+            description=(
+                "Publish a local video Reel or photo post via the logged-in "
+                "Instagram CDP Chrome session: create flow, upload, caption, "
+                "share, then verify via Instagram's share confirmation. "
+                "Photo posts also verify profile/top-post change. "
+                "Args: media_type (reel|photo), video_path/photo_path/media_path, "
+                "caption (str, optional), account (str, optional - expected handle, guards against "
+                "posting from the wrong account). Tier 3: external publication."
+            ),
+            allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["InstagramPublish"],
+            handler=instagram_publish, mutates_state=True, requires_network=True,
+            tier=TIER_REQUIRES_APPROVAL,
+            success_condition=EXTERNAL_TOOL_SUCCESS_CONDITIONS["InstagramPublish"],
+            preflight=EXTERNAL_TOOL_PREFLIGHTS["InstagramPublish"],
+            parameter_schema={
+                "type": "object",
+                "properties": {
+                    "video_path": {"type": "string"},
+                    "photo_path": {"type": "string"},
+                    "media_path": {"type": "string"},
+                    "media_type": {"type": "string", "enum": ["reel", "photo"]},
+                    "caption": {"type": "string"},
+                    "account": {"type": "string"},
                 },
-            )
-        )
+                "required": [],
+            },
+        ))
 
         # --- Social media skills (scaffolds + competitor research) ---
         def social_caption_scaffold(args: dict) -> dict:
             from claw_v2.social_media import draft_caption_scaffold
-
             return draft_caption_scaffold(
                 topic=args.get("topic", ""),
                 platform=args.get("platform", "instagram_reel"),
@@ -1766,7 +1607,6 @@ class ToolRegistry:
 
         def social_reply_scaffold(args: dict) -> dict:
             from claw_v2.social_media import suggest_reply_scaffold
-
             return suggest_reply_scaffold(
                 incoming_comment=args.get("incoming_comment", ""),
                 platform=args.get("platform", "instagram_feed"),
@@ -1775,7 +1615,6 @@ class ToolRegistry:
 
         def social_competitor_research(args: dict) -> dict:
             from claw_v2.social_media import research_competitor
-
             kwargs: dict = {
                 "handle": args.get("handle", ""),
                 "recent_post_count": int(args.get("recent_post_count", 6)),
@@ -1785,87 +1624,39 @@ class ToolRegistry:
                 kwargs["cdp_url"] = cdp_url
             return research_competitor(**kwargs).to_dict()
 
-        registry.register(
-            ToolDefinition(
-                name="SocialCaptionScaffold",
-                description="Return platform-aware scaffold for caption drafting: char limits, hashtag caps, hook patterns, structure. The model writes the actual copy. Args: topic (str), platform (instagram_feed|instagram_reel|instagram_story|linkedin|x|threads), voice (punchy_contrarian|warm_authority|story_driven), hook_style (contrarian|specific_number|concrete_story|question_loop).",
-                allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["SocialCaptionScaffold"],
-                handler=social_caption_scaffold,
-                mutates_state=False,
-                requires_network=False,
-                tier=TIER_READ_ONLY,
-                parameter_schema={
-                    "type": "object",
-                    "properties": {
-                        "topic": {"type": "string"},
-                        "platform": {"type": "string"},
-                        "voice": {"type": "string"},
-                        "hook_style": {"type": "string"},
-                    },
-                    "required": ["topic"],
-                },
-            )
-        )
-        registry.register(
-            ToolDefinition(
-                name="SocialReplyScaffold",
-                description="Return tone + length + structure guidance for replying to a comment. Does not publish. Args: incoming_comment (str), platform (str), tone (warm|expert|playful|direct).",
-                allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["SocialReplyScaffold"],
-                handler=social_reply_scaffold,
-                mutates_state=False,
-                requires_network=False,
-                tier=TIER_READ_ONLY,
-                parameter_schema={
-                    "type": "object",
-                    "properties": {
-                        "incoming_comment": {"type": "string"},
-                        "platform": {"type": "string"},
-                        "tone": {"type": "string"},
-                    },
-                    "required": ["incoming_comment"],
-                },
-            )
-        )
-        registry.register(
-            ToolDefinition(
-                name="SocialCompetitorResearch",
-                description="Scrape a public Instagram profile via Chrome CDP: header stats + recent post captions + hook-pattern classification. Read-only. Args: handle (str), recent_post_count (int, default 6), cdp_url (str, optional — override default http://localhost:9250).",
-                allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["SocialCompetitorResearch"],
-                handler=social_competitor_research,
-                mutates_state=False,
-                requires_network=True,
-                tier=TIER_READ_ONLY,
-                parameter_schema={
-                    "type": "object",
-                    "properties": {
-                        "handle": {"type": "string"},
-                        "recent_post_count": {"type": "integer"},
-                        "cdp_url": {"type": "string"},
-                    },
-                    "required": ["handle"],
-                },
-            )
-        )
+        registry.register(ToolDefinition(
+            name="SocialCaptionScaffold",
+            description="Return platform-aware scaffold for caption drafting: char limits, hashtag caps, hook patterns, structure. The model writes the actual copy. Args: topic (str), platform (instagram_feed|instagram_reel|instagram_story|linkedin|x|threads), voice (punchy_contrarian|warm_authority|story_driven), hook_style (contrarian|specific_number|concrete_story|question_loop).",
+            allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["SocialCaptionScaffold"],
+            handler=social_caption_scaffold, mutates_state=False, requires_network=False,
+            tier=TIER_READ_ONLY,
+            parameter_schema={"type": "object", "properties": {"topic": {"type": "string"}, "platform": {"type": "string"}, "voice": {"type": "string"}, "hook_style": {"type": "string"}}, "required": ["topic"]},
+        ))
+        registry.register(ToolDefinition(
+            name="SocialReplyScaffold",
+            description="Return tone + length + structure guidance for replying to a comment. Does not publish. Args: incoming_comment (str), platform (str), tone (warm|expert|playful|direct).",
+            allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["SocialReplyScaffold"],
+            handler=social_reply_scaffold, mutates_state=False, requires_network=False,
+            tier=TIER_READ_ONLY,
+            parameter_schema={"type": "object", "properties": {"incoming_comment": {"type": "string"}, "platform": {"type": "string"}, "tone": {"type": "string"}}, "required": ["incoming_comment"]},
+        ))
+        registry.register(ToolDefinition(
+            name="SocialCompetitorResearch",
+            description="Scrape a public Instagram profile via Chrome CDP: header stats + recent post captions + hook-pattern classification. Read-only. Args: handle (str), recent_post_count (int, default 6), cdp_url (str, optional — override default http://localhost:9250).",
+            allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["SocialCompetitorResearch"],
+            handler=social_competitor_research, mutates_state=False, requires_network=True,
+            tier=TIER_READ_ONLY,
+            parameter_schema={"type": "object", "properties": {"handle": {"type": "string"}, "recent_post_count": {"type": "integer"}, "cdp_url": {"type": "string"}}, "required": ["handle"]},
+        ))
 
         # --- GPT Image generation tool ---
         def _openai_api_key() -> str:
             import os as _os
-
             key = _os.getenv("OPENAI_API_KEY", "")
             if not key:
                 result = subprocess.run(
-                    [
-                        "security",
-                        "find-generic-password",
-                        "-a",
-                        "openai",
-                        "-s",
-                        "OPENAI_API_KEY",
-                        "-w",
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
+                    ["security", "find-generic-password", "-a", "openai", "-s", "OPENAI_API_KEY", "-w"],
+                    capture_output=True, text=True, timeout=5,
                 )
                 key = result.stdout.strip()
             if not key:
@@ -1879,14 +1670,12 @@ class ToolRegistry:
             size = args.get("size", "1024x1024")
             quality = args.get("quality", "auto")
             api_key = _openai_api_key()
-            payload = json.dumps(
-                {
-                    "model": "gpt-image-1",
-                    "prompt": prompt_text,
-                    "size": size,
-                    "quality": quality,
-                }
-            ).encode()
+            payload = json.dumps({
+                "model": "gpt-image-1",
+                "prompt": prompt_text,
+                "size": size,
+                "quality": quality,
+            }).encode()
             req = Request(
                 "https://api.openai.com/v1/images/generations",
                 data=payload,
@@ -1905,7 +1694,6 @@ class ToolRegistry:
             output_dir.mkdir(exist_ok=True)
             import base64
             import time as _time
-
             for i, img in enumerate(images):
                 if img.get("b64_json"):
                     fname = f"gpt_image_{int(_time.time())}_{i}.png"
@@ -1914,42 +1702,19 @@ class ToolRegistry:
                     saved.append(str(fpath))
                 elif img.get("url"):
                     saved.append(img["url"])
-            return {
-                "images": saved,
-                "revised_prompt": images[0].get("revised_prompt", "") if images else "",
-            }
+            return {"images": saved, "revised_prompt": images[0].get("revised_prompt", "") if images else ""}
 
         DEFAULT_TOOL_AGENT_CLASSES["GPTImage"] = ("operator", "deployer")
-        registry.register(
-            ToolDefinition(
-                name="GPTImage",
-                description="Generate images using GPT Image API. Args: prompt (str, required), size (str, default '1024x1024'), quality (str, default 'auto').",
-                allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["GPTImage"],
-                handler=gpt_image,
-                mutates_state=True,
-                requires_network=True,
-                tier=TIER_REQUIRES_APPROVAL,
-                success_condition=EXTERNAL_TOOL_SUCCESS_CONDITIONS["GPTImage"],
-                preflight=EXTERNAL_TOOL_PREFLIGHTS["GPTImage"],
-                parameter_schema={
-                    "type": "object",
-                    "properties": {
-                        "prompt": {"type": "string", "description": "Image description"},
-                        "size": {
-                            "type": "string",
-                            "enum": ["1024x1024", "1536x1024", "1024x1536"],
-                            "default": "1024x1024",
-                        },
-                        "quality": {
-                            "type": "string",
-                            "enum": ["auto", "low", "medium", "high"],
-                            "default": "auto",
-                        },
-                    },
-                    "required": ["prompt"],
-                },
-            )
-        )
+        registry.register(ToolDefinition(
+            name="GPTImage",
+            description="Generate images using GPT Image API. Args: prompt (str, required), size (str, default '1024x1024'), quality (str, default 'auto').",
+            allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["GPTImage"],
+            handler=gpt_image, mutates_state=True, requires_network=True,
+            tier=TIER_REQUIRES_APPROVAL,
+            success_condition=EXTERNAL_TOOL_SUCCESS_CONDITIONS["GPTImage"],
+            preflight=EXTERNAL_TOOL_PREFLIGHTS["GPTImage"],
+            parameter_schema={"type": "object", "properties": {"prompt": {"type": "string", "description": "Image description"}, "size": {"type": "string", "enum": ["1024x1024", "1536x1024", "1024x1536"], "default": "1024x1024"}, "quality": {"type": "string", "enum": ["auto", "low", "medium", "high"], "default": "auto"}}, "required": ["prompt"]},
+        ))
 
         # --- GPT Vision / Image Analysis tool ---
         def analyze_image(args: dict) -> dict:
@@ -1961,7 +1726,6 @@ class ToolRegistry:
             content: list[dict] = [{"type": "input_text", "text": question}]
             if image_path:
                 import base64 as _b64
-
                 p = _readable_path(image_path)
                 if not p.exists():
                     raise ValueError(f"Image file not found: {image_path}")
@@ -1974,12 +1738,10 @@ class ToolRegistry:
             else:
                 content.append({"type": "input_image", "image_url": image_url})
             api_key = _openai_api_key()
-            payload = json.dumps(
-                {
-                    "model": "gpt-5.4-mini",
-                    "input": [{"role": "user", "content": content}],
-                }
-            ).encode()
+            payload = json.dumps({
+                "model": "gpt-5.4-mini",
+                "input": [{"role": "user", "content": content}],
+            }).encode()
             req = Request(
                 "https://api.openai.com/v1/responses",
                 data=payload,
@@ -1991,56 +1753,32 @@ class ToolRegistry:
             return {"analysis": body.get("output_text", ""), "model": "gpt-5.4-mini"}
 
         DEFAULT_TOOL_AGENT_CLASSES["AnalyzeImage"] = ("researcher", "operator", "deployer")
-        registry.register(
-            ToolDefinition(
-                name="AnalyzeImage",
-                description="Analyze an image using GPT vision. Args: image_path (str) or image_url (str), question (str, optional).",
-                allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["AnalyzeImage"],
-                handler=analyze_image,
-                requires_network=True,
-                tier=TIER_LOCAL_MUTATION,
-                success_condition=LOCAL_TOOL_SUCCESS_CONDITIONS["AnalyzeImage"],
-                parameter_schema={
-                    "type": "object",
-                    "properties": {
-                        "image_path": {
-                            "type": "string",
-                            "description": "Local file path to the image",
-                        },
-                        "image_url": {
-                            "type": "string",
-                            "description": "URL of the image to analyze",
-                        },
-                        "question": {
-                            "type": "string",
-                            "description": "What to analyze (default: describe the image)",
-                            "default": "Describe this image in detail.",
-                        },
-                    },
-                    "required": [],
+        registry.register(ToolDefinition(
+            name="AnalyzeImage",
+            description="Analyze an image using GPT vision. Args: image_path (str) or image_url (str), question (str, optional).",
+            allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["AnalyzeImage"],
+            handler=analyze_image, requires_network=True,
+            tier=TIER_LOCAL_MUTATION,
+            success_condition=LOCAL_TOOL_SUCCESS_CONDITIONS["AnalyzeImage"],
+            parameter_schema={
+                "type": "object",
+                "properties": {
+                    "image_path": {"type": "string", "description": "Local file path to the image"},
+                    "image_url": {"type": "string", "description": "URL of the image to analyze"},
+                    "question": {"type": "string", "description": "What to analyze (default: describe the image)", "default": "Describe this image in detail."},
                 },
-            )
-        )
+                "required": [],
+            },
+        ))
 
         # --- Firecrawl Scrape tool ---
         def _firecrawl_api_key() -> str:
             import os as _os
-
             key = _os.getenv("FIRECRAWL_API_KEY", "")
             if not key:
                 result = subprocess.run(
-                    [
-                        "security",
-                        "find-generic-password",
-                        "-a",
-                        "firecrawl",
-                        "-s",
-                        "FIRECRAWL_API_KEY",
-                        "-w",
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
+                    ["security", "find-generic-password", "-a", "firecrawl", "-s", "FIRECRAWL_API_KEY", "-w"],
+                    capture_output=True, text=True, timeout=5,
                 )
                 key = result.stdout.strip()
             if not key:
@@ -2084,13 +1822,11 @@ class ToolRegistry:
             )
             results = []
             for item in body.get("data", [])[:limit]:
-                results.append(
-                    {
-                        "title": item.get("metadata", {}).get("title", ""),
-                        "url": item.get("metadata", {}).get("sourceURL", ""),
-                        "markdown": item.get("markdown", "")[:2000],
-                    }
-                )
+                results.append({
+                    "title": item.get("metadata", {}).get("title", ""),
+                    "url": item.get("metadata", {}).get("sourceURL", ""),
+                    "markdown": item.get("markdown", "")[:2000],
+                })
             return {"results": results, "count": len(results)}
 
         def firecrawl_extract(args: dict) -> dict:
@@ -2112,85 +1848,63 @@ class ToolRegistry:
                 timeout=90,
             )
             data = result.get("data", [])
-            return {
-                "extracted": data[0] if len(data) == 1 else data,
-                "success": result.get("success", False),
-            }
+            return {"extracted": data[0] if len(data) == 1 else data, "success": result.get("success", False)}
 
         DEFAULT_TOOL_AGENT_CLASSES["FirecrawlExtract"] = ("researcher", "operator", "deployer")
         DEFAULT_TOOL_AGENT_CLASSES["FirecrawlScrape"] = ("researcher", "operator", "deployer")
         DEFAULT_TOOL_AGENT_CLASSES["FirecrawlSearch"] = ("researcher", "operator", "deployer")
-        registry.register(
-            ToolDefinition(
-                name="FirecrawlScrape",
-                description="Scrape a URL and return markdown content. Works with JS-rendered pages, SPAs, social media. Args: url (str, required), formats (list[str], default ['markdown']).",
-                allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["FirecrawlScrape"],
-                handler=firecrawl_scrape,
-                requires_network=True,
-                ingests_external_content=True,
-                sanitize_fields=("markdown", "content", "html", "text"),
-                tier=TIER_READ_ONLY,
-                parameter_schema={
-                    "type": "object",
-                    "properties": {
-                        "url": {"type": "string", "description": "URL to scrape"},
-                        "formats": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "default": ["markdown"],
-                        },
-                    },
-                    "required": ["url"],
+        registry.register(ToolDefinition(
+            name="FirecrawlScrape",
+            description="Scrape a URL and return markdown content. Works with JS-rendered pages, SPAs, social media. Args: url (str, required), formats (list[str], default ['markdown']).",
+            allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["FirecrawlScrape"],
+            handler=firecrawl_scrape, requires_network=True,
+            ingests_external_content=True,
+            sanitize_fields=("markdown", "content", "html", "text"),
+            tier=TIER_READ_ONLY,
+            parameter_schema={
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL to scrape"},
+                    "formats": {"type": "array", "items": {"type": "string"}, "default": ["markdown"]},
                 },
-            )
-        )
-        registry.register(
-            ToolDefinition(
-                name="FirecrawlSearch",
-                description="Search the web and return scraped results with markdown content. Args: query (str, required), limit (int, default 5).",
-                allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["FirecrawlSearch"],
-                handler=firecrawl_search,
-                requires_network=True,
-                ingests_external_content=True,
-                sanitize_fields=("markdown", "content", "results"),
-                tier=TIER_READ_ONLY,
-                parameter_schema={
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "Search query"},
-                        "limit": {"type": "integer", "default": 5, "description": "Max results"},
-                    },
-                    "required": ["query"],
+                "required": ["url"],
+            },
+        ))
+        registry.register(ToolDefinition(
+            name="FirecrawlSearch",
+            description="Search the web and return scraped results with markdown content. Args: query (str, required), limit (int, default 5).",
+            allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["FirecrawlSearch"],
+            handler=firecrawl_search, requires_network=True,
+            ingests_external_content=True,
+            sanitize_fields=("markdown", "content", "results"),
+            tier=TIER_READ_ONLY,
+            parameter_schema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"},
+                    "limit": {"type": "integer", "default": 5, "description": "Max results"},
                 },
-            )
-        )
-        registry.register(
-            ToolDefinition(
-                name="FirecrawlExtract",
-                description="Extract structured data from a URL using a JSON schema. Args: url (str, required), schema (dict, required), prompt (str, optional guidance).",
-                allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["FirecrawlExtract"],
-                handler=firecrawl_extract,
-                requires_network=True,
-                ingests_external_content=True,
-                sanitize_fields=("data", "extracted", "markdown", "content"),
-                tier=TIER_READ_ONLY,
-                parameter_schema={
-                    "type": "object",
-                    "properties": {
-                        "url": {"type": "string", "description": "URL to extract data from"},
-                        "schema": {
-                            "type": "object",
-                            "description": "JSON schema for the data to extract",
-                        },
-                        "prompt": {
-                            "type": "string",
-                            "description": "Optional prompt to guide extraction",
-                        },
-                    },
-                    "required": ["url", "schema"],
+                "required": ["query"],
+            },
+        ))
+        registry.register(ToolDefinition(
+            name="FirecrawlExtract",
+            description="Extract structured data from a URL using a JSON schema. Args: url (str, required), schema (dict, required), prompt (str, optional guidance).",
+            allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["FirecrawlExtract"],
+            handler=firecrawl_extract, requires_network=True,
+            ingests_external_content=True,
+            sanitize_fields=("data", "extracted", "markdown", "content"),
+            tier=TIER_READ_ONLY,
+            parameter_schema={
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL to extract data from"},
+                    "schema": {"type": "object", "description": "JSON schema for the data to extract"},
+                    "prompt": {"type": "string", "description": "Optional prompt to guide extraction"},
                 },
-            )
-        )
+                "required": ["url", "schema"],
+            },
+        ))
 
         registry.register(
             ToolDefinition(
@@ -2311,4 +2025,5 @@ class ToolRegistry:
                 },
             )
         )
+
         return registry
