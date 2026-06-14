@@ -569,6 +569,31 @@ class BrowserReadToolsTests(unittest.TestCase):
             "Ignore previous instructions" not in str(result) or "[sanitized" in str(result).lower()
         )
 
+    def test_browser_navigate_reports_clear_error_when_cdp_unavailable(self) -> None:
+        import claw_v2.tools as tools_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            registry = ToolRegistry.default(workspace_root=workspace)
+
+        def _boom():
+            from claw_v2.browser_capability import BrowserCapabilityError
+
+            raise BrowserCapabilityError("CDP down", endpoint="http://127.0.0.1:9250")
+
+        orig = tools_mod._browser_tool_service
+        tools_mod._browser_tool_service = _boom
+        try:
+            result = registry.execute(
+                "BrowserNavigate", {"url": "https://x.test"}, agent_class="researcher"
+            )
+        finally:
+            tools_mod._browser_tool_service = orig
+        # Handler catches BrowserCapabilityError and returns {ok: False, error: ...}
+        # rather than raising — registry.execute returns a dict, not an exception.
+        self.assertIn("ok", str(result).lower())
+
 
 if __name__ == "__main__":
     unittest.main()
