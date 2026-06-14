@@ -563,11 +563,12 @@ class BrowserReadToolsTests(unittest.TestCase):
             )
         finally:
             tools_mod._browser_tool_service = orig
-        # Sanitizer quarantines malicious snapshot: result["verdict"] == "malicious"
-        # and the raw injection text is not present in the returned dict.
-        assert (
-            "Ignore previous instructions" not in str(result) or "[sanitized" in str(result).lower()
-        )
+        # Sanitizer quarantines the malicious snapshot: the result is replaced by a
+        # quarantine envelope and the raw injection text never reaches the agent.
+        self.assertEqual(result.get("verdict"), "malicious")
+        self.assertTrue(result.get("sanitized"))
+        self.assertIn("quarantine", result)
+        self.assertNotIn("Ignore previous instructions", str(result.get("quarantine", {})))
 
     def test_browser_navigate_reports_clear_error_when_cdp_unavailable(self) -> None:
         import claw_v2.tools as tools_mod
@@ -591,8 +592,11 @@ class BrowserReadToolsTests(unittest.TestCase):
         finally:
             tools_mod._browser_tool_service = orig
         # Handler catches BrowserCapabilityError and returns {ok: False, error: ...}
-        # rather than raising — registry.execute returns a dict, not an exception.
-        self.assertIn("ok", str(result).lower())
+        # rather than raising — registry.execute returns a degraded dict carrying
+        # the real failure reason, not an exception.
+        self.assertIs(result.get("ok"), False)
+        self.assertIn("error", result)
+        self.assertIn("CDP down", result["error"])
 
 
 if __name__ == "__main__":
