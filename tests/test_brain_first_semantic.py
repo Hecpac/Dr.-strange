@@ -80,7 +80,22 @@ def test_semantic_classifier_recognizes_operational_tasks_and_option_picks() -> 
         "Afínalo y que después cree las imágenes del grid",
         "Refina el carrusel y genera los assets visuales",
         "Haz un barrido por X de las noticias",
+        "Haz un repaso por X",
+        "Has un repaso por x",
+        "Haz un repaso por X e investiga sobre la des habilitación de Fable 5",
+        "Revisa las noticias el X",
+        "Revisa las noticias desde chrome incluyendo X",
+        "Abre Instagram",
+        "Abre Instagram en Chrome",
+        "Abre Instagram por defecto ya está loggeado",
+        "Haz commit y reinicia",
+        "Haz commit y reinicia el daemon",
+        "Commitea y reinicia",
+        "Reinicia el daemon",
         "Haz la auditoria de los MCps",
+        "Revisa el repo de browser use",
+        "Revisa el hilo https://x.com/openrouter/status/2065856853989270011?s=46",
+        "https://x.com/openrouter/status/2065856853989270011?s=46 revisa el hilo",
     ]
 
     for text in task_samples:
@@ -109,6 +124,10 @@ def test_semantic_classifier_recognizes_operational_tasks_and_option_picks() -> 
     assert spaced_combo_turn.intent == "continue_active_mission"
     assert spaced_combo_turn.explicit_continuation is True
 
+    question_after_url = classify_semantic_turn("https://example.com/foo?x=1 que opinas")
+    assert question_after_url.intent == "question"
+    assert question_after_url.clear_goal is False
+
     contextual_action_samples = [
         "Publicalo",
         "Lee los docs",
@@ -117,6 +136,14 @@ def test_semantic_classifier_recognizes_operational_tasks_and_option_picks() -> 
         "Okay 1",
         "Hazla Imagen en ChatGPT",
         "Ármalo",
+        "Levántalo",
+        "Mata y relanza",
+        "Vuelve abrir chrome",
+        "Vuelve a intentar abrir x",
+        "Vuelve a intentarlo",
+        "Tráela al frente",
+        "Ya lo cerré",
+        "Abrelo tu",
         "Ya esta desbloqueada",
         "Ya está desbloqueada",
     ]

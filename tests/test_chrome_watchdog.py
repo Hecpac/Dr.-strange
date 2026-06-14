@@ -34,6 +34,9 @@ class _WatchdogHarness(unittest.TestCase):
         self._wait_profile_free_patcher = patch("claw_v2.chrome._wait_for_profile_free")
         self._wait_profile_free_patcher.start()
         self.addCleanup(self._wait_profile_free_patcher.stop)
+        self._focus_visible_chrome_patcher = patch("claw_v2.chrome._focus_visible_chrome")
+        self._focus_visible_chrome_patcher.start()
+        self.addCleanup(self._focus_visible_chrome_patcher.stop)
 
 
 class ChromeWatchdogKillsOnlyExpectedProfilePidsTests(_WatchdogHarness):

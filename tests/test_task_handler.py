@@ -7,7 +7,11 @@ import unittest
 from pathlib import Path
 
 from claw_v2.coordinator import CoordinatorResult, WorkerResult
-from claw_v2.bot_helpers import _infer_session_mode, _should_use_browser_executor
+from claw_v2.bot_helpers import (
+    _evaluate_autonomy_policy,
+    _infer_session_mode,
+    _should_use_browser_executor,
+)
 from claw_v2.jobs import JobService
 from claw_v2.memory import MemoryStore
 from claw_v2.observe import ObserveStream
@@ -48,6 +52,18 @@ class TaskHandlerTests(unittest.TestCase):
                     "no incluye PID, launchd, logs, DB ni evento agent_startup_context."
                 ),
                 {"summary": "Estado actual: no verificado"},
+            )
+        )
+        self.assertTrue(
+            TaskHandler._response_contradicts_passed_verification(
+                "LIMITACIÓN CRÍTICA - No puedo ejecutar esta tarea.",
+                {"summary": "Soy un agente de navegador y esto está fuera de mi scope."},
+            )
+        )
+        self.assertTrue(
+            TaskHandler._response_contradicts_passed_verification(
+                "No puedo completar esta tarea tal como está especificada.",
+                {"summary": "No tengo capacidad para ejecutar pkill."},
             )
         )
 
@@ -456,8 +472,94 @@ class BrowserExecutorRoutingTests(unittest.TestCase):
     def test_x_sweep_objective_infers_browse_mode(self) -> None:
         self.assertEqual(_infer_session_mode("Haz un repaso por X"), "browse")
         self.assertEqual(_infer_session_mode("lee X por CDP"), "browse")
+        self.assertEqual(_infer_session_mode("Abre Instagram"), "browse")
+        self.assertEqual(_infer_session_mode("revisa el perfil de Instagram"), "browse")
+        self.assertEqual(_infer_session_mode("Revisa el repo de browser use"), "coding")
         self.assertTrue(_should_use_browser_executor("ops", "Haz un repaso por X"))
+        self.assertTrue(_should_use_browser_executor("research", "revisa el perfil de Instagram"))
         self.assertFalse(_should_use_browser_executor("research", "analiza x variable"))
+        self.assertFalse(
+            _should_use_browser_executor(
+                _infer_session_mode("Revisa el repo de browser use"),
+                "Revisa el repo de browser use",
+            )
+        )
+
+    def test_autonomy_policy_allows_safe_browser_work_only(self) -> None:
+        allowed = _evaluate_autonomy_policy(
+            "Abre Instagram y verifica que el perfil quede visible",
+            mode="browse",
+            forced=False,
+            autonomy_mode="autonomous",
+        )
+        self.assertTrue(allowed["allowed"])
+
+        inactivity_context = _evaluate_autonomy_policy(
+            "Abre Instagram hay varios dias sin postear nada",
+            mode="browse",
+            forced=False,
+            autonomy_mode="autonomous",
+        )
+        self.assertTrue(inactivity_context["allowed"])
+
+        for planning_text in (
+            "Tenemos que postear estamos atrasados",
+            "Hay que crear material para publicar",
+            "Necesitamos ideas para publicar esta semana",
+        ):
+            self.assertNotEqual(_infer_session_mode(planning_text), "publish")
+            planning_policy = _evaluate_autonomy_policy(
+                planning_text,
+                mode=_infer_session_mode(planning_text),
+                forced=False,
+                autonomy_mode="autonomous",
+            )
+            self.assertNotEqual(planning_policy["reason"], "sensitive_action", planning_text)
+
+        still_block_publish = _evaluate_autonomy_policy(
+            "Abre Instagram hay varios dias sin postear nada; publica esto",
+            mode="browse",
+            forced=False,
+            autonomy_mode="autonomous",
+        )
+        self.assertFalse(still_block_publish["allowed"])
+        self.assertEqual(still_block_publish["reason"], "sensitive_action")
+
+        ops_allowed = _evaluate_autonomy_policy(
+            "Revisa Chrome por CDP y toma screenshot",
+            mode="ops",
+            forced=False,
+            autonomy_mode="autonomous",
+        )
+        self.assertTrue(ops_allowed["allowed"])
+
+        generic_ops = _evaluate_autonomy_policy(
+            "corre el script de backup",
+            mode="ops",
+            forced=False,
+            autonomy_mode="autonomous",
+        )
+        self.assertFalse(generic_ops["allowed"])
+        self.assertEqual(generic_ops["reason"], "unsupported_mode")
+
+        for text in (
+            "publica esto en Instagram",
+            "postea el reel en Instagram",
+            "sube esto a Instagram",
+            "hay que publicar esto en Instagram",
+            "haz merge del PR",
+            "envia un DM por Instagram",
+            "compra el plan premium",
+            "borra la base de datos",
+        ):
+            blocked = _evaluate_autonomy_policy(
+                text,
+                mode=_infer_session_mode(text),
+                forced=False,
+                autonomy_mode="autonomous",
+            )
+            self.assertFalse(blocked["allowed"], text)
+            self.assertEqual(blocked["reason"], "sensitive_action", text)
 
     def test_research_bare_platform_mention_stays_on_coordinator(self) -> None:
         # A research task that merely names a platform must NOT hijack to the
@@ -486,6 +588,16 @@ class BrowserExecutorRoutingTests(unittest.TestCase):
         self.assertTrue(
             _browser_output_indicates_failure(
                 human_message(x, BrowserProfileHealth.BLOCKED_BY_CHALLENGE)
+            )
+        )
+        self.assertTrue(
+            _browser_output_indicates_failure(
+                "LIMITACIÓN CRÍTICA - No puedo ejecutar esta tarea"
+            )
+        )
+        self.assertTrue(
+            _browser_output_indicates_failure(
+                "No puedo completar esta tarea tal como está especificada."
             )
         )
         self.assertFalse(_browser_output_indicates_failure("Capturé 32 posts del timeline"))
@@ -522,6 +634,130 @@ class BrowserExecutorRoutingTests(unittest.TestCase):
             self.assertEqual(recorded["executor"], ("repaso por X", "t-1", "browse"))
             self.assertNotIn("coordinator_ran", recorded)
             self.assertIn("feed capturado", out)
+
+    def test_autonomous_browse_message_starts_browser_executor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            memory = MemoryStore(root / "claw.db")
+            observe = ObserveStream(root / "observe.db")
+            ledger = TaskLedger(root / "claw.db", observe=observe)
+            jobs = JobService(root / "claw.db", observe=observe)
+            recorded: dict = {}
+
+            class _RecordingCoordinator:
+                def run(self, task_id, objective, research_tasks, **kwargs):
+                    recorded["coordinator_ran"] = True
+                    return CoordinatorResult(task_id=task_id, phase_results={}, synthesis="coord")
+
+            def fake_exec(objective, *, task_id, mode):
+                recorded["executor"] = (objective, task_id, mode)
+                return "Instagram visible y verificado"
+
+            handler = TaskHandler(
+                coordinator=_RecordingCoordinator(),
+                observe=observe,
+                task_ledger=ledger,
+                job_service=jobs,
+                browser_executor=fake_exec,
+                get_session_state=memory.get_session_state,
+                update_session_state=memory.update_session_state,
+            )
+            memory.update_session_state("tg-1", autonomy_mode="autonomous", step_budget=8)
+
+            reply = handler.maybe_run_coordinated_task("tg-1", "Abre Instagram")
+
+            self.assertIsNotNone(reply)
+            self.assertIn("Tarea autónoma iniciada", reply or "")
+            task_id = (reply or "").split("`", 2)[1]
+            self.assertTrue(handler.wait_for_task(task_id, timeout=2))
+            self.assertEqual(recorded["executor"], ("Abre Instagram", task_id, "browse"))
+            self.assertNotIn("coordinator_ran", recorded)
+            record = ledger.get(task_id)
+            self.assertIsNotNone(record)
+            self.assertEqual(record.mode, "browse")
+            self.assertEqual(record.status, "succeeded")
+
+    def test_publish_planning_language_falls_through_to_brain(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            memory = MemoryStore(root / "claw.db")
+            recorded: dict = {}
+
+            class _RecordingCoordinator:
+                def run(self, task_id, objective, research_tasks, **kwargs):
+                    recorded["coordinator_ran"] = True
+                    return CoordinatorResult(task_id=task_id, phase_results={}, synthesis="coord")
+
+            handler = TaskHandler(
+                coordinator=_RecordingCoordinator(),
+                get_session_state=memory.get_session_state,
+                update_session_state=memory.update_session_state,
+            )
+            memory.update_session_state("tg-1", autonomy_mode="autonomous", step_budget=8)
+
+            for text in (
+                "Tenemos que postear estamos atrasados",
+                "Hay que crear material para publicar",
+            ):
+                self.assertIsNone(handler.maybe_run_coordinated_task("tg-1", text), text)
+
+            state = memory.get_session_state("tg-1")
+            self.assertNotEqual(state.get("verification_status"), "blocked")
+            self.assertNotIn("coordinator_ran", recorded)
+
+    def test_browser_use_repo_review_uses_coordinator_not_browser_executor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            memory = MemoryStore(root / "claw.db")
+            observe = ObserveStream(root / "observe.db")
+            ledger = TaskLedger(root / "claw.db", observe=observe)
+            jobs = JobService(root / "claw.db", observe=observe)
+            recorded: dict = {}
+
+            class _RecordingCoordinator:
+                def run(self, task_id, objective, research_tasks, **kwargs):
+                    recorded["coordinator"] = (objective, kwargs.get("implementation_tasks"))
+                    return CoordinatorResult(
+                        task_id=task_id,
+                        phase_results={
+                            "verification": [
+                                WorkerResult(
+                                    task_name="verify_repo_review",
+                                    content="Verification Status: passed",
+                                    duration_seconds=0.0,
+                                )
+                            ]
+                        },
+                        synthesis="repo revisado",
+                    )
+
+            def browser_executor(objective, *, task_id, mode):
+                recorded["browser_executor"] = (objective, task_id, mode)
+                return "should not run"
+
+            handler = TaskHandler(
+                coordinator=_RecordingCoordinator(),
+                observe=observe,
+                task_ledger=ledger,
+                job_service=jobs,
+                browser_executor=browser_executor,
+                get_session_state=memory.get_session_state,
+                update_session_state=memory.update_session_state,
+            )
+            memory.update_session_state("tg-1", autonomy_mode="autonomous", step_budget=8)
+
+            reply = handler.maybe_run_coordinated_task("tg-1", "Revisa el repo de browser use")
+
+            self.assertIsNotNone(reply)
+            self.assertIn("Tarea autónoma iniciada", reply or "")
+            task_id = (reply or "").split("`", 2)[1]
+            self.assertTrue(handler.wait_for_task(task_id, timeout=2))
+            self.assertIn("coordinator", recorded)
+            self.assertNotIn("browser_executor", recorded)
+            record = ledger.get(task_id)
+            self.assertIsNotNone(record)
+            self.assertEqual(record.mode, "coding")
+            self.assertEqual(memory.get_session_state("tg-1").get("mode"), "coding")
 
     def test_ops_x_sweep_uses_browser_executor_not_coordinator(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -689,6 +925,24 @@ class BrowserExecutorRoutingTests(unittest.TestCase):
             self.assertIn("autonomous_task_failed", event_types)
             self.assertNotIn("autonomous_task_pending", event_types)
             record = ledger.get("t-nores")
+            self.assertEqual(record.status, "failed")
+
+    def test_browser_executor_refusal_text_terminates_failed_not_passed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            handler, ledger, jobs = self._autonomous_handler(
+                Path(tmpdir),
+                browser_executor=lambda o, *, task_id, mode: (
+                    "No puedo completar esta tarea tal como está especificada. "
+                    "No tengo capacidad para ejecutar pkill."
+                ),
+            )
+            self._run_autonomous_browser(
+                handler, ledger, jobs, task_id="t-refusal", objective="Mata y relanza"
+            )
+            event_types = [e["event_type"] for e in handler.observe.recent_events(limit=50)]
+            self.assertIn("autonomous_task_failed", event_types)
+            self.assertNotIn("autonomous_task_completed", event_types)
+            record = ledger.get("t-refusal")
             self.assertEqual(record.status, "failed")
 
     def test_browser_executor_real_result_terminates_succeeded(self) -> None:

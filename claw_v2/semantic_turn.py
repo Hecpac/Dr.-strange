@@ -109,17 +109,24 @@ _CORRECTION_MARKERS = (
     "detengamos",
     "dejemos esto",
 )
+_URL_SPAN_RE = re.compile(r"\b(?:https?://|www\.)\S+", re.IGNORECASE)
 
 _NEW_TASK_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(pattern)
     for pattern in (
-        r"\b(?:crea|crear|creame|créame|genera|generame|haz|hazme|prepara|armame|arma)\b.+\b(?:mision|misión|tarea|task|smoke|prueba|test|plan|replay|cuaderno|notebook|notebooklm|podcast|noticias|barrido|research|audit|auditoria|mcp|mcps)\b",
+        r"\b(?:crea|crear|creame|créame|genera|generame|haz|has|hazme|prepara|armame|arma)\b.+\b(?:mision|misión|tarea|task|smoke|prueba|test|plan|replay|cuaderno|notebook|notebooklm|podcast|noticias|barrido|repaso|recorrido|research|audit|auditoria|mcp|mcps)\b",
         r"\b(?:implementa|parchea|corrige|arregla|agrega|modifica|actualiza|regenera|completa|termina|finaliza)\b",
         r"\b(?:verifica|comprueba|valida)\b.+\b(?:daemon|servicio|launchd|runtime|bot|cuaderno|notebook|notebooklm|tarea|task)\b",
         r"\b(?:verifica|comprueba|valida)\b.+\b(?:cifras|fuentes?|fuente primaria|websearch|estadisticas|estadísticas|drafts?|asset|publicar)\b",
         r"\b(?:afina|afinar|afinalo|refina|refinar|refinalo|mejora|mejorar|mejoralo|optimiza|optimizar|pule|pulir|ajusta|ajustar)\b.+\b(?:crea|crear|cree|genera|generar|genere)\b.+\b(?:imagen(?:es)?|assets?|grid|carrusel(?:es)?|portadas?)\b",
         r"\b(?:crea|crear|cree|genera|generar|genere)\b.+\b(?:imagen(?:es)?|assets?|grid|carrusel(?:es)?|portadas?)\b",
         r"\b(?:investiga|revisa|audita)\b.+\b(?:bug|fallo|falla|logs?|trazas?|router|runtime|telegram|test|smoke|mcp|mcps)\b",
+        r"\b(?:investiga|revisa|audita)\b.+\b(?:repo|repositorio|codebase|codigo|código|libreria|librería|library|paquete|package|github)\b",
+        r"\b(?:investiga|revisa|revisame|lee|analiza|consulta)\b.+\b(?:hilo|thread|tweet|tuit|url|enlace|pagina|página|post)\b",
+        r"\b(?:haz|has|hacer|hazme|commitea|commitealo|commit|comitea|comitealo)\b.+\b(?:commit|commitea|comitea|reinicia|reiniciar|restart|reboot|daemon|servicio|launchd)\b",
+        r"\b(?:reinicia|reiniciar|restart|reboot|relanza|relanzar)\b.+\b(?:daemon|servicio|bot|runtime|launchd|chrome|cdp)\b",
+        r"(?=.*\b(?:x|twitter)\b)(?=.*\b(?:noticias|news|feed|timeline)\b)\b(?:revisa|revisame|repasa|repasame|mira|consulta)\b",
+        r"^(?:abre|abrir|navega|navegar|entra|entrar)\b.+\b(?:instagram|x|twitter|chrome|navegador|browser)\b",
         r"\b(?:create|generate|prepare|implement|patch|fix|add|modify|update|complete|finish|review|investigate|audit)\b",
     )
 )
@@ -131,6 +138,13 @@ _CONTEXTUAL_CONTINUATION_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"^(?:lee|leer|read)\s+(?:los?\s+)?(?:docs?|documentos?)$",
         r"^listo\s+(?:logueado|loggeado|logged\s+in)$",
         r"^(?:arranca|arrancar|empieza|inicia)\s+con\s+(?:el\s+)?plan$",
+        r"^(?:levantalo|arrancalo|subelo)$",
+        r"^(?:mata\s+y\s+relanza|reinicialo|relanzalo)$",
+        r"^(?:vuelve\s+(?:a\s+)?)?(?:intentar\s+)?abrir\s+(?:chrome|x|twitter|c)$",
+        r"^vuelve\s+a\s+intentarlo$",
+        r"^(?:trae|traela|traeme|ponla|llevala)\s+(?:al\s+)?frente$",
+        r"^ya\s+lo\s+cerre$",
+        r"^(?:abrelo)(?:\s+tu)?$",
         r"^(?:ok|okay|dale|va|listo)\s+\d+$",
     )
 )
@@ -281,6 +295,10 @@ def _looks_like_new_task(normalized: str, original: str) -> bool:
     return any(pattern.search(normalized) for pattern in _NEW_TASK_PATTERNS)
 
 
+def _strip_url_spans(text: str) -> str:
+    return _URL_SPAN_RE.sub(" ", text or "")
+
+
 def _is_explicit_authorization(compact: str) -> bool:
     if compact in _APPROVAL_ONLY:
         return True
@@ -309,9 +327,11 @@ def _looks_like_contextual_continuation(normalized: str) -> bool:
 
 
 def _looks_like_question(original: str, normalized: str) -> bool:
-    if "?" in original or "¿" in original:
+    original_without_urls = _strip_url_spans(original)
+    if "?" in original_without_urls or "¿" in original_without_urls:
         return True
-    return normalized.startswith(_QUESTION_PREFIXES)
+    normalized_without_urls = re.sub(r"\s+", " ", _strip_url_spans(normalized)).strip()
+    return normalized_without_urls.startswith(_QUESTION_PREFIXES)
 
 
 def _asks_for_debug_or_audit(normalized: str) -> bool:

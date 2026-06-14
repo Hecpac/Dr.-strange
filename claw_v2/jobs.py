@@ -11,6 +11,7 @@ from typing import Any, Iterable
 
 from claw_v2.sqlite_runtime import (
     connect_runtime_sqlite,
+    heal_wal_after_closed_connection,
     heal_wal_after_disk_io,
     make_store_wal_heal,
     register_wal_heal,
@@ -105,6 +106,13 @@ class JobService:
                 return callback()
             except sqlite3.OperationalError as exc:
                 if not wal_heal_attempted and heal_wal_after_disk_io(
+                    self.db_path, exc, context=operation
+                ):
+                    wal_heal_attempted = True
+                    continue
+                raise
+            except sqlite3.ProgrammingError as exc:
+                if not wal_heal_attempted and heal_wal_after_closed_connection(
                     self.db_path, exc, context=operation
                 ):
                     wal_heal_attempted = True
@@ -455,18 +463,24 @@ class JobService:
                 params.extend(kind_list)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         params.append(max(1, min(int(limit), 100)))
-        with self._lock:
-            rows = self._conn.execute(
-                f"SELECT * FROM agent_jobs {where} ORDER BY updated_at DESC LIMIT ?",
-                params,
-            ).fetchall()
+        def list_once() -> list[sqlite3.Row]:
+            with self._lock:
+                return self._conn.execute(
+                    f"SELECT * FROM agent_jobs {where} ORDER BY updated_at DESC LIMIT ?",
+                    params,
+                ).fetchall()
+
+        rows = self._retry_once_after_disk_io("JobService.list", list_once)
         return [self._row_to_record(row) for row in rows]
 
     def summary(self) -> dict[str, int]:
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT status, COUNT(*) AS count FROM agent_jobs GROUP BY status",
-            ).fetchall()
+        def summary_once() -> list[sqlite3.Row]:
+            with self._lock:
+                return self._conn.execute(
+                    "SELECT status, COUNT(*) AS count FROM agent_jobs GROUP BY status",
+                ).fetchall()
+
+        rows = self._retry_once_after_disk_io("JobService.summary", summary_once)
         return {str(row["status"]): int(row["count"]) for row in rows}
 
     def resume_candidates(self, *, limit: int = 20) -> list[JobRecord]:

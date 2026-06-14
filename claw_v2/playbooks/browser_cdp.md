@@ -14,15 +14,15 @@ priority: 5
 # Chrome CDP — Automatización de Browser
 
 ## Setup
-- Chrome CDP usa perfil dedicado en `~/.claw-chrome-cdp`
-- Lanzar: `bash scripts/launch-chrome-cdp.sh` (puerto 9222 por defecto)
+- Chrome CDP usa perfil dedicado en `~/.claw/chrome-profile`
+- Lanzar: `bash scripts/launch-chrome-cdp.sh` (puerto 9250 por defecto)
 - Chrome 146+ bloquea CDP en perfil default — siempre usar user-data-dir dedicado
 
 ## Conexión
 ```python
 from playwright.sync_api import sync_playwright
 pw = sync_playwright().start()
-browser = pw.chromium.connect_over_cdp("http://localhost:9222")
+browser = pw.chromium.connect_over_cdp("http://localhost:9250")
 context = browser.contexts[0]
 # Listar tabs
 for i, p in enumerate(context.pages):
@@ -40,4 +40,4 @@ for i, p in enumerate(context.pages):
 - `DevBrowserService.chrome_navigate()` cierra conexión al terminar — usar Playwright directo para multi-step
 - Cookie files encriptados per-profile — no se pueden copiar entre perfiles
 - Siempre usar `open -na` (no `-a`) para Chrome con flags
-- Session de Google login persiste en `~/.claw-chrome-cdp` tras login manual inicial
+- Session de Google login persiste en `~/.claw/chrome-profile` tras login manual inicial

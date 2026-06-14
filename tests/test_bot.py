@@ -792,12 +792,19 @@ class BotTests(unittest.TestCase):
                 policy = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/autonomy_policy"))
                 self.assertEqual(policy["autonomy_mode"], "autonomous")
                 self.assertIn("coding", policy["automatic_coordinator_modes"])
+                self.assertIn("browse", policy["automatic_coordinator_modes"])
+                self.assertIn("ops", policy["automatic_coordinator_modes"])
                 self.assertIn("edit", policy["allowed_task_actions"])
+                self.assertIn("browse", policy["allowed_task_actions"])
                 self.assertIn("commit", policy["allowed_task_actions"])
                 self.assertIn("push", policy["allowed_task_actions"])
                 self.assertNotIn("commit", policy["approval_required_actions"])
                 self.assertIn("deploy", policy["blocked_actions"])
+                self.assertIn("merge", policy["blocked_actions"])
+                self.assertIn("send", policy["blocked_actions"])
+                self.assertEqual(policy["step_budget"], 8)
                 self.assertIn("deploy", policy["action_patterns"])
+                self.assertIn("browse", policy["task_action_patterns"])
                 self.assertIn("commit", policy["task_action_patterns"])
                 self.assertIn("push", policy["task_action_patterns"])
 
@@ -5398,6 +5405,56 @@ class BotTests(unittest.TestCase):
                 self.assertIn("## Fuente", args[1])
                 self.assertIn("## Aplicación sugerida", args[1])
                 self.assertEqual(kwargs["memory_text"], f"Revisa este tweet {tweet_url}")
+
+    @patch("claw_v2.bot_helpers._tweet_fxtwitter_read")
+    def test_tweet_querystring_review_uses_prefetched_evidence_not_gate(self, mock_tweet_read) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+                "CLAW_DISABLE_TASK_INTENT_ROUTER": "1",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                tweet_url = "https://x.com/openrouter/status/2065856853989270011?s=46"
+                mock_tweet_read.return_value = (
+                    f"**OpenRouter (@OpenRouter) on X** ({tweet_url})\n\n"
+                    "Fusion API routes a prompt across multiple models and synthesizes the result."
+                )
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                with patch.object(type(runtime.bot.brain), "handle_message") as mock_handle_message:
+                    mock_handle_message.return_value = LLMResponse(
+                        content=(
+                            "## Fuente\n"
+                            "- Verificado: leí el hilo y el prompt descrito por OpenRouter.\n\n"
+                            "## Aplicación sugerida\n"
+                            "- Usar esto como referencia para el router."
+                        ),
+                        lane="brain",
+                        provider="anthropic",
+                        model="claude-opus-4-7",
+                    )
+
+                    result = runtime.bot.handle_text(
+                        user_id="123",
+                        session_id="s1",
+                        text=f"{tweet_url} revisa el hilo",
+                        runtime_channel="telegram",
+                    )
+
+                self.assertIn("Verificado: leí el hilo", result)
+                self.assertNotIn("Decime qué disparo", result)
+                self.assertNotIn("No lo marco como hecho todavía", result)
+                events = [event["event_type"] for event in runtime.observe.recent_events(limit=80)]
+                self.assertNotIn("evidence_gate_blocked_completion_claim", events)
+                mock_tweet_read.assert_called_once_with(tweet_url)
+                args, kwargs = mock_handle_message.call_args
+                self.assertIn("[Contenido del tweet pre-cargado]", args[1])
+                self.assertEqual(kwargs["memory_text"], f"{tweet_url} revisa el hilo")
 
     @patch("claw_v2.bot_helpers._tweet_fxtwitter_read")
     def test_tweet_analysis_prefetches_nested_tweet_urls(self, mock_tweet_read) -> None:

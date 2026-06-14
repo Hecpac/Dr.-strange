@@ -11,6 +11,21 @@ from claw_v2.jobs import JOB_TERMINAL_STATUSES, JobService
 from claw_v2.observe import ObserveStream
 
 
+class _ClosedOnceConn:
+    def __init__(self, real: sqlite3.Connection) -> None:
+        self._real = real
+        self.failures = 1
+
+    def execute(self, *args, **kwargs):
+        if self.failures > 0:
+            self.failures -= 1
+            raise sqlite3.ProgrammingError("Cannot operate on a closed database.")
+        return self._real.execute(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
 class JobServiceTests(unittest.TestCase):
     def test_enqueue_is_idempotent_for_active_resume_key(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -114,6 +129,16 @@ class JobServiceTests(unittest.TestCase):
             self.assertEqual(completed.status, "completed")
             self.assertEqual(completed.result["pr"], "https://example.com/pr/1")
             self.assertIsNotNone(completed.completed_at)
+
+    def test_list_recovers_once_after_closed_database_handle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = JobService(Path(tmpdir) / "claw.db")
+            created = service.enqueue(kind="pipeline.issue")
+            service._conn = _ClosedOnceConn(service._conn)
+
+            rows = service.list(statuses=("queued",), kinds=("pipeline.issue",))
+
+            self.assertEqual([row.job_id for row in rows], [created.job_id])
 
     def test_reschedule_keeps_pending_poller_active_without_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -259,6 +259,58 @@ class Wave0GoldenTraceTests(unittest.TestCase):
             self.assertIn("idle_executor_last_candidate", active_object)
             self.assertNotIn("idle_executor", active_object)
 
+    def test_idle_executor_clears_active_task_when_ledger_is_terminal(self) -> None:
+        from claw_v2.task_ledger import TaskLedger
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            memory = MemoryStore(root / "memory.db")
+            ledger = TaskLedger(root / "ledger.db")
+            observe = _Observe()
+            ledger.create(
+                task_id="tg-wave0:instagram",
+                session_id="tg-wave0",
+                objective="abrir Instagram",
+                mode="browse",
+                runtime="coordinator",
+                status="running",
+                metadata={"autonomous": True},
+            )
+            ledger.mark_terminal(
+                "tg-wave0:instagram",
+                status="failed",
+                summary="La apertura de Instagram no dejó evidencia visible",
+                verification_status="failed",
+            )
+            memory.update_session_state(
+                "tg-wave0",
+                verification_status="unknown",
+                active_object={
+                    "active_task": {
+                        "task_id": "tg-wave0:instagram",
+                        "objective": "abrir Instagram",
+                        "status": "running",
+                        "mode": "browse",
+                    }
+                },
+            )
+            executor = IdleOwnershipExecutor(
+                memory=memory,
+                task_ledger=ledger,
+                observe=observe,
+                telemetry_root=root / "telemetry",
+                env={"CLAW_IDLE_EXECUTOR_ENABLED": "0"},
+            )
+
+            result = executor.inspect_turn(session_id="tg-wave0")
+
+            self.assertIsNone(result.candidate)
+            self.assertEqual(result.event_names, ())
+            self.assertNotIn("active_task", memory.get_session_state("tg-wave0")["active_object"])
+            event_names = [name for name, _ in observe.events]
+            self.assertIn("idle_executor_stale_active_task_cleared", event_names)
+            self.assertNotIn("idle_executor_would_advance", event_names)
+
     def test_idle_executor_circuit_breaker_suspends_stalled_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             memory = MemoryStore(Path(tmp) / "claw.db")
@@ -457,6 +509,81 @@ class Wave0GoldenTraceTests(unittest.TestCase):
             self.assertFalse(idle_state["advanced"])
             self.assertEqual(idle_state["unchanged_count"], 0)
             self.assertNotIn("idle_executor_circuit_broke", [name for name, _ in observe.events])
+
+    def test_brain_tooluse_ledger_does_not_attach_terminal_active_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = _runtime_with_executor(
+                tmp,
+                lambda request: LLMResponse(
+                    content="ok",
+                    lane=request.lane,
+                    provider="anthropic",
+                    model=request.model,
+                ),
+            )
+            session_id = "tg-wave0"
+            task_id = "tg-wave0:instagram"
+            runtime.task_ledger.create(
+                task_id=task_id,
+                session_id=session_id,
+                objective="abrir Instagram",
+                mode="browse",
+                runtime="coordinator",
+                status="running",
+                metadata={"autonomous": True},
+            )
+            runtime.task_ledger.mark_terminal(
+                task_id,
+                status="failed",
+                summary="La apertura de Instagram no dejó evidencia visible",
+                verification_status="failed",
+            )
+            runtime.memory.update_session_state(
+                session_id,
+                active_object={
+                    "active_task": {
+                        "task_id": task_id,
+                        "objective": "abrir Instagram",
+                        "status": "running",
+                        "mode": "browse",
+                    }
+                },
+            )
+            trace_id = "trace-stale-active-task"
+            runtime.observe.emit(
+                "sdk_post_tool_use",
+                trace_id=trace_id,
+                payload={
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "osascript -e 'tell application \"Google Chrome\" to activate'"},
+                    "tool_response": {"stdout": "Google Chrome"},
+                },
+            )
+            response = LLMResponse(
+                content="hecho",
+                lane="brain",
+                provider="anthropic",
+                model="test",
+                artifacts={"trace_id": trace_id},
+            )
+
+            runtime.bot._attach_brain_tool_use_ledger(
+                session_id=session_id,
+                response=response,
+                source_text="Tráela al frente",
+                runtime_channel="telegram",
+            )
+
+            self.assertNotIn("active_task", runtime.memory.get_session_state(session_id)["active_object"])
+            records = runtime.task_ledger.list(session_id=session_id, limit=10)
+            self.assertTrue(any(record.task_id.startswith(f"brain-tooluse:{session_id}:") for record in records))
+            attached_events = runtime.observe.recent_events(
+                limit=20,
+                event_type="brain_tooluse_ledger_attached_existing",
+            )
+            self.assertFalse(any(event["payload"].get("trace_id") == trace_id for event in attached_events))
+            cleared_events = runtime.observe.recent_events(limit=20, event_type="stale_active_task_cleared")
+            self.assertTrue(any(event["payload"].get("task_id") == task_id for event in cleared_events))
 
     def test_introspection_routing_does_not_start_coding_coordinator(self) -> None:
         def reflective(request: LLMRequest) -> LLMResponse:

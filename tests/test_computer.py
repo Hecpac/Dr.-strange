@@ -1027,6 +1027,72 @@ class DelegatedBrowserTaskTests(unittest.TestCase):
         self.assertEqual(capability.calls, [(9250, "~/.claw/chrome-profile")])
         self.assertEqual(fake.cdp_url, "http://127.0.0.1:9250")
 
+    def test_simple_instagram_open_uses_deterministic_cdp_not_browser_use(self) -> None:
+        import types
+        from unittest.mock import patch
+
+        from claw_v2.browser import BrowseResult
+        from claw_v2.computer_handler import ComputerHandler
+
+        class FakeBrowserUse:
+            last_artifact_path = None
+            cdp_url = "http://localhost:9250"
+
+            def __init__(self) -> None:
+                self.called = False
+
+            async def run_task(self, task, **kwargs):
+                self.called = True
+                return "(no result)"
+
+        class FakeDevBrowserService:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, str]] = []
+
+            def chrome_navigate(self, url, *, cdp_url, page_url_pattern=None):
+                self.calls.append(("navigate", url))
+                return BrowseResult(
+                    url="https://www.instagram.com/",
+                    title="Instagram",
+                    content="Instagram home feed",
+                )
+
+            def chrome_screenshot(self, *, cdp_url, page_url_pattern=None, name="chrome.png"):
+                self.calls.append(("screenshot", name))
+                return BrowseResult(
+                    url="https://www.instagram.com/",
+                    title="Instagram",
+                    content="Instagram home feed",
+                    screenshot_path="/tmp/claw-instagram-open.png",
+                )
+
+        fake_browser_use = FakeBrowserUse()
+        fake_dev_browser = FakeDevBrowserService()
+        handler = ComputerHandler(
+            browser_use=fake_browser_use,
+            config=types.SimpleNamespace(
+                computer_auto_approve=True,
+                sensitive_urls=[],
+                computer_browser_use_timeout_seconds=0,
+            ),
+            browser_capability=self._ReadyBrowserCapability(),
+        )
+
+        with patch("claw_v2.computer_handler.DevBrowserService", return_value=fake_dev_browser):
+            out = handler.run_delegated_browser_task(
+                "Abre Instagram hay varios dias sin postear nada",
+                task_id="t-ig",
+                mode="browse",
+            )
+
+        self.assertIn("Instagram abierto en Chrome CDP", out)
+        self.assertIn("Captura guardada: /tmp/claw-instagram-open.png", out)
+        self.assertFalse(fake_browser_use.called)
+        self.assertEqual(
+            fake_dev_browser.calls,
+            [("navigate", "https://www.instagram.com/"), ("screenshot", "instagram-open.png")],
+        )
+
     def test_unavailable_browser_use_returns_clear_message(self) -> None:
         from claw_v2.computer_handler import ComputerHandler
 
