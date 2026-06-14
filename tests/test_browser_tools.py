@@ -210,5 +210,15 @@ class ChromeCdpBackendTests(unittest.TestCase):
         self.assertEqual(backend.name, "chrome_cdp")
 
 
+from claw_v2.browser_tools import build_chrome_cdp_service
+
+
+class FactoryTests(unittest.TestCase):
+    def test_factory_builds_service_with_cdp_backend(self) -> None:
+        svc = build_chrome_cdp_service(cdp_endpoint="http://127.0.0.1:9250")
+        self.assertEqual(svc._backend.name, "chrome_cdp")
+        self.assertEqual(svc._cdp_endpoint, "http://127.0.0.1:9250")
+
+
 if __name__ == "__main__":
     unittest.main()
