@@ -7,7 +7,7 @@ import sqlite3
 from dataclasses import dataclass, field
 import threading
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from claw_v2.sqlite_runtime import (
     connect_runtime_sqlite,

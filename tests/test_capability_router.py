@@ -3,8 +3,6 @@ from __future__ import annotations
 import unittest
 
 from claw_v2.capability_router import (
-    AutonomyIntent,
-    CapabilityRoute,
     RuntimeAliveProbe,
     classify_autonomy_intent,
     route_request,

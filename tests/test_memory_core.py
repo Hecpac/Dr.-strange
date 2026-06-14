@@ -478,7 +478,7 @@ class OutcomeEmbeddingStoreTests(unittest.TestCase):
         def fake_embed(text: str) -> list[float]:
             captured.append(text)
             return [0.1, 0.2, 0.3]
-        oid = self.store.store_task_outcome_with_embedding(
+        _oid = self.store.store_task_outcome_with_embedding(
             task_type="self_heal",
             task_id="cycle-2",
             description="ping",
@@ -643,7 +643,6 @@ class CheckpointsTableSchemaTests(unittest.TestCase):
         MemoryStore(self.store.db_path)
 
 
-import shutil
 
 from claw_v2.checkpoint import CheckpointService, apply_pending_restore_if_any
 

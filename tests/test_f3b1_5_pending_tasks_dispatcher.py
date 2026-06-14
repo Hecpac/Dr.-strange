@@ -16,7 +16,8 @@ import pytest
 def _no_network(monkeypatch):
     def _boom(*a, **kw):
         raise RuntimeError("Network call attempted from F3b.1.5 test — forbidden")
-    import socket, urllib.request
+    import socket
+    import urllib.request
     monkeypatch.setattr(socket.socket, "connect", _boom)
     monkeypatch.setattr(urllib.request, "urlopen", _boom)
     yield
@@ -27,7 +28,7 @@ def matcher_only():
     """A minimal harness that calls the matcher methods without booting the
     full bot. We exercise the pure-text logic on a stub class that inherits
     the methods we need from BotService."""
-    from claw_v2.bot import BotService, _normalize_command_text
+    from claw_v2.bot import BotService
 
     class _Stub:
         # Borrow methods that don't need state.

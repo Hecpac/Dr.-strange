@@ -19,7 +19,6 @@ from claw_v2.brain import (
 )
 from claw_v2.memory import MemoryStore
 from claw_v2.observe import ObserveStream
-from claw_v2.types import LLMResponse
 
 
 _IMAGE_ERROR = (

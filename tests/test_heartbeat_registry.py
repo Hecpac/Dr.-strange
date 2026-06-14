@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from claw_v2.heartbeat import HeartbeatService, _compute_health, update_agent_registry
+from claw_v2.heartbeat import HeartbeatService, _compute_health
 
 
 class ComputeHealthTests(unittest.TestCase):

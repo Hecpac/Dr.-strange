@@ -12,11 +12,8 @@ import unittest
 from pathlib import Path
 
 from claw_v2.task_board import (
-    BoardTask,
-    Project,
     ProjectStatus,
     TaskBoard,
-    TaskStatus,
 )
 
 
@@ -83,7 +80,7 @@ class TaskBoardProjectTests(unittest.TestCase):
 
             t1 = board.publish("a", "do a", project_id=project.id)
             t2 = board.publish("b", "do b", project_id=project.id)
-            t3 = board.publish("c", "do c", project_id=project.id)
+            _t3 = board.publish("c", "do c", project_id=project.id)
 
             board.claim("alma", lane="worker")
             board.complete(t1.id, "done")

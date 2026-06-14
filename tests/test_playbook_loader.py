@@ -1,6 +1,5 @@
 """Tests for the PlaybookLoader system."""
 from pathlib import Path
-import tempfile
 
 from claw_v2.playbook_loader import PlaybookLoader, _parse_playbook
 

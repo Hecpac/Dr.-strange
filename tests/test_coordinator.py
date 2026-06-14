@@ -425,7 +425,7 @@ class AgentAwareTests(unittest.TestCase):
         router.ask.return_value = MagicMock(content="plan here")
         from claw_v2.coordinator import WorkerResult
         findings = [WorkerResult(task_name="r1", content="found bug", duration_seconds=1.0)]
-        result = svc._synthesize("fix bugs", findings)
+        _result = svc._synthesize("fix bugs", findings)
         prompt_arg = router.ask.call_args.args[0]
         self.assertIn("hex", prompt_arg)
         self.assertIn("code", prompt_arg)
@@ -477,7 +477,6 @@ class RetryAndContextTests(unittest.TestCase):
         svc, router, *_ = _make_service()
         responses: list[Any] = []  # type: ignore[name-defined]
 
-        from claw_v2.coordinator import WorkerResult
         def fake_ask(prompt, **_kwargs):
             responses.append(prompt)
             return MagicMock(content="plan" if "Synthesize" in prompt else "result")

@@ -9,7 +9,13 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
+
+if TYPE_CHECKING:
+    # Forward-ref only: ToolRegistry is imported lazily inside the builder to
+    # avoid a heavy import at module load; this makes the string annotation
+    # resolvable to type checkers / ruff.
+    from claw_v2.tools import ToolRegistry
 
 from claw_v2.a2a import A2AService
 from claw_v2.action_events import recover_orphan_actions

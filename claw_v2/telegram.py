@@ -1257,7 +1257,8 @@ class TelegramTransport:
         if self._PID_FILE.exists():
             try:
                 old_pid = int(self._PID_FILE.read_text().strip())
-                import os, signal
+                import os
+                import signal
                 if old_pid != os.getpid():
                     proc = await run_subprocess_bounded_off_loop(
                         ["ps", "-p", str(old_pid), "-o", "command="],

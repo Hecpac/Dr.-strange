@@ -7630,7 +7630,7 @@ class BotService:
         if not approvals:
             return []
         approvals_for_audit = self._sorted_approvals_for_audit(approvals)
-        audit = self._classify_pending_approvals(approvals_for_audit)
+        _audit = self._classify_pending_approvals(approvals_for_audit)
         seen_actions: set[str] = set()
         active_items: list[tuple[dict[str, Any], str]] = []
         duplicate_count = 0

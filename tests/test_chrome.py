@@ -405,7 +405,7 @@ class ProfileUserDataPidsTests(unittest.TestCase):
     def test_misses_user_data_dir_when_line_truncated(self) -> None:
         profile = "/Users/hector/.claw/chrome-profile"
         # Simulate what ps without -ww would return: line cut before the flag appears
-        truncated = f"  1234 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --remote"
+        truncated = "  1234 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --remote"
         with patch("claw_v2.chrome.subprocess.check_output", return_value=truncated):
             pids = _profile_user_data_pids(profile)
         self.assertEqual(pids, [])

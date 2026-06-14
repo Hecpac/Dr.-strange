@@ -8,7 +8,7 @@ import subprocess
 import threading
 from contextlib import contextmanager
 from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable, Generator
 
 _pool_logger = logging.getLogger(__name__)

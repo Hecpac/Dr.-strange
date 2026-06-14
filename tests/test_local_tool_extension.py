@@ -12,7 +12,6 @@ from claw_v2.tools import ToolDefinition, ToolRegistry
 from claw_v2.verification.local_tool_contracts import (
     BASH_COMMAND_KIND_CONTRACTS,
     LOCAL_TOOL_SUCCESS_CONDITIONS,
-    build_local_tool_artifact,
 )
 from claw_v2.verification.local_tool_runner import (
     ARTIFACT_RESULT_KEY,
@@ -26,7 +25,8 @@ from claw_v2.verification.promote_gate import apply_promote_gate_to_checkpoint
 def _no_network(monkeypatch):
     def _boom(*a, **kw):
         raise RuntimeError("Network call attempted from extension test — forbidden")
-    import socket, urllib.request
+    import socket
+    import urllib.request
     monkeypatch.setattr(socket.socket, "connect", _boom)
     monkeypatch.setattr(urllib.request, "urlopen", _boom)
     yield

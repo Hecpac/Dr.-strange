@@ -4,7 +4,7 @@ import unittest
 from dataclasses import dataclass, field
 from typing import Any
 
-from claw_v2.nlm_context import NotebookContext, resolve_latest_notebook_context
+from claw_v2.nlm_context import resolve_latest_notebook_context
 from claw_v2.nlm_handler import NlmHandler
 
 

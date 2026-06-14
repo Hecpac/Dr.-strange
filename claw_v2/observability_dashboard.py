@@ -89,14 +89,14 @@ def _reason(status_code: int) -> str:
     }.get(status_code, "OK")
 
 
-_DASHBOARD_HTML = f"""<!doctype html>
+_DASHBOARD_HTML = """<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Claw Observability</title>
   <style>
-    :root {{
+    :root {
       color-scheme: light dark;
       --bg: #f7f8fa;
       --panel: #ffffff;
@@ -106,9 +106,9 @@ _DASHBOARD_HTML = f"""<!doctype html>
       --accent: #146c94;
       --danger: #b42318;
       --ok: #087443;
-    }}
-    @media (prefers-color-scheme: dark) {{
-      :root {{
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
         --bg: #111317;
         --panel: #181b20;
         --text: #f1f4f8;
@@ -117,66 +117,66 @@ _DASHBOARD_HTML = f"""<!doctype html>
         --accent: #62b6d8;
         --danger: #ff8a7a;
         --ok: #62c48f;
-      }}
-    }}
-    * {{ box-sizing: border-box; }}
-    body {{
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
       margin: 0;
       font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       background: var(--bg);
       color: var(--text);
-    }}
-    header {{
+    }
+    header {
       padding: 18px 24px 12px;
       border-bottom: 1px solid var(--border);
       background: var(--panel);
       position: sticky;
       top: 0;
       z-index: 2;
-    }}
-    h1 {{
+    }
+    h1 {
       margin: 0 0 14px;
       font-size: 22px;
       font-weight: 650;
       letter-spacing: 0;
-    }}
-    .metrics {{
+    }
+    .metrics {
       display: grid;
       grid-template-columns: repeat(5, minmax(140px, 1fr));
       gap: 10px;
       align-items: stretch;
-    }}
-    .metric {{
+    }
+    .metric {
       border: 1px solid var(--border);
       border-radius: 8px;
       padding: 10px 12px;
       background: var(--bg);
       min-width: 0;
-    }}
-    .label {{
+    }
+    .label {
       color: var(--muted);
       font-size: 12px;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
-    }}
-    .value {{
+    }
+    .value {
       margin-top: 5px;
       font-size: 18px;
       font-weight: 650;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
-    }}
-    main {{ padding: 18px 24px 32px; }}
-    .toolbar {{
+    }
+    main { padding: 18px 24px 32px; }
+    .toolbar {
       display: flex;
       flex-wrap: wrap;
       align-items: center;
       gap: 10px;
       margin-bottom: 14px;
-    }}
-    button, select {{
+    }
+    button, select {
       height: 36px;
       border: 1px solid var(--border);
       border-radius: 8px;
@@ -184,49 +184,49 @@ _DASHBOARD_HTML = f"""<!doctype html>
       color: var(--text);
       padding: 0 12px;
       font: inherit;
-    }}
-    button.primary {{ border-color: var(--accent); color: var(--accent); }}
-    button.danger {{ border-color: var(--danger); color: var(--danger); }}
-    .state {{
+    }
+    button.primary { border-color: var(--accent); color: var(--accent); }
+    button.danger { border-color: var(--danger); color: var(--danger); }
+    .state {
       margin-left: auto;
       color: var(--muted);
       font-size: 13px;
       min-width: 180px;
       text-align: right;
-    }}
-    table {{
+    }
+    table {
       width: 100%;
       border-collapse: collapse;
       background: var(--panel);
       border: 1px solid var(--border);
       border-radius: 8px;
       overflow: hidden;
-    }}
-    th, td {{
+    }
+    th, td {
       padding: 9px 10px;
       border-bottom: 1px solid var(--border);
       text-align: left;
       vertical-align: top;
       font-size: 13px;
-    }}
-    th {{
+    }
+    th {
       color: var(--muted);
       font-weight: 600;
       background: color-mix(in srgb, var(--panel) 88%, var(--border));
-    }}
-    tr:last-child td {{ border-bottom: 0; }}
-    code {{
+    }
+    tr:last-child td { border-bottom: 0; }
+    code {
       white-space: pre-wrap;
       overflow-wrap: anywhere;
       color: var(--muted);
-    }}
-    .ok {{ color: var(--ok); }}
-    .danger-text {{ color: var(--danger); }}
-    @media (max-width: 920px) {{
-      .metrics {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
-      .state {{ margin-left: 0; text-align: left; width: 100%; }}
-      th:nth-child(4), td:nth-child(4), th:nth-child(5), td:nth-child(5) {{ display: none; }}
-    }}
+    }
+    .ok { color: var(--ok); }
+    .danger-text { color: var(--danger); }
+    @media (max-width: 920px) {
+      .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .state { margin-left: 0; text-align: left; width: 100%; }
+      th:nth-child(4), td:nth-child(4), th:nth-child(5), td:nth-child(5) { display: none; }
+    }
   </style>
 </head>
 <body>
@@ -264,24 +264,24 @@ _DASHBOARD_HTML = f"""<!doctype html>
     </table>
   </main>
   <script>
-    const state = {{ eventTypes: new Set() }};
+    const state = { eventTypes: new Set() };
     const $ = (id) => document.getElementById(id);
-    async function post(path) {{
-      await fetch(path, {{ method: "POST" }});
+    async function post(path) {
+      await fetch(path, { method: "POST" });
       await refresh();
-    }}
-    function money(value) {{
+    }
+    function money(value) {
       return "$" + Number(value || 0).toFixed(4);
-    }}
-    function pct(value) {{
+    }
+    function pct(value) {
       return Math.round(Number(value || 0) * 100) + "%";
-    }}
-    function text(value) {{
+    }
+    function text(value) {
       if (value === null || value === undefined || value === "") return "n/a";
       return String(value);
-    }}
-    function setMetric(id, value) {{ $(id).textContent = value; }}
-    function renderStatus(payload) {{
+    }
+    function setMetric(id, value) { $(id).textContent = value; }
+    function renderStatus(payload) {
       setMetric("costToday", money(payload.cost_today));
       setMetric("remaining", payload.daily_budget_remaining === null ? "n/a" : money(payload.daily_budget_remaining));
       setMetric("actionsMin", text(payload.actions_per_minute));
@@ -291,45 +291,45 @@ _DASHBOARD_HTML = f"""<!doctype html>
       $("freezeState").innerHTML = frozen
         ? '<span class="danger-text">Frozen</span> ' + text(payload.freeze_reason)
         : '<span class="ok">Live</span>';
-    }}
-    function renderEvents(events) {{
+    }
+    function renderEvents(events) {
       const filter = $("eventFilter");
-      for (const event of events) {{
-        if (!state.eventTypes.has(event.event_type)) {{
+      for (const event of events) {
+        if (!state.eventTypes.has(event.event_type)) {
           state.eventTypes.add(event.event_type);
           const option = document.createElement("option");
           option.value = event.event_type;
           option.textContent = event.event_type;
           filter.appendChild(option);
-        }}
-      }}
+        }
+      }
       $("eventsBody").innerHTML = events.map((event) => `
         <tr>
-          <td>${{escapeHtml(event.timestamp || "")}}</td>
-          <td>${{escapeHtml(event.event_type || "")}}</td>
-          <td>${{escapeHtml(event.lane || "")}}</td>
-          <td>${{escapeHtml(event.provider || "")}}</td>
-          <td>${{escapeHtml(event.model || "")}}</td>
-          <td><code>${{escapeHtml(JSON.stringify(event.payload || {{}}, null, 2))}}</code></td>
+          <td>${escapeHtml(event.timestamp || "")}</td>
+          <td>${escapeHtml(event.event_type || "")}</td>
+          <td>${escapeHtml(event.lane || "")}</td>
+          <td>${escapeHtml(event.provider || "")}</td>
+          <td>${escapeHtml(event.model || "")}</td>
+          <td><code>${escapeHtml(JSON.stringify(event.payload || {}, null, 2))}</code></td>
         </tr>
       `).join("");
-    }}
-    function escapeHtml(value) {{
+    }
+    function escapeHtml(value) {
       return String(value)
         .replaceAll("&", "&amp;")
         .replaceAll("<", "&lt;")
         .replaceAll(">", "&gt;")
         .replaceAll('"', "&quot;")
         .replaceAll("'", "&#039;");
-    }}
-    async function refresh() {{
+    }
+    async function refresh() {
       const status = await fetch("/observability/state").then((r) => r.json());
       renderStatus(status);
       const eventType = encodeURIComponent($("eventFilter").value);
-      const path = eventType ? `/observability/events?event_type=${{eventType}}&limit=50` : "/observability/events?limit=50";
+      const path = eventType ? `/observability/events?event_type=${eventType}&limit=50` : "/observability/events?limit=50";
       const events = await fetch(path).then((r) => r.json());
       renderEvents(events.events || []);
-    }}
+    }
     $("freezeBtn").addEventListener("click", () => post("/observability/freeze"));
     $("unfreezeBtn").addEventListener("click", () => post("/observability/unfreeze"));
     $("eventFilter").addEventListener("change", refresh);

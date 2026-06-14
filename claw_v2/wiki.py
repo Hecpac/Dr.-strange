@@ -15,7 +15,7 @@ import re
 import textwrap
 import threading
 import time
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -894,14 +894,14 @@ class WikiService:
             # Ask NotebookLM to extract key facts
             extraction_questions = [
                 (
-                    f"Lista los 3 hechos o desarrollos más importantes y específicos "
-                    f"de este cuaderno. Para cada uno incluye: título corto, fechas, "
-                    f"nombres de empresas/personas, y datos concretos. Responde en español."
+                    "Lista los 3 hechos o desarrollos más importantes y específicos "
+                    "de este cuaderno. Para cada uno incluye: título corto, fechas, "
+                    "nombres de empresas/personas, y datos concretos. Responde en español."
                 ),
                 (
-                    f"¿Qué tendencias emergentes o predicciones aparecen en las fuentes "
-                    f"de este cuaderno que aún no son de conocimiento general? "
-                    f"Responde con hechos específicos en español."
+                    "¿Qué tendencias emergentes o predicciones aparecen en las fuentes "
+                    "de este cuaderno que aún no son de conocimiento general? "
+                    "Responde con hechos específicos en español."
                 ),
             ]
 

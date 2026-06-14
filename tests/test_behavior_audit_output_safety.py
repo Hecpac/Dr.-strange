@@ -7,8 +7,6 @@ uses per-run identifiers and refuses to overwrite the canonical paths.
 
 from __future__ import annotations
 
-import os
-import re
 import tempfile
 import threading
 import unittest

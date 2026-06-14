@@ -11,17 +11,14 @@ fed stubbed observations.
 """
 from __future__ import annotations
 
-import warnings
 
 import pytest
 
 from claw_v2 import memory_revalidation as mr
 from claw_v2.verification import (
     ExternalCheckSpec,
-    PreflightSpec,
     StateDeltaSpec,
     SuccessCondition,
-    ToolContractWarning,
     build_verification_envelope,
     validate_success_condition,
     warn_if_contract_missing,

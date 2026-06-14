@@ -217,7 +217,8 @@ class ManagedChrome:
             self._process = None
             logger.info("ManagedChrome stopped")
         elif self._attached_pid is not None:
-            import os, signal
+            import os
+            import signal
             pid = self._attached_pid
             try:
                 os.kill(pid, signal.SIGTERM)
