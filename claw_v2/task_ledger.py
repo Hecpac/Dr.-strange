@@ -13,6 +13,7 @@ from claw_v2.sqlite_runtime import (
     WAL_HEAL_RETRY_LIMIT,
     connect_runtime_sqlite,
     heal_orphaned_wal,
+    heal_wal_after_closed_connection,
     heal_wal_after_disk_io,
     make_store_wal_heal,
     note_wal_generation,
@@ -349,6 +350,23 @@ class TaskLedger:
                     )
                     raise
                 time.sleep(_TERMINAL_WRITE_LOCKED_BACKOFF_SECONDS * write_attempt)
+            except sqlite3.ProgrammingError as exc:
+                # PR #111 review: the terminal write has no @_synchronized shield,
+                # so a WAL heal that closed the connection surfaces as closed-db
+                # here. Heal+retry with the same bounded budget as the disk-io
+                # path instead of crashing the task close.
+                try:
+                    with self._lock:
+                        self._conn.rollback()
+                except Exception:
+                    pass
+                if heals < WAL_HEAL_RETRY_LIMIT and heal_wal_after_closed_connection(
+                    self.db_path, exc, context="TaskLedger.mark_terminal"
+                ):
+                    heals += 1
+                    write_attempt = 0
+                    continue
+                raise
         if blocked_status is not None:
             self._emit(
                 "task_ledger_terminal_transition_blocked",

@@ -1128,6 +1128,17 @@ class MemoryStore:
                     heals += 1
                     continue
                 raise
+            except sqlite3.ProgrammingError as exc:
+                # PR #111 review: the upsert leg is not @_synchronized, so a WAL
+                # heal that closed the shared connection surfaces here. Handle
+                # closed-db with the same bounded heal+retry as the other writers
+                # instead of relying on get_session_state's shield.
+                if heals < WAL_HEAL_RETRY_LIMIT and heal_wal_after_closed_connection(
+                    self.db_path, exc, context="MemoryStore.update_session_state"
+                ):
+                    heals += 1
+                    continue
+                raise
 
     def merge_active_object(
         self,

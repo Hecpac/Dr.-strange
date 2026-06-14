@@ -124,6 +124,29 @@ class _ClosedNTimesConn:
         return getattr(self._real, name)
 
 
+class _ClosedOnWriteConn:
+    """Raises closed-database on write statements, delegates reads.
+
+    Targets the write leg of a method whose earlier read is shielded by a
+    different heal path (e.g. MemoryStore.update_session_state, whose initial
+    get_session_state read is @_synchronized while the upsert is not).
+    """
+
+    def __init__(self, real: sqlite3.Connection, failures: int) -> None:
+        self._real = real
+        self.failures = failures
+
+    def execute(self, sql, *args, **kwargs):
+        verb = sql.lstrip()[:6].upper()
+        if self.failures > 0 and (verb.startswith("INSERT") or verb.startswith("UPDATE")):
+            self.failures -= 1
+            raise sqlite3.ProgrammingError("Cannot operate on a closed database.")
+        return self._real.execute(sql, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
 class _DiskIoNTimesConn:
     """Delegates to a real connection after N disk I/O failures."""
 
@@ -1232,6 +1255,73 @@ class WalHealCascadeTests(unittest.TestCase):
                 )
             finally:
                 task_ledger_module.heal_wal_after_disk_io = original_heal
+
+            self.assertEqual(len(heal_calls), 2)
+            self.assertIsNotNone(record)
+            assert record is not None
+            self.assertEqual(record.status, "failed")
+
+    def test_memory_update_session_state_survives_closed_db(self) -> None:
+        # Gemini review (PR #111): the upsert leg is not @_synchronized and only
+        # caught OperationalError, so a heal that closed the connection would
+        # crash it. The handler makes it self-sufficient (no longer relying on
+        # get_session_state's shield).
+        import claw_v2.memory as memory_module
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "mem.db"
+            store = MemoryStore(db_path)
+            store._conn = _ClosedOnWriteConn(store._conn, failures=2)
+            heal_calls: list[str] = []
+            original_heal = memory_module.heal_wal_after_closed_connection
+
+            def fake_heal(path, exc, *, context):
+                heal_calls.append(context)
+                return True
+
+            memory_module.heal_wal_after_closed_connection = fake_heal
+            try:
+                state = store.update_session_state("sess", mode="coding")
+            finally:
+                memory_module.heal_wal_after_closed_connection = original_heal
+
+            self.assertEqual(len(heal_calls), 2)
+            self.assertEqual(state["mode"], "coding")
+
+    def test_task_ledger_terminal_survives_closed_db(self) -> None:
+        # Gemini review (PR #111): mark_terminal's SELECT runs with no
+        # @_synchronized shield, so a heal-closed connection raised
+        # ProgrammingError that the OperationalError-only handler missed.
+        import claw_v2.task_ledger as task_ledger_module
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "ledger.db"
+            ledger = TaskLedger(db_path)
+            ledger.create(
+                task_id="t-closed",
+                session_id="tg-1",
+                objective="obj",
+                mode="coding",
+                runtime="coordinator",
+                provider="anthropic",
+                model="m",
+                status="running",
+            )
+            ledger._conn = _ClosedNTimesConn(ledger._conn, failures=2)
+            heal_calls: list[str] = []
+            original_heal = task_ledger_module.heal_wal_after_closed_connection
+
+            def fake_heal(path, exc, *, context):
+                heal_calls.append(context)
+                return True
+
+            task_ledger_module.heal_wal_after_closed_connection = fake_heal
+            try:
+                record = ledger.mark_terminal(
+                    "t-closed", status="failed", summary="s", error="boom"
+                )
+            finally:
+                task_ledger_module.heal_wal_after_closed_connection = original_heal
 
             self.assertEqual(len(heal_calls), 2)
             self.assertIsNotNone(record)
