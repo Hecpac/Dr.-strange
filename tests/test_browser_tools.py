@@ -161,5 +161,24 @@ class SafetyCapsTests(unittest.TestCase):
         self.assertIn("login_or_challenge", r.error)
 
 
+class ObserveTests(unittest.TestCase):
+    def test_navigate_emits_started_and_completed(self) -> None:
+        events: list[tuple[str, dict]] = []
+
+        class _Obs:
+            def emit(self, event_type, payload=None):
+                events.append((event_type, payload or {}))
+
+        page = _page("https://x.test/secret?token=abcd", RawElement("#a", "button", "A", "A", None, None))
+        svc = BrowserToolService(backend=_FakeBackend([page]))
+        svc.observe = _Obs()
+        svc.navigate("s", "https://x.test/secret?token=abcd")
+        kinds = [e[0] for e in events]
+        self.assertIn("browser_tool_action_started", kinds)
+        self.assertIn("browser_tool_action_completed", kinds)
+        for _, payload in events:
+            self.assertNotIn("token=abcd", str(payload))
+
+
 if __name__ == "__main__":
     unittest.main()
