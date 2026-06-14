@@ -87,6 +87,20 @@ _WAL_HEAL_REGISTRY_LOCK = threading.Lock()
 _WAL_HEAL_LOCKS: dict[str, threading.Lock] = {}
 _NULL_STORE_LOCK = contextlib.nullcontext()
 _RUNTIME_DB_DEGRADED: dict[str, RuntimeDatabaseError] = {}
+# M5 (2026-06-14): monotonic count of COMPLETED heals per db_path. Lets a
+# forced heal that lost the race for the per-db heal lock notice that another
+# writer already reopened every registered connection while it waited, and
+# coalesce onto that fresh generation instead of forcing a redundant
+# registry-wide reopen (which would re-close every other writer's just-healed
+# connection and re-trigger the cascade). GIL-atomic dict ops, like the
+# adjacent generation/degraded maps.
+_HEAL_GENERATION: dict[str, int] = {}
+
+# Upper bound on consecutive heals a single writer operation will absorb before
+# giving up. A burst of concurrent heals can re-close a connection mid-retry;
+# tolerating a bounded run (instead of exactly one) lets the operation ride the
+# cascade to convergence, while still failing visibly on a genuinely wedged DB.
+WAL_HEAL_RETRY_LIMIT = 8
 
 
 def _registry_key(db_path: Path | str) -> str:
@@ -357,7 +371,15 @@ def _force_conservative_wal_heal(
 ) -> bool:
     key = _registry_key(db_path)
     heal_lock = _heal_lock_for_key(key)
+    # Read the completed-heal counter BEFORE competing for the heal lock. If it
+    # advances while we block, another writer already reopened every registered
+    # connection (ours included) into the fresh generation — so we coalesce onto
+    # it and signal "retry" rather than forcing a redundant reopen that would
+    # re-close the connections the other heal just restored (M5).
+    generation_before = _HEAL_GENERATION.get(key, 0)
     with heal_lock:
+        if _HEAL_GENERATION.get(key, 0) != generation_before:
+            return True
         return _run_conservative_wal_heal(
             key,
             db_path,
@@ -437,6 +459,11 @@ def _run_conservative_wal_heal(
     # the next successful persist records the fresh inode.
     _WAL_GENERATION_INODES.pop(key, None)
     _RUNTIME_DB_DEGRADED.pop(key, None)
+    # Publish the completed generation last, so a concurrent forced heal blocked
+    # on the heal lock observes the bump and coalesces (M5). Both heal entry
+    # points (forced + orphaned) run this under the per-db heal lock, so the
+    # increment is serialized per key.
+    _HEAL_GENERATION[key] = _HEAL_GENERATION.get(key, 0) + 1
     return True
 
 

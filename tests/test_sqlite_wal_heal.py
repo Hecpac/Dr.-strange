@@ -22,6 +22,7 @@ from claw_v2.sqlite_runtime import (
     RuntimeDatabaseError,
     connect_runtime_sqlite,
     heal_orphaned_wal,
+    heal_wal_after_closed_connection,
     heal_wal_after_disk_io,
     make_store_wal_heal,
     register_wal_heal,
@@ -95,6 +96,45 @@ class _ClosedOnceConn:
         if self.failures > 0:
             self.failures -= 1
             raise sqlite3.ProgrammingError("Cannot operate on a closed database.")
+        return self._real.execute(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+class _ClosedNTimesConn:
+    """Delegates to a real connection after N closed-database failures.
+
+    M5 reproduction: a concurrent WAL heal can re-close a writer's connection
+    *during* its post-heal retry, so the same operation observes "closed
+    database" more than once before it converges.
+    """
+
+    def __init__(self, real: sqlite3.Connection, failures: int) -> None:
+        self._real = real
+        self.failures = failures
+
+    def execute(self, *args, **kwargs):
+        if self.failures > 0:
+            self.failures -= 1
+            raise sqlite3.ProgrammingError("Cannot operate on a closed database.")
+        return self._real.execute(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+class _DiskIoNTimesConn:
+    """Delegates to a real connection after N disk I/O failures."""
+
+    def __init__(self, real: sqlite3.Connection, failures: int) -> None:
+        self._real = real
+        self.failures = failures
+
+    def execute(self, *args, **kwargs):
+        if self.failures > 0:
+            self.failures -= 1
+            raise sqlite3.OperationalError("disk I/O error")
         return self._real.execute(*args, **kwargs)
 
     def __getattr__(self, name):
@@ -1020,6 +1060,183 @@ class TaskLedgerStampTests(unittest.TestCase):
             )
             ledger.mark_terminal("t-stamp", status="failed", summary="s", error="x")
             self.assertIn(_registry_key(db_path), _WAL_GENERATION_INODES)
+
+
+class WalHealCascadeTests(unittest.TestCase):
+    """M5 (2026-06-14) — the conservative-WAL-heal cascade.
+
+    Under WAL contention every writer that observes a closed connection forced
+    its own registry-wide reopen, and each wrapper granted only a single heal
+    retry. A burst of concurrent heals therefore re-closed each other's
+    just-healed connections faster than the single retry could absorb, so the
+    second closed-database re-raised and launchd restarted the daemon. The fix
+    has two prongs: heals coalesce (one real reopen per wave) and the writer
+    wrappers tolerate a bounded burst of heals instead of exactly one.
+    """
+
+    def test_forced_heal_coalesces_when_generation_advanced_under_lock(self) -> None:
+        # Deterministic coalescing contract: a forced heal that read the
+        # generation, then blocked for the per-db heal lock, must coalesce (not
+        # reopen) once it sees the generation advanced while it waited — that
+        # means another writer already reopened every registered connection.
+        import claw_v2.sqlite_runtime as rt
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "t.db"
+            _seed_db(db_path)
+            key = rt._registry_key(db_path)
+
+            class _CountingHandle:
+                def __init__(self) -> None:
+                    self.reopens = 0
+                    self.alive = True
+
+                def close(self) -> None:
+                    return None
+
+                def reopen(self) -> None:
+                    self.reopens += 1
+
+                def mark_degraded(self, error) -> None:
+                    return None
+
+                def describe(self) -> str:
+                    return "counting"
+
+            handle = _CountingHandle()
+            register_wal_heal(db_path, handle)
+
+            read_generation = threading.Event()
+
+            class _SignalingGen(dict):
+                def get(self, k, default=None):
+                    if k == key:
+                        read_generation.set()
+                    return super().get(k, default)
+
+            original_gen = rt._HEAL_GENERATION
+            rt._HEAL_GENERATION = _SignalingGen(original_gen)
+            heal_lock = rt._heal_lock_for_key(key)
+            results: list[bool] = []
+            errors: list[BaseException] = []
+            exc = sqlite3.ProgrammingError("Cannot operate on a closed database.")
+
+            def worker() -> None:
+                try:
+                    results.append(
+                        heal_wal_after_closed_connection(db_path, exc, context="test")
+                    )
+                except BaseException as e:  # pragma: no cover - assertion path
+                    errors.append(e)
+
+            heal_lock.acquire()
+            try:
+                thread = threading.Thread(target=worker)
+                thread.start()
+                # Worker has read generation_before and is now blocked on the
+                # heal lock we hold.
+                self.assertTrue(read_generation.wait(timeout=1))
+                # Simulate another writer completing a heal while it waits.
+                rt._HEAL_GENERATION[key] = rt._HEAL_GENERATION.get(key, 0) + 1
+            finally:
+                heal_lock.release()
+            thread.join(timeout=2)
+            rt._HEAL_GENERATION = original_gen
+
+            self.assertFalse(errors)
+            self.assertEqual(results, [True])
+            self.assertEqual(handle.reopens, 0)
+
+    def test_jobs_retry_survives_consecutive_closed_db(self) -> None:
+        import claw_v2.jobs as jobs_module
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "jobs.db"
+            svc = JobService(db_path)
+            svc._conn = _ClosedNTimesConn(svc._conn, failures=2)
+            original_heal = jobs_module.heal_wal_after_closed_connection
+            jobs_module.heal_wal_after_closed_connection = lambda *a, **k: True
+            try:
+                records = svc.list()
+            finally:
+                jobs_module.heal_wal_after_closed_connection = original_heal
+            self.assertEqual(records, [])
+
+    def test_memory_synchronized_survives_consecutive_closed_db(self) -> None:
+        import claw_v2.memory as memory_module
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "mem.db"
+            store = MemoryStore(db_path)
+            store._conn = _ClosedNTimesConn(store._conn, failures=2)
+            original_heal = memory_module.heal_wal_after_closed_connection
+            memory_module.heal_wal_after_closed_connection = lambda *a, **k: True
+            try:
+                count = store.count_messages("sess")
+            finally:
+                memory_module.heal_wal_after_closed_connection = original_heal
+            self.assertEqual(count, 0)
+
+    def test_observe_persist_survives_consecutive_closed_db(self) -> None:
+        import claw_v2.observe as observe_module
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "obs.db"
+            observe = ObserveStream(db_path)
+            observe._conn = _ClosedNTimesConn(observe._conn, failures=2)
+            heal_calls: list[str] = []
+            original_heal = observe_module.heal_wal_after_closed_connection
+
+            def fake_heal(path, exc, *, context):
+                heal_calls.append(context)
+                return True
+
+            observe_module.heal_wal_after_closed_connection = fake_heal
+            try:
+                observe.emit("closed_cascade_probe", payload={"ok": True})
+            finally:
+                observe_module.heal_wal_after_closed_connection = original_heal
+
+            self.assertEqual(len(heal_calls), 2)
+            events = [e["event_type"] for e in observe.recent_events(limit=5)]
+            self.assertIn("closed_cascade_probe", events)
+
+    def test_task_ledger_terminal_survives_consecutive_disk_io(self) -> None:
+        import claw_v2.task_ledger as task_ledger_module
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "ledger.db"
+            ledger = TaskLedger(db_path)
+            ledger.create(
+                task_id="t-cascade",
+                session_id="tg-1",
+                objective="obj",
+                mode="coding",
+                runtime="coordinator",
+                provider="anthropic",
+                model="m",
+                status="running",
+            )
+            ledger._conn = _DiskIoNTimesConn(ledger._conn, failures=2)
+            heal_calls: list[str] = []
+            original_heal = task_ledger_module.heal_wal_after_disk_io
+
+            def fake_heal(path, exc, *, context):
+                heal_calls.append(context)
+                return True
+
+            task_ledger_module.heal_wal_after_disk_io = fake_heal
+            try:
+                record = ledger.mark_terminal(
+                    "t-cascade", status="failed", summary="s", error="boom"
+                )
+            finally:
+                task_ledger_module.heal_wal_after_disk_io = original_heal
+
+            self.assertEqual(len(heal_calls), 2)
+            self.assertIsNotNone(record)
+            assert record is not None
+            self.assertEqual(record.status, "failed")
 
 
 if __name__ == "__main__":

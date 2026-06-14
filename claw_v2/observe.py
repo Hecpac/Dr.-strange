@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Callable
 
 from claw_v2.sqlite_runtime import (
+    WAL_HEAL_RETRY_LIMIT,
     connect_runtime_sqlite,
     heal_orphaned_wal,
     heal_wal_after_closed_connection,
@@ -183,7 +184,10 @@ class ObserveStream:
         clean_payload: dict,
     ) -> bool:
         payload_json = json.dumps(clean_payload)
-        wal_heal_attempted = False
+        # M5: bounded heal burst — concurrent heals can re-close the connection
+        # during a post-heal retry, so tolerate a run of heals (not exactly one)
+        # before dropping. Heals coalesce, so the run converges quickly.
+        heals = 0
         attempt = 0
         while attempt < OBSERVE_LOCKED_RETRY_ATTEMPTS:
             attempt += 1
@@ -231,20 +235,20 @@ class ObserveStream:
                 except Exception:
                     logger.debug("observe rollback failed after SQLite write error", exc_info=True)
                 if "locked" not in str(exc).lower():
-                    if not wal_heal_attempted and heal_wal_after_disk_io(
+                    if heals < WAL_HEAL_RETRY_LIMIT and heal_wal_after_disk_io(
                         self.db_path, exc, context="ObserveStream._persist_event"
                     ):
-                        wal_heal_attempted = True
+                        heals += 1
                         attempt = 0
                         continue
                     raise
-                if attempt >= OBSERVE_LOCKED_RETRY_ATTEMPTS and not wal_heal_attempted:
+                if attempt >= OBSERVE_LOCKED_RETRY_ATTEMPTS and heals < WAL_HEAL_RETRY_LIMIT:
                     # T10 (2026-06-12): persistent locks with the -wal sidecar
                     # gone mean this process is wedged on orphaned WAL files.
-                    # Heal (reopen every registered connection) and grant one
+                    # Heal (reopen every registered connection) and grant a
                     # fresh retry round before dropping anything.
-                    wal_heal_attempted = True
                     if heal_orphaned_wal(self.db_path):
+                        heals += 1
                         attempt = 0
                         continue
                 if attempt >= OBSERVE_LOCKED_RETRY_ATTEMPTS:
@@ -272,10 +276,10 @@ class ObserveStream:
                     return False
                 time.sleep(OBSERVE_LOCKED_RETRY_DELAY_SECONDS * attempt)
             except sqlite3.ProgrammingError as exc:
-                if not wal_heal_attempted and heal_wal_after_closed_connection(
+                if heals < WAL_HEAL_RETRY_LIMIT and heal_wal_after_closed_connection(
                     self.db_path, exc, context="ObserveStream._persist_event"
                 ):
-                    wal_heal_attempted = True
+                    heals += 1
                     attempt = 0
                     continue
                 raise
