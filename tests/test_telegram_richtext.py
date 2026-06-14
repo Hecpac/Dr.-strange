@@ -103,6 +103,18 @@ class TestBlocks:
     def test_quote(self) -> None:
         assert markdown_to_telegram_html("> citado") == "<blockquote>citado</blockquote>"
 
+    def test_multiline_quote_merges_into_one_blockquote(self) -> None:
+        # Telegram has no nested blockquotes; consecutive quote lines are one
+        # element with newline-separated content, not a bubble per line.
+        out = markdown_to_telegram_html("> a\n> b\n> c")
+        assert out == "<blockquote>a\nb\nc</blockquote>"
+        assert _balanced(out)
+
+    def test_quotes_split_by_normal_line_stay_separate(self) -> None:
+        out = markdown_to_telegram_html("> a\ntexto\n> b")
+        assert out == "<blockquote>a</blockquote>\ntexto\n<blockquote>b</blockquote>"
+        assert _balanced(out)
+
     def test_fenced_code_with_lang(self) -> None:
         out = markdown_to_telegram_html("```python\nx = 1 < 2\n```")
         assert out == '<pre><code class="language-python">x = 1 &lt; 2</code></pre>'

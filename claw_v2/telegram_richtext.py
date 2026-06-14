@@ -114,9 +114,25 @@ def markdown_to_telegram_html(text: str) -> str:
     # 5) Inline emphasis on the escaped text.
     text = _render_emphasis(text)
 
-    # 6) Block-level, line by line.
+    # 6) Block-level, line by line. Consecutive quote lines collapse into a
+    #    single <blockquote>: Telegram has no nested blockquotes, and a
+    #    multi-line quote is one element with newline-separated content
+    #    (per the Bot API formatting-options table), not one bubble per line.
     out_lines: list[str] = []
+    quote_buf: list[str] = []
+
+    def _flush_quote() -> None:
+        if quote_buf:
+            joined = "\n".join(quote_buf)
+            out_lines.append(f"<blockquote>{joined}</blockquote>")
+            quote_buf.clear()
+
     for line in text.split("\n"):
+        quote = _QUOTE_RE.match(line)
+        if quote:
+            quote_buf.append(quote.group(1))
+            continue
+        _flush_quote()
         heading = _HEADING_RE.match(line)
         if heading:
             out_lines.append(f"<b>{heading.group(1).strip()}</b>")
@@ -125,11 +141,8 @@ def markdown_to_telegram_html(text: str) -> str:
         if bullet:
             out_lines.append(f"• {bullet.group(1)}")
             continue
-        quote = _QUOTE_RE.match(line)
-        if quote:
-            out_lines.append(f"<blockquote>{quote.group(1)}</blockquote>")
-            continue
         out_lines.append(line)
+    _flush_quote()
     text = "\n".join(out_lines)
 
     # 7) Restore protected spans.
