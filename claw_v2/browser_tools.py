@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re as _re
 import threading
 import time as _time
 from dataclasses import dataclass, field
@@ -17,9 +18,11 @@ SNAPSHOT_MAX_TEXT_CHARS = 2000
 # Core dataclasses
 # ---------------------------------------------------------------------------
 
+
 @dataclass(slots=True)
 class RawElement:
     """One interactive element as the backend sees it (pre-ref)."""
+
     selector: str
     role: str | None
     label: str
@@ -31,6 +34,7 @@ class RawElement:
 @dataclass(slots=True)
 class RawPage:
     """Backend's raw view of a page; the service turns this into refs + snapshot."""
+
     url: str
     title: str
     text: str
@@ -66,8 +70,10 @@ class BrowserToolResult:
 # Backend Protocol
 # ---------------------------------------------------------------------------
 
+
 class BrowserToolBackend(Protocol):
     """Selector-level CDP operations. Refs are owned by the service, not here."""
+
     name: str
 
     def navigate(self, url: str) -> RawPage: ...
@@ -80,6 +86,7 @@ class BrowserToolBackend(Protocol):
 # ---------------------------------------------------------------------------
 # Service session state
 # ---------------------------------------------------------------------------
+
 
 @dataclass(slots=True)
 class BrowserToolSession:
@@ -96,6 +103,7 @@ class BrowserToolSession:
 # URL redaction helper
 # ---------------------------------------------------------------------------
 
+
 def _redact_url(url: str | None) -> str:
     if not url:
         return ""
@@ -106,9 +114,17 @@ def _redact_url(url: str | None) -> str:
         return "(unparseable url)"
 
 
+_URL_RE = _re.compile(r"https?://\S+")
+
+
+def _redact_err(msg: str) -> str:
+    return _URL_RE.sub(lambda m: _redact_url(m.group(0)), msg)[:200]
+
+
 # ---------------------------------------------------------------------------
 # BrowserToolService
 # ---------------------------------------------------------------------------
+
 
 class BrowserToolService:
     def __init__(self, *, backend: BrowserToolBackend, cdp_endpoint: str = "") -> None:
@@ -142,33 +158,52 @@ class BrowserToolService:
         for idx, el in enumerate(page.elements[:SNAPSHOT_MAX_ELEMENTS], start=1):
             ref = f"@e{idx}"
             refs[ref] = BrowserElementRef(
-                ref=ref, label=el.label, role=el.role, selector=el.selector,
-                text=el.text, href=el.href, input_type=el.input_type,
+                ref=ref,
+                label=el.label,
+                role=el.role,
+                selector=el.selector,
+                text=el.text,
+                href=el.href,
+                input_type=el.input_type,
             )
             role = el.role or "element"
             line = f'{ref} {role} "{el.label}"'
-            if el.href:
-                line += f' href="{el.href}"'
+            href_display = (el.href or "")[:300]
+            if href_display:
+                line += f' href="{href_display}"'
             lines.append(line)
         sess.refs = refs
         sess.ref_version += 1
         sess.current_url = page.url
         sess.last_used_at = _time.time()
         body = page.text[:SNAPSHOT_MAX_TEXT_CHARS]
-        snapshot = f"URL: {page.url}\nTITLE: {page.title}\n\n{body}\n\nELEMENTS ({len(refs)}):\n" + "\n".join(lines)
+        snapshot = (
+            f"URL: {page.url[:300]}\nTITLE: {page.title[:200]}\n\n{body}\n\nELEMENTS ({len(refs)}):\n"
+            + "\n".join(lines)
+        )
         if truncated:
-            snapshot += f"\n[truncated: {len(page.elements)} elements, showing {SNAPSHOT_MAX_ELEMENTS}]"
+            snapshot += (
+                f"\n[truncated: {len(page.elements)} elements, showing {SNAPSHOT_MAX_ELEMENTS}]"
+            )
         if page.login_or_challenge:
             # No-evasion: report human state, do not claim success.
             return BrowserToolResult(
-                success=False, url=page.url, title=page.title, snapshot=snapshot,
-                element_count=len(refs), backend=self._backend.name,
+                success=False,
+                url=page.url,
+                title=page.title,
+                snapshot=snapshot,
+                element_count=len(refs),
+                backend=self._backend.name,
                 error="login_or_challenge: page requires human login or verification",
                 metadata={"login_or_challenge": True},
             )
         return BrowserToolResult(
-            success=True, url=page.url, title=page.title, snapshot=snapshot,
-            element_count=len(refs), backend=self._backend.name,
+            success=True,
+            url=page.url,
+            title=page.title,
+            snapshot=snapshot,
+            element_count=len(refs),
+            backend=self._backend.name,
             metadata={"truncated": truncated, "ref_version": sess.ref_version},
         )
 
@@ -184,67 +219,131 @@ class BrowserToolService:
             logger.debug("browser_tools observe emit failed: %s", event_type, exc_info=True)
 
     def navigate(self, session_id: str, url: str) -> BrowserToolResult:
-        self._emit("browser_tool_action_started",
-                   {"action": "navigate", "url": _redact_url(url), "backend": self._backend.name})
+        self._emit(
+            "browser_tool_action_started",
+            {"action": "navigate", "url": _redact_url(url), "backend": self._backend.name},
+        )
+        fail: tuple[BrowserToolResult, str] | None = None
+        result: BrowserToolResult | None = None
         with self._lock:
             sess = self._session(session_id)
             try:
                 page = self._backend.navigate(url)
             except Exception as exc:
-                self._emit("browser_tool_action_failed",
-                           {"action": "navigate", "url": _redact_url(url), "error": str(exc)[:200]})
-                return BrowserToolResult(success=False, error=str(exc)[:300],
-                                         backend=self._backend.name)
-            result = self._ingest(sess, page)
-        self._emit("browser_tool_action_completed",
-                   {"action": "navigate", "url": _redact_url(result.url),
-                    "success": result.success, "element_count": result.element_count})
+                fail = (
+                    BrowserToolResult(
+                        success=False, error=str(exc)[:300], backend=self._backend.name
+                    ),
+                    _redact_err(str(exc)),
+                )
+            else:
+                result = self._ingest(sess, page)
+        if fail is not None:
+            res, emsg = fail
+            self._emit(
+                "browser_tool_action_failed",
+                {"action": "navigate", "url": _redact_url(url), "error": emsg},
+            )
+            return res
+        assert result is not None
+        self._emit(
+            "browser_tool_action_completed",
+            {
+                "action": "navigate",
+                "url": _redact_url(result.url),
+                "success": result.success,
+                "element_count": result.element_count,
+            },
+        )
         return result
 
     def snapshot(self, session_id: str, full: bool = False) -> BrowserToolResult:
-        self._emit("browser_tool_action_started",
-                   {"action": "snapshot", "backend": self._backend.name})
+        self._emit(
+            "browser_tool_action_started", {"action": "snapshot", "backend": self._backend.name}
+        )
+        fail: tuple[BrowserToolResult, str] | None = None
+        result: BrowserToolResult | None = None
         with self._lock:
             sess = self._session(session_id)
             try:
                 page = self._backend.snapshot(full=full)
             except Exception as exc:
-                self._emit("browser_tool_action_failed",
-                           {"action": "snapshot", "error": str(exc)[:200]})
-                return BrowserToolResult(success=False, error=str(exc)[:300],
-                                         backend=self._backend.name)
-            result = self._ingest(sess, page)
-        self._emit("browser_tool_action_completed",
-                   {"action": "snapshot", "url": _redact_url(result.url),
-                    "success": result.success, "element_count": result.element_count})
+                fail = (
+                    BrowserToolResult(
+                        success=False, error=str(exc)[:300], backend=self._backend.name
+                    ),
+                    _redact_err(str(exc)),
+                )
+            else:
+                result = self._ingest(sess, page)
+        if fail is not None:
+            res, emsg = fail
+            self._emit("browser_tool_action_failed", {"action": "snapshot", "error": emsg})
+            return res
+        assert result is not None
+        self._emit(
+            "browser_tool_action_completed",
+            {
+                "action": "snapshot",
+                "url": _redact_url(result.url),
+                "success": result.success,
+                "element_count": result.element_count,
+            },
+        )
         return result
 
-    def _act(self, session_id: str, ref: str, action: str, text: str | None = None) -> BrowserToolResult:
-        self._emit("browser_tool_action_started",
-                   {"action": action, "ref": ref, "backend": self._backend.name})
+    def _act(
+        self, session_id: str, ref: str, action: str, text: str | None = None
+    ) -> BrowserToolResult:
+        self._emit(
+            "browser_tool_action_started",
+            {"action": action, "ref": ref, "backend": self._backend.name},
+        )
+        fail: tuple[BrowserToolResult, str] | None = None
+        result: BrowserToolResult | None = None
         with self._lock:
             sess = self._session(session_id)
             target = sess.refs.get(ref)
             if target is None or not target.selector:
-                result = BrowserToolResult(
-                    success=False, url=sess.current_url, backend=self._backend.name,
-                    error=f"stale_ref: {ref} not in current snapshot",
-                    metadata={"ref_version": sess.ref_version},
+                fail = (
+                    BrowserToolResult(
+                        success=False,
+                        url=sess.current_url,
+                        backend=self._backend.name,
+                        error=f"stale_ref: {ref} not in current snapshot",
+                        metadata={"ref_version": sess.ref_version},
+                    ),
+                    f"stale_ref: {ref} not in current snapshot",
                 )
-                self._emit("browser_tool_action_failed",
-                           {"action": action, "ref": ref, "error": result.error})
-                return result
-            try:
-                page = self._backend.act(target.selector, action, text)
-            except Exception as exc:
-                self._emit("browser_tool_action_failed",
-                           {"action": action, "ref": ref, "error": str(exc)[:200]})
-                return BrowserToolResult(success=False, url=sess.current_url,
-                                         backend=self._backend.name, error=str(exc)[:300])
-            result = self._ingest(sess, page)
-        self._emit("browser_tool_action_completed",
-                   {"action": action, "ref": ref, "url": _redact_url(result.url),
-                    "success": result.success})
+            else:
+                try:
+                    page = self._backend.act(target.selector, action, text)
+                except Exception as exc:
+                    fail = (
+                        BrowserToolResult(
+                            success=False,
+                            url=sess.current_url,
+                            backend=self._backend.name,
+                            error=str(exc)[:300],
+                        ),
+                        _redact_err(str(exc)),
+                    )
+                else:
+                    result = self._ingest(sess, page)
+        if fail is not None:
+            res, emsg = fail
+            self._emit("browser_tool_action_failed", {"action": action, "ref": ref, "error": emsg})
+            return res
+        assert result is not None
+        self._emit(
+            "browser_tool_action_completed",
+            {
+                "action": action,
+                "ref": ref,
+                "url": _redact_url(result.url),
+                "success": result.success,
+            },
+        )
         return result
 
     def click(self, session_id: str, ref: str) -> BrowserToolResult:
@@ -259,9 +358,17 @@ class BrowserToolService:
 # ---------------------------------------------------------------------------
 
 _LOGIN_MARKERS = (
-    "log in", "sign in", "login", "iniciar sesión", "verify you are human",
-    "verifica que eres", "captcha", "unusual activity", "are you a robot",
-    "checking your browser", "enable javascript and cookies",
+    "log in",
+    "sign in",
+    "login",
+    "iniciar sesión",
+    "verify you are human",
+    "verifica que eres",
+    "captcha",
+    "unusual activity",
+    "are you a robot",
+    "checking your browser",
+    "enable javascript and cookies",
 )
 
 _SNAPSHOT_JS = r"""
@@ -285,7 +392,7 @@ _SNAPSHOT_JS = r"""
   };
   const q = 'a[href],button,input,textarea,select,[role=button],[role=link],[contenteditable=true],[tabindex]:not([tabindex="-1"])';
   const out = [];
-  for (const el of Array.from(document.querySelectorAll(q)).slice(0, 400)) {
+  for (const el of Array.from(document.querySelectorAll(q)).slice(0, 150)) {
     const r = el.getBoundingClientRect();
     if (r.width === 0 && r.height === 0) continue;
     const label = (el.getAttribute('aria-label') || el.innerText || el.value ||
@@ -316,6 +423,7 @@ class ChromeCdpBrowserBackend:
     event loop via asyncio.to_thread (C3). sync_playwright cannot run inside a
     live asyncio loop, so never call this from the brain coroutine directly.
     """
+
     name = "chrome_cdp"
 
     def __init__(self, *, cdp_endpoint: str, nav_timeout_ms: int = 45000) -> None:
@@ -324,6 +432,7 @@ class ChromeCdpBrowserBackend:
 
     def _with_page(self, fn):
         from claw_v2.browser import _cdp_connect, _require_sync_playwright
+
         with _require_sync_playwright() as pw:
             browser = _cdp_connect(pw, self._endpoint, enable_downloads=False)
             ctx = browser.contexts[0] if browser.contexts else browser.new_context()
@@ -346,8 +455,13 @@ class ChromeCdpBrowserBackend:
             for e in (data.get("elements") or [])
             if e.get("selector")
         ]
-        return RawPage(url=str(data.get("url") or ""), title=str(data.get("title") or ""),
-                       text=text, elements=elements, login_or_challenge=login)
+        return RawPage(
+            url=str(data.get("url") or ""),
+            title=str(data.get("title") or ""),
+            text=text,
+            elements=elements,
+            login_or_challenge=login,
+        )
 
     def navigate(self, url: str) -> RawPage:
         def _go(page):
@@ -359,6 +473,7 @@ class ChromeCdpBrowserBackend:
                 except Exception:
                     pass
             return self._read_page(page)
+
         return self._with_page(_go)
 
     def snapshot(self, full: bool = False) -> RawPage:
@@ -377,12 +492,14 @@ class ChromeCdpBrowserBackend:
             except Exception:
                 pass
             return self._read_page(page)
+
         return self._with_page(_do)
 
     def screenshot(self, path: str) -> bool:
         def _shot(page):
             page.screenshot(path=path, full_page=True)
             return True
+
         return self._with_page(_shot)
 
     def console(self, clear: bool = False) -> list[str]:
@@ -395,8 +512,12 @@ class ChromeCdpBrowserBackend:
 # Factory
 # ---------------------------------------------------------------------------
 
-def build_chrome_cdp_service(*, cdp_endpoint: str, observe: Any | None = None) -> BrowserToolService:
-    svc = BrowserToolService(backend=ChromeCdpBrowserBackend(cdp_endpoint=cdp_endpoint),
-                             cdp_endpoint=cdp_endpoint)
+
+def build_chrome_cdp_service(
+    *, cdp_endpoint: str, observe: Any | None = None
+) -> BrowserToolService:
+    svc = BrowserToolService(
+        backend=ChromeCdpBrowserBackend(cdp_endpoint=cdp_endpoint), cdp_endpoint=cdp_endpoint
+    )
     svc.observe = observe
     return svc

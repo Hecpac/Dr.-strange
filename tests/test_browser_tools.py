@@ -23,18 +23,32 @@ class DataclassTests(unittest.TestCase):
             url="https://x.test",
             title="X",
             text="hello",
-            elements=[RawElement(selector="#post", role="button", label="Post",
-                                 text="Post", href=None, input_type=None)],
+            elements=[
+                RawElement(
+                    selector="#post",
+                    role="button",
+                    label="Post",
+                    text="Post",
+                    href=None,
+                    input_type=None,
+                )
+            ],
             login_or_challenge=False,
         )
         self.assertEqual(len(page.elements), 1)
         self.assertEqual(page.elements[0].label, "Post")
 
     def test_element_ref_shape(self) -> None:
-        ref = BrowserElementRef(ref="@e1", label="Post", role="button",
-                                selector="#post", text="Post", href=None, input_type=None)
+        ref = BrowserElementRef(
+            ref="@e1",
+            label="Post",
+            role="button",
+            selector="#post",
+            text="Post",
+            href=None,
+            input_type=None,
+        )
         self.assertEqual(ref.ref, "@e1")
-
 
 
 from claw_v2.browser_tools import BrowserToolService
@@ -67,10 +81,8 @@ class _FakeBackend:
         return ["log: ok"]
 
 
-def _page(url: str, *elements: RawElement, text: str = "body text",
-          login: bool = False) -> RawPage:
-    return RawPage(url=url, title=url, text=text, elements=list(elements),
-                   login_or_challenge=login)
+def _page(url: str, *elements: RawElement, text: str = "body text", login: bool = False) -> RawPage:
+    return RawPage(url=url, title=url, text=text, elements=list(elements), login_or_challenge=login)
 
 
 class NavigateRefTests(unittest.TestCase):
@@ -137,8 +149,10 @@ from claw_v2.browser_tools import SNAPSHOT_MAX_ELEMENTS, SNAPSHOT_MAX_TEXT_CHARS
 
 class SafetyCapsTests(unittest.TestCase):
     def test_snapshot_caps_elements_and_marks_truncated(self) -> None:
-        many = [RawElement(f"#e{i}", "button", f"B{i}", f"B{i}", None, None)
-                for i in range(SNAPSHOT_MAX_ELEMENTS + 25)]
+        many = [
+            RawElement(f"#e{i}", "button", f"B{i}", f"B{i}", None, None)
+            for i in range(SNAPSHOT_MAX_ELEMENTS + 25)
+        ]
         svc = BrowserToolService(backend=_FakeBackend([_page("https://x.test", *many)]))
         r = svc.navigate("s", "https://x.test")
         self.assertEqual(r.element_count, SNAPSHOT_MAX_ELEMENTS)
@@ -151,8 +165,12 @@ class SafetyCapsTests(unittest.TestCase):
         self.assertLessEqual(len(r.snapshot), SNAPSHOT_MAX_TEXT_CHARS + 400)
 
     def test_login_page_is_not_success(self) -> None:
-        page = _page("https://x.test/login", RawElement("#u", "textbox", "User", "", None, "text"),
-                     text="Log in to continue", login=True)
+        page = _page(
+            "https://x.test/login",
+            RawElement("#u", "textbox", "User", "", None, "text"),
+            text="Log in to continue",
+            login=True,
+        )
         svc = BrowserToolService(backend=_FakeBackend([page]))
         r = svc.navigate("s", "https://x.test/login")
         self.assertFalse(r.success)
@@ -168,7 +186,9 @@ class ObserveTests(unittest.TestCase):
             def emit(self, event_type, payload=None):
                 events.append((event_type, payload or {}))
 
-        page = _page("https://x.test/secret?token=abcd", RawElement("#a", "button", "A", "A", None, None))
+        page = _page(
+            "https://x.test/secret?token=abcd", RawElement("#a", "button", "A", "A", None, None)
+        )
         svc = BrowserToolService(backend=_FakeBackend([page]))
         svc.observe = _Obs()
         svc.navigate("s", "https://x.test/secret?token=abcd")
@@ -177,6 +197,39 @@ class ObserveTests(unittest.TestCase):
         self.assertIn("browser_tool_action_completed", kinds)
         for _, payload in events:
             self.assertNotIn("token=abcd", str(payload))
+
+    def test_navigate_backend_error_emits_redacted_failed_event(self) -> None:
+        class _BoomBackend:
+            name = "fake"
+
+            def navigate(self, url):
+                raise RuntimeError("net::ERR loading https://x.test/p?token=secret")
+
+            def snapshot(self, full=False):
+                raise AssertionError("unused")
+
+            def act(self, s, a, t=None):
+                raise AssertionError("unused")
+
+            def screenshot(self, p):
+                return False
+
+            def console(self, clear=False):
+                return []
+
+        events = []
+
+        class _Obs:
+            def emit(self, et, payload=None):
+                events.append((et, payload or {}))
+
+        svc = BrowserToolService(backend=_BoomBackend())
+        svc.observe = _Obs()
+        r = svc.navigate("s", "https://x.test/p?token=secret")
+        self.assertFalse(r.success)
+        self.assertIn("browser_tool_action_failed", [e[0] for e in events])
+        for _, payload in events:
+            self.assertNotIn("token=secret", str(payload))
 
 
 import os
