@@ -232,7 +232,10 @@ class ManagedChrome:
                 import signal
                 try:
                     os.kill(pid, signal.SIGTERM)
-                    _wait_for_port_free(self.port, timeout=5)
+                    try:
+                        _wait_for_port_free(self.port, timeout=5)
+                    except ChromeStartError:
+                        pass  # SIGTERM didn't free the port in time; escalate to SIGKILL
                     try:
                         os.kill(pid, 0)
                         os.kill(pid, signal.SIGKILL)

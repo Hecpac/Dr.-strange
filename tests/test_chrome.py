@@ -442,6 +442,32 @@ class ManagedChromeAttachStopKillAttachedTests(unittest.TestCase):
             mock_kill.assert_any_call(8888, signal.SIGTERM)
             self.assertIsNone(mc._attached_pid)
 
+    def test_stop_kill_attached_escalates_to_sigkill_when_port_wait_times_out(self) -> None:
+        """If SIGTERM doesn't free the port (_wait_for_port_free raises), stop() must
+        still escalate to SIGKILL, not propagate ChromeStartError, and clear the pid."""
+        import signal
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mc = self._make_mc(tmpdir)
+            self._attach_mc(mc, 7777)
+
+            kill_calls: list[tuple[int, int]] = []
+
+            def spy_kill(pid: int, sig: int) -> None:
+                kill_calls.append((pid, sig))
+
+            with patch(
+                "claw_v2.chrome._wait_for_port_free",
+                side_effect=ChromeStartError("Port 9250 still busy after 5s"),
+            ):
+                with patch("os.kill", side_effect=spy_kill):
+                    mc.stop(kill_attached=True)  # must NOT raise
+
+            sigs = [sig for _pid, sig in kill_calls]
+            self.assertIn(signal.SIGTERM, sigs)
+            self.assertIn(signal.SIGKILL, sigs)
+            self.assertTrue(all(pid == 7777 for pid, _sig in kill_calls))
+            self.assertIsNone(mc._attached_pid)
+
     def test_stop_launched_process_terminates_regardless_of_kill_attached(self) -> None:
         """stop() on a launched process must terminate it regardless of kill_attached flag."""
         with tempfile.TemporaryDirectory() as tmpdir:
