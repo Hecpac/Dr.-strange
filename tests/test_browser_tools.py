@@ -133,5 +133,33 @@ class InteractionTests(unittest.TestCase):
         self.assertEqual(r.error, "stale_ref: @e99 not in current snapshot")
 
 
+from claw_v2.browser_tools import SNAPSHOT_MAX_ELEMENTS, SNAPSHOT_MAX_TEXT_CHARS
+
+
+class SafetyCapsTests(unittest.TestCase):
+    def test_snapshot_caps_elements_and_marks_truncated(self) -> None:
+        many = [RawElement(f"#e{i}", "button", f"B{i}", f"B{i}", None, None)
+                for i in range(SNAPSHOT_MAX_ELEMENTS + 25)]
+        svc = BrowserToolService(backend=_FakeBackend([_page("https://x.test", *many)]))
+        r = svc.navigate("s", "https://x.test")
+        self.assertEqual(r.element_count, SNAPSHOT_MAX_ELEMENTS)
+        self.assertIn("[truncated:", r.snapshot)
+
+    def test_long_body_text_is_capped(self) -> None:
+        page = _page("https://x.test", text="x" * (SNAPSHOT_MAX_TEXT_CHARS + 500))
+        svc = BrowserToolService(backend=_FakeBackend([page]))
+        r = svc.navigate("s", "https://x.test")
+        self.assertLessEqual(len(r.snapshot), SNAPSHOT_MAX_TEXT_CHARS + 400)
+
+    def test_login_page_is_not_success(self) -> None:
+        page = _page("https://x.test/login", RawElement("#u", "textbox", "User", "", None, "text"),
+                     text="Log in to continue", login=True)
+        svc = BrowserToolService(backend=_FakeBackend([page]))
+        r = svc.navigate("s", "https://x.test/login")
+        self.assertFalse(r.success)
+        self.assertTrue(r.metadata.get("login_or_challenge"))
+        self.assertIn("login_or_challenge", r.error)
+
+
 if __name__ == "__main__":
     unittest.main()
