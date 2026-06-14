@@ -205,9 +205,18 @@ class ManagedChrome:
         except Exception:
             logger.debug("observe callback raised in ManagedChrome", exc_info=True)
 
-    def stop(self) -> None:
-        """Stop Chrome. Kills the process whether it was launched or attached — that is
-        the contract /chrome_login needs to transition from headless to visible."""
+    def stop(self, *, kill_attached: bool = False) -> None:
+        """Stop Chrome.
+
+        Ownership contract:
+        - If we launched Chrome (_process is not None): terminate/kill it unconditionally.
+        - If we attached to an existing Chrome (_attached_pid is not None):
+          - kill_attached=False (default): disconnect only — clear _attached_pid and leave
+            the Chrome running. Use this for normal task teardown where the shared CDP
+            Chrome must survive beyond the task.
+          - kill_attached=True: terminate the attached Chrome (use for explicit mode
+            switches such as headless→visible or visible→headless relaunch).
+        """
         if self._process is not None:
             self._process.terminate()
             try:
@@ -217,21 +226,30 @@ class ManagedChrome:
             self._process = None
             logger.info("ManagedChrome stopped")
         elif self._attached_pid is not None:
-            import os
-            import signal
             pid = self._attached_pid
-            try:
-                os.kill(pid, signal.SIGTERM)
-                _wait_for_port_free(self.port, timeout=5)
+            if kill_attached:
+                import os
+                import signal
                 try:
-                    os.kill(pid, 0)
-                    os.kill(pid, signal.SIGKILL)
+                    os.kill(pid, signal.SIGTERM)
+                    try:
+                        _wait_for_port_free(self.port, timeout=5)
+                    except ChromeStartError:
+                        pass  # SIGTERM didn't free the port in time; escalate to SIGKILL
+                    try:
+                        os.kill(pid, 0)
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
                 except ProcessLookupError:
                     pass
-            except ProcessLookupError:
-                pass
-            self._attached_pid = None
-            logger.info("ManagedChrome detached and killed attached Chrome PID %d", pid)
+                self._attached_pid = None
+                logger.info("ManagedChrome detached and killed attached Chrome PID %d", pid)
+            else:
+                self._attached_pid = None
+                logger.info(
+                    "ManagedChrome detached from attached Chrome PID %d (left running)", pid
+                )
 
     def ensure(self, *, headless: bool = False) -> None:
         if self._process is not None and self._process.poll() is None:

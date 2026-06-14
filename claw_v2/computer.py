@@ -694,6 +694,7 @@ class BrowserUseService:
             headless=self.headless,
             allowed_domains=normalized_allowed or None,
             prohibited_domains=normalized_prohibited or None,
+            keep_alive=True,
         )
         llm, fallback_llm = self._build_browser_llm(model)
         tools = None
@@ -837,6 +838,7 @@ class BrowserUseService:
         browser = BrowserSession(
             cdp_url=self.cdp_url,
             headless=self.headless,
+            keep_alive=True,
         )
         async with browser:
             page = await browser.get_current_page()
