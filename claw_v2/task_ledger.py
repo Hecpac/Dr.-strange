@@ -10,8 +10,10 @@ from typing import Any, Iterable
 
 from claw_v2.redaction import redact_sensitive
 from claw_v2.sqlite_runtime import (
+    WAL_HEAL_RETRY_LIMIT,
     connect_runtime_sqlite,
     heal_orphaned_wal,
+    heal_wal_after_closed_connection,
     heal_wal_after_disk_io,
     make_store_wal_heal,
     note_wal_generation,
@@ -299,8 +301,10 @@ class TaskLedger:
         # PR #97 review (gemini, crítico): exhaustion must ALWAYS raise — a
         # heal on the last attempt previously fell out of the loop without
         # writing OR raising, and mark_terminal continued as if it had closed
-        # the task. The heal grants exactly one fresh retry budget.
-        wal_heal_attempted = False
+        # the task. M5: the heal grants a bounded run of fresh retry budgets
+        # (concurrent heals can re-fail the write mid-retry), still raising
+        # visibly once the budget is spent.
+        heals = 0
         write_attempt = 0
         while True:
             write_attempt += 1
@@ -324,16 +328,16 @@ class TaskLedger:
                 except Exception:
                     pass
                 if "locked" not in str(exc).lower():
-                    if not wal_heal_attempted and heal_wal_after_disk_io(
+                    if heals < WAL_HEAL_RETRY_LIMIT and heal_wal_after_disk_io(
                         self.db_path, exc, context="TaskLedger.mark_terminal"
                     ):
-                        wal_heal_attempted = True
+                        heals += 1
                         write_attempt = 0
                         continue
                     raise
                 if write_attempt >= _TERMINAL_WRITE_LOCKED_ATTEMPTS:
-                    if not wal_heal_attempted and heal_orphaned_wal(self.db_path):
-                        wal_heal_attempted = True
+                    if heals < WAL_HEAL_RETRY_LIMIT and heal_orphaned_wal(self.db_path):
+                        heals += 1
                         write_attempt = 0
                         continue
                     self._emit(
@@ -346,6 +350,23 @@ class TaskLedger:
                     )
                     raise
                 time.sleep(_TERMINAL_WRITE_LOCKED_BACKOFF_SECONDS * write_attempt)
+            except sqlite3.ProgrammingError as exc:
+                # PR #111 review: the terminal write has no @_synchronized shield,
+                # so a WAL heal that closed the connection surfaces as closed-db
+                # here. Heal+retry with the same bounded budget as the disk-io
+                # path instead of crashing the task close.
+                try:
+                    with self._lock:
+                        self._conn.rollback()
+                except Exception:
+                    pass
+                if heals < WAL_HEAL_RETRY_LIMIT and heal_wal_after_closed_connection(
+                    self.db_path, exc, context="TaskLedger.mark_terminal"
+                ):
+                    heals += 1
+                    write_attempt = 0
+                    continue
+                raise
         if blocked_status is not None:
             self._emit(
                 "task_ledger_terminal_transition_blocked",

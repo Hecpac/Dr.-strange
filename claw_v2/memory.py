@@ -18,6 +18,7 @@ from claw_v2.memory_retention import (
     normalize_prompt_residency,
 )
 from claw_v2.sqlite_runtime import (
+    WAL_HEAL_RETRY_LIMIT,
     connect_runtime_sqlite,
     heal_wal_after_closed_connection,
     heal_wal_after_disk_io,
@@ -418,28 +419,34 @@ def _synchronized(method):
 
     @functools.wraps(method)
     def wrapper(self, *args, **kwargs):
-        try:
-            with self._lock:
-                return method(self, *args, **kwargs)
-        except sqlite3.ProgrammingError as exc:
-            # A WAL heal triggered on another connection can close this store's
-            # shared handle mid-call ("Cannot operate on a closed database").
-            # Heal once — which reopens the registered connections — then retry,
-            # mirroring ObserveStream._persist_event. Non-closed ProgrammingErrors
-            # (real SQL bugs) are re-raised untouched.
-            #
-            # The heal MUST run with the store lock released: the heal closes and
-            # reopens every registered connection, and each reopen() re-acquires
-            # that store's lock. Holding self._lock here while the heal needs
-            # another store's lock (under the global heal_lock) would invert lock
-            # order and deadlock — so the disk-io path and ObserveStream both heal
-            # outside their lock, and this must too.
-            if not heal_wal_after_closed_connection(
-                self.db_path, exc, context=f"MemoryStore.{method.__name__}"
-            ):
+        # A WAL heal triggered on another connection can close this store's
+        # shared handle mid-call ("Cannot operate on a closed database").
+        # Heal — which reopens the registered connections — then retry,
+        # mirroring ObserveStream._persist_event. Non-closed ProgrammingErrors
+        # (real SQL bugs) are re-raised untouched.
+        #
+        # M5: under a burst of concurrent heals the retry can itself see a
+        # freshly re-closed connection, so absorb a bounded run of heals rather
+        # than exactly one before giving up (heals coalesce → converges fast).
+        #
+        # The heal MUST run with the store lock released: the heal closes and
+        # reopens every registered connection, and each reopen() re-acquires
+        # that store's lock. Holding self._lock here while the heal needs
+        # another store's lock (under the global heal_lock) would invert lock
+        # order and deadlock — so the disk-io path and ObserveStream both heal
+        # outside their lock, and this must too.
+        heals = 0
+        while True:
+            try:
+                with self._lock:
+                    return method(self, *args, **kwargs)
+            except sqlite3.ProgrammingError as exc:
+                if heals < WAL_HEAL_RETRY_LIMIT and heal_wal_after_closed_connection(
+                    self.db_path, exc, context=f"MemoryStore.{method.__name__}"
+                ):
+                    heals += 1
+                    continue
                 raise
-        with self._lock:
-            return method(self, *args, **kwargs)
 
     return wrapper
 
@@ -1093,7 +1100,7 @@ class MemoryStore:
         rolling_summary: str | None = None,
         last_turn_summary: str | None = None,
     ) -> dict:
-        wal_heal_attempted = False
+        heals = 0
         while True:
             try:
                 with self._lock:
@@ -1114,10 +1121,22 @@ class MemoryStore:
                         self._conn.rollback()
                 except Exception:
                     logger.debug("session_state rollback failed after disk I/O error", exc_info=True)
-                if not wal_heal_attempted and heal_wal_after_disk_io(
+                # M5: bounded heal burst (concurrent heals can re-close mid-retry).
+                if heals < WAL_HEAL_RETRY_LIMIT and heal_wal_after_disk_io(
                     self.db_path, exc, context="MemoryStore.update_session_state"
                 ):
-                    wal_heal_attempted = True
+                    heals += 1
+                    continue
+                raise
+            except sqlite3.ProgrammingError as exc:
+                # PR #111 review: the upsert leg is not @_synchronized, so a WAL
+                # heal that closed the shared connection surfaces here. Handle
+                # closed-db with the same bounded heal+retry as the other writers
+                # instead of relying on get_session_state's shield.
+                if heals < WAL_HEAL_RETRY_LIMIT and heal_wal_after_closed_connection(
+                    self.db_path, exc, context="MemoryStore.update_session_state"
+                ):
+                    heals += 1
                     continue
                 raise
 
