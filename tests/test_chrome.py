@@ -398,6 +398,77 @@ class ManagedChromeAttachStopTests(unittest.TestCase):
             self.assertIsNone(mc._attached_pid)
 
 
+class ManagedChromeAttachStopKillAttachedTests(unittest.TestCase):
+    """Tests for the detach-not-kill contract on ManagedChrome.stop()."""
+
+    def _make_mc(self, tmpdir: str) -> ManagedChrome:
+        return ManagedChrome(port=9250, profile_dir=tmpdir)
+
+    def _attach_mc(self, mc: ManagedChrome, pid: int) -> None:
+        """Simulate an attach by setting state directly (mirrors start() attach path)."""
+        mc._process = None
+        mc._attached_pid = pid
+
+    def test_stop_default_does_not_kill_attached_pid(self) -> None:
+        """stop() with default kill_attached=False must NOT send any signal to the attached pid."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mc = self._make_mc(tmpdir)
+            self._attach_mc(mc, 9999)
+
+            kill_calls: list[tuple[int, int]] = []
+
+            def spy_kill(pid: int, sig: int) -> None:
+                kill_calls.append((pid, sig))
+
+            with patch("os.kill", side_effect=spy_kill):
+                mc.stop()
+
+            # Must NOT have sent any signal to the attached pid
+            self.assertEqual(kill_calls, [])
+            # Must clear the attached pid
+            self.assertIsNone(mc._attached_pid)
+
+    def test_stop_kill_attached_true_kills_attached_pid(self) -> None:
+        """stop(kill_attached=True) must send SIGTERM to the attached pid (existing contract)."""
+        import signal
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mc = self._make_mc(tmpdir)
+            self._attach_mc(mc, 8888)
+
+            with patch("claw_v2.chrome._wait_for_port_free"):
+                with patch("os.kill", side_effect=[None, ProcessLookupError()]) as mock_kill:
+                    mc.stop(kill_attached=True)
+
+            mock_kill.assert_any_call(8888, signal.SIGTERM)
+            self.assertIsNone(mc._attached_pid)
+
+    def test_stop_launched_process_terminates_regardless_of_kill_attached(self) -> None:
+        """stop() on a launched process must terminate it regardless of kill_attached flag."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mc = self._make_mc(tmpdir)
+            proc = MagicMock()
+            mc._process = proc
+            mc._attached_pid = None
+
+            mc.stop()
+
+            proc.terminate.assert_called_once()
+            self.assertIsNone(mc._process)
+
+    def test_stop_launched_process_terminates_with_kill_attached_true(self) -> None:
+        """stop(kill_attached=True) on a launched process also terminates it (kill_attached is for attached path only)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mc = self._make_mc(tmpdir)
+            proc = MagicMock()
+            mc._process = proc
+            mc._attached_pid = None
+
+            mc.stop(kill_attached=True)
+
+            proc.terminate.assert_called_once()
+            self.assertIsNone(mc._process)
+
+
 class ProfileUserDataPidsTests(unittest.TestCase):
     # Regression for Bug #7: ps without -ww truncates long command lines on macOS,
     # causing --user-data-dir paths near/past col 80 to be missed.

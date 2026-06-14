@@ -705,6 +705,104 @@ class BrowserUseArtifactTests(unittest.TestCase):
         self.assertEqual(created["allowed_domains"], ["chatgpt.com"])
         self.assertEqual(created["prohibited_domains"], ["stripe.com"])
 
+    def test_run_task_passes_keep_alive_true_to_browser_session(self) -> None:
+        """BrowserSession in run_task must be constructed with keep_alive=True.
+
+        Chrome lifecycle is owned by ManagedChrome, not browser_use. The session
+        must only disconnect on stop(), never kill the shared CDP process.
+        """
+        import asyncio
+        import sys
+        import types
+        from claw_v2.computer import BrowserUseService
+
+        created: dict = {}
+
+        class FakeBrowserSession:
+            def __init__(self, **kwargs):
+                created.update(kwargs)
+
+            async def stop(self):
+                pass
+
+        class FakeResult:
+            def final_result(self):
+                return "ok"
+
+            def last_action(self):
+                return None
+
+        class FakeAgent:
+            def __init__(self, **kwargs):
+                pass
+
+            async def run(self):
+                return FakeResult()
+
+        class FakeChatOpenAI:
+            def __init__(self, **kwargs):
+                pass
+
+        module = types.SimpleNamespace(
+            Agent=FakeAgent, BrowserSession=FakeBrowserSession, ChatOpenAI=FakeChatOpenAI
+        )
+        with patch.dict(sys.modules, {"browser_use": module}), \
+                patch.object(BrowserUseService, "_build_browser_llm", return_value=(object(), None)):
+            svc = BrowserUseService()
+            asyncio.run(svc.run_task("t"))
+        self.assertTrue(
+            created.get("keep_alive"),
+            "BrowserSession must be constructed with keep_alive=True so browser_use "
+            "disconnects instead of killing the shared CDP Chrome on stop()",
+        )
+
+    def test_quick_screenshot_passes_keep_alive_true_to_browser_session(self) -> None:
+        """BrowserSession in quick_screenshot must also be constructed with keep_alive=True."""
+        import asyncio
+        import sys
+        import types
+        from claw_v2.computer import BrowserUseService
+
+        created: dict = {}
+
+        class FakePage:
+            async def goto(self, url):
+                pass
+
+            async def wait_for_load_state(self, state):
+                pass
+
+            async def screenshot(self, full_page=False):
+                return b"\x89PNG"
+
+        class FakeBrowserSession:
+            def __init__(self, **kwargs):
+                created.update(kwargs)
+
+            async def get_current_page(self):
+                return FakePage()
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                pass
+
+        class FakeChatOpenAI:
+            def __init__(self, **kwargs):
+                pass
+
+        module = types.SimpleNamespace(
+            BrowserSession=FakeBrowserSession, ChatOpenAI=FakeChatOpenAI
+        )
+        with patch.dict(sys.modules, {"browser_use": module}):
+            svc = BrowserUseService()
+            asyncio.run(svc.quick_screenshot("https://example.com"))
+        self.assertTrue(
+            created.get("keep_alive"),
+            "BrowserSession in quick_screenshot must be constructed with keep_alive=True",
+        )
+
 
 class BrowserUseGuardTests(unittest.TestCase):
     def test_guarded_tools_import_does_not_mutate_claw_model_env(self) -> None:
