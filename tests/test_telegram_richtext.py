@@ -115,6 +115,28 @@ class TestBlocks:
         assert out == "<blockquote>a</blockquote>\ntexto\n<blockquote>b</blockquote>"
         assert _balanced(out)
 
+    def test_expandable_quote(self) -> None:
+        # ">>>" maps to Telegram's collapsible blockquote.
+        out = markdown_to_telegram_html(">>> oculto")
+        assert out == "<blockquote expandable>oculto</blockquote>"
+        assert _balanced(out)
+
+    def test_multiline_expandable_quote_merges(self) -> None:
+        out = markdown_to_telegram_html(">>> a\n>>> b\n>>> c")
+        assert out == "<blockquote expandable>a\nb\nc</blockquote>"
+        assert _balanced(out)
+
+    def test_expandable_and_normal_quote_do_not_merge(self) -> None:
+        # Different quote kinds are distinct blocks even when adjacent.
+        out = markdown_to_telegram_html(">>> a\n> b")
+        assert out == "<blockquote expandable>a</blockquote>\n<blockquote>b</blockquote>"
+        assert _balanced(out)
+
+    def test_expandable_quote_keeps_emphasis(self) -> None:
+        out = markdown_to_telegram_html(">>> **bold** y `code`")
+        assert out == "<blockquote expandable><b>bold</b> y <code>code</code></blockquote>"
+        assert _balanced(out)
+
     def test_fenced_code_with_lang(self) -> None:
         out = markdown_to_telegram_html("```python\nx = 1 < 2\n```")
         assert out == '<pre><code class="language-python">x = 1 &lt; 2</code></pre>'

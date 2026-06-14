@@ -299,6 +299,12 @@ For operational work, translate machine states into plain language:
 - failed → "intenté y falló por Y"
 Keep command names, task IDs, and exact errors when they matter, but wrap them in normal prose."""
 
+TELEGRAM_FORMAT_CONTRACT = """# Formato colapsable (Telegram)
+Para contenido secundario y largo —trace operativo, pasos intermedios, contexto opcional, logs, detalle técnico que no es la respuesta principal— enciérralo en un bloque colapsable usando ">>>" al inicio de cada línea. Telegram lo muestra plegado y Hector lo expande si quiere.
+- Líneas con ">>>" = bloque colapsable (detalle largo).
+- Líneas con ">" = cita corta normal (no se pliega).
+Deja SIEMPRE la respuesta o el resultado principal fuera del bloque, arriba y en texto normal. No metas la respuesta dentro del colapsable. Úsalo solo cuando de verdad hay detalle extenso que estorbaría; un mensaje corto no necesita bloque."""
+
 BRAIN_PUSHBACK_CONTRACT = """# Pushback contract
 Compliance ≠ utilidad.
 Si el objetivo parece equivocado, ambiguo, o factualmente imposible, **discrepa** ANTES de intentar:
@@ -1639,6 +1645,7 @@ def _brain_system_prompt(system_prompt: str, *, include_delegation: bool = False
         f"{system_prompt.rstrip()}\n\n"
         f"{BRAIN_RESPONSE_CONTRACT}\n\n"
         f"{CONVERSATIONAL_STYLE_CONTRACT}\n\n"
+        f"{TELEGRAM_FORMAT_CONTRACT}\n\n"
         f"{BRAIN_PUSHBACK_CONTRACT}\n\n"
         f"{SELF_HEALING_LOOP_CONTRACT}\n\n"
         f"{AUTONOMY_EXECUTION_CONTRACT}\n\n"

@@ -39,6 +39,8 @@ _ITALIC_UND_RE = re.compile(r"(?<![\w_])_([^\s_][^\n_]*?)_(?![\w_])")
 _HEADING_RE = re.compile(r"^#{1,6}[ \t]+(.*)$")
 _BULLET_RE = re.compile(r"^[ \t]*[-*+][ \t]+(.*)$")
 # Quote markers run after global escaping, so ">" is already "&gt;".
+# Expandable (">>>") is tested before the single ">" so it wins the match.
+_QUOTE_EXP_RE = re.compile(r"^(?:&gt;){3}[ \t]?(.*)$")
 _QUOTE_RE = re.compile(r"^&gt;[ \t]?(.*)$")
 
 
@@ -120,16 +122,27 @@ def markdown_to_telegram_html(text: str) -> str:
     #    (per the Bot API formatting-options table), not one bubble per line.
     out_lines: list[str] = []
     quote_buf: list[str] = []
+    quote_expandable = False
 
     def _flush_quote() -> None:
+        nonlocal quote_expandable
         if quote_buf:
             joined = "\n".join(quote_buf)
-            out_lines.append(f"<blockquote>{joined}</blockquote>")
+            tag = "<blockquote expandable>" if quote_expandable else "<blockquote>"
+            out_lines.append(f"{tag}{joined}</blockquote>")
             quote_buf.clear()
+        quote_expandable = False
 
     for line in text.split("\n"):
-        quote = _QUOTE_RE.match(line)
+        exp = _QUOTE_EXP_RE.match(line)
+        quote = exp or _QUOTE_RE.match(line)
         if quote:
+            is_exp = exp is not None
+            # A change of quote kind starts a fresh block (Telegram cannot
+            # nest, and the two kinds render differently).
+            if quote_buf and is_exp != quote_expandable:
+                _flush_quote()
+            quote_expandable = is_exp
             quote_buf.append(quote.group(1))
             continue
         _flush_quote()
