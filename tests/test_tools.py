@@ -523,5 +523,18 @@ class BrowserReadToolsTests(unittest.TestCase):
         self.assertIn("BrowserSnapshot", names)
         self.assertIn("BrowserScreenshot", names)
 
+    def test_researcher_cannot_use_browser_click(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            registry = ToolRegistry.default(workspace_root=workspace)
+        researcher = {s["name"] for s in registry.openai_tool_schemas(agent_class="researcher")}
+        operator = {s["name"] for s in registry.openai_tool_schemas(agent_class="operator")}
+        self.assertNotIn("BrowserClick", researcher)
+        self.assertNotIn("BrowserType", researcher)
+        self.assertIn("BrowserClick", operator)
+        self.assertIn("BrowserType", operator)
+
+
 if __name__ == "__main__":
     unittest.main()

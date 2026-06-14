@@ -221,6 +221,8 @@ DEFAULT_TOOL_AGENT_CLASSES: dict[str, tuple[AgentClass, ...]] = {
     "BrowserNavigate": ("researcher", "operator", "deployer"),
     "BrowserSnapshot": ("researcher", "operator", "deployer"),
     "BrowserScreenshot": ("researcher", "operator", "deployer"),
+    "BrowserClick": ("operator", "deployer"),
+    "BrowserType": ("operator", "deployer"),
 }
 
 
@@ -298,6 +300,32 @@ def _browser_screenshot(args: dict) -> dict:
     except Exception as exc:
         return {"ok": False, "error": str(exc)[:300]}
     return {"ok": bool(path), "screenshot_path": path}
+
+
+def _browser_click(args: dict) -> dict:
+    def _work():
+        svc = _browser_tool_service()
+        return svc.click(str(args.get("session_id") or "brain"), str(args["ref"]))
+
+    try:
+        r = _run_off_loop(_work)
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)[:300]}
+    return {"ok": r.success, "url": r.url, "snapshot": r.snapshot, "error": r.error}
+
+
+def _browser_type(args: dict) -> dict:
+    def _work():
+        svc = _browser_tool_service()
+        return svc.type(
+            str(args.get("session_id") or "brain"), str(args["ref"]), str(args.get("text", ""))
+        )
+
+    try:
+        r = _run_off_loop(_work)
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)[:300]}
+    return {"ok": r.success, "url": r.url, "snapshot": r.snapshot, "error": r.error}
 
 
 def is_valid_agent_class(value: str) -> bool:
@@ -2217,6 +2245,55 @@ class ToolRegistry:
                         },
                     },
                     "required": [],
+                },
+            )
+        )
+        registry.register(
+            ToolDefinition(
+                name="BrowserClick",
+                description="Click an element in the browser by @eN ref. Returns updated snapshot.",
+                allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["BrowserClick"],
+                handler=_browser_click,
+                requires_network=True,
+                ingests_external_content=True,
+                sanitize_fields=("snapshot",),
+                mutates_state=True,
+                tier=TIER_LOCAL_MUTATION,
+                parameter_schema={
+                    "type": "object",
+                    "properties": {
+                        "ref": {"type": "string", "description": "Element ref (e.g. @e1)"},
+                        "session_id": {
+                            "type": "string",
+                            "description": "Browser session id (default: brain)",
+                        },
+                    },
+                    "required": ["ref"],
+                },
+            )
+        )
+        registry.register(
+            ToolDefinition(
+                name="BrowserType",
+                description="Type text into an input element in the browser by @eN ref.",
+                allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["BrowserType"],
+                handler=_browser_type,
+                requires_network=True,
+                ingests_external_content=True,
+                sanitize_fields=("snapshot",),
+                mutates_state=True,
+                tier=TIER_LOCAL_MUTATION,
+                parameter_schema={
+                    "type": "object",
+                    "properties": {
+                        "ref": {"type": "string", "description": "Element ref (e.g. @e1)"},
+                        "text": {"type": "string", "description": "Text to type"},
+                        "session_id": {
+                            "type": "string",
+                            "description": "Browser session id (default: brain)",
+                        },
+                    },
+                    "required": ["ref"],
                 },
             )
         )
