@@ -653,8 +653,10 @@ class BrowserReadToolsTests(unittest.TestCase):
         self.assertIn("brain", TOOL_POLICIES["BrowserNavigate"].allowed_contexts)
         self.assertIn("brain", TOOL_POLICIES["BrowserSnapshot"].allowed_contexts)
         self.assertNotIn("brain", TOOL_POLICIES["BrowserClick"].allowed_contexts)
+        self.assertNotIn("brain", TOOL_POLICIES["BrowserType"].allowed_contexts)
         # interaction tools are mutations
         self.assertFalse(TOOL_POLICIES["BrowserClick"].read_only)
+        self.assertFalse(TOOL_POLICIES["BrowserType"].read_only)
         self.assertTrue(TOOL_POLICIES["BrowserNavigate"].read_only)
 
 
