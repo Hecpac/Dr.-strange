@@ -180,6 +180,27 @@ class RuntimeDbTests(unittest.TestCase):
             with db.cursor() as cur:  # shared connection's factory was NOT mutated
                 self.assertEqual(cur.execute("SELECT id, v FROM t").fetchone()["v"], "x")
 
+    def test_cursor_inside_transaction_shares_the_transaction(self) -> None:
+        # cursor() nested inside transaction() is supported (re-entrant lock,
+        # same connection): the inner cursor's writes commit/roll back ATOMICALLY
+        # with the enclosing transaction; cursor() never commits on its own.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = self._runtime_db(tmpdir)
+            with db.transaction() as tcur:
+                tcur.execute("INSERT INTO t (v) VALUES ('A')")
+                with db.cursor() as ccur:
+                    ccur.execute("INSERT INTO t (v) VALUES ('B')")
+            with db.cursor() as cur:
+                self.assertEqual(sorted(r["v"] for r in cur.execute("SELECT v FROM t")), ["A", "B"])
+            with self.assertRaises(RuntimeError):
+                with db.transaction() as tcur:
+                    tcur.execute("INSERT INTO t (v) VALUES ('C')")
+                    with db.cursor() as ccur:
+                        ccur.execute("INSERT INTO t (v) VALUES ('D')")
+                    raise RuntimeError("boom")
+            with db.cursor() as cur:  # both C and D rolled back with the outer transaction
+                self.assertEqual(sorted(r["v"] for r in cur.execute("SELECT v FROM t")), ["A", "B"])
+
     def test_nested_transaction_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db = self._runtime_db(tmpdir)

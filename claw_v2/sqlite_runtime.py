@@ -636,9 +636,12 @@ class RuntimeDb:
     @contextlib.contextmanager
     def cursor(self, *, row_factory=_RUNTIME_DB_DEFAULT_ROW_FACTORY):
         """Yield a cursor under the shared lock. No implicit transaction
-        control — for reads or caller-managed writes. ``row_factory`` shapes
-        rows for THIS cursor only (``None`` -> tuples); the shared connection's
-        factory is never mutated."""
+        control — for reads or caller-managed writes; ``cursor()`` never commits
+        on its own. It MAY be nested inside :meth:`transaction` (the re-entrant
+        lock allows it): the cursor then shares that open transaction, so its
+        writes commit or roll back atomically with the enclosing
+        ``transaction()``. ``row_factory`` shapes rows for THIS cursor only
+        (``None`` -> tuples); the shared connection's factory is never mutated."""
         with self._lock:
             cur = self._conn.cursor()
             if row_factory is not _RUNTIME_DB_DEFAULT_ROW_FACTORY:
