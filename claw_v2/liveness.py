@@ -77,7 +77,10 @@ def read_liveness(path: Path) -> dict | None:
     """
     try:
         raw = Path(path).read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
+        # UnicodeDecodeError (a ValueError) on a byte-corrupted sink must
+        # degrade to None like a missing file — never escape into the
+        # diagnostics/watchdog health path, which only guards sqlite errors.
         return None
     try:
         value = json.loads(raw)

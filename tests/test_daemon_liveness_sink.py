@@ -71,6 +71,15 @@ class LivenessSinkModuleTests(unittest.TestCase):
             path.write_text("[1, 2, 3]", encoding="utf-8")
             self.assertIsNone(liveness.read_liveness(path))
 
+    def test_read_byte_corrupted_sink_returns_none(self) -> None:
+        # Ultra #117 finding: invalid UTF-8 bytes raise UnicodeDecodeError (a
+        # ValueError, NOT an OSError). read_liveness must degrade to None, not
+        # let it escape into the diagnostics/watchdog health path.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = liveness.liveness_sink_path(tmpdir)
+            path.write_bytes(b"\xff\xfe\x00\x80not utf-8")
+            self.assertIsNone(liveness.read_liveness(path))
+
 
 class _FakeWebTransport:
     def __init__(self, serving: bool) -> None:
