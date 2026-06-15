@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import secrets
 import shlex
 import threading
 import time
@@ -540,7 +542,7 @@ class ObservationWindowState:
             "actor": self._freeze_actor,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
-        self.state_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        _atomic_write_text(self.state_path, json.dumps(payload, indent=2, sort_keys=True))
 
     def _prune_locked(self, now: float) -> None:
         while self._tool_call_times and now - self._tool_call_times[0] > 60:
@@ -944,3 +946,47 @@ def _timestamp_from_iso(value: object) -> float | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.timestamp()
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` atomically and durably (F0.4).
+
+    Mirrors ``coordinator._atomic_write_text`` / ``liveness.write_liveness``
+    (unique dot-prefixed tmp file → ``os.write`` → ``fsync`` → ``os.replace`` →
+    best-effort parent-dir fsync); intentionally duplicated rather than imported
+    so this leaf module has no dependency on the coordinator. A reader never
+    observes a partial file: a crash between temp-write and rename leaves the
+    target absent or the previous complete file, never half-written, so the
+    next boot's circuit/budget restore always parses valid JSON.
+    """
+    data = text.encode("utf-8")
+    tmp = path.parent / f".{path.name}.{secrets.token_hex(4)}.tmp"
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(fd, data)
+        os.fsync(fd)
+    except BaseException:
+        os.close(fd)
+        tmp.unlink(missing_ok=True)
+        raise
+    else:
+        os.close(fd)
+    try:
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+    # Best-effort durability of the rename across power loss; a failure here
+    # (e.g. a filesystem/sandbox that disallows fsync'ing a directory) must NOT
+    # turn a successful, atomically in-place write into a spurious error.
+    try:
+        dir_fd = os.open(str(path.parent), os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except OSError:
+        pass

@@ -8,9 +8,13 @@ multi-task progress.
 
 from __future__ import annotations
 
+import contextlib
+import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from claw_v2.task_board import (
     ProjectStatus,
@@ -129,6 +133,93 @@ class TaskBoardProjectTests(unittest.TestCase):
             tasks = board._load_all()  # noqa: SLF001 — covering a regression invariant
             self.assertEqual(len(tasks), 1)
             self.assertEqual(tasks[0].title, "real task")
+
+
+def _crash_replace_for(target: Path):
+    """Return an ``os.replace`` stand-in that simulates power loss exactly at
+    the atomic-commit rename for ``target`` (and only ``target``), delegating
+    every other rename to the real implementation."""
+    real_replace = os.replace
+
+    def crash_replace(src, dst, *args, **kwargs):
+        if Path(dst).name == target.name:
+            raise OSError("simulated power loss at rename")
+        return real_replace(src, dst, *args, **kwargs)
+
+    return crash_replace
+
+
+class TaskBoardAtomicWriteTests(unittest.TestCase):
+    """F0.4: ``TaskBoard`` persistence must be atomic and crash-safe. A reader
+    must see either the old complete JSON or the new complete JSON — never a
+    truncated/partial file — even if the process dies mid-write."""
+
+    def test_save_crash_at_rename_leaves_previous_complete_json(self) -> None:
+        # TDD #1: a crash at the atomic-commit point of a task re-save must
+        # leave the on-disk task as the OLD complete record, not the new one
+        # (and never a half-written file). Non-atomic write_text overwrites the
+        # target in place and "commits" the new content even though the commit
+        # was supposed to fail — that is the failure this test pins down.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            board = TaskBoard(board_root=Path(tmpdir))
+            task = board.publish("v1 title", "v1 instruction")
+            target = Path(tmpdir) / f"{task.id}.json"
+            self.assertEqual(json.loads(target.read_text(encoding="utf-8"))["title"], "v1 title")
+
+            task.title = "v2 title"
+            with patch("os.replace", side_effect=_crash_replace_for(target)):
+                with contextlib.suppress(OSError):
+                    board._save(task)  # noqa: SLF001 — exercising the persistence primitive
+
+            data = json.loads(target.read_text(encoding="utf-8"))  # must not raise
+            self.assertEqual(data["title"], "v1 title")
+
+    def test_save_project_crash_at_rename_leaves_previous_complete_json(self) -> None:
+        # TDD #2: same old-or-new invariant for project records.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            board = TaskBoard(board_root=Path(tmpdir))
+            project = board.publish_project("v1 project")
+            target = Path(tmpdir) / "projects" / f"{project.id}.json"
+            self.assertEqual(json.loads(target.read_text(encoding="utf-8"))["title"], "v1 project")
+
+            project.title = "v2 project"
+            with patch("os.replace", side_effect=_crash_replace_for(target)):
+                with contextlib.suppress(OSError):
+                    board._save_project(project)  # noqa: SLF001
+
+            data = json.loads(target.read_text(encoding="utf-8"))  # must not raise
+            self.assertEqual(data["title"], "v1 project")
+
+    def test_reader_never_sees_corrupt_json_after_repeated_failed_saves(self) -> None:
+        # TDD #4: read-after-failure. Across repeated interrupted saves a reader
+        # always parses valid JSON that is one of the known-complete versions —
+        # never a truncated/corrupt file.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            board = TaskBoard(board_root=Path(tmpdir))
+            task = board.publish("title 0", "instruction")
+            target = Path(tmpdir) / f"{task.id}.json"
+            for n in range(1, 6):
+                task.title = f"title {n}"
+                with patch("os.replace", side_effect=_crash_replace_for(target)):
+                    with contextlib.suppress(OSError):
+                        board._save(task)  # noqa: SLF001
+                data = json.loads(target.read_text(encoding="utf-8"))  # must never raise
+                self.assertEqual(data["title"], "title 0")  # old complete version survives
+
+    def test_successful_save_writes_complete_json_and_leaves_no_tmp(self) -> None:
+        # Preservation guard: the happy path still produces the new complete
+        # record, leaves no leftover temp file, and the temp file never matches
+        # the ``*.json`` listing glob (so _load_all never sees a partial).
+        with tempfile.TemporaryDirectory() as tmpdir:
+            board = TaskBoard(board_root=Path(tmpdir))
+            task = board.publish("done", "instruction")
+            target = Path(tmpdir) / f"{task.id}.json"
+            self.assertEqual(json.loads(target.read_text(encoding="utf-8"))["title"], "done")
+            siblings = list(Path(tmpdir).glob("*"))
+            self.assertEqual(
+                [p.name for p in siblings if p.name != "projects"], [f"{task.id}.json"]
+            )
+            self.assertEqual(len(board._load_all()), 1)  # noqa: SLF001
 
 
 if __name__ == "__main__":

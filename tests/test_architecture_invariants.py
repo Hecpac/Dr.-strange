@@ -86,6 +86,36 @@ class ArchitectureInvariantTests(unittest.TestCase):
         self.assertIn("liveness.read_liveness", reader)
         self.assertIn("liveness.liveness_sink_path", reader)
 
+    def test_operational_state_writers_are_atomic(self) -> None:
+        """F0.4 tripwire: operational state files — the shared task board
+        (``task_board.py``) and the observation-window circuit/budget freeze
+        state (``observation_window.py``) — must be persisted atomically
+        (temp file → fsync → ``os.replace`` → parent-dir fsync), never via a
+        direct non-atomic ``Path.write_text``. A torn write here drops a task
+        result or fails the next boot's circuit/budget restore. Only writes are
+        policed (``read_text`` is fine). A new operational state module belongs
+        in this allowlist with its write routed through the established atomic
+        helper — not exempted from it."""
+        operational_state_modules = (
+            "claw_v2/task_board.py",
+            "claw_v2/observation_window.py",
+        )
+        offenders: list[str] = []
+        for rel_path in operational_state_modules:
+            tree = ast.parse((REPO_ROOT / rel_path).read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "write_text"
+                ):
+                    offenders.append(f"{rel_path}:{node.lineno}")
+        self.assertEqual(
+            offenders,
+            [],
+            f"operational state writer uses non-atomic write_text: {offenders}",
+        )
+
     def test_self_improve_promotion_actions_have_critical_floor(self) -> None:
         from claw_v2.brain import _risk_floor_for_action
 
