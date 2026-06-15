@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
+from claw_v2 import liveness
 from claw_v2.redaction import redact_sensitive
 
 
@@ -245,7 +246,56 @@ def _merge_events(*event_groups: list[dict[str, Any]], limit: int) -> list[dict[
     return [by_id[event_id] for event_id in sorted(by_id, reverse=True)[:limit]]
 
 
+def _main_db_file(conn: sqlite3.Connection) -> Path | None:
+    """Resolve the on-disk path of the connection's main database, or None."""
+    try:
+        rows = conn.execute("PRAGMA database_list").fetchall()
+    except sqlite3.Error:
+        return None
+    for row in rows:
+        # Rows are (seq, name, file). Handle both sqlite3.Row and tuple.
+        try:
+            name = row["name"]
+            file = row["file"]
+        except (IndexError, TypeError, KeyError):
+            try:
+                name = row[1]
+                file = row[2]
+            except (IndexError, TypeError):
+                continue
+        if name == "main" and file:
+            return Path(str(file))
+    return None
+
+
 def _heartbeat_summary(conn: sqlite3.Connection, *, now: float | None = None) -> dict[str, Any]:
+    """Summarize daemon liveness.
+
+    F0.3: the atomic JSON liveness sink (written by the scheduled lifecycle
+    heartbeat) is the single source of truth when present. It carries the
+    authoritative ``web_transport_serving`` together with its ``ts`` — never
+    combine ts-from-sink with web-from-observe. Only when the sink is
+    missing/unreadable do we fall back to the legacy observe_stream query.
+    """
+    db_file = _main_db_file(conn)
+    if db_file is not None:
+        record = liveness.read_liveness(liveness.liveness_sink_path(db_file.parent))
+        if record is not None:
+            raw_ts = record.get("ts")
+            age_s: float | None = None
+            if isinstance(raw_ts, (int, float)):
+                current = time.time() if now is None else now
+                age_s = max(0.0, float(current) - float(raw_ts))
+            return {
+                "present": True,
+                "ts": raw_ts,
+                "age_s": age_s,
+                "web_transport_serving": record.get("web_transport_serving"),
+                "pid": record.get("pid"),
+                "boot_id": record.get("boot_id"),
+                "source": "liveness_sink",
+            }
+
     row = conn.execute(
         """
         SELECT id, timestamp, payload
@@ -259,7 +309,7 @@ def _heartbeat_summary(conn: sqlite3.Connection, *, now: float | None = None) ->
         return {"present": False}
     payload = _loads_json(row["payload"])
     raw_ts = payload.get("ts") if isinstance(payload, dict) else None
-    age_s: float | None = None
+    age_s = None
     if isinstance(raw_ts, (int, float)):
         current = time.time() if now is None else now
         age_s = max(0.0, float(current) - float(raw_ts))
@@ -271,6 +321,7 @@ def _heartbeat_summary(conn: sqlite3.Connection, *, now: float | None = None) ->
         "ts": raw_ts,
         "age_s": age_s,
         "web_transport_serving": web_serving,
+        "source": "observe_stream",
     }
 
 

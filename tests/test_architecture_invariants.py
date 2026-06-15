@@ -74,6 +74,18 @@ class ArchitectureInvariantTests(unittest.TestCase):
         self.assertFalse(inspect.iscoroutinefunction(build_runtime))
         self.assertFalse(inspect.iscoroutinefunction(_is_git_repo))
 
+    def test_liveness_signal_has_a_consumer(self) -> None:
+        """F0.3 tripwire: the daemon liveness signal lives in a shared atomic
+        JSON sink (``claw_v2/liveness.py``). The WRITER (lifecycle) and the
+        READER (diagnostics) must both reference that shared module so they
+        cannot drift to different paths and silently lose the signal."""
+        writer = (REPO_ROOT / "claw_v2" / "lifecycle.py").read_text(encoding="utf-8")
+        reader = (REPO_ROOT / "claw_v2" / "diagnostics.py").read_text(encoding="utf-8")
+        self.assertIn("liveness.write_liveness", writer)
+        self.assertIn("liveness.liveness_sink_path", writer)
+        self.assertIn("liveness.read_liveness", reader)
+        self.assertIn("liveness.liveness_sink_path", reader)
+
     def test_self_improve_promotion_actions_have_critical_floor(self) -> None:
         from claw_v2.brain import _risk_floor_for_action
 

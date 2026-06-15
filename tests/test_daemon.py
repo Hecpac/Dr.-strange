@@ -101,6 +101,11 @@ class DaemonTickTests(unittest.TestCase):
                 ledger,
                 job_service=jobs,
                 pending_verification_interval=900,
+                # F0.3: idle ticks are now sampled out of observe_stream. Force
+                # every tick to emit so this test can assert the field-omission
+                # semantics (the second, skipped tick must not carry a stale
+                # reconciliation job id) rather than the sampling behavior.
+                tick_emit_sample=1,
             )
             daemon.tick(now=1_000_000)  # enqueue runs
             daemon.tick(now=1_000_030)  # within interval -> skipped
