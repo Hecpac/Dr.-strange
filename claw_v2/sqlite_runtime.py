@@ -632,6 +632,24 @@ class RuntimeDb:
         ``heal_orphaned_wal`` path performs on this registered handle)."""
         self._heal_handle.reopen()
 
+    # -- store wiring (F1.1a1) ------------------------------------------------
+    @property
+    def lock(self) -> threading.RLock:
+        """The shared re-entrant lock. A store that shares this RuntimeDb sets
+        ``self._lock = runtime_db.lock`` so its existing ``with self._lock:``
+        blocks serialize on the one shared lock (RLock: memory's
+        ``@_synchronized`` reads nest)."""
+        return self._lock
+
+    def connection_handle(self, *, row_factory: bool = True) -> "_RuntimeConnHandle":
+        """Return a non-owning, dynamic facade over this RuntimeDb's CURRENT
+        connection. A store assigns it to ``self._conn`` and keeps using
+        ``self._conn.execute(...)`` / ``.executescript()`` / ``.commit()`` /
+        ``.rollback()`` unchanged, while the real connection lives here and a
+        WAL-heal reopen that swaps it stays invisible (no stale connection). The
+        store must hold :attr:`lock` around its access, exactly as before."""
+        return _RuntimeConnHandle(self, row_factory=row_factory)
+
     # -- access ---------------------------------------------------------------
     @contextlib.contextmanager
     def cursor(self, *, row_factory=_RUNTIME_DB_DEFAULT_ROW_FACTORY):
@@ -731,3 +749,42 @@ class RuntimeDb:
                 self._conn.close()
             except Exception:
                 logger.debug("RuntimeDb connection close failed", exc_info=True)
+
+
+class _RuntimeConnHandle:
+    """Non-owning, dynamic facade over a :class:`RuntimeDb`'s current sqlite3
+    connection (F1.1a1).
+
+    A runtime store assigns this to ``self._conn`` and keeps calling the four
+    connection methods it already uses — ``execute``, ``executescript``,
+    ``commit``, ``rollback`` — each delegating to RuntimeDb's CURRENT connection.
+    A WAL-heal reopen swaps that connection under the shared lock, and because
+    the handle resolves ``self._db._conn`` on every call it never holds a stale
+    connection. ``execute`` shapes its result rows per handle (``Row`` or tuple)
+    on a fresh cursor, never mutating the shared connection's ``row_factory``.
+
+    It deliberately exposes NO ``close``/``cursor``/``.conn`` and does not own
+    the connection: RuntimeDb is the sole owner of the connection lifecycle and
+    of WAL-heal registration. Callers must hold ``RuntimeDb.lock`` around their
+    access (the store keeps its existing ``with self._lock:`` blocks, now bound
+    to the shared lock)."""
+
+    __slots__ = ("_db", "_row_factory")
+
+    def __init__(self, runtime_db: "RuntimeDb", *, row_factory: bool = True) -> None:
+        self._db = runtime_db
+        self._row_factory = sqlite3.Row if row_factory else None
+
+    def execute(self, sql: str, parameters=()):  # noqa: ANN001 - sqlite param shape
+        cur = self._db._conn.cursor()
+        cur.row_factory = self._row_factory
+        return cur.execute(sql, parameters)
+
+    def executescript(self, sql_script: str):
+        return self._db._conn.executescript(sql_script)
+
+    def commit(self) -> None:
+        self._db._conn.commit()
+
+    def rollback(self) -> None:
+        self._db._conn.rollback()

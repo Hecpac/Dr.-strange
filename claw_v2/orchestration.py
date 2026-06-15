@@ -12,6 +12,7 @@ from typing import Any
 
 from claw_v2.redaction import redact_sensitive
 from claw_v2.sqlite_runtime import (
+    RuntimeDb,
     connect_runtime_sqlite,
     make_store_wal_heal,
     register_wal_heal,
@@ -237,13 +238,27 @@ class OrchestrationStore:
     and must be acknowledged by the next consumer role.
     """
 
-    def __init__(self, db_path: Path | str, *, observe: Any | None = None) -> None:
+    def __init__(
+        self,
+        db_path: Path | str,
+        *,
+        observe: Any | None = None,
+        runtime_db: RuntimeDb | None = None,
+    ) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.observe = observe
-        self._conn = connect_runtime_sqlite(self.db_path)
-        register_wal_heal(self.db_path, make_store_wal_heal(self))
-        self._lock = threading.Lock()
+        if runtime_db is not None:
+            # F1.1a1 production path: share the single RuntimeDb connection + lock.
+            self._db: RuntimeDb | None = runtime_db
+            self._conn = runtime_db.connection_handle(row_factory=True)
+            self._lock = runtime_db.lock
+        else:
+            # Transitional test/back-compat path (not used by main.py).
+            self._db = None
+            self._conn = connect_runtime_sqlite(self.db_path)
+            register_wal_heal(self.db_path, make_store_wal_heal(self))
+            self._lock = threading.Lock()
         with self._lock:
             self._conn.executescript(ORCHESTRATION_SCHEMA)
             self._conn.commit()

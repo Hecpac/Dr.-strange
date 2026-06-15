@@ -85,7 +85,7 @@ from claw_v2.content import ContentEngine
 from claw_v2.sandbox import SandboxPolicy
 from claw_v2.subprocess_runner import run_subprocess_bounded
 from claw_v2.runtime_policy import RuntimePolicyEngine
-from claw_v2.sqlite_runtime import check_runtime_sqlite_health
+from claw_v2.sqlite_runtime import RuntimeDb, check_runtime_sqlite_health
 from claw_v2.task_board import TaskBoard
 from claw_v2.task_ledger import TaskLedger
 from claw_v2.terminal_bridge import TerminalBridgeService
@@ -582,9 +582,11 @@ def _wrap_job_handler(
 
 def _setup_core_state(
     config: AppConfig,
+    *,
+    runtime_db: RuntimeDb | None = None,
 ) -> tuple[MemoryStore, ObserveStream, MetricsTracker, ApprovalManager, AgentBus, FileAgentStore]:
-    memory = MemoryStore(config.db_path)
-    observe = ObserveStream(config.db_path)
+    memory = MemoryStore(config.db_path, runtime_db=runtime_db)
+    observe = ObserveStream(config.db_path, runtime_db=runtime_db)
     # F5.1: lets build_context report identity_block_truncated.
     memory.observe = observe
     metrics = MetricsTracker()
@@ -776,6 +778,7 @@ def _setup_agent_services(
     agent_store: FileAgentStore,
     metrics: MetricsTracker,
     brain: BrainService,
+    runtime_db: RuntimeDb | None = None,
 ) -> tuple[
     AutoResearchAgentService,
     SubAgentService,
@@ -807,7 +810,7 @@ def _setup_agent_services(
     discovered = sub_agents.discover()
     if discovered:
         observe.emit("sub_agents_discovered", payload={"agents": discovered})
-    orchestration_store = OrchestrationStore(config.db_path, observe=observe)
+    orchestration_store = OrchestrationStore(config.db_path, observe=observe, runtime_db=runtime_db)
     coordinator = CoordinatorService(
         router=router,
         observe=observe,
@@ -2122,10 +2125,17 @@ def build_runtime(
     config.ensure_directories()
     check_runtime_sqlite_health(config.db_path, thorough=True)
 
-    memory, observe, metrics, approvals, bus, agent_store = _setup_core_state(config)
-    task_ledger = TaskLedger(config.db_path, observe=observe)
+    # F1.1a1: ONE RuntimeDb owns the single claw.db connection + shared lock for
+    # every runtime store. Built once here and injected into all production
+    # stores so the daemon is a single writer (RAÍZ #1). No production store
+    # falls back to its own connection (runtime_db=None is test-only).
+    runtime_db = RuntimeDb(config.db_path)
+    memory, observe, metrics, approvals, bus, agent_store = _setup_core_state(
+        config, runtime_db=runtime_db
+    )
+    task_ledger = TaskLedger(config.db_path, observe=observe, runtime_db=runtime_db)
     task_ledger.reconcile_false_successes()
-    job_service = JobService(config.db_path, observe=observe)
+    job_service = JobService(config.db_path, observe=observe, runtime_db=runtime_db)
     model_registry = ModelRegistry.default()
     startup_health = _run_startup_healthchecks(config, observe)
     observation_window = ObservationWindowState(
@@ -2197,6 +2207,11 @@ def build_runtime(
         codex_transport=codex_transport,
         observation_window=observation_window,
     )
+    # F1.1a1: capability_grants is built on-demand by the HeyGen read-only tool
+    # path (tools.py -> HeyGenReadOnlyAdapter -> CapabilityGrantStore). Expose
+    # the shared RuntimeDb on the registry so that store joins the single writer
+    # instead of opening its own claw.db connection in production.
+    tool_registry.runtime_db = runtime_db
     auto_research, sub_agents, coordinator, task_board, heartbeat, kairos, buddy = (
         _setup_agent_services(
             config=config,
@@ -2208,6 +2223,7 @@ def build_runtime(
             agent_store=agent_store,
             metrics=metrics,
             brain=brain,
+            runtime_db=runtime_db,
         )
     )
     daemon, bot, pipeline, _, _, _ = _setup_operational_services(
