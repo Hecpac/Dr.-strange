@@ -367,7 +367,16 @@ def _atomic_write_text(path: Path, text: str) -> None:
     tmp = path.parent / f".{path.name}.{secrets.token_hex(4)}.tmp"
     fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
-        os.write(fd, data)
+        # os.write may write fewer bytes than requested (short write); loop until
+        # the full payload lands so a partial write is never fsync'd and
+        # committed as a truncated file. No progress (n <= 0) is unrecoverable.
+        view = memoryview(data)
+        written = 0
+        while written < len(view):
+            n = os.write(fd, view[written:])
+            if n <= 0:
+                raise OSError(f"short write to {tmp}: os.write returned {n}")
+            written += n
         os.fsync(fd)
     except BaseException:
         os.close(fd)

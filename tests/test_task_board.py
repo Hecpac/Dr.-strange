@@ -221,6 +221,44 @@ class TaskBoardAtomicWriteTests(unittest.TestCase):
             )
             self.assertEqual(len(board._load_all()), 1)  # noqa: SLF001
 
+    def test_short_os_write_still_persists_complete_json(self) -> None:
+        # F0.4 blocker (#119 review): a single unchecked os.write may short-write
+        # (return fewer bytes than the payload). The helper must keep writing
+        # until the whole payload lands, so the committed file is the COMPLETE
+        # new record — never a truncated prefix.
+        real_write = os.write
+
+        def fragmented_write(fd, data):  # write at most 8 bytes per call
+            return real_write(fd, bytes(data[:8]))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            board = TaskBoard(board_root=Path(tmpdir))
+            task = board.publish("short write target", "x" * 500)
+            target = Path(tmpdir) / f"{task.id}.json"
+            task.title = "rewritten after short writes"
+            with patch("os.write", side_effect=fragmented_write):
+                board._save(task)  # noqa: SLF001
+
+            data = json.loads(target.read_text(encoding="utf-8"))  # must parse fully
+            self.assertEqual(data["title"], "rewritten after short writes")
+            self.assertEqual(data["instruction"], "x" * 500)
+
+    def test_os_write_no_progress_raises_before_replace_and_keeps_old_json(self) -> None:
+        # If os.write makes no progress (returns 0), the helper must raise BEFORE
+        # os.replace so a truncated/empty file is never committed — the previous
+        # complete record survives intact.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            board = TaskBoard(board_root=Path(tmpdir))
+            task = board.publish("v1 title", "v1 instruction")
+            target = Path(tmpdir) / f"{task.id}.json"
+            task.title = "v2 title"
+            with patch("os.write", return_value=0):
+                with self.assertRaises(OSError):
+                    board._save(task)  # noqa: SLF001
+
+            data = json.loads(target.read_text(encoding="utf-8"))  # must parse
+            self.assertEqual(data["title"], "v1 title")
+
 
 if __name__ == "__main__":
     unittest.main()

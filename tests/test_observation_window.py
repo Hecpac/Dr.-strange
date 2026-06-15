@@ -731,6 +731,26 @@ class ObservationWindowAtomicWriteTests(unittest.TestCase):
             data = json.loads(state_path.read_text(encoding="utf-8"))  # must not raise
             self.assertEqual(data["reason"], "v1")
 
+    def test_short_os_write_still_persists_complete_state(self) -> None:
+        # F0.4 blocker (#119 review): a single unchecked os.write may short-write.
+        # The helper must keep writing until the whole payload lands so the
+        # committed freeze state is COMPLETE valid JSON, never a truncated prefix
+        # that fails the next boot's circuit/budget restore.
+        real_write = os.write
+
+        def fragmented_write(fd, data):  # write at most 8 bytes per call
+            return real_write(fd, bytes(data[:8]))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "window.json"
+            window = ObservationWindowState(state_path=state_path)
+            with patch("os.write", side_effect=fragmented_write):
+                window.freeze(reason="frozen-with-short-writes", actor="test")
+
+            data = json.loads(state_path.read_text(encoding="utf-8"))  # must parse fully
+            self.assertTrue(data["frozen"])
+            self.assertEqual(data["reason"], "frozen-with-short-writes")
+
 
 if __name__ == "__main__":
     unittest.main()
