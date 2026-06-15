@@ -53,6 +53,75 @@ class FormatterTests(unittest.TestCase):
         line = _payload_summary("dispatch_decision", payload, {})
         self.assertIn("matched=shortcut.url_extract", line)
 
+    def test_dispatch_decision_consolidated_summary_shows_selected_and_tried(self) -> None:
+        # F0.3c: a consolidated event carries tried_handlers[] + selected_*.
+        # The formatter must surface the selected route, how many handlers were
+        # tried, and the fall-through reasons instead of a single handler/route.
+        payload = {
+            "session_id": "sess-abcdef12",
+            "selected_handler": None,
+            "selected_route": "fall_through",
+            "handler": None,
+            "route": "fall_through",
+            "reason": "fall_through_all",
+            "captured": False,
+            "text_preview": "porque te cuesta?",
+            "tried_handlers": [
+                {
+                    "handler": "operational_alert",
+                    "route": "fall_through",
+                    "reason": "operational_alert_no_match",
+                    "captured": False,
+                },
+                {
+                    "handler": "task_intent",
+                    "route": "fall_through",
+                    "reason": "disabled_by_flag",
+                    "captured": False,
+                },
+                {
+                    "handler": "nlm_natural_language",
+                    "route": "fall_through",
+                    "reason": "nlm_intent_no_match",
+                    "captured": False,
+                },
+            ],
+        }
+        line = _payload_summary("dispatch_decision", payload, {})
+        self.assertIn("selected=fall_through", line)
+        self.assertIn("tried=3", line)
+        # A representative fall-through reason should be visible.
+        self.assertIn("disabled_by_flag", line)
+
+    def test_dispatch_decision_consolidated_summary_names_winner(self) -> None:
+        payload = {
+            "session_id": "sess-abcdef12",
+            "selected_handler": "task_intent",
+            "selected_route": "intercepted",
+            "handler": "task_intent",
+            "route": "intercepted",
+            "reason": "task_intent_classifier_matched",
+            "captured": True,
+            "text_preview": "estado de la task",
+            "tried_handlers": [
+                {
+                    "handler": "operational_alert",
+                    "route": "fall_through",
+                    "reason": "operational_alert_no_match",
+                    "captured": False,
+                },
+                {
+                    "handler": "task_intent",
+                    "route": "intercepted",
+                    "reason": "task_intent_classifier_matched",
+                    "captured": True,
+                },
+            ],
+        }
+        line = _payload_summary("dispatch_decision", payload, {})
+        self.assertIn("selected=task_intent", line)
+        self.assertIn("tried=2", line)
+
     def test_kairos_decide_failed_summary_shows_kind_and_error(self) -> None:
         payload = {"error_kind": "codex_timeout", "error": "Codex CLI timed out after 300.0s"}
         line = _payload_summary("kairos_decide_failed", payload, {})

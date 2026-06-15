@@ -67,10 +67,31 @@ def _format_event(event: dict) -> str:
 
 def _payload_summary(event_type: str, payload: dict, event: dict) -> str:
     if event_type == "dispatch_decision":
+        text = (payload.get("text_preview") or "").replace("\n", " ")[:40]
+        tried = payload.get("tried_handlers")
+        if isinstance(tried, list):
+            # F0.3c consolidated shape: one event per turn carrying every
+            # handler considered. Show the selected route, how many handlers
+            # were tried, and the distinct fall-through reasons so audits see
+            # *why* a turn ended up at the brain.
+            selected_route = payload.get("selected_route") or payload.get("route") or "?"
+            selected_handler = payload.get("selected_handler")
+            selected_part = f" selected={selected_handler}" if selected_handler else ""
+            fall_reasons: list[str] = []
+            for entry in tried:
+                if not isinstance(entry, dict) or entry.get("captured"):
+                    continue
+                reason = entry.get("reason")
+                if reason and reason not in fall_reasons:
+                    fall_reasons.append(str(reason))
+            reasons_part = f" reasons={','.join(fall_reasons[:4])}" if fall_reasons else ""
+            return (
+                f"selected={selected_route}{selected_part} tried={len(tried)}"
+                f"{reasons_part} text={text!r}"
+            )
         handler = payload.get("handler") or "?"
         route = payload.get("route") or "?"
         reason = payload.get("reason") or ""
-        text = (payload.get("text_preview") or "").replace("\n", " ")[:40]
         matched = payload.get("matched_pattern")
         matched_part = f" matched={matched}" if matched else ""
         return f"handler={handler} route={route} reason={reason}{matched_part} text={text!r}"

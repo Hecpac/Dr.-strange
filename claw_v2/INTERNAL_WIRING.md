@@ -8,9 +8,9 @@
 ## meta
 
 ```yaml
-describes_commit: fe99808+spec-002-self-improve-promotion-hotfix+spec-002-subprocess-bounded-pr-c+spec-002-approval-manager-pr-d+spec-002-promotion-tooling-phase-4+brain-delegation-tool+recovery-jobs-drain-c1+audit-m3-m4-offloop-emits-nonblocking-checkpoint-backup+audit-high-2026-06-11+audit-waves-2-3-2026-06-12+adapters-d1-split-2026-06-12+pasos-6-7-coordinator-resumable-2026-06-12+wal-generation-guard-2026-06-12+telegram-t1-t12-2026-06-12+m2-pre-brain-browse-ops-gate-2026-06-14
-doc_version: 2.22
-last_verified: 2026-06-14
+describes_commit: fe99808+spec-002-self-improve-promotion-hotfix+spec-002-subprocess-bounded-pr-c+spec-002-approval-manager-pr-d+spec-002-promotion-tooling-phase-4+brain-delegation-tool+recovery-jobs-drain-c1+audit-m3-m4-offloop-emits-nonblocking-checkpoint-backup+audit-high-2026-06-11+audit-waves-2-3-2026-06-12+adapters-d1-split-2026-06-12+pasos-6-7-coordinator-resumable-2026-06-12+wal-generation-guard-2026-06-12+telegram-t1-t12-2026-06-12+m2-pre-brain-browse-ops-gate-2026-06-14+f0-3c-dispatch-decision-consolidation-2026-06-15
+doc_version: 2.23
+last_verified: 2026-06-15
 verification_method: manual + pytest + AST sentinel cross-check
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
@@ -680,8 +680,12 @@ human approval. Each member satisfies all four:
 ### 5.1 layer 1 — pre-brain dispatchers
 
 `BotService.handle_text` (`claw_v2/bot.py`) tries the handlers in order.
-Each emits `dispatch_decision`. Order matters; no test enforces it. The
-real call sites in `_handle_text_body` (verified 2026-06-10):
+Each *records* its decision into a turn-scoped accumulator
+(`dispatch_decision_accumulator`, `claw_v2/turn_context.py`);
+`_handle_text_body` then emits a SINGLE consolidated `dispatch_decision`
+event per turn (F0.3c — `_flush_dispatch_decision`, idempotent), instead
+of ~15 rows/turn. Order matters; no test enforces it. The real call sites
+in `_handle_text_body` (verified 2026-06-10):
 
 | # | Handler symbol | Trigger / contract |
 |---|---|---|
@@ -719,11 +723,19 @@ reason (`tests/test_dispatch_routing.py:121` codifies the over-capture as
 xfail strict). The CRITICAL_TASK_KINDS list in #11 is hardcoded
 (`{social_publish, pipeline_merge, deploy}`) — see TODO §7.
 
-**dispatch_decision payload**: `handler`, `route` (intercepted |
-fall_through | brain_shortcut | explicit_command), `reason`, `captured`
-(bool), `text_preview[:80]`, `text_len`, `session_id`. `brain_shortcut`
-means the dispatcher only enriched the prompt and the brain handled the
-turn (`captured=false`).
+**dispatch_decision payload** (F0.3c consolidated, one event/turn):
+`tried_handlers[]` (every handler considered — each entry: `handler`,
+`route`, `reason`, `captured`, `matched_pattern`; bounded, no
+prompt/system/evidence blobs), `selected_handler`/`selected_route` (the
+winner, else None/`fall_through`), plus back-compat TOP-LEVEL fields so
+existing parsers keep working: `handler`/`route` (mirror selected),
+`reason` (winner's or `fall_through_all_<n>`), `captured` (any captured),
+`matched_pattern`, `text_preview[:80]`, `text_len`, `text_length`,
+`session_id`. `route` values: intercepted | fall_through | brain_shortcut
+| explicit_command. `brain_shortcut` means the dispatcher only enriched
+the prompt and the brain handled the turn (`captured=false`). Entry points
+without a turn accumulator (`handle_multimodal`) still emit the legacy
+single-handler shape via `_emit_single_dispatch_decision`.
 
 ### 5.2 layer 2 — CapabilityRouter
 

@@ -57,7 +57,16 @@ def _drive(
     def spy(event_type: str, **kwargs):
         events.append(event_type)
         if event_type == "dispatch_decision":
-            decisions.append(dict(kwargs.get("payload") or {}))
+            payload = dict(kwargs.get("payload") or {})
+            # F0.3c: a turn emits ONE consolidated dispatch_decision whose
+            # tried_handlers[] array holds every per-handler decision. Flatten
+            # it back to the per-handler view these routing assertions expect
+            # (each entry already carries handler/route/reason/captured).
+            tried = payload.get("tried_handlers")
+            if isinstance(tried, list):
+                decisions.extend(dict(entry) for entry in tried if isinstance(entry, dict))
+            else:
+                decisions.append(payload)
         return real_emit(event_type, **kwargs)
 
     with patch.object(bot.observe, "emit", side_effect=spy):
