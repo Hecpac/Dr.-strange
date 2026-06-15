@@ -73,6 +73,27 @@ class ObserveStreamTurnIdIndexTests(unittest.TestCase):
         self.assertEqual(self.observe.prune(retention_days=30, max_rows=2), 2)
         self.assertEqual(self.observe.prune(retention_days=30, max_rows=10), 3)
 
+    def test_prune_caps_total_row_count(self) -> None:
+        # 50 fresh rows (all within retention): age-only prune keeps them all,
+        # but max_total_rows must cap the table to its highest 20 ids.
+        with self.observe._lock:
+            for _ in range(50):
+                self.observe._conn.execute(
+                    "INSERT INTO observe_stream (event_type, payload) VALUES ('e', '{}')"
+                )
+            self.observe._conn.commit()
+
+        deleted = self.observe.prune(retention_days=30, max_rows=1000, max_total_rows=20)
+
+        self.assertEqual(deleted, 30)
+        rows = self.observe._conn.execute(
+            "SELECT id FROM observe_stream ORDER BY id"
+        ).fetchall()
+        self.assertEqual(len(rows), 20)
+        ids = [r[0] for r in rows]
+        # survivors are the highest ids (31..50)
+        self.assertEqual(ids, list(range(31, 51)))
+
 
 class ObservePruneSchedulerJobTests(unittest.TestCase):
     def test_observe_prune_job_is_registered_and_runs(self) -> None:

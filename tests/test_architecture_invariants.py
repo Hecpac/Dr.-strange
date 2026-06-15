@@ -263,6 +263,64 @@ class ArchitectureInvariantTests(unittest.TestCase):
                         offenders.append(f"{rel_path}:{node.lineno}:shell=True")
         self.assertEqual(offenders, [])
 
+    def test_vacuum_only_runs_off_tick(self) -> None:
+        """F0.2c: VACUUM is blocking and needs ~2x free disk, so it must never
+        be reachable from ``daemon.tick`` / ``cron.run_due``, and its only
+        ``main.py`` call-site must be wired through
+        ``register_background_job_runner`` (the off-tick mechanism). Mirrors
+        the off-tick discipline of Core Invariant 1."""
+        # 1. No VACUUM anywhere in the tick / scheduler hot path.
+        for rel in ("daemon.py", "cron.py"):
+            src = (REPO_ROOT / "claw_v2" / rel).read_text(encoding="utf-8")
+            self.assertNotIn("vacuum", src.lower(), f"VACUUM must not appear in {rel}")
+
+        # 2. Every main.py function that calls .maintenance_vacuum() must be
+        #    registered as the handler= of a register_background_job_runner call.
+        tree = ast.parse((REPO_ROOT / "claw_v2" / "main.py").read_text(encoding="utf-8"))
+
+        def _directly_calls_maintenance_vacuum(func: ast.AST) -> bool:
+            # Walk the function body WITHOUT descending into nested functions,
+            # so only the call's nearest-enclosing def matches (not ancestors).
+            stack = list(getattr(func, "body", []))
+            while stack:
+                node = stack.pop()
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "maintenance_vacuum"
+                ):
+                    return True
+                stack.extend(ast.iter_child_nodes(node))
+            return False
+
+        vacuum_funcs = {
+            node.name
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and _directly_calls_maintenance_vacuum(node)
+        }
+        self.assertTrue(vacuum_funcs, "expected a main.py function calling maintenance_vacuum")
+
+        registered_handlers: set[str] = set()
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "register_background_job_runner"
+            ):
+                for kw in node.keywords:
+                    if kw.arg == "handler" and isinstance(kw.value, ast.Name):
+                        registered_handlers.add(kw.value.id)
+
+        unwired = vacuum_funcs - registered_handlers
+        self.assertEqual(
+            unwired,
+            set(),
+            f"maintenance_vacuum call-sites not wired off-tick: {unwired}",
+        )
+
     def test_no_default_on_scheduler_job_runs_heavy_work_inline_in_daemon_tick(self) -> None:
         """Deny-by-default backstop for Core Invariant 1.
 

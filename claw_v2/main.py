@@ -72,7 +72,11 @@ from claw_v2.metrics import MetricsTracker
 from claw_v2.model_registry import ModelRegistry
 from claw_v2.network_proxy import DomainAllowlistEnforcer
 from claw_v2.observation_window import ObservationWindowConfig, ObservationWindowState
-from claw_v2.observe import ObserveStream
+from claw_v2.observe import (
+    OBSERVE_MAX_TOTAL_ROWS,
+    OBSERVE_RETENTION_DAYS,
+    ObserveStream,
+)
 from claw_v2.orchestration import OrchestrationStore
 from claw_v2.pipeline import PipelineService
 from claw_v2.skills import SkillRegistry
@@ -1611,7 +1615,9 @@ def _setup_scheduler(
             retention_days = int(os.environ.get("OBSERVE_RETENTION_DAYS", "30"))
         except ValueError:
             retention_days = 30
-        deleted = observe.prune(retention_days=retention_days)
+        # Age sweep + absolute row-count cap (no VACUUM here — that is the
+        # blocking off-tick maintenance runner's job).
+        deleted = observe.prune(retention_days=retention_days, max_total_rows=OBSERVE_MAX_TOTAL_ROWS)
         if deleted:
             observe.emit(
                 "observe_stream_pruned",
@@ -1623,6 +1629,30 @@ def _setup_scheduler(
 
     dream = AutoDreamService(memory=memory, observe=observe, router=router)
     if daemon is not None and job_service is not None:
+
+        def _observe_maintenance_handler() -> None:
+            # Off-tick maintenance: cap the table to the absolute ceiling, then
+            # VACUUM to reclaim freed pages. Both are blocking-but-local; the
+            # background runner keeps them off daemon.tick (Core Invariant 1)
+            # and the maintenance-window gate keeps the heavy VACUUM out of
+            # peak hours. See test_vacuum_only_runs_off_tick.
+            if _maintenance_skip():
+                return
+            deleted = observe.prune(
+                retention_days=OBSERVE_RETENTION_DAYS,
+                max_total_rows=OBSERVE_MAX_TOTAL_ROWS,
+            )
+            observe.maintenance_vacuum()
+            observe.emit(
+                "observe_maintenance",
+                payload={"deleted_rows": deleted, "max_total_rows": OBSERVE_MAX_TOTAL_ROWS},
+            )
+
+        daemon.register_background_job_runner(
+            name="observe_maintenance",
+            handler=_observe_maintenance_handler,
+            interval=86400.0,
+        )
         auto_dream_runner = ScheduledBackgroundJobRunner(
             job_name="auto_dream",
             job_kind=AUTO_DREAM_JOB_KIND,
