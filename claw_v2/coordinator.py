@@ -1358,7 +1358,13 @@ def _atomic_write_text(path: Path, text: str) -> None:
     try:
         os.write(fd, data)
         os.fsync(fd)
-    finally:
+    except BaseException:
+        # Write/fsync failed (e.g. ENOSPC): close the fd and remove the tmp so
+        # a failed write never leaks an orphan .tmp (mirrors approval.py).
+        os.close(fd)
+        tmp.unlink(missing_ok=True)
+        raise
+    else:
         os.close(fd)
     try:
         os.replace(tmp, path)
@@ -1368,12 +1374,19 @@ def _atomic_write_text(path: Path, text: str) -> None:
         except OSError:
             pass
         raise
-    # fsync the directory so the rename is durable across power loss.
-    dir_fd = os.open(str(path.parent), os.O_RDONLY)
+    # Best-effort durability of the rename across power loss. A failure here
+    # must NOT fail the caller: the target is already completely written and
+    # atomically in place, so swallow OSError (some filesystems/sandboxes
+    # disallow opening or fsync'ing a directory) rather than turning a
+    # successful, durable write into a spurious run failure up the call stack.
     try:
-        os.fsync(dir_fd)
-    finally:
-        os.close(dir_fd)
+        dir_fd = os.open(str(path.parent), os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except OSError:
+        pass
 
 
 def _worker_result_payload(result: WorkerResult) -> dict[str, Any]:

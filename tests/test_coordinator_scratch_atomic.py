@@ -94,3 +94,42 @@ def test_write_scratch_text_is_atomic(tmp_path, monkeypatch):
 
     assert not (scratch / "synthesis.md").exists()
     assert list(scratch.glob(".*")) == []
+
+
+def test_atomic_write_survives_directory_fsync_failure(tmp_path, monkeypatch):
+    # Review #114-1: a parent-dir fsync failure happens AFTER os.replace has
+    # already put the complete file in place. It must NOT propagate — else a
+    # durably-written artifact would mark the whole coordinator run failed.
+    target = tmp_path / "phase" / "w1.json"
+    target.parent.mkdir(parents=True)
+
+    real_open = cmod.os.open
+
+    def open_raises_on_dir(path, flags, *args, **kwargs):
+        if os.path.isdir(path):
+            raise OSError("directory fsync unsupported on this filesystem")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(cmod.os, "open", open_raises_on_dir)
+
+    # No exception, and the file is fully written.
+    cmod._atomic_write_text(target, '{"ok": 1}')
+    assert target.read_text(encoding="utf-8") == '{"ok": 1}'
+
+
+def test_atomic_write_cleans_tmp_on_write_failure(tmp_path, monkeypatch):
+    # Review #114-2: a write/fsync failure (e.g. ENOSPC) before os.replace must
+    # remove the orphan .tmp, matching the docstring and approval.py.
+    target = tmp_path / "phase" / "w1.json"
+    target.parent.mkdir(parents=True)
+
+    def write_fails(_fd, _data):
+        raise OSError("ENOSPC")
+
+    monkeypatch.setattr(cmod.os, "write", write_fails)
+
+    with pytest.raises(OSError):
+        cmod._atomic_write_text(target, "data")
+
+    assert not target.exists()
+    assert list(target.parent.glob(".*")) == []  # tmp cleaned up, no leak
