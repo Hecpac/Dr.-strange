@@ -3,6 +3,7 @@
 Offline only. tmp_path filesystem. NO live GPT vision / no real git / no
 external network. Autouse `_no_network` fixture blocks sockets/urllib.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -25,8 +26,10 @@ from claw_v2.verification.promote_gate import apply_promote_gate_to_checkpoint
 def _no_network(monkeypatch):
     def _boom(*a, **kw):
         raise RuntimeError("Network call attempted from extension test — forbidden")
+
     import socket
     import urllib.request
+
     monkeypatch.setattr(socket.socket, "connect", _boom)
     monkeypatch.setattr(urllib.request, "urlopen", _boom)
     yield
@@ -34,6 +37,7 @@ def _no_network(monkeypatch):
 
 def _registry_with(tool_name: str, handler):
     from pathlib import Path
+
     reg = ToolRegistry(workspace_root=Path("/tmp"))
     reg.register(
         ToolDefinition(
@@ -74,7 +78,7 @@ def test_skill_generate_happy_path_with_file(tmp_path):
     out.parent.mkdir(parents=True, exist_ok=True)
     payload = b"# Skill body\n"
     out.write_bytes(payload)
-    sha = hashlib.sha256(payload).hexdigest()    # full 64 hex (F3a-ext.1)
+    sha = hashlib.sha256(payload).hexdigest()  # full 64 hex (F3a-ext.1)
 
     def _handler(args):
         return {
@@ -94,9 +98,7 @@ def test_skill_generate_happy_path_with_file(tmp_path):
     assert result[CONTRACT_REQUIRED_KEY] is True
     assert ARTIFACT_RESULT_KEY in result
 
-    checkpoint = lift_artifact_to_checkpoint(
-        {"verification_status": "passed"}, result
-    )
+    checkpoint = lift_artifact_to_checkpoint({"verification_status": "passed"}, result)
     terminal, verification, _new_checkpoint, _events = apply_promote_gate_to_checkpoint(
         raw_terminal_status="succeeded",
         raw_verification_status="passed",
@@ -125,9 +127,7 @@ def test_skill_generate_ok_true_but_no_file_fails(tmp_path):
         {"task": "ghost skill"},
         agent_class="operator",
     )
-    checkpoint = lift_artifact_to_checkpoint(
-        {"verification_status": "passed"}, result
-    )
+    checkpoint = lift_artifact_to_checkpoint({"verification_status": "passed"}, result)
     terminal, verification, new_checkpoint, _events = apply_promote_gate_to_checkpoint(
         raw_terminal_status="succeeded",
         raw_verification_status="passed",
@@ -156,9 +156,7 @@ def test_skill_generate_missing_required_key_fails(tmp_path):
 
     reg = _registry_with("SkillGenerate", _handler)
     result = reg.execute("SkillGenerate", {"task": "x"}, agent_class="operator")
-    checkpoint = lift_artifact_to_checkpoint(
-        {"verification_status": "passed"}, result
-    )
+    checkpoint = lift_artifact_to_checkpoint({"verification_status": "passed"}, result)
     terminal, _v, new_checkpoint, _e = apply_promote_gate_to_checkpoint(
         raw_terminal_status="succeeded",
         raw_verification_status="passed",
@@ -186,9 +184,7 @@ def test_skill_generate_file_exists_but_empty_fails(tmp_path):
 
     reg = _registry_with("SkillGenerate", _handler)
     result = reg.execute("SkillGenerate", {"task": "x"}, agent_class="operator")
-    checkpoint = lift_artifact_to_checkpoint(
-        {"verification_status": "passed"}, result
-    )
+    checkpoint = lift_artifact_to_checkpoint({"verification_status": "passed"}, result)
     terminal, _v, new_checkpoint, _e = apply_promote_gate_to_checkpoint(
         raw_terminal_status="succeeded",
         raw_verification_status="passed",
@@ -215,9 +211,7 @@ def test_skill_generate_invalid_sha_fails(tmp_path):
 
     reg = _registry_with("SkillGenerate", _handler)
     result = reg.execute("SkillGenerate", {"task": "x"}, agent_class="operator")
-    checkpoint = lift_artifact_to_checkpoint(
-        {"verification_status": "passed"}, result
-    )
+    checkpoint = lift_artifact_to_checkpoint({"verification_status": "passed"}, result)
     terminal, _v, new_checkpoint, _e = apply_promote_gate_to_checkpoint(
         raw_terminal_status="succeeded",
         raw_verification_status="passed",
@@ -254,9 +248,7 @@ def test_analyze_image_happy_path():
         {"image_path": "/tmp/fake.png", "question": "what is this?"},
         agent_class="operator",
     )
-    checkpoint = lift_artifact_to_checkpoint(
-        {"verification_status": "passed"}, result
-    )
+    checkpoint = lift_artifact_to_checkpoint({"verification_status": "passed"}, result)
     terminal, verification, _new_checkpoint, _events = apply_promote_gate_to_checkpoint(
         raw_terminal_status="succeeded",
         raw_verification_status="passed",
@@ -268,13 +260,11 @@ def test_analyze_image_happy_path():
 
 def test_analyze_image_empty_output_fails():
     def _handler(args):
-        return {"ok": True}            # missing description AND model_used
+        return {"ok": True}  # missing description AND model_used
 
     reg = _registry_with("AnalyzeImage", _handler)
     result = reg.execute("AnalyzeImage", {"image_path": "/tmp/x.png"}, agent_class="operator")
-    checkpoint = lift_artifact_to_checkpoint(
-        {"verification_status": "passed"}, result
-    )
+    checkpoint = lift_artifact_to_checkpoint({"verification_status": "passed"}, result)
     terminal, _v, new_checkpoint, _e = apply_promote_gate_to_checkpoint(
         raw_terminal_status="succeeded",
         raw_verification_status="passed",
@@ -317,9 +307,7 @@ def test_analyze_image_forbidden_reason_blocks():
 
     reg = _registry_with("AnalyzeImage", _handler)
     result = reg.execute("AnalyzeImage", {"image_path": "/tmp/x.png"}, agent_class="operator")
-    checkpoint = lift_artifact_to_checkpoint(
-        {"verification_status": "passed"}, result
-    )
+    checkpoint = lift_artifact_to_checkpoint({"verification_status": "passed"}, result)
     terminal, _v, new_checkpoint, _e = apply_promote_gate_to_checkpoint(
         raw_terminal_status="succeeded",
         raw_verification_status="passed",
@@ -327,7 +315,10 @@ def test_analyze_image_forbidden_reason_blocks():
     )
     assert terminal == "failed"
     envelope = new_checkpoint["promote_gate_envelope"]
-    assert any("forbidden_reason_matched:invalid_image" == e for e in envelope["verification_result"]["errors"])
+    assert any(
+        "forbidden_reason_matched:invalid_image" == e
+        for e in envelope["verification_result"]["errors"]
+    )
 
 
 # ===========================================================================
@@ -366,9 +357,7 @@ def test_bash_git_commit_happy_path():
     assert "commit_hash" in artifact["success_condition"]["must_contain_keys"]
     assert "head_unchanged" in artifact["success_condition"]["forbidden_reasons"]
 
-    checkpoint = lift_artifact_to_checkpoint(
-        {"verification_status": "passed"}, result
-    )
+    checkpoint = lift_artifact_to_checkpoint({"verification_status": "passed"}, result)
     terminal, verification, _new_checkpoint, _events = apply_promote_gate_to_checkpoint(
         raw_terminal_status="succeeded",
         raw_verification_status="passed",
@@ -396,9 +385,7 @@ def test_bash_git_commit_head_unchanged_fails():
         {"command": "git commit -m 'noop'", "command_kind": "git_commit"},
         agent_class="operator",
     )
-    checkpoint = lift_artifact_to_checkpoint(
-        {"verification_status": "passed"}, result
-    )
+    checkpoint = lift_artifact_to_checkpoint({"verification_status": "passed"}, result)
     terminal, _v, new_checkpoint, _e = apply_promote_gate_to_checkpoint(
         raw_terminal_status="succeeded",
         raw_verification_status="passed",
@@ -406,7 +393,10 @@ def test_bash_git_commit_head_unchanged_fails():
     )
     assert terminal == "failed"
     envelope = new_checkpoint["promote_gate_envelope"]
-    assert any("forbidden_reason_matched:head_unchanged" == e for e in envelope["verification_result"]["errors"])
+    assert any(
+        "forbidden_reason_matched:head_unchanged" == e
+        for e in envelope["verification_result"]["errors"]
+    )
 
 
 def test_bash_git_commit_protected_branch_fails():
@@ -427,9 +417,7 @@ def test_bash_git_commit_protected_branch_fails():
         {"command": "git commit -m 'on main'", "command_kind": "git_commit"},
         agent_class="operator",
     )
-    checkpoint = lift_artifact_to_checkpoint(
-        {"verification_status": "passed"}, result
-    )
+    checkpoint = lift_artifact_to_checkpoint({"verification_status": "passed"}, result)
     terminal, _v, new_checkpoint, _e = apply_promote_gate_to_checkpoint(
         raw_terminal_status="succeeded",
         raw_verification_status="passed",
@@ -437,7 +425,10 @@ def test_bash_git_commit_protected_branch_fails():
     )
     assert terminal == "failed"
     envelope = new_checkpoint["promote_gate_envelope"]
-    assert any("forbidden_reason_matched:protected_branch_detected" == e for e in envelope["verification_result"]["errors"])
+    assert any(
+        "forbidden_reason_matched:protected_branch_detected" == e
+        for e in envelope["verification_result"]["errors"]
+    )
 
 
 def test_bash_git_commit_invalid_hash_fails():
@@ -457,9 +448,7 @@ def test_bash_git_commit_invalid_hash_fails():
         {"command": "git commit -m 'malformed'", "command_kind": "git_commit"},
         agent_class="operator",
     )
-    checkpoint = lift_artifact_to_checkpoint(
-        {"verification_status": "passed"}, result
-    )
+    checkpoint = lift_artifact_to_checkpoint({"verification_status": "passed"}, result)
     terminal, _v, new_checkpoint, _e = apply_promote_gate_to_checkpoint(
         raw_terminal_status="succeeded",
         raw_verification_status="passed",
@@ -483,9 +472,7 @@ def test_bash_without_command_kind_uses_base_contract():
     # Sub-contract keys must NOT be required for a plain Bash call.
     assert "commit_hash" not in artifact["success_condition"]["must_contain_keys"]
 
-    checkpoint = lift_artifact_to_checkpoint(
-        {"verification_status": "passed"}, result
-    )
+    checkpoint = lift_artifact_to_checkpoint({"verification_status": "passed"}, result)
     terminal, verification, _nc, _e = apply_promote_gate_to_checkpoint(
         raw_terminal_status="succeeded",
         raw_verification_status="passed",

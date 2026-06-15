@@ -79,10 +79,7 @@ def preflight_objective(
         allowed_binaries=allowed_binaries,
     )
     which = which or shutil.which
-    checks = [
-        preflight_command(spec, policy=policy, which=which)
-        for spec in specs
-    ]
+    checks = [preflight_command(spec, policy=policy, which=which) for spec in specs]
     blockers = [check.blocker for check in checks if check.blocker]
     risk_tier = _max_risk_tier([spec.risk_tier for spec in specs]) if specs else "tier_1"
     return CapabilityPreflightResult(
@@ -160,7 +157,9 @@ def command_specs_for_objective(objective: str) -> tuple[str, list[CommandSpec]]
                 CommandSpec("codex --version", "codex_cli_version_check", requires_network=True),
                 CommandSpec("claude --version", "claude_code_version_check", requires_network=True),
                 CommandSpec("npm --version", "node_package_manager_check", requires_network=True),
-                CommandSpec("osascript -e 'id of app \"Codex\"'", "codex_app_gui_check", requires_gui=True),
+                CommandSpec(
+                    "osascript -e 'id of app \"Codex\"'", "codex_app_gui_check", requires_gui=True
+                ),
             ],
         )
     if _looks_like_lock_regeneration(normalized):
@@ -247,8 +246,12 @@ def _binary_for_command(command: str) -> str:
 
 
 def _looks_like_tool_update(normalized: str) -> bool:
-    mentions_tool = any(token in normalized for token in ("codex", "claude", "claude code", "codex app"))
-    asks_update = any(token in normalized for token in ("actualiza", "actualizar", "update", "upgrade"))
+    mentions_tool = any(
+        token in normalized for token in ("codex", "claude", "claude code", "codex app")
+    )
+    asks_update = any(
+        token in normalized for token in ("actualiza", "actualizar", "update", "upgrade")
+    )
     contextual_followup = any(
         phrase in normalized
         for phrase in (
@@ -263,14 +266,19 @@ def _looks_like_tool_update(normalized: str) -> bool:
 
 def _looks_like_lock_regeneration(normalized: str) -> bool:
     return (
-        ("lock" in normalized and any(token in normalized for token in ("regenera", "regenerar", "poetry", "qts")))
+        (
+            "lock" in normalized
+            and any(token in normalized for token in ("regenera", "regenerar", "poetry", "qts"))
+        )
         or "poetry.lock" in normalized
         or ("pyproject" in normalized and "lock" in normalized)
     )
 
 
 def _looks_like_pr_completion(normalized: str) -> bool:
-    return "pr" in normalized and any(token in normalized for token in ("termina", "completa", "cierra", "finaliza"))
+    return "pr" in normalized and any(
+        token in normalized for token in ("termina", "completa", "cierra", "finaliza")
+    )
 
 
 def _looks_like_test_execution(normalized: str) -> bool:

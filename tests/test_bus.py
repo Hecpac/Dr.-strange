@@ -102,7 +102,9 @@ class ReceiveTests(unittest.TestCase):
         self.bus = AgentBus(bus_root=self.tmpdir)
 
     def test_receive_returns_messages_and_archives(self) -> None:
-        msg = _new_message(from_agent="rook", to_agent="hex", intent="notify", topic="alert", payload={})
+        msg = _new_message(
+            from_agent="rook", to_agent="hex", intent="notify", topic="alert", payload={}
+        )
         self.bus.send(msg)
         received = self.bus.receive("hex")
         self.assertEqual(len(received), 1)
@@ -111,7 +113,14 @@ class ReceiveTests(unittest.TestCase):
         self.assertEqual(len(list((self.tmpdir / "archive").glob("*.json"))), 1)
 
     def test_receive_skips_expired_messages(self) -> None:
-        msg = _new_message(from_agent="rook", to_agent="hex", intent="notify", topic="old", payload={}, ttl_seconds=1)
+        msg = _new_message(
+            from_agent="rook",
+            to_agent="hex",
+            intent="notify",
+            topic="old",
+            payload={},
+            ttl_seconds=1,
+        )
         msg.created_at = time.time() - 10
         self.bus.send(msg)
         received = self.bus.receive("hex")
@@ -119,7 +128,9 @@ class ReceiveTests(unittest.TestCase):
 
     def test_receive_newest_first(self) -> None:
         for i in range(3):
-            msg = _new_message(from_agent="rook", to_agent="hex", intent="notify", topic=f"t{i}", payload={})
+            msg = _new_message(
+                from_agent="rook", to_agent="hex", intent="notify", topic=f"t{i}", payload={}
+            )
             msg.created_at = time.time() + i
             self.bus.send(msg)
         received = self.bus.receive("hex")
@@ -133,7 +144,9 @@ class ReplyTests(unittest.TestCase):
         self.bus = AgentBus(bus_root=self.tmpdir)
 
     def test_reply_links_via_correlation_id(self) -> None:
-        original = _new_message(from_agent="rook", to_agent="hex", intent="request", topic="help", payload={})
+        original = _new_message(
+            from_agent="rook", to_agent="hex", intent="request", topic="help", payload={}
+        )
         self.bus.send(original)
         received = self.bus.receive("hex")
         self.bus.reply(received[0], content={"answer": "done"}, from_agent="hex")
@@ -151,14 +164,30 @@ class PendingTests(unittest.TestCase):
 
     def test_pending_count(self) -> None:
         for i in range(3):
-            msg = _new_message(from_agent="rook", to_agent="hex", intent="notify", topic=f"t{i}", payload={})
+            msg = _new_message(
+                from_agent="rook", to_agent="hex", intent="notify", topic=f"t{i}", payload={}
+            )
             self.bus.send(msg)
         self.assertEqual(self.bus.pending_count("hex"), 3)
         self.assertEqual(self.bus.pending_count("alma"), 0)
 
     def test_pending_urgent(self) -> None:
-        normal = _new_message(from_agent="rook", to_agent="hex", intent="notify", topic="low", payload={}, priority="normal")
-        urgent = _new_message(from_agent="rook", to_agent="alma", intent="escalate", topic="fire", payload={}, priority="urgent")
+        normal = _new_message(
+            from_agent="rook",
+            to_agent="hex",
+            intent="notify",
+            topic="low",
+            payload={},
+            priority="normal",
+        )
+        urgent = _new_message(
+            from_agent="rook",
+            to_agent="alma",
+            intent="escalate",
+            topic="fire",
+            payload={},
+            priority="urgent",
+        )
         self.bus.send(normal)
         self.bus.send(urgent)
         urgents = self.bus.pending_urgent()
@@ -172,7 +201,14 @@ class ScanExpiredRequestsTests(unittest.TestCase):
         self.bus = AgentBus(bus_root=self.tmpdir)
 
     def test_detects_expired_request_without_reply(self) -> None:
-        msg = _new_message(from_agent="rook", to_agent="hex", intent="request", topic="help", payload={}, ttl_seconds=1)
+        msg = _new_message(
+            from_agent="rook",
+            to_agent="hex",
+            intent="request",
+            topic="help",
+            payload={},
+            ttl_seconds=1,
+        )
         msg.created_at = time.time() - 10
         self.bus.send(msg)
         expired = self.bus.scan_expired_requests()
@@ -180,14 +216,28 @@ class ScanExpiredRequestsTests(unittest.TestCase):
         self.assertEqual(expired[0].topic, "help")
 
     def test_ignores_notify_messages(self) -> None:
-        msg = _new_message(from_agent="rook", to_agent="hex", intent="notify", topic="info", payload={}, ttl_seconds=1)
+        msg = _new_message(
+            from_agent="rook",
+            to_agent="hex",
+            intent="notify",
+            topic="info",
+            payload={},
+            ttl_seconds=1,
+        )
         msg.created_at = time.time() - 10
         self.bus.send(msg)
         expired = self.bus.scan_expired_requests()
         self.assertEqual(len(expired), 0)
 
     def test_ignores_non_expired_requests(self) -> None:
-        msg = _new_message(from_agent="rook", to_agent="hex", intent="request", topic="help", payload={}, ttl_seconds=9999)
+        msg = _new_message(
+            from_agent="rook",
+            to_agent="hex",
+            intent="request",
+            topic="help",
+            payload={},
+            ttl_seconds=9999,
+        )
         self.bus.send(msg)
         expired = self.bus.scan_expired_requests()
         self.assertEqual(len(expired), 0)
@@ -199,7 +249,9 @@ class CleanupTests(unittest.TestCase):
         self.bus = AgentBus(bus_root=self.tmpdir)
 
     def test_removes_old_archived_messages(self) -> None:
-        msg = _new_message(from_agent="rook", to_agent="hex", intent="notify", topic="old", payload={})
+        msg = _new_message(
+            from_agent="rook", to_agent="hex", intent="notify", topic="old", payload={}
+        )
         self.bus.send(msg)
         self.bus.receive("hex")
         archive_files = list((self.tmpdir / "archive").glob("*.json"))

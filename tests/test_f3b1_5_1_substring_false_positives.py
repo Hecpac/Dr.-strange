@@ -7,6 +7,7 @@ word-boundary matching for any marker <= 3 chars.
 
 100% offline. Autouse `_no_network` fixture.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -16,8 +17,10 @@ import pytest
 def _no_network(monkeypatch):
     def _boom(*a, **kw):
         raise RuntimeError("Network call attempted from F3b.1.5.1 — forbidden")
+
     import socket
     import urllib.request
+
     monkeypatch.setattr(socket.socket, "connect", _boom)
     monkeypatch.setattr(urllib.request, "urlopen", _boom)
     yield
@@ -46,8 +49,12 @@ def matcher_only():
         def _emit_dispatcher_fallthrough(self, *, source, reason, text):
             self.observe.emit(
                 "dispatcher_fallthrough_imperative",
-                payload={"source": source, "reason": reason,
-                         "text_head": text[:120], "text_len": len(text)},
+                payload={
+                    "source": source,
+                    "reason": reason,
+                    "text_head": text[:120],
+                    "text_len": len(text),
+                },
             )
 
     return _Stub()
@@ -108,10 +115,22 @@ def test_ok_final_is_still_imperative(matcher_only):
 # ===========================================================================
 
 
-@pytest.mark.parametrize("word", [
-    "pago", "trago", "fuego", "amigo", "domingo", "estoy haciendo algo",
-    "tengo dudas", "luego de eso", "agosto", "rasgo", "diálogo",
-])
+@pytest.mark.parametrize(
+    "word",
+    [
+        "pago",
+        "trago",
+        "fuego",
+        "amigo",
+        "domingo",
+        "estoy haciendo algo",
+        "tengo dudas",
+        "luego de eso",
+        "agosto",
+        "rasgo",
+        "diálogo",
+    ],
+)
 def test_words_containing_go_substring_are_not_imperative(matcher_only, word):
     msg = f"qué tareas pendientes {word}"
     # Base matcher still wants "tareas + pendient" → matches.

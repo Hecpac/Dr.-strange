@@ -44,7 +44,9 @@ class RetryStuckPolicyTests(unittest.TestCase):
 class ProviderCircuitBreakerTests(unittest.TestCase):
     def test_opens_after_threshold_and_blocks_until_cooldown(self) -> None:
         now = [100.0]
-        circuit = ProviderCircuitBreaker(failure_threshold=2, cooldown_seconds=30, clock=lambda: now[0])
+        circuit = ProviderCircuitBreaker(
+            failure_threshold=2, cooldown_seconds=30, clock=lambda: now[0]
+        )
 
         self.assertTrue(circuit.check("openai").allowed)
         first = circuit.record_failure("openai", "timeout")
@@ -64,7 +66,9 @@ class ProviderCircuitBreakerTests(unittest.TestCase):
 
     def test_success_after_open_recovers_circuit(self) -> None:
         now = [100.0]
-        circuit = ProviderCircuitBreaker(failure_threshold=1, cooldown_seconds=10, clock=lambda: now[0])
+        circuit = ProviderCircuitBreaker(
+            failure_threshold=1, cooldown_seconds=10, clock=lambda: now[0]
+        )
         circuit.record_failure("anthropic", "boom")
         now[0] = 111.0
 

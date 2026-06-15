@@ -299,7 +299,9 @@ class AutoResearchAgentService:
         if self.store.state_path(definition.name).exists():
             raise FileExistsError(f"agent already exists: {definition.name}")
 
-        allowed_tools = self._normalize_allowed_tools(definition.agent_class, definition.allowed_tools)
+        allowed_tools = self._normalize_allowed_tools(
+            definition.agent_class, definition.allowed_tools
+        )
         payload = {
             "name": definition.name,
             "agent_class": definition.agent_class,
@@ -526,7 +528,9 @@ class AutoResearchAgentService:
         try:
             return self.experiment_runner(agent_name, experiment_number, state)
         except AdapterError as exc:
-            if _classify_adapter_error(exc) != "codex_timeout" or state.get("codex_timeout_retry_attempted"):
+            if _classify_adapter_error(exc) != "codex_timeout" or state.get(
+                "codex_timeout_retry_attempted"
+            ):
                 raise
             error = str(exc)[:_ERROR_SNIPPET_CHARS]
             checkpoint = {
@@ -548,7 +552,11 @@ class AutoResearchAgentService:
                     )
                     self.observe.emit(
                         "codex_retry_started",
-                        payload={"agent": agent_name, "experiment_number": experiment_number, "scope": "narrow"},
+                        payload={
+                            "agent": agent_name,
+                            "experiment_number": experiment_number,
+                            "scope": "narrow",
+                        },
                     )
                 except Exception:
                     logger.exception("codex timeout retry event emit failed for %s", agent_name)
@@ -648,7 +656,11 @@ class DockerSandbox:
         if self._available is None:
             try:
                 result = subprocess.run(
-                    ["docker", "info"], capture_output=True, text=True, check=False, timeout=5,
+                    ["docker", "info"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=5,
                 )
                 self._available = result.returncode == 0
             except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -657,17 +669,27 @@ class DockerSandbox:
 
     def run(self, command: str, cwd: Path) -> subprocess.CompletedProcess[str]:
         docker_cmd = [
-            "docker", "run", "--rm",
+            "docker",
+            "run",
+            "--rm",
             f"--memory={self.memory_limit}",
             f"--pids-limit={self.pids_limit}",
             f"--network={self.network}",
-            "-v", f"{cwd}:/workspace",
-            "-w", "/workspace",
+            "-v",
+            f"{cwd}:/workspace",
+            "-w",
+            "/workspace",
             self.image,
-            "sh", "-c", command,
+            "sh",
+            "-c",
+            command,
         ]
         return subprocess.run(
-            docker_cmd, capture_output=True, text=True, check=False, timeout=self.timeout,
+            docker_cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=self.timeout,
         )
 
 
@@ -690,7 +712,9 @@ def wiki_quality_evaluator(worktree_path: Path, state: dict, diff: str) -> Exper
         status = "regressed"
     else:
         status = "no_change"
-    return ExperimentEvaluation(metric_value=metric, status=status, output=json.dumps(report, indent=2))
+    return ExperimentEvaluation(
+        metric_value=metric, status=status, output=json.dumps(report, indent=2)
+    )
 
 
 class GitWorktreeExperimentRunner:
@@ -778,7 +802,9 @@ class GitWorktreeExperimentRunner:
                         plan=response.content,
                         diff=diff,
                         test_output=evaluation.output,
-                        executor=lambda: self.promotion_executor(worktree_path, promotion_state, diff),
+                        executor=lambda: self.promotion_executor(
+                            worktree_path, promotion_state, diff
+                        ),
                     )
                 except PromotionToolingError as exc:
                     status = "promotion_blocked"
@@ -822,7 +848,9 @@ class GitWorktreeExperimentRunner:
                     "workspace_mode": workspace_mode,
                     "docker_available": self._docker_available(),
                     "promotion_enabled": bool(state.get("promote_on_improvement")),
-                    "promotion_executed": bool(promotion_commit_sha or promotion_branch_name or status == "executed"),
+                    "promotion_executed": bool(
+                        promotion_commit_sha or promotion_branch_name or status == "executed"
+                    ),
                     "metric_value": record.metric_value,
                     "baseline_value": record.baseline_value,
                     "status": record.status,
@@ -854,7 +882,9 @@ class GitWorktreeExperimentRunner:
                 },
             )
             if prepared:
-                raise AdapterError(f"{exc}; preserved experiment workspace at {worktree_path}") from exc
+                raise AdapterError(
+                    f"{exc}; preserved experiment workspace at {worktree_path}"
+                ) from exc
             raise
         except Exception as exc:
             self._emit_experiment_event(
@@ -933,12 +963,16 @@ class GitWorktreeExperimentRunner:
         command = state.get("metric_command")
         if not command:
             status = "no_metric" if diff.strip() else "noop"
-            return ExperimentEvaluation(metric_value=baseline, status=status, output="No metric command configured.")
+            return ExperimentEvaluation(
+                metric_value=baseline, status=status, output="No metric command configured."
+            )
         if self.docker_sandbox.is_available():
             try:
                 completed = self.docker_sandbox.run(command, cwd=worktree_path)
             except subprocess.TimeoutExpired:
-                return ExperimentEvaluation(metric_value=baseline, status="metric_failed", output="Docker timeout exceeded.")
+                return ExperimentEvaluation(
+                    metric_value=baseline, status="metric_failed", output="Docker timeout exceeded."
+                )
         else:
             logger.error("Docker unavailable — refusing to run metric command on host: %s", command)
             return ExperimentEvaluation(
@@ -949,7 +983,9 @@ class GitWorktreeExperimentRunner:
         output = (completed.stdout or "") + (completed.stderr or "")
         metric_value = self._parse_metric(output, baseline)
         if completed.returncode != 0:
-            return ExperimentEvaluation(metric_value=baseline, status="metric_failed", output=output)
+            return ExperimentEvaluation(
+                metric_value=baseline, status="metric_failed", output=output
+            )
         if metric_value > baseline:
             status = "improved"
         elif metric_value < baseline:
@@ -967,7 +1003,15 @@ class GitWorktreeExperimentRunner:
             # The directory may be gone from disk yet still listed in
             # .git/worktrees, which makes `worktree add` exit 128.
             run_subprocess_bounded(
-                ["git", "-C", str(self.repo_root), "worktree", "remove", "--force", str(worktree_path)],
+                [
+                    "git",
+                    "-C",
+                    str(self.repo_root),
+                    "worktree",
+                    "remove",
+                    "--force",
+                    str(worktree_path),
+                ],
                 check=False,
                 timeout_s=_GIT_TIMEOUT_SECONDS,
             )
@@ -978,7 +1022,16 @@ class GitWorktreeExperimentRunner:
             )
             try:
                 run_subprocess_bounded(
-                    ["git", "-C", str(self.repo_root), "worktree", "add", "--detach", str(worktree_path), "HEAD"],
+                    [
+                        "git",
+                        "-C",
+                        str(self.repo_root),
+                        "worktree",
+                        "add",
+                        "--detach",
+                        str(worktree_path),
+                        "HEAD",
+                    ],
                     check=True,
                     timeout_s=_GIT_TIMEOUT_SECONDS,
                 )
@@ -998,7 +1051,15 @@ class GitWorktreeExperimentRunner:
     def _remove_workspace(self, worktree_path: Path, workspace_mode: str) -> None:
         if workspace_mode == "git_worktree":
             run_subprocess_bounded(
-                ["git", "-C", str(self.repo_root), "worktree", "remove", "--force", str(worktree_path)],
+                [
+                    "git",
+                    "-C",
+                    str(self.repo_root),
+                    "worktree",
+                    "remove",
+                    "--force",
+                    str(worktree_path),
+                ],
                 check=False,
                 timeout_s=_GIT_TIMEOUT_SECONDS,
             )
@@ -1149,7 +1210,11 @@ class PromotionToolingGate:
         elif ruff_check_status in {"passed", "passed_with_baseline_violations"}:
             ruff_format_status = self._run_ruff_format_check(worktree_path, python_files)
 
-        if ruff_check_status not in {"passed", "passed_with_baseline_violations", "skipped_no_python_files"}:
+        if ruff_check_status not in {
+            "passed",
+            "passed_with_baseline_violations",
+            "skipped_no_python_files",
+        }:
             decision = "failed"
             reason = "ruff_check_failed"
             self._emit(
@@ -1161,7 +1226,11 @@ class PromotionToolingGate:
                     "status": ruff_check_status,
                 },
             )
-        elif ruff_format_status not in {"passed", "passed_with_baseline_violations", "skipped_no_python_files"}:
+        elif ruff_format_status not in {
+            "passed",
+            "passed_with_baseline_violations",
+            "skipped_no_python_files",
+        }:
             decision = "failed"
             reason = "ruff_format_failed"
             self._emit(
@@ -1244,24 +1313,37 @@ class PromotionToolingGate:
             return "advisory_failed"
         return "passed" if completed.returncode == 0 else "advisory_failed"
 
-    def _run_required_command(self, args_prefix: list[str], files: list[str], *, cwd: Path, timeout_s: int) -> str:
+    def _run_required_command(
+        self, args_prefix: list[str], files: list[str], *, cwd: Path, timeout_s: int
+    ) -> str:
         status = "passed"
         for relative_path in files:
-            file_status = self._run_command([*args_prefix, relative_path], cwd=cwd, timeout_s=timeout_s)
+            file_status = self._run_command(
+                [*args_prefix, relative_path], cwd=cwd, timeout_s=timeout_s
+            )
             if file_status == "passed":
                 continue
-            if file_status == "failed" and self._baseline_has_same_failure(args_prefix, relative_path, timeout_s):
+            if file_status == "failed" and self._baseline_has_same_failure(
+                args_prefix, relative_path, timeout_s
+            ):
                 status = "passed_with_baseline_violations"
                 continue
             return file_status
         return status
 
-    def _baseline_has_same_failure(self, args_prefix: list[str], relative_path: str, timeout_s: int) -> bool:
+    def _baseline_has_same_failure(
+        self, args_prefix: list[str], relative_path: str, timeout_s: int
+    ) -> bool:
         if self.baseline_root is None:
             return False
         if not (self.baseline_root / relative_path).is_file():
             return False
-        return self._run_command([*args_prefix, relative_path], cwd=self.baseline_root, timeout_s=timeout_s) == "failed"
+        return (
+            self._run_command(
+                [*args_prefix, relative_path], cwd=self.baseline_root, timeout_s=timeout_s
+            )
+            == "failed"
+        )
 
     def _run_command(self, args: list[str], *, cwd: Path, timeout_s: int) -> str:
         try:
@@ -1282,9 +1364,7 @@ class PromotionToolingGate:
     def _python_files_for_tooling(worktree_path: Path, manifest: PromotionManifest) -> list[str]:
         candidates = [*manifest.added, *manifest.modified]
         return [
-            path
-            for path in candidates
-            if path.endswith(".py") and (worktree_path / path).is_file()
+            path for path in candidates if path.endswith(".py") and (worktree_path / path).is_file()
         ]
 
     @staticmethod
@@ -1391,7 +1471,16 @@ class WorkspacePromotionExecutor:
     def build_manifest_from_git_status(cls, worktree_path: Path | str) -> PromotionManifest:
         worktree_path = Path(worktree_path)
         completed = run_subprocess_bounded(
-            ["git", "-C", str(worktree_path), "status", "--porcelain", "--untracked-files=all", "--", "."],
+            [
+                "git",
+                "-C",
+                str(worktree_path),
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+                "--",
+                ".",
+            ],
             check=True,
             timeout_s=_GIT_TIMEOUT_SECONDS,
         )
@@ -1491,13 +1580,17 @@ class GitBranchPromotionExecutor:
     ) -> None:
         self.repo_root = Path(repo_root)
         self.commit_executor = commit_executor or GitCommitPromotionExecutor(self.repo_root)
-        self.tooling_gate = tooling_gate or PromotionToolingGate(baseline_root=self.repo_root, observe=observe)
+        self.tooling_gate = tooling_gate or PromotionToolingGate(
+            baseline_root=self.repo_root, observe=observe
+        )
 
     def __call__(self, worktree_path: Path, state: dict, diff: str) -> PromotionResult:
         branch_on_promotion = bool(state.get("branch_on_promotion", True))
         commit_on_promotion = bool(state.get("commit_on_promotion"))
         target_branch = self._planned_branch_name(state)
-        manifest = WorkspacePromotionExecutor(self.repo_root).select_manifest(worktree_path, state, diff)
+        manifest = WorkspacePromotionExecutor(self.repo_root).select_manifest(
+            worktree_path, state, diff
+        )
         report = self.tooling_gate.evaluate(
             worktree_path=worktree_path,
             state=state,
@@ -1524,7 +1617,9 @@ class GitBranchPromotionExecutor:
             result.promotion_report = report.to_dict()
         return result
 
-    def _commit_to_isolated_branch(self, worktree_path: Path, state: dict, diff: str) -> PromotionResult:
+    def _commit_to_isolated_branch(
+        self, worktree_path: Path, state: dict, diff: str
+    ) -> PromotionResult:
         with tempfile.TemporaryDirectory(prefix="claw-promotion-") as tmpdir:
             isolated_worktree = Path(tmpdir) / "worktree"
             self._git("worktree", "add", "--detach", str(isolated_worktree), "HEAD")
@@ -1537,7 +1632,15 @@ class GitBranchPromotionExecutor:
                 return self._attach_branch(result, state)
             finally:
                 run_subprocess_bounded(
-                    ["git", "-C", str(self.repo_root), "worktree", "remove", "--force", str(isolated_worktree)],
+                    [
+                        "git",
+                        "-C",
+                        str(self.repo_root),
+                        "worktree",
+                        "remove",
+                        "--force",
+                        str(isolated_worktree),
+                    ],
                     check=False,
                     timeout_s=_GIT_TIMEOUT_SECONDS,
                 )
@@ -1567,7 +1670,9 @@ class GitBranchPromotionExecutor:
         return f"claw/{agent_name}/{commit_sha[:7]}"
 
     def _planned_branch_name(self, state: dict) -> str | None:
-        if not bool(state.get("branch_on_promotion", True)) and not bool(state.get("commit_on_promotion")):
+        if not bool(state.get("branch_on_promotion", True)) and not bool(
+            state.get("commit_on_promotion")
+        ):
             return None
         explicit = str(state.get("promotion_branch_name") or "").strip()
         if explicit:
@@ -1675,9 +1780,7 @@ class SubAgentService:
         try:
             provider, model = self._parse_model_from_soul(soul, strict=strict)
         except SubAgentConfigError as exc:
-            raise SubAgentConfigError(
-                f"Cannot load subagent {agent_dir.name!r}: {exc}"
-            ) from exc
+            raise SubAgentConfigError(f"Cannot load subagent {agent_dir.name!r}: {exc}") from exc
         display_name = self._parse_display_name(soul)
         return SubAgentDefinition(
             name=agent_dir.name,
@@ -1829,7 +1932,9 @@ class SubAgentService:
             failures=tuple(failures),
         )
 
-    def run_skill(self, agent_name: str, skill_name: str, context: str = "", *, lane: str = "research") -> str:
+    def run_skill(
+        self, agent_name: str, skill_name: str, context: str = "", *, lane: str = "research"
+    ) -> str:
         """Execute a named skill for a sub-agent."""
         defn = self._agents.get(agent_name)
         if defn is None:

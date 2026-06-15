@@ -90,6 +90,7 @@ class SynthesizeTests(unittest.TestCase):
         svc, router, *_ = _make_service()
         router.ask.return_value = MagicMock(content="Step 1: do X\nStep 2: do Y")
         from claw_v2.coordinator import WorkerResult
+
         findings = [
             WorkerResult(task_name="r1", content="data A", duration_seconds=1.0),
             WorkerResult(task_name="r2", content="data B", duration_seconds=1.0),
@@ -105,18 +106,24 @@ class SynthesizeTests(unittest.TestCase):
     def test_synthesis_distills_long_worker_summaries(self) -> None:
         svc, router, *_ = _make_service(worker_result_summary_chars=120)
         router.ask.side_effect = [
-            MagicMock(content="- causa raiz: fallo en /Users/hector/Projects/Dr.-strange/claw_v2/foo.py"),
+            MagicMock(
+                content="- causa raiz: fallo en /Users/hector/Projects/Dr.-strange/claw_v2/foo.py"
+            ),
             MagicMock(content="plan"),
         ]
         from claw_v2.coordinator import WorkerResult
+
         tail_marker = "FULL_CONTENT_TAIL_SHOULD_NOT_APPEAR"
-        svc._synthesize("build feature", [
-            WorkerResult(
-                task_name="r1",
-                content=("important " * 200) + tail_marker,
-                duration_seconds=1.0,
-            ),
-        ])
+        svc._synthesize(
+            "build feature",
+            [
+                WorkerResult(
+                    task_name="r1",
+                    content=("important " * 200) + tail_marker,
+                    duration_seconds=1.0,
+                ),
+            ],
+        )
 
         distill_prompt = router.ask.call_args_list[0].args[0]
         synthesis_prompt = router.ask.call_args_list[-1].args[0]
@@ -129,6 +136,7 @@ class SynthesizeTests(unittest.TestCase):
         svc, router, *_ = _make_service(worker_result_summary_chars=360)
         router.ask.side_effect = [RuntimeError("distiller down"), MagicMock(content="plan")]
         from claw_v2.coordinator import MECHANICAL_TRUNCATION_SIGNATURE, WorkerResult
+
         worker = WorkerResult(
             task_name="r1",
             content="HEAD-/Users/hector/start\n" + ("noise\n" * 500) + "TAIL-claw_v2/end.py",
@@ -147,9 +155,13 @@ class SynthesizeTests(unittest.TestCase):
         svc, router, *_ = _make_service()
         router.ask.side_effect = RuntimeError("oops")
         from claw_v2.coordinator import WorkerResult
-        result = svc._synthesize("objective", [
-            WorkerResult(task_name="r1", content="data", duration_seconds=0.5),
-        ])
+
+        result = svc._synthesize(
+            "objective",
+            [
+                WorkerResult(task_name="r1", content="data", duration_seconds=0.5),
+            ],
+        )
         self.assertEqual(result, "")
 
 
@@ -280,7 +292,7 @@ class FullRunTests(unittest.TestCase):
                     content=(
                         "CRITICAL ERROR EN WORKER\n"
                         "Traceback (most recent call last):\n"
-                        "  File \"/Users/hector/Projects/Dr.-strange/claw_v2/broken.py\", line 7\n"
+                        '  File "/Users/hector/Projects/Dr.-strange/claw_v2/broken.py", line 7\n'
                         "RuntimeError: missing dependency"
                     )
                 )
@@ -297,7 +309,9 @@ class FullRunTests(unittest.TestCase):
         self.assertTrue(result.audit["critical_worker_error"])
         self.assertIn("implementation", result.phase_results)
         self.assertNotIn("verification", result.phase_results)
-        self.assertIn("/Users/hector/Projects/Dr.-strange/claw_v2/broken.py", result.audit["raw_error"])
+        self.assertIn(
+            "/Users/hector/Projects/Dr.-strange/claw_v2/broken.py", result.audit["raw_error"]
+        )
         critical_synthesis_prompt = prompts[-1]
         self.assertIn("Self-Healing", critical_synthesis_prompt)
         self.assertIn("CRITICAL ERROR EN WORKER", critical_synthesis_prompt)
@@ -328,7 +342,13 @@ class AgentAwareTests(unittest.TestCase):
 
     def test_execute_worker_uses_agent_provider_and_model(self) -> None:
         registry = {
-            "hex": {"provider": "openai", "model": "gpt-5.3-codex", "soul_text": "You are Hex.", "domains": [], "skills": []},
+            "hex": {
+                "provider": "openai",
+                "model": "gpt-5.3-codex",
+                "soul_text": "You are Hex.",
+                "domains": [],
+                "skills": [],
+            },
         }
         svc, router, _, _ = _make_service(agent_registry=registry)
         router.ask.return_value = MagicMock(content="fixed")
@@ -341,7 +361,9 @@ class AgentAwareTests(unittest.TestCase):
         self.assertEqual(call_kwargs.kwargs.get("system_prompt"), "You are Hex.")
 
     def test_execute_worker_without_agent_uses_defaults(self) -> None:
-        registry = {"hex": {"provider": "openai", "model": "gpt-5.3-codex", "domains": [], "skills": []}}
+        registry = {
+            "hex": {"provider": "openai", "model": "gpt-5.3-codex", "domains": [], "skills": []}
+        }
         svc, router, _, _ = _make_service(agent_registry=registry)
         router.ask.return_value = MagicMock(content="ok")
         task = WorkerTask(name="t1", instruction="do something")
@@ -419,11 +441,17 @@ class AgentAwareTests(unittest.TestCase):
 
     def test_synthesize_includes_agent_context(self) -> None:
         registry = {
-            "hex": {"provider": "openai", "model": "gpt-5.3-codex", "domains": ["code"], "skills": ["bug-triage"]},
+            "hex": {
+                "provider": "openai",
+                "model": "gpt-5.3-codex",
+                "domains": ["code"],
+                "skills": ["bug-triage"],
+            },
         }
         svc, router, _, _ = _make_service(agent_registry=registry)
         router.ask.return_value = MagicMock(content="plan here")
         from claw_v2.coordinator import WorkerResult
+
         findings = [WorkerResult(task_name="r1", content="found bug", duration_seconds=1.0)]
         _result = svc._synthesize("fix bugs", findings)
         prompt_arg = router.ask.call_args.args[0]
@@ -434,29 +462,43 @@ class AgentAwareTests(unittest.TestCase):
 class RetryAndContextTests(unittest.TestCase):
     def test_worker_lane_retries_once_on_adapter_error(self) -> None:
         from claw_v2.adapters.base import AdapterError
+
         svc, router, observe, _ = _make_service()
-        router.ask.side_effect = [AdapterError("Codex CLI timed out after 120s"), MagicMock(content="done")]
+        router.ask.side_effect = [
+            AdapterError("Codex CLI timed out after 120s"),
+            MagicMock(content="done"),
+        ]
         task = WorkerTask(name="impl", instruction="build", lane="worker")
         result = svc._execute_worker(task)
         self.assertEqual(result.content, "done")
         self.assertEqual(result.error, "")
         self.assertEqual(router.ask.call_count, 2)
-        retry_calls = [c for c in observe.emit.call_args_list if c.args and c.args[0] == "coordinator_worker_retry"]
+        retry_calls = [
+            c
+            for c in observe.emit.call_args_list
+            if c.args and c.args[0] == "coordinator_worker_retry"
+        ]
         self.assertEqual(len(retry_calls), 1)
 
     def test_worker_heavy_lane_retries_once_on_adapter_error(self) -> None:
         from claw_v2.adapters.base import AdapterError
+
         svc, router, observe, _ = _make_service()
         router.ask.side_effect = [AdapterError("terminal failure"), MagicMock(content="done")]
         task = WorkerTask(name="debug", instruction="debug", lane="worker_heavy")
         result = svc._execute_worker(task)
         self.assertEqual(result.content, "done")
         self.assertEqual(router.ask.call_count, 2)
-        retry_calls = [c for c in observe.emit.call_args_list if c.args and c.args[0] == "coordinator_worker_retry"]
+        retry_calls = [
+            c
+            for c in observe.emit.call_args_list
+            if c.args and c.args[0] == "coordinator_worker_retry"
+        ]
         self.assertEqual(len(retry_calls), 1)
 
     def test_worker_lane_gives_up_after_two_attempts(self) -> None:
         from claw_v2.adapters.base import AdapterError
+
         svc, router, *_ = _make_service()
         router.ask.side_effect = AdapterError("persistent timeout")
         task = WorkerTask(name="impl", instruction="build", lane="worker")
@@ -467,6 +509,7 @@ class RetryAndContextTests(unittest.TestCase):
 
     def test_research_lane_does_not_retry(self) -> None:
         from claw_v2.adapters.base import AdapterError
+
         svc, router, *_ = _make_service()
         router.ask.side_effect = AdapterError("fail")
         task = WorkerTask(name="r1", instruction="find", lane="research")
@@ -480,6 +523,7 @@ class RetryAndContextTests(unittest.TestCase):
         def fake_ask(prompt, **_kwargs):
             responses.append(prompt)
             return MagicMock(content="plan" if "Synthesize" in prompt else "result")
+
         router.ask.side_effect = fake_ask
 
         research = [WorkerTask(name="r1", instruction="find")]
@@ -495,6 +539,7 @@ class RetryAndContextTests(unittest.TestCase):
 
     def test_verification_surfaces_implementation_errors(self) -> None:
         from claw_v2.adapters.base import AdapterError
+
         svc, router, *_ = _make_service()
         captured: list[str] = []
 
@@ -504,6 +549,7 @@ class RetryAndContextTests(unittest.TestCase):
                 raise AdapterError("Codex CLI timed out after 120s")
             captured.append(prompt)
             return MagicMock(content="ok")
+
         router.ask.side_effect = fake_ask
 
         research = [WorkerTask(name="r1", instruction="find")]
@@ -654,9 +700,7 @@ class ResumeCriticalWorkerTests(unittest.TestCase):
 
     def test_loaded_research_with_critical_marker_runs_self_healing(self) -> None:
         tmp = Path(tempfile.mkdtemp())
-        self._seed_research(
-            tmp, "task-crit", content="CRITICAL ERROR EN WORKER: entorno roto"
-        )
+        self._seed_research(tmp, "task-crit", content="CRITICAL ERROR EN WORKER: entorno roto")
         svc, router, observe, _ = _make_service(scratch_root=tmp)
         router.ask.return_value = MagicMock(content="diagnóstico")
         impl = [WorkerTask(name="i1", instruction="implementa", lane="worker")]
@@ -681,9 +725,7 @@ class ResumeCriticalWorkerTests(unittest.TestCase):
         impl_dir = tmp / "task-crit2" / "implementation"
         impl_dir.mkdir()
         (impl_dir / "i1.json").write_text(
-            json.dumps(
-                {"task_name": "i1", "content": "CRITICAL ERROR EN WORKER: deploy roto"}
-            ),
+            json.dumps({"task_name": "i1", "content": "CRITICAL ERROR EN WORKER: deploy roto"}),
             encoding="utf-8",
         )
         svc, router, observe, _ = _make_service(scratch_root=tmp)

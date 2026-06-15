@@ -149,14 +149,17 @@ class TaskBoard:
 
     # ── claim ────────────────────────────────────────────────
 
-    def claim(self, agent_name: str, *, lane: str = "worker", tags: list[str] | None = None) -> BoardTask | None:
+    def claim(
+        self, agent_name: str, *, lane: str = "worker", tags: list[str] | None = None
+    ) -> BoardTask | None:
         """Claim the highest-priority queued task matching lane/tags.
 
         Returns the claimed task or None if nothing is available.
         """
         with self._lock:
             candidates = [
-                t for t in self._load_all()
+                t
+                for t in self._load_all()
                 if t.status == TaskStatus.QUEUED
                 and t.required_lane == lane
                 and (tags is None or any(tag in t.tags for tag in tags))
@@ -215,7 +218,9 @@ class TaskBoard:
 
     def active(self) -> list[BoardTask]:
         """Return all claimed or in-progress tasks."""
-        return [t for t in self._load_all() if t.status in (TaskStatus.CLAIMED, TaskStatus.IN_PROGRESS)]
+        return [
+            t for t in self._load_all() if t.status in (TaskStatus.CLAIMED, TaskStatus.IN_PROGRESS)
+        ]
 
     def summary(self) -> dict[str, int]:
         """Return counts per status."""
@@ -230,7 +235,10 @@ class TaskBoard:
         cutoff = time.time() - max_age_seconds
         removed = 0
         for task in self._load_all():
-            if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED) and task.completed_at < cutoff:
+            if (
+                task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED)
+                and task.completed_at < cutoff
+            ):
                 (self.root / f"{task.id}.json").unlink(missing_ok=True)
                 removed += 1
         return removed

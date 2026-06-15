@@ -21,8 +21,19 @@ _INTERNAL_LABEL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("needs_approval", re.compile(r"\bneeds_approval\b|\bpending_approval\b", re.IGNORECASE)),
     ("waiting_for_user_input", re.compile(r"\bwaiting_for_user_input\b", re.IGNORECASE)),
     ("explicit_blocker", re.compile(r"\bexplicit_blocker\b", re.IGNORECASE)),
-    ("risk_high", re.compile(r"\brisk[_ -]?tier\s*[:=]?\s*`?high`?\b|\brisk\s*[:=]?\s*`?high`?\b", re.IGNORECASE)),
-    ("internal_command", re.compile(r"/(?:task_approve|task_abort|action_approve|action_abort|approve|approval_status)\b", re.IGNORECASE)),
+    (
+        "risk_high",
+        re.compile(
+            r"\brisk[_ -]?tier\s*[:=]?\s*`?high`?\b|\brisk\s*[:=]?\s*`?high`?\b", re.IGNORECASE
+        ),
+    ),
+    (
+        "internal_command",
+        re.compile(
+            r"/(?:task_approve|task_abort|action_approve|action_abort|approve|approval_status)\b",
+            re.IGNORECASE,
+        ),
+    ),
 )
 
 _LINE_DROP_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -33,7 +44,10 @@ _LINE_DROP_PATTERNS: tuple[re.Pattern[str], ...] = (
     ),
     re.compile(r"\bApprove via\b|\bAbort via\b", re.IGNORECASE),
     re.compile(r"^\s*(?:Comando|Command)\s*:", re.IGNORECASE),
-    re.compile(r"/(?:task_approve|task_abort|action_approve|action_abort|approve|approval_status)\b", re.IGNORECASE),
+    re.compile(
+        r"/(?:task_approve|task_abort|action_approve|action_abort|approve|approval_status)\b",
+        re.IGNORECASE,
+    ),
     re.compile(r"^\s*(?:\*\*)?\s*pido\s+tu\s+ok\s+antes\s+de\s+tocar\b.*$", re.IGNORECASE),
     re.compile(r"^\s*una\s+palabra\s*:\s*`?(?:dale|todo)`?\b.*$", re.IGNORECASE),
 )
@@ -43,7 +57,10 @@ _SECTION_DROP_HEADING_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 _REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\btask\.contextual_action\b", re.IGNORECASE), "la acción contextual"),
-    (re.compile(r"\bneeds_approval\b|\bpending_approval\b", re.IGNORECASE), "pendiente de autorización"),
+    (
+        re.compile(r"\bneeds_approval\b|\bpending_approval\b", re.IGNORECASE),
+        "pendiente de autorización",
+    ),
     (re.compile(r"\bwaiting_for_user_input\b", re.IGNORECASE), "esperando tu respuesta"),
     (re.compile(r"\bexplicit_blocker\b", re.IGNORECASE), "bloqueo verificado"),
     (re.compile(r"\brisk[_ -]?tier\s*[:=]?\s*`?high`?\b", re.IGNORECASE), "riesgo alto"),

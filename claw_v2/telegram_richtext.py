@@ -94,17 +94,14 @@ def markdown_to_telegram_html(text: str) -> str:
 
     # 2) Inline code — protect before inline emphasis so `*x*` inside code is
     #    left literal.
-    text = _INLINE_CODE_RE.sub(
-        lambda m: _protect(f"<code>{_esc(m.group(1))}</code>"), text
-    )
+    text = _INLINE_CODE_RE.sub(lambda m: _protect(f"<code>{_esc(m.group(1))}</code>"), text)
 
     # 3) Links — protect (rendered text + href) before escaping the rest. The
     #    link text keeps inline emphasis; inline code inside it is already a
     #    placeholder from step 2 and passes through untouched.
     text = _LINK_RE.sub(
         lambda m: _protect(
-            f'<a href="{_esc_attr(m.group(2))}">'
-            f"{_render_emphasis(_esc(m.group(1)))}</a>"
+            f'<a href="{_esc_attr(m.group(2))}">{_render_emphasis(_esc(m.group(1)))}</a>'
         ),
         text,
     )

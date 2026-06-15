@@ -338,7 +338,9 @@ class ArchitectureInvariantTests(unittest.TestCase):
         """
 
         def fake_anthropic(req: LLMRequest) -> LLMResponse:
-            return LLMResponse(content="<response>ok</response>", lane=req.lane, provider="anthropic")
+            return LLMResponse(
+                content="<response>ok</response>", lane=req.lane, provider="anthropic"
+            )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -362,8 +364,9 @@ class ArchitectureInvariantTests(unittest.TestCase):
                 # call before the sweep. recompute_confidence is a slow *local*
                 # wiki maintenance pass (no provider/subprocess/codegen) — no-op
                 # it so the sweep is not dominated by ~17s of unrelated work.
-                with patch("claw_v2.main._resolve_pytest_command") as mock_resolve, patch(
-                    "claw_v2.wiki.WikiService.recompute_confidence", return_value=None
+                with (
+                    patch("claw_v2.main._resolve_pytest_command") as mock_resolve,
+                    patch("claw_v2.wiki.WikiService.recompute_confidence", return_value=None),
                 ):
                     mock_resolve.return_value = (["true"], "true")
                     runtime = build_runtime(anthropic_executor=fake_anthropic)
@@ -375,13 +378,16 @@ class ArchitectureInvariantTests(unittest.TestCase):
                     # ``except Exception`` does not swallow it and it reaches us.
                     heavy: set[str] = set()
                     for job in runtime.scheduler.list_jobs():
-                        with patch.object(
-                            runtime.router, "ask", side_effect=_HeavyInlineCall
-                        ), patch.object(
-                            runtime.auto_research, "run_loop", side_effect=_HeavyInlineCall
-                        ), patch.object(
-                            runtime.sub_agents, "run_skill", side_effect=_HeavyInlineCall
-                        ), patch("subprocess.run", side_effect=_HeavyInlineCall):
+                        with (
+                            patch.object(runtime.router, "ask", side_effect=_HeavyInlineCall),
+                            patch.object(
+                                runtime.auto_research, "run_loop", side_effect=_HeavyInlineCall
+                            ),
+                            patch.object(
+                                runtime.sub_agents, "run_skill", side_effect=_HeavyInlineCall
+                            ),
+                            patch("subprocess.run", side_effect=_HeavyInlineCall),
+                        ):
                             try:
                                 job.handler()
                             except _HeavyInlineCall:
@@ -406,7 +412,9 @@ class ArchitectureInvariantTests(unittest.TestCase):
                     # Positive side: every known slow job enqueues a durable
                     # job and is wired as an off-tick background runner.
                     scheduler_jobs = {job.name: job for job in runtime.scheduler.list_jobs()}
-                    runner_names = {runner.name for runner in runtime.daemon._background_job_runners}
+                    runner_names = {
+                        runner.name for runner in runtime.daemon._background_job_runners
+                    }
                     for job_name, job_kind in SLOW_SCHEDULER_AGENT_JOBS.items():
                         with self.subTest(job_name=job_name):
                             self.assertIn(job_name, scheduler_jobs)
@@ -417,7 +425,9 @@ class ArchitectureInvariantTests(unittest.TestCase):
 
     def test_self_improve_is_migrated_off_tick_and_does_not_run_inline(self) -> None:
         def fake_anthropic(req: LLMRequest) -> LLMResponse:
-            return LLMResponse(content="<response>ok</response>", lane=req.lane, provider="anthropic")
+            return LLMResponse(
+                content="<response>ok</response>", lane=req.lane, provider="anthropic"
+            )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -463,7 +473,9 @@ class ArchitectureInvariantTests(unittest.TestCase):
                     runtime.auto_research.run_loop.assert_not_called()
 
                     # Heavy work must be wired as an off-tick durable runner...
-                    runner_names = {runner.name for runner in runtime.daemon._background_job_runners}
+                    runner_names = {
+                        runner.name for runner in runtime.daemon._background_job_runners
+                    }
                     self.assertIn("self_improve", runner_names)
 
                     # ...and the scheduler handler must enqueue a durable job.
@@ -479,7 +491,9 @@ class ArchitectureInvariantTests(unittest.TestCase):
         durable job, and uses a window so a slow tick cannot skip the day."""
 
         def fake_anthropic(req: LLMRequest) -> LLMResponse:
-            return LLMResponse(content="<response>ok</response>", lane=req.lane, provider="anthropic")
+            return LLMResponse(
+                content="<response>ok</response>", lane=req.lane, provider="anthropic"
+            )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -508,16 +522,16 @@ class ArchitectureInvariantTests(unittest.TestCase):
                 due = real_datetime(2026, 6, 11, 20, 59, 30)
                 with patch("claw_v2.main.datetime") as mock_dt:
                     mock_dt.now.return_value = due
-                    with patch.object(
-                        runtime.router, "ask", side_effect=_HeavyInlineCall
-                    ), patch.object(
-                        runtime.kairos, "run_health_check", side_effect=_HeavyInlineCall
-                    ), patch("subprocess.run", side_effect=_HeavyInlineCall):
+                    with (
+                        patch.object(runtime.router, "ask", side_effect=_HeavyInlineCall),
+                        patch.object(
+                            runtime.kairos, "run_health_check", side_effect=_HeavyInlineCall
+                        ),
+                        patch("subprocess.run", side_effect=_HeavyInlineCall),
+                    ):
                         jobs["daemon_health_check_guard"].handler()
 
-                    rows = runtime.job_service.list(
-                        kinds=(DAEMON_HEALTH_CHECK_JOB_KIND,), limit=10
-                    )
+                    rows = runtime.job_service.list(kinds=(DAEMON_HEALTH_CHECK_JOB_KIND,), limit=10)
                     self.assertEqual(len(rows), 1)
                     self.assertEqual(rows[0].status, "queued")
 
@@ -553,7 +567,9 @@ class ArchitectureInvariantTests(unittest.TestCase):
         runs in a daemon background runner."""
 
         def fake_anthropic(req: LLMRequest) -> LLMResponse:
-            return LLMResponse(content="<response>ok</response>", lane=req.lane, provider="anthropic")
+            return LLMResponse(
+                content="<response>ok</response>", lane=req.lane, provider="anthropic"
+            )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -644,7 +660,9 @@ class ArchitectureInvariantTests(unittest.TestCase):
         old inline behavior of simply not running self-improve when off."""
 
         def fake_anthropic(req: LLMRequest) -> LLMResponse:
-            return LLMResponse(content="<response>ok</response>", lane=req.lane, provider="anthropic")
+            return LLMResponse(
+                content="<response>ok</response>", lane=req.lane, provider="anthropic"
+            )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -675,17 +693,24 @@ class ArchitectureInvariantTests(unittest.TestCase):
 
                 runners = {runner.name: runner for runner in runtime.daemon._background_job_runners}
                 self.assertIn("self_improve", runners)
-                with patch("subprocess.run", side_effect=AssertionError("self-improve must not run when disabled")):
+                with patch(
+                    "subprocess.run",
+                    side_effect=AssertionError("self-improve must not run when disabled"),
+                ):
                     runners["self_improve"].handler()
 
                 rows = runtime.job_service.list(kinds=(SELF_IMPROVE_JOB_KIND,), limit=10)
                 self.assertEqual(len(rows), 1)
-                self.assertEqual(rows[0].status, "queued", "disabled kill-switch must leave the job unclaimed")
+                self.assertEqual(
+                    rows[0].status, "queued", "disabled kill-switch must leave the job unclaimed"
+                )
                 runtime.auto_research.run_loop.assert_not_called()
 
     def test_pipeline_poll_jobs_are_migrated_off_tick_and_do_not_run_inline(self) -> None:
         def fake_anthropic(req: LLMRequest) -> LLMResponse:
-            return LLMResponse(content="<response>ok</response>", lane=req.lane, provider="anthropic")
+            return LLMResponse(
+                content="<response>ok</response>", lane=req.lane, provider="anthropic"
+            )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -705,9 +730,10 @@ class ArchitectureInvariantTests(unittest.TestCase):
                 # Patch at class level BEFORE build so the (current) raw
                 # ``handler=pipeline.poll_actionable`` registration captures the
                 # sentinel; the migrated handler must never invoke them inline.
-                with patch("claw_v2.pipeline.PipelineService.poll_actionable") as mock_poll, patch(
-                    "claw_v2.pipeline.PipelineService.poll_merges"
-                ) as mock_merges:
+                with (
+                    patch("claw_v2.pipeline.PipelineService.poll_actionable") as mock_poll,
+                    patch("claw_v2.pipeline.PipelineService.poll_merges") as mock_merges,
+                ):
                     runtime = build_runtime(anthropic_executor=fake_anthropic)
 
                     jobs = {job.name: job for job in runtime.scheduler.list_jobs()}
@@ -719,7 +745,9 @@ class ArchitectureInvariantTests(unittest.TestCase):
                     mock_poll.assert_not_called()
                     mock_merges.assert_not_called()
 
-                    runner_names = {runner.name for runner in runtime.daemon._background_job_runners}
+                    runner_names = {
+                        runner.name for runner in runtime.daemon._background_job_runners
+                    }
                     self.assertIn("pipeline_poll", runner_names)
                     self.assertIn("pipeline_poll_merges", runner_names)
 
@@ -731,7 +759,9 @@ class ArchitectureInvariantTests(unittest.TestCase):
 
     def test_a2a_process_inbox_is_migrated_off_tick_and_does_not_dispatch_inline(self) -> None:
         def fake_anthropic(req: LLMRequest) -> LLMResponse:
-            return LLMResponse(content="<response>ok</response>", lane=req.lane, provider="anthropic")
+            return LLMResponse(
+                content="<response>ok</response>", lane=req.lane, provider="anthropic"
+            )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -760,16 +790,22 @@ class ArchitectureInvariantTests(unittest.TestCase):
 
                     mock_inbox.assert_not_called()
 
-                    runner_names = {runner.name for runner in runtime.daemon._background_job_runners}
+                    runner_names = {
+                        runner.name for runner in runtime.daemon._background_job_runners
+                    }
                     self.assertIn("a2a_process_inbox", runner_names)
 
                     rows = runtime.job_service.list(kinds=(A2A_PROCESS_INBOX_JOB_KIND,), limit=10)
                     self.assertEqual(len(rows), 1)
                     self.assertEqual(rows[0].status, "queued")
 
-    def test_scheduled_sub_agent_jobs_are_migrated_off_tick_and_do_not_dispatch_inline(self) -> None:
+    def test_scheduled_sub_agent_jobs_are_migrated_off_tick_and_do_not_dispatch_inline(
+        self,
+    ) -> None:
         def fake_anthropic(req: LLMRequest) -> LLMResponse:
-            return LLMResponse(content="<response>ok</response>", lane=req.lane, provider="anthropic")
+            return LLMResponse(
+                content="<response>ok</response>", lane=req.lane, provider="anthropic"
+            )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -795,7 +831,9 @@ class ArchitectureInvariantTests(unittest.TestCase):
                     f"{_sanitize_job_name(j.agent)}_{_sanitize_job_name(j.skill)}"
                     for j in runtime.config.scheduled_sub_agents
                 }
-                self.assertTrue(sub_agent_names, "default config must register scheduled sub-agent jobs")
+                self.assertTrue(
+                    sub_agent_names, "default config must register scheduled sub-agent jobs"
+                )
 
                 jobs = {job.name: job for job in runtime.scheduler.list_jobs()}
                 for name in sub_agent_names:
@@ -888,7 +926,9 @@ class ArchitectureInvariantTests(unittest.TestCase):
                 if not _is_call_named(node, "ScheduledJob"):
                     continue
                 handler = _keyword_value(node, "handler")
-                if handler is not None and _node_mentions(handler, {"PropertyGraphProjection", "materialize"}):
+                if handler is not None and _node_mentions(
+                    handler, {"PropertyGraphProjection", "materialize"}
+                ):
                     offenders.append(f"{path.relative_to(REPO_ROOT)}:{node.lineno}")
         self.assertEqual(offenders, [])
 
@@ -943,9 +983,7 @@ def _control_router_ask_calls() -> list[_ControlCallsite]:
 
 def _package_python_files() -> list[Path]:
     return [
-        path
-        for path in (REPO_ROOT / "claw_v2").rglob("*.py")
-        if "__pycache__" not in path.parts
+        path for path in (REPO_ROOT / "claw_v2").rglob("*.py") if "__pycache__" not in path.parts
     ]
 
 

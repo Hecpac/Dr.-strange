@@ -103,8 +103,12 @@ class CoordinatorService:
         self.phase_input_summary_chars = max(1, int(phase_input_summary_chars))
         self.default_worker_timeout_seconds = max(1.0, float(default_worker_timeout_seconds))
         self.default_research_timeout_seconds = max(1.0, float(default_research_timeout_seconds))
-        self.default_verification_timeout_seconds = max(1.0, float(default_verification_timeout_seconds))
-        self.default_implementation_timeout_seconds = max(1.0, float(default_implementation_timeout_seconds))
+        self.default_verification_timeout_seconds = max(
+            1.0, float(default_verification_timeout_seconds)
+        )
+        self.default_implementation_timeout_seconds = max(
+            1.0, float(default_implementation_timeout_seconds)
+        )
 
     def run(
         self,
@@ -171,7 +175,9 @@ class CoordinatorService:
                 research_results = self._load_scratch_results(task_id, "research")
                 if research_results:
                     result.phase_results["research"] = research_results
-                    self._emit_phase_resumed_from_scratch(trace, task_id, "research", len(research_results))
+                    self._emit_phase_resumed_from_scratch(
+                        trace, task_id, "research", len(research_results)
+                    )
                     # A kill between _write_scratch and the self-healing path
                     # can persist a critical artifact: re-check loaded results
                     # so a resume never proceeds past a critical worker error.
@@ -207,7 +213,9 @@ class CoordinatorService:
                     trace_context=trace,
                 )
                 self._orchestration_ack(research_artifact_id, consumer_role="coordinator_synthesis")
-                self._orchestration_require_ack(research_artifact_id, consumer_role="coordinator_synthesis")
+                self._orchestration_require_ack(
+                    research_artifact_id, consumer_role="coordinator_synthesis"
+                )
                 self._orchestration_checkpoint(
                     orchestration_run_id,
                     phase="research",
@@ -254,7 +262,9 @@ class CoordinatorService:
                     self._emit_phase_resumed_from_scratch(trace, task_id, "synthesis", 1)
             if not synthesis:
                 self._orchestration_begin_phase(orchestration_run_id, "synthesis", trace)
-                synthesis = self._synthesize(objective, research_results, trace, lane_overrides=lane_overrides)
+                synthesis = self._synthesize(
+                    objective, research_results, trace, lane_overrides=lane_overrides
+                )
                 result.synthesis = synthesis
                 self._write_scratch_text(scratch, "synthesis.md", synthesis)
                 if implementation_tasks:
@@ -273,7 +283,9 @@ class CoordinatorService:
                     trace_context=trace,
                 )
                 self._orchestration_ack(synthesis_artifact_id, consumer_role=synthesis_consumer)
-                self._orchestration_require_ack(synthesis_artifact_id, consumer_role=synthesis_consumer)
+                self._orchestration_require_ack(
+                    synthesis_artifact_id, consumer_role=synthesis_consumer
+                )
                 self._orchestration_checkpoint(
                     orchestration_run_id,
                     phase="synthesis",
@@ -344,7 +356,11 @@ class CoordinatorService:
                             )
             if implementation_tasks and not result.phase_results.get("implementation"):
                 started_marker = scratch / IMPLEMENTATION_STARTED_MARKER
-                if start_phase is not None and started_marker.exists() and not allow_implementation_rerun:
+                if (
+                    start_phase is not None
+                    and started_marker.exists()
+                    and not allow_implementation_rerun
+                ):
                     # F3.1 gate: a previous attempt started implementation but
                     # never persisted completed results — partial external side
                     # effects are possible. Re-execution must be an explicit
@@ -374,14 +390,19 @@ class CoordinatorService:
                 )
                 self._orchestration_begin_phase(orchestration_run_id, "implementation", trace)
                 impl_tasks = self._inject_context(
-                    self._with_phase_timeout(implementation_tasks, self.default_implementation_timeout_seconds),
+                    self._with_phase_timeout(
+                        implementation_tasks, self.default_implementation_timeout_seconds
+                    ),
                     objective=objective,
                     input_artifact_ref=synthesis_artifact_ref,
                     input_summary=synthesis_summary,
                     phase_input_summary_chars=self.phase_input_summary_chars,
-                    degraded=any(r.degraded_compaction for r in research_results) or synthesis_empty,
+                    degraded=any(r.degraded_compaction for r in research_results)
+                    or synthesis_empty,
                 )
-                impl_results = self._dispatch_parallel(impl_tasks, trace, lane_overrides=lane_overrides)
+                impl_results = self._dispatch_parallel(
+                    impl_tasks, trace, lane_overrides=lane_overrides
+                )
                 result.phase_results["implementation"] = impl_results
                 self._write_scratch(scratch, "implementation", impl_results)
                 impl_artifact_id = self._orchestration_record_phase_results(
@@ -393,7 +414,9 @@ class CoordinatorService:
                     trace_context=trace,
                 )
                 self._orchestration_ack(impl_artifact_id, consumer_role="verification_workers")
-                self._orchestration_require_ack(impl_artifact_id, consumer_role="verification_workers")
+                self._orchestration_require_ack(
+                    impl_artifact_id, consumer_role="verification_workers"
+                )
                 self._orchestration_checkpoint(
                     orchestration_run_id,
                     phase="implementation",
@@ -443,7 +466,9 @@ class CoordinatorService:
                         lane_overrides=lane_overrides,
                     )
                 verify_tasks = self._inject_context(
-                    self._with_phase_timeout(verification_tasks, self.default_verification_timeout_seconds),
+                    self._with_phase_timeout(
+                        verification_tasks, self.default_verification_timeout_seconds
+                    ),
                     objective=objective,
                     input_artifact_ref=verification_input_ref,
                     input_summary=verification_input_summary,
@@ -454,7 +479,9 @@ class CoordinatorService:
                     )
                     or synthesis_empty,
                 )
-                verify_results = self._dispatch_parallel(verify_tasks, trace, lane_overrides=lane_overrides)
+                verify_results = self._dispatch_parallel(
+                    verify_tasks, trace, lane_overrides=lane_overrides
+                )
                 result.phase_results["verification"] = verify_results
                 self._write_scratch(scratch, "verification", verify_results)
                 verification_artifact_id = self._orchestration_record_phase_results(
@@ -465,8 +492,12 @@ class CoordinatorService:
                     consumer_role="coordinator_result",
                     trace_context=trace,
                 )
-                self._orchestration_ack(verification_artifact_id, consumer_role="coordinator_result")
-                self._orchestration_require_ack(verification_artifact_id, consumer_role="coordinator_result")
+                self._orchestration_ack(
+                    verification_artifact_id, consumer_role="coordinator_result"
+                )
+                self._orchestration_require_ack(
+                    verification_artifact_id, consumer_role="coordinator_result"
+                )
                 self._orchestration_checkpoint(
                     orchestration_run_id,
                     phase="verification",
@@ -546,7 +577,9 @@ class CoordinatorService:
         shutdown_early = False
         try:
             futures = {
-                pool.submit(self._execute_worker, task, trace_context, lane_overrides=lane_overrides): task
+                pool.submit(
+                    self._execute_worker, task, trace_context, lane_overrides=lane_overrides
+                ): task
                 for task in tasks
             }
             for future in as_completed(futures):
@@ -588,7 +621,9 @@ class CoordinatorService:
         kwargs: dict[str, Any] = {
             "lane": task.lane,
             "role": self._role_for_worker_task(task),
-            "timeout": task.timeout_seconds if task.timeout_seconds is not None else self._timeout_for_worker_task(task),
+            "timeout": task.timeout_seconds
+            if task.timeout_seconds is not None
+            else self._timeout_for_worker_task(task),
             "evidence_pack": attach_trace({"coordinator_task": task.name}, task_trace),
         }
         if task.assigned_agent and task.assigned_agent in self.agent_registry:
@@ -624,7 +659,12 @@ class CoordinatorService:
                         span_id=task_trace["span_id"],
                         parent_span_id=task_trace["parent_span_id"],
                         artifact_id=task.name,
-                        payload={"task_name": task.name, "lane": task.lane, "error": str(exc)[:300], "attempt": attempt},
+                        payload={
+                            "task_name": task.name,
+                            "lane": task.lane,
+                            "error": str(exc)[:300],
+                            "attempt": attempt,
+                        },
                     )
                     continue
                 break
@@ -698,7 +738,9 @@ class CoordinatorService:
         )
 
         try:
-            synthesis_trace = child_trace_context(trace_context, artifact_id="coordinator_synthesis")
+            synthesis_trace = child_trace_context(
+                trace_context, artifact_id="coordinator_synthesis"
+            )
             response = self.router.ask(
                 prompt,
                 lane="research",
@@ -767,14 +809,18 @@ class CoordinatorService:
             for t in tasks
         ]
 
-    def _with_phase_timeout(self, tasks: list[WorkerTask], timeout_seconds: float) -> list[WorkerTask]:
+    def _with_phase_timeout(
+        self, tasks: list[WorkerTask], timeout_seconds: float
+    ) -> list[WorkerTask]:
         return [
             WorkerTask(
                 name=task.name,
                 instruction=task.instruction,
                 lane=task.lane,
                 assigned_agent=task.assigned_agent,
-                timeout_seconds=task.timeout_seconds if task.timeout_seconds is not None else timeout_seconds,
+                timeout_seconds=task.timeout_seconds
+                if task.timeout_seconds is not None
+                else timeout_seconds,
             )
             for task in tasks
         ]

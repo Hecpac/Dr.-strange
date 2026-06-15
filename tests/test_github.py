@@ -31,7 +31,9 @@ class GitHubPullRequestServiceTests(unittest.TestCase):
             draft=True,
         )
 
-        self.assertEqual(commands[0], ["git", "-C", "/tmp/repo", "push", "-u", "origin", "claw/agent/abc1234"])
+        self.assertEqual(
+            commands[0], ["git", "-C", "/tmp/repo", "push", "-u", "origin", "claw/agent/abc1234"]
+        )
         self.assertEqual(
             commands[1],
             [

@@ -96,7 +96,9 @@ def _tool_failure_event(tool_name: str, error: str = "Exit code 1", **kwargs) ->
     }
 
 
-def _make_bot(observe: _RecordingObserve, task_ledger: TaskLedger, state: dict | None = None) -> BotService:
+def _make_bot(
+    observe: _RecordingObserve, task_ledger: TaskLedger, state: dict | None = None
+) -> BotService:
     bot = BotService.__new__(BotService)
     bot.observe = observe
     bot.task_ledger = task_ledger
@@ -132,7 +134,9 @@ class ValidateCompletionBrainManifestTests(unittest.TestCase):
         self.assertFalse(_has_brain_tooluse_evidence_manifest(record))
 
     def test_recognizer_requires_correlation_hook(self) -> None:
-        record = {"artifacts": {"evidence_manifest": self._manifest(trace_id="", observe_event_ids=[])}}
+        record = {
+            "artifacts": {"evidence_manifest": self._manifest(trace_id="", observe_event_ids=[])}
+        }
         self.assertFalse(_has_brain_tooluse_evidence_manifest(record))
 
     def test_recognizer_accepts_trace_id(self) -> None:
@@ -166,7 +170,9 @@ class ValidateCompletionBrainManifestTests(unittest.TestCase):
                 "status": "succeeded",
                 "verification_status": "needs_verification",
                 "summary": "brain tool-use turn (verified)",
-                "artifacts": {"evidence_manifest": self._manifest(verification_result="passed", blockers=[])},
+                "artifacts": {
+                    "evidence_manifest": self._manifest(verification_result="passed", blockers=[])
+                },
             }
         )
         self.assertEqual(decision.final_status, "succeeded")
@@ -229,9 +235,7 @@ class BrainToolUseEvidencePackTests(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self._ledger_observe = _RecordingObserve()
-        self.ledger = TaskLedger(
-            Path(self._tmp.name) / "claw.db", observe=self._ledger_observe
-        )
+        self.ledger = TaskLedger(Path(self._tmp.name) / "claw.db", observe=self._ledger_observe)
 
     # --- A. completed with manifest closes unverified until verified --------
 

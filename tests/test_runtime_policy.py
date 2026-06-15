@@ -64,7 +64,9 @@ class RuntimePolicyEngineTests(unittest.TestCase):
     def test_unknown_tool_is_denied_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)
-            engine = RuntimePolicyEngine(workspace_root=workspace, sandbox_policy=SandboxPolicy(workspace_root=workspace))
+            engine = RuntimePolicyEngine(
+                workspace_root=workspace, sandbox_policy=SandboxPolicy(workspace_root=workspace)
+            )
 
             with self.assertRaises(PermissionError) as ctx:
                 engine.enforce("not.in.policy", {}, context="operator")
@@ -74,7 +76,9 @@ class RuntimePolicyEngineTests(unittest.TestCase):
     def test_delegate_task_policy_allows_brain_and_denies_worker_contexts(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)
-            engine = RuntimePolicyEngine(workspace_root=workspace, sandbox_policy=SandboxPolicy(workspace_root=workspace))
+            engine = RuntimePolicyEngine(
+                workspace_root=workspace, sandbox_policy=SandboxPolicy(workspace_root=workspace)
+            )
 
             decision = engine.enforce(
                 "mcp__claw__delegate_task",
@@ -99,7 +103,9 @@ class RuntimePolicyEngineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)
             (workspace / ".env").write_text("SECRET=1", encoding="utf-8")
-            engine = RuntimePolicyEngine(workspace_root=workspace, sandbox_policy=SandboxPolicy(workspace_root=workspace))
+            engine = RuntimePolicyEngine(
+                workspace_root=workspace, sandbox_policy=SandboxPolicy(workspace_root=workspace)
+            )
 
             with self.assertRaises(PermissionError):
                 engine.enforce("Read", {"path": ".env"}, context="operator")
@@ -108,10 +114,14 @@ class RuntimePolicyEngineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)
             (workspace / "README.md").write_text("ok", encoding="utf-8")
-            engine = RuntimePolicyEngine(workspace_root=workspace, sandbox_policy=SandboxPolicy(workspace_root=workspace))
+            engine = RuntimePolicyEngine(
+                workspace_root=workspace, sandbox_policy=SandboxPolicy(workspace_root=workspace)
+            )
 
             with self.assertRaises(PermissionError) as ctx:
-                engine.enforce("Read", {"path": "README.md"}, context="operator", mutates_state=True)
+                engine.enforce(
+                    "Read", {"path": "README.md"}, context="operator", mutates_state=True
+                )
 
             self.assertIn("read-only", str(ctx.exception))
 
@@ -145,7 +155,9 @@ class RuntimePolicyEngineTests(unittest.TestCase):
         # host paths slipped past the boundary check.
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)
-            engine = RuntimePolicyEngine(workspace_root=workspace, sandbox_policy=SandboxPolicy(workspace_root=workspace))
+            engine = RuntimePolicyEngine(
+                workspace_root=workspace, sandbox_policy=SandboxPolicy(workspace_root=workspace)
+            )
             for command in (
                 "bash -c 'cat /etc/passwd'",
                 "bash -c 'cp /etc/passwd /tmp/x'",
@@ -162,21 +174,30 @@ class RuntimePolicyEngineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)
             (workspace / "README.md").write_text("ok", encoding="utf-8")
-            engine = RuntimePolicyEngine(workspace_root=workspace, sandbox_policy=SandboxPolicy(workspace_root=workspace))
+            engine = RuntimePolicyEngine(
+                workspace_root=workspace, sandbox_policy=SandboxPolicy(workspace_root=workspace)
+            )
             engine.enforce("Bash", {"command": "bash -c 'cat README.md'"}, context="operator")
 
     def test_direct_secret_command_path_blocked(self) -> None:
         # Regression guard: direct (non-wrapped) host path stays blocked.
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)
-            engine = RuntimePolicyEngine(workspace_root=workspace, sandbox_policy=SandboxPolicy(workspace_root=workspace))
+            engine = RuntimePolicyEngine(
+                workspace_root=workspace, sandbox_policy=SandboxPolicy(workspace_root=workspace)
+            )
             with self.assertRaises(PermissionError):
                 engine.enforce("Bash", {"command": "cat /etc/passwd"}, context="operator")
 
     def test_iter_path_values_recurses_into_lists(self) -> None:
         # 2026-05-29 audit: _iter_path_values skipped lists (asymmetric with
         # _iter_urls), so path args inside lists escaped the secret/boundary check.
-        found = [v for _, v in _iter_path_values({"files": [{"path": "/etc/passwd"}, {"path": "~/.netrc"}]})]
+        found = [
+            v
+            for _, v in _iter_path_values(
+                {"files": [{"path": "/etc/passwd"}, {"path": "~/.netrc"}]}
+            )
+        ]
         self.assertIn("/etc/passwd", found)
         self.assertIn("~/.netrc", found)
         nested = [v for _, v in _iter_path_values({"path": ["/etc/passwd", "~/.npmrc"]})]

@@ -49,9 +49,7 @@ class ManagedChrome:
         profile_pids = set(_profile_user_data_pids(self.profile_dir)) if pids else set()
         if pids and _is_cdp_ready(self.port, timeout=1):
             if all(any(cn in name.lower() for cn in _CHROME_NAMES) for _, name in pids):
-                matching_profile_pids = [
-                    pid for pid, _name in pids if pid in profile_pids
-                ]
+                matching_profile_pids = [pid for pid, _name in pids if pid in profile_pids]
                 if not matching_profile_pids:
                     raise ChromeStartError(
                         f"Port {self.port} has a ready Chrome CDP process, but it is "
@@ -71,7 +69,11 @@ class ManagedChrome:
                     self._attached_pid = matching_profile_pids[0]
                     if not headless:
                         self._ensure_visible_window(self._attached_pid)
-                    logger.info("ManagedChrome reusing existing CDP Chrome on port %d (PID %d)", self.port, self._attached_pid)
+                    logger.info(
+                        "ManagedChrome reusing existing CDP Chrome on port %d (PID %d)",
+                        self.port,
+                        self._attached_pid,
+                    )
                     return
         for pid, name in pids:
             if any(cn in name.lower() for cn in _CHROME_NAMES):
@@ -116,7 +118,9 @@ class ManagedChrome:
                         try:
                             self._process.terminate()
                         except Exception:
-                            logger.debug("Could not terminate failed Chrome subprocess", exc_info=True)
+                            logger.debug(
+                                "Could not terminate failed Chrome subprocess", exc_info=True
+                            )
                         self._process = None
                     continue
                 break
@@ -131,9 +135,7 @@ class ManagedChrome:
         )
         if last_error is not None:
             raise last_error
-        raise ChromeStartError(
-            f"Chrome failed to launch on port {self.port}; CDP unavailable"
-        )
+        raise ChromeStartError(f"Chrome failed to launch on port {self.port}; CDP unavailable")
 
     def _reclaim_profile_if_busy(self) -> None:
         """Kill ONLY PIDs whose --user-data-dir matches self.profile_dir.
@@ -168,21 +170,23 @@ class ManagedChrome:
         if headless:
             cmd.append("--headless=new")
         else:
-            cmd.extend([
-                "--start-maximized",
-                "--window-position=0,0",
-                "--window-size=1440,1000",
-            ])
+            cmd.extend(
+                [
+                    "--start-maximized",
+                    "--window-position=0,0",
+                    "--window-size=1440,1000",
+                ]
+            )
 
         self._process = subprocess.Popen(
-            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
         _wait_for_cdp_ready(self.port, timeout=10)
         if not headless:
             self._ensure_visible_window(self._process.pid)
-        logger.info(
-            "ManagedChrome started on port %d (PID %d)", self.port, self._process.pid
-        )
+        logger.info("ManagedChrome started on port %d (PID %d)", self.port, self._process.pid)
 
     def _ensure_visible_window(self, pid: int) -> None:
         if _focus_visible_chrome(pid=pid):
@@ -230,6 +234,7 @@ class ManagedChrome:
             if kill_attached:
                 import os
                 import signal
+
                 try:
                     os.kill(pid, signal.SIGTERM)
                     try:
@@ -275,7 +280,10 @@ def _find_chrome() -> str:
 def _check_port_pids(port: int) -> list[tuple[int, str]]:
     try:
         output = subprocess.check_output(
-            ["lsof", "-ti", f":{port}"], text=True, stderr=subprocess.DEVNULL, timeout=5,
+            ["lsof", "-ti", f":{port}"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
         ).strip()
     except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
         return []
@@ -286,7 +294,10 @@ def _check_port_pids(port: int) -> list[tuple[int, str]]:
         pid = int(line.strip())
         try:
             name = subprocess.check_output(
-                ["ps", "-p", str(pid), "-o", "comm="], text=True, stderr=subprocess.DEVNULL, timeout=5,
+                ["ps", "-p", str(pid), "-o", "comm="],
+                text=True,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
             ).strip()
         except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
             name = "unknown"
@@ -369,7 +380,9 @@ def _open_cdp_target(port: int, url: str) -> None:
         with urllib.request.urlopen(request, timeout=3):
             return
     except Exception as exc:
-        raise ChromeStartError(f"Could not create visible Chrome CDP tab on port {port}: {exc}") from exc
+        raise ChromeStartError(
+            f"Could not create visible Chrome CDP tab on port {port}: {exc}"
+        ) from exc
 
 
 def _focus_existing_cdp_page(port: int) -> bool:
@@ -478,6 +491,7 @@ def _remove_stale_singleton_lock(profile_dir: str) -> None:
 def _kill_pid(pid: int) -> None:
     import signal
     import os
+
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
@@ -508,6 +522,7 @@ def _wait_for_profile_free(profile_dir: str, timeout: float = 5) -> None:
 
 def _is_cdp_ready(port: int, timeout: float = 2) -> bool:
     import urllib.request
+
     url = f"http://localhost:{port}/json/version"
     try:
         urllib.request.urlopen(url, timeout=timeout)

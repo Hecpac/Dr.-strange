@@ -220,9 +220,7 @@ def test_literal_task_id_bypasses_disable_flag(bot, monkeypatch) -> None:
     # Disable flag stays at default ("1"); the carve-out should still let
     # this message pass through to the classifier, which then routes it.
     monkeypatch.setenv("CLAW_DISABLE_TASK_INTENT_ROUTER", "1")
-    classified = bot._classify_task_intent(
-        "estado de la task nlm-5a9c55c8929d", session_id="t"
-    )
+    classified = bot._classify_task_intent("estado de la task nlm-5a9c55c8929d", session_id="t")
     assert classified.get("intent") in {
         "status_question",
         "resume_previous",
@@ -291,15 +289,12 @@ def test_dispatch_decision_chain_for_ambiguous_prompts(bot) -> None:
             "nlm_natural_language",
         ):
             assert required in handlers_seen, (
-                f"{required} did not emit a dispatch_decision for {prompt!r}; "
-                f"chain={handlers_seen}"
+                f"{required} did not emit a dispatch_decision for {prompt!r}; chain={handlers_seen}"
             )
 
         # task_intent must fall through with the disabled_by_flag reason
         # (default production setting), proving the brain-bypass guard fired.
-        task_intent_event = next(
-            ev for ev in events if ev["handler"] == "task_intent"
-        )
+        task_intent_event = next(ev for ev in events if ev["handler"] == "task_intent")
         assert task_intent_event["route"] == "fall_through", task_intent_event
         assert task_intent_event["reason"] in {
             "disabled_by_flag",
@@ -311,12 +306,9 @@ def test_dispatch_decision_marks_explicit_task_id(bot) -> None:
     """Messages naming a literal task_id must produce an `explicit_command`
     marker event so the audit stream can separate intentional commands from
     heuristic captures."""
-    events = _capture_dispatch_decisions(
-        bot, "estado de la task nlm-5a9c55c8929d"
-    )
+    events = _capture_dispatch_decisions(bot, "estado de la task nlm-5a9c55c8929d")
     assert any(
-        ev["route"] == "explicit_command"
-        and ev["reason"] == "literal_task_id_match"
+        ev["route"] == "explicit_command" and ev["reason"] == "literal_task_id_match"
         for ev in events
     ), f"missing explicit_command marker for task_id message; chain={events!r}"
 

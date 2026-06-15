@@ -12,6 +12,7 @@ flow that the runtime takes:
 100% offline. tmp_path filesystem only. Autouse `_no_network` fixture blocks
 sockets/urllib. NO X/LinkedIn/HeyGen/deploy/GitHub remote, no browser/CDP.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -30,8 +31,10 @@ from claw_v2.verification.promote_gate import apply_promote_gate_to_checkpoint
 def _no_network(monkeypatch):
     def _boom(*a, **kw):
         raise RuntimeError("Network call attempted from runner integration test — forbidden")
+
     import socket
     import urllib.request
+
     monkeypatch.setattr(socket.socket, "connect", _boom)
     monkeypatch.setattr(urllib.request, "urlopen", _boom)
     yield
@@ -48,6 +51,7 @@ def _fake_write_handler_factory(target_path: str, payload: str):
     def _handler(args):
         # Tool args are the dict the registry forwards from the caller.
         from pathlib import Path
+
         Path(args["path"]).write_text(args["content"])
         return {"ok": True, "path": args["path"], "bytes_written": len(args["content"])}
 
@@ -69,11 +73,17 @@ def _fake_bash_handler(args):
 def _fake_edit_handler_factory(target_path: str, new_content: str):
     def _handler(args):
         from pathlib import Path
+
         p = Path(args["path"])
         old = p.read_text() if p.exists() else ""
         old_text = args.get("old_text", "")
         if old_text and old_text not in old:
-            return {"ok": True, "path": args["path"], "changed_bytes": 0, "reason": "old_text_not_found"}
+            return {
+                "ok": True,
+                "path": args["path"],
+                "changed_bytes": 0,
+                "reason": "old_text_not_found",
+            }
         p.write_text(new_content)
         return {"ok": True, "path": args["path"], "changed_bytes": abs(len(new_content) - len(old))}
 
@@ -96,6 +106,7 @@ def _fake_wikilint_handler_factory(issues_list):
 
 def _registry_with(tool_name: str, handler, *, workspace_root=None):
     from pathlib import Path
+
     reg = ToolRegistry(workspace_root=Path(workspace_root) if workspace_root else Path("/tmp"))
     sc = LOCAL_TOOL_SUCCESS_CONDITIONS[tool_name]
     reg.register(
@@ -385,7 +396,10 @@ def test_runtime_edit_handler_reports_old_text_not_found_fails(tmp_path):
     )
     assert terminal == "failed"
     envelope = new_checkpoint["promote_gate_envelope"]
-    assert any("forbidden_reason_matched:old_text_not_found" == e for e in envelope["verification_result"]["errors"])
+    assert any(
+        "forbidden_reason_matched:old_text_not_found" == e
+        for e in envelope["verification_result"]["errors"]
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -434,7 +448,7 @@ def test_failclosed_when_attach_artifact_raises(monkeypatch, tmp_path):
         raw_verification_status="passed",
         completed_checkpoint=checkpoint,
     )
-    assert terminal == ""                                          # NOT succeeded
+    assert terminal == ""  # NOT succeeded
     assert verification == "blocked"
     assert new_checkpoint["promote_gate_reason"] == "contract_required_artifact_missing"
     assert any(name == "promote_gate_contract_bypass_detected" for name, _ in events)
@@ -609,7 +623,7 @@ def test_edit_allow_noop_succeeds_when_state_is_already_correct(tmp_path):
     """idempotent_ok / allow_noop flag relaxes content_changed requirement
     when the handler signals the file is already in the desired state."""
     target = tmp_path / "code.py"
-    target.write_text("x = 2\n")            # already in target state
+    target.write_text("x = 2\n")  # already in target state
 
     def _idempotent_handler(args):
         return {"ok": True, "path": args["path"], "changed_bytes": 0}

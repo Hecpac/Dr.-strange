@@ -57,7 +57,9 @@ class WikiConcurrencyTests(unittest.TestCase):
             for t in threads:
                 t.join()
 
-            self.assertEqual(errors, [], msg=f"concurrent wiki access raised: {[repr(e) for e in errors[:3]]}")
+            self.assertEqual(
+                errors, [], msg=f"concurrent wiki access raised: {[repr(e) for e in errors[:3]]}"
+            )
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@ Si el backend devuelve >1 candidato cercano sin orden garantizado,
 retorna confidence="low" y reason="multiple_candidates" para que el
 caller pueda pedir confirmación.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass

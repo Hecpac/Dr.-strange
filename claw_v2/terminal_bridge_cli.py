@@ -7,7 +7,9 @@ from claw_v2.terminal_bridge import TerminalBridgeError, TerminalBridgeService
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Manage persistent PTY bridge sessions for claude/codex.")
+    parser = argparse.ArgumentParser(
+        description="Manage persistent PTY bridge sessions for claude/codex."
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     open_parser = subparsers.add_parser("open")

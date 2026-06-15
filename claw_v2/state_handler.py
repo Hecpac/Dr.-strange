@@ -37,8 +37,28 @@ PENDING_ACTION_COHERENCE_THRESHOLD = 0.40
 
 _REDACTED_MARKERS = ("[REDACTED]", "<REDACTED:")
 _TOPIC_STOPWORDS = {
-    "a", "al", "and", "de", "del", "el", "en", "for", "la", "las", "lo",
-    "los", "me", "mi", "que", "the", "to", "tu", "un", "una", "y", "yo",
+    "a",
+    "al",
+    "and",
+    "de",
+    "del",
+    "el",
+    "en",
+    "for",
+    "la",
+    "las",
+    "lo",
+    "los",
+    "me",
+    "mi",
+    "que",
+    "the",
+    "to",
+    "tu",
+    "un",
+    "una",
+    "y",
+    "yo",
 }
 _PROFILE_CORRECTION_TAGS = ("profile", "correction", "user_direct")
 
@@ -217,7 +237,9 @@ class StateHandler:
             step_budget=_default_step_budget(current.get("autonomy_mode", "assisted")),
         )
 
-    def remember_assistant_turn_state(self, session_id: str, user_text: str, reply_text: str) -> None:
+    def remember_assistant_turn_state(
+        self, session_id: str, user_text: str, reply_text: str
+    ) -> None:
         state = self._memory.get_session_state(session_id)
         self._persist_direct_profile_corrections(session_id, user_text)
         options = _extract_numbered_options(reply_text)
@@ -235,7 +257,9 @@ class StateHandler:
         # which the brain almost never wrote, leaving the DB column at
         # 0/35 non-empty per the 2026-05-16 audit.
         if not (isinstance(pending_action, str) and pending_action.strip()):
-            if self._looks_like_proposal_question(reply_text) and not self._looks_like_ledger_status_choice(reply_text):
+            if self._looks_like_proposal_question(
+                reply_text
+            ) and not self._looks_like_ledger_status_choice(reply_text):
                 proposal = self._summarize_proposal(reply_text)
                 if proposal:
                     pending_action = proposal
@@ -246,7 +270,9 @@ class StateHandler:
         # PR 0D: refuse to persist secret-shaped pending_action so a
         # later "ok" cannot replay a token as an objective.
         if isinstance(pending_action, str) and pending_action.strip():
-            if _is_secret_shaped_token(pending_action) or _contains_sensitive_redaction(pending_action):
+            if _is_secret_shaped_token(pending_action) or _contains_sensitive_redaction(
+                pending_action
+            ):
                 self._emit(
                     "resolver_state_skipped_sensitive",
                     {"session_id": session_id, "slot": "pending_action"},
@@ -297,16 +323,23 @@ class StateHandler:
         # local task_queue bookkeeping.
         verification_status = state.get("verification_status", "unknown")
         self_reported_status = _extract_verification_status(reply_text)
-        checkpoint = _build_checkpoint(reply_text, pending_action=pending_action, verification_status=verification_status)
+        checkpoint = _build_checkpoint(
+            reply_text, pending_action=pending_action, verification_status=verification_status
+        )
         if self_reported_status is not None:
             checkpoint["self_reported_status"] = self_reported_status
         steps_taken = state.get("steps_taken", 0)
         is_followup_selection = _extract_option_reference(user_text) is not None
-        if state.get("mode") in {"coding", "research", "browse", "publish", "ops"} and not is_followup_selection:
+        if (
+            state.get("mode") in {"coding", "research", "browse", "publish", "ops"}
+            and not is_followup_selection
+        ):
             steps_taken += 1
         task_queue = state.get("task_queue") or []
         if isinstance(pending_action, str) and pending_action.strip():
-            depends_on = self._task_handler.derive_task_dependencies(task_queue, summary=pending_action)
+            depends_on = self._task_handler.derive_task_dependencies(
+                task_queue, summary=pending_action
+            )
             existing_entry = next(
                 (
                     item
@@ -327,10 +360,16 @@ class StateHandler:
                 depends_on=depends_on,
             )
         elif self_reported_status == "passed":
-            task_queue = self._task_handler.mark_first_task_queue_entry(task_queue, from_status="in_progress", to_status="done")
-            task_queue = self._task_handler.mark_first_task_queue_entry(task_queue, from_status="pending", to_status="done")
+            task_queue = self._task_handler.mark_first_task_queue_entry(
+                task_queue, from_status="in_progress", to_status="done"
+            )
+            task_queue = self._task_handler.mark_first_task_queue_entry(
+                task_queue, from_status="pending", to_status="done"
+            )
         elif self_reported_status == "failed":
-            task_queue = self._task_handler.mark_first_task_queue_entry(task_queue, from_status="in_progress", to_status="blocked")
+            task_queue = self._task_handler.mark_first_task_queue_entry(
+                task_queue, from_status="in_progress", to_status="blocked"
+            )
         self._memory.update_session_state(
             session_id,
             mode=_infer_session_mode(user_text, reply_text),
@@ -394,11 +433,15 @@ class StateHandler:
                 {"session_id": session_id, "facts": persisted},
             )
 
-    def maybe_resolve_stateful_followup(self, text: str, *, session_id: str) -> str | _BrainShortcut | None:
+    def maybe_resolve_stateful_followup(
+        self, text: str, *, session_id: str
+    ) -> str | _BrainShortcut | None:
         if not text or text.startswith("/"):
             return None
         state = self._memory.get_session_state(session_id)
-        ratio_shortcut = self._maybe_resolve_ratio_followup(text, session_id=session_id, state=state)
+        ratio_shortcut = self._maybe_resolve_ratio_followup(
+            text, session_id=session_id, state=state
+        )
         if ratio_shortcut is not None:
             return ratio_shortcut
         option_index = _extract_option_reference(text)
@@ -469,7 +512,9 @@ class StateHandler:
             if state.get("verification_status") == "awaiting_approval":
                 pending_approvals = state.get("pending_approvals") or []
                 latest_pending = pending_approvals[-1] if pending_approvals else {}
-                approval_id = latest_pending.get("approval_id") or (state.get("last_checkpoint") or {}).get("approval_id")
+                approval_id = latest_pending.get("approval_id") or (
+                    state.get("last_checkpoint") or {}
+                ).get("approval_id")
                 if approval_id:
                     return (
                         "Hay una aprobación pendiente antes de continuar.\n"
@@ -479,7 +524,9 @@ class StateHandler:
                 return "Hay una aprobación pendiente antes de continuar. Usa `/task_approve <approval_id> <token>`."
             if state.get("steps_taken", 0) >= state.get("step_budget", 0):
                 checkpoint = state.get("last_checkpoint") or {}
-                summary = checkpoint.get("summary") or state.get("rolling_summary") or "sin checkpoint"
+                summary = (
+                    checkpoint.get("summary") or state.get("rolling_summary") or "sin checkpoint"
+                )
                 return (
                     "step budget agotado para esta tarea.\n"
                     f"Resumen actual: {summary}\n"
@@ -535,16 +582,26 @@ class StateHandler:
                     )
                 self._emit(
                     "approval_detected",
-                    {"session_id": session_id, "source": "pending_action", "text_preview": text[:80]},
+                    {
+                        "session_id": session_id,
+                        "source": "pending_action",
+                        "text_preview": text[:80],
+                    },
                 )
                 self._emit(
                     "pending_action_detected",
                     {"session_id": session_id, "pending_action_preview": pending_action[:160]},
                 )
-                task_queue = self._task_handler.mark_task_queue_in_progress(state.get("task_queue") or [], summary=pending_action)
+                task_queue = self._task_handler.mark_task_queue_in_progress(
+                    state.get("task_queue") or [], summary=pending_action
+                )
                 self._memory.update_session_state(session_id, task_queue=task_queue)
                 checkpoint = state.get("last_checkpoint") or {}
-                checkpoint_text = json.dumps(checkpoint, ensure_ascii=True, sort_keys=True) if checkpoint else "{}"
+                checkpoint_text = (
+                    json.dumps(checkpoint, ensure_ascii=True, sort_keys=True)
+                    if checkpoint
+                    else "{}"
+                )
                 self._emit(
                     "pending_action_execution_started",
                     {"session_id": session_id, "pending_action_preview": pending_action[:160]},
@@ -573,13 +630,22 @@ class StateHandler:
                         source="task_queue",
                         task_queue=blocked_queue,
                     )
-                task_queue = self._task_handler.mark_task_queue_in_progress(task_queue, task_id=next_task.get("task_id"))
+                task_queue = self._task_handler.mark_task_queue_in_progress(
+                    task_queue, task_id=next_task.get("task_id")
+                )
                 self._memory.update_session_state(session_id, task_queue=task_queue)
                 checkpoint = state.get("last_checkpoint") or {}
-                checkpoint_text = json.dumps(checkpoint, ensure_ascii=True, sort_keys=True) if checkpoint else "{}"
+                checkpoint_text = (
+                    json.dumps(checkpoint, ensure_ascii=True, sort_keys=True)
+                    if checkpoint
+                    else "{}"
+                )
                 self._emit(
                     "pending_action_execution_started",
-                    {"session_id": session_id, "pending_action_preview": str(next_task.get("summary") or "")[:160]},
+                    {
+                        "session_id": session_id,
+                        "pending_action_preview": str(next_task.get("summary") or "")[:160],
+                    },
                 )
                 return _BrainShortcut(
                     text=(
@@ -593,7 +659,11 @@ class StateHandler:
             if unlock_option:
                 self._memory.update_session_state(session_id, pending_action=unlock_option)
                 checkpoint = state.get("last_checkpoint") or {}
-                checkpoint_text = json.dumps(checkpoint, ensure_ascii=True, sort_keys=True) if checkpoint else "{}"
+                checkpoint_text = (
+                    json.dumps(checkpoint, ensure_ascii=True, sort_keys=True)
+                    if checkpoint
+                    else "{}"
+                )
                 self._emit(
                     "continuation_resolved",
                     {
@@ -630,7 +700,11 @@ class StateHandler:
                     )
                 self._memory.update_session_state(session_id, pending_action=proposal)
                 checkpoint = state.get("last_checkpoint") or {}
-                checkpoint_text = json.dumps(checkpoint, ensure_ascii=True, sort_keys=True) if checkpoint else "{}"
+                checkpoint_text = (
+                    json.dumps(checkpoint, ensure_ascii=True, sort_keys=True)
+                    if checkpoint
+                    else "{}"
+                )
                 self._emit(
                     "continuation_resolved",
                     {
@@ -732,7 +806,9 @@ class StateHandler:
                 except Exception:
                     current_id = created_id
                 try:
-                    max_delta = int(meta.get("max_message_delta") or PENDING_ACTION_MAX_MESSAGE_DELTA)
+                    max_delta = int(
+                        meta.get("max_message_delta") or PENDING_ACTION_MAX_MESSAGE_DELTA
+                    )
                 except (TypeError, ValueError):
                     max_delta = PENDING_ACTION_MAX_MESSAGE_DELTA
                 if current_id - created_id > max_delta:
@@ -852,7 +928,9 @@ class StateHandler:
         session_id: str,
         state: dict[str, Any],
     ) -> _BrainShortcut | None:
-        if not _looks_like_ratio_reference_request(text) and not self._looks_like_generic_two_artifact_request(text):
+        if not _looks_like_ratio_reference_request(
+            text
+        ) and not self._looks_like_generic_two_artifact_request(text):
             return None
         context = self._ratio_context_from_state(state)
         source = "session_state"
@@ -973,7 +1051,11 @@ class StateHandler:
         # PENDING_ACTION_TTL_SECONDS is treated as stale and ignored so
         # an old "ok" cannot replay obsolete proposals.
         pending = (state.get("pending_action") or "").strip()
-        if pending and not _contains_sensitive_redaction(pending) and not _is_secret_shaped_token(pending):
+        if (
+            pending
+            and not _contains_sensitive_redaction(pending)
+            and not _is_secret_shaped_token(pending)
+        ):
             if self._pending_action_still_fresh(state, session_id=session_id):
                 return DelegatedObjectiveResolution(
                     objective=pending,
@@ -1425,7 +1507,13 @@ class StateHandler:
             if message.get("role") != "assistant":
                 continue
             content = str(message.get("content") or "")
-            if "ratio" in content.lower() or "9:16" in content or "1:1" in content or "9x16" in content.lower() or "1x1" in content.lower():
+            if (
+                "ratio" in content.lower()
+                or "9:16" in content
+                or "1:1" in content
+                or "9x16" in content.lower()
+                or "1x1" in content.lower()
+            ):
                 chunks.append(content)
             if len(chunks) >= 4:
                 break

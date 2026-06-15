@@ -8,6 +8,7 @@ Three layers must scrub the marker:
 These tests cover layers 2-3 plus the shared helper. A regression that
 removes scrubbing from any of them must turn red here.
 """
+
 from __future__ import annotations
 
 import json

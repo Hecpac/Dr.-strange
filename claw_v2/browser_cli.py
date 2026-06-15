@@ -16,7 +16,9 @@ def _load_payload(raw: str) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run structured browser interactions via dev-browser.")
+    parser = argparse.ArgumentParser(
+        description="Run structured browser interactions via dev-browser."
+    )
     parser.add_argument("payload", nargs="?", help="JSON payload; when omitted, read from stdin")
     parser.add_argument("--browser", dest="browser_name", default="default")
     parser.add_argument("--headed", action="store_true", help="Disable headless mode")
@@ -46,12 +48,16 @@ def main(argv: list[str] | None = None) -> int:
         print(str(exc), file=sys.stderr)
         return 1
 
-    print(json.dumps({
-        "url": result.url,
-        "title": result.title,
-        "content": result.content,
-        "screenshot_path": result.screenshot_path,
-    }))
+    print(
+        json.dumps(
+            {
+                "url": result.url,
+                "title": result.title,
+                "content": result.content,
+                "screenshot_path": result.screenshot_path,
+            }
+        )
+    )
     return 0
 
 

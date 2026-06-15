@@ -14,7 +14,9 @@ class _TaskHandler:
     def derive_task_dependencies(self, *_args, **_kwargs):
         return []
 
-    def upsert_task_queue_entry(self, queue, *, summary, mode, status, source, priority, depends_on):
+    def upsert_task_queue_entry(
+        self, queue, *, summary, mode, status, source, priority, depends_on
+    ):
         return [
             *queue,
             {
@@ -149,10 +151,7 @@ class ContinuationResolverTests(unittest.TestCase):
         memory.store_message(
             "s1",
             "assistant",
-            (
-                "Plan: lanzar el smoke test de Inworld TTS-2 y comparar con Sal.\n"
-                "¿Lo arranco?"
-            ),
+            ("Plan: lanzar el smoke test de Inworld TTS-2 y comparar con Sal.\n¿Lo arranco?"),
         )
 
         shortcut = handler.maybe_resolve_stateful_followup("Dale", session_id="s1")
@@ -197,7 +196,7 @@ class ContinuationResolverTests(unittest.TestCase):
                         "**Checkpoint:**\n"
                         "- **Hecho:** inspeccion de observe_stream post-restart.\n"
                         "- **Pendiente:** validacion de la rama nueva (`brain_shortcut`) "
-                        "— requiere un \"Procede\"/\"Continua\" pelado de tu parte.\n"
+                        '— requiere un "Procede"/"Continua" pelado de tu parte.\n'
                         "Sigo activo esperando."
                     ),
                     "created_at": time.time(),
@@ -221,7 +220,7 @@ class ContinuationResolverTests(unittest.TestCase):
                 "reply_context": {
                     "source": "telegram_reply",
                     "text": (
-                        "Si quieres, convierto el bloque \"skills are the prompts + loop engineering\" "
+                        'Si quieres, convierto el bloque "skills are the prompts + loop engineering" '
                         "en el primer post de tu cadena semanal. Dime y lo armo."
                     ),
                     "created_at": time.time(),

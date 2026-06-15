@@ -90,18 +90,28 @@ class PipelineService:
         issue = self.linear.get_issue(issue_id)
         branch = _validate_branch_name(issue.branch_name or _slugify_branch(issue.id, issue.title))
         self.linear.update_status(issue_id, "In Progress")
-        run = PipelineRun(issue_id=issue_id, branch_name=branch, repo_root=str(repo), status="in_progress")
+        run = PipelineRun(
+            issue_id=issue_id, branch_name=branch, repo_root=str(repo), status="in_progress"
+        )
         _create_branch(repo, branch)
         wt_path = _create_worktree(repo, branch)
         run.worktree_path = str(wt_path)
-        past_lessons = self.learning.retrieve_lessons(issue.description, task_type="pipeline")[0] if self.learning else _retrieve_lessons(self.memory, issue.description) if self.memory else ""
+        past_lessons = (
+            self.learning.retrieve_lessons(issue.description, task_type="pipeline")[0]
+            if self.learning
+            else _retrieve_lessons(self.memory, issue.description)
+            if self.memory
+            else ""
+        )
         try:
             for attempt in range(self.max_retries + 1):
                 prompt = _build_code_prompt(issue, run, past_lessons=past_lessons)
                 # The coding agent's effect is the worktree diff collected below;
                 # its text response is intentionally not consumed.
                 _response = self.router.ask(
-                    prompt, lane="worker", system_prompt="You are a coding agent. Implement the requested change.",
+                    prompt,
+                    lane="worker",
+                    system_prompt="You are a coding agent. Implement the requested change.",
                     evidence_pack={"issue": issue.id, "description": issue.description},
                     cwd=str(wt_path),
                 )
@@ -120,7 +130,10 @@ class PipelineService:
                 if run.retries >= self.max_retries:
                     run.status = "failed"
                     self._record(issue, run, "failure")
-                    self.linear.post_comment(issue_id, f"Pipeline failed after {self.max_retries} retries.\n\n```\n{output[:1000]}\n```")
+                    self.linear.post_comment(
+                        issue_id,
+                        f"Pipeline failed after {self.max_retries} retries.\n\n```\n{output[:1000]}\n```",
+                    )
                     self._save_run(run)
                     return run
             if run.status == "awaiting_approval":
@@ -142,7 +155,9 @@ class PipelineService:
             if run.status == "failed" and wt_path:
                 _remove_worktree(repo, wt_path)
         if self.observe:
-            self.observe.emit("pipeline_checkpoint", payload={"issue": issue_id, "status": run.status})
+            self.observe.emit(
+                "pipeline_checkpoint", payload={"issue": issue_id, "status": run.status}
+            )
         return run
 
     def complete_pipeline(self, issue_id: str) -> PipelineRun:
@@ -159,9 +174,7 @@ class PipelineService:
             _commit_worktree(wt_path, f"feat: {issue_id} pipeline implementation")
             _push_branch(repo, run.branch_name)
         trivial_automerge = (
-            self._evaluate_trivial_automerge(run)
-            if self.enable_trivial_automerge
-            else None
+            self._evaluate_trivial_automerge(run) if self.enable_trivial_automerge else None
         )
         pr_result = self.pull_requests.create_pull_request(
             branch_name=run.branch_name,
@@ -233,7 +246,9 @@ class PipelineService:
             classifier=decision.classifier,
         )
 
-    def _auto_merge_trivial(self, issue_id: str, run: PipelineRun, pr_result: Any, decision: _TrivialAutoMergeDecision) -> PipelineRun:
+    def _auto_merge_trivial(
+        self, issue_id: str, run: PipelineRun, pr_result: Any, decision: _TrivialAutoMergeDecision
+    ) -> PipelineRun:
         pr_url = getattr(pr_result, "url", None) or ""
         pr_number = getattr(pr_result, "number", None) or _parse_pr_number_from_url(pr_url)
         if pr_number is None:
@@ -299,7 +314,9 @@ class PipelineService:
         run.status = "merged"
         self._save_run(run)
         self.linear.update_status(issue_id, "Done")
-        self.linear.post_comment(issue_id, f"PR merged and issue closed by Claw pipeline.\n\nPR: {run.pr_url}")
+        self.linear.post_comment(
+            issue_id, f"PR merged and issue closed by Claw pipeline.\n\nPR: {run.pr_url}"
+        )
         run.status = "done"
         self._save_run(run)
         if self.learning:
@@ -420,7 +437,9 @@ class PipelineService:
     @staticmethod
     def _load_run_from_path(path: Path) -> PipelineRun:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return PipelineRun(**{k: v for k, v in data.items() if k in PipelineRun.__dataclass_fields__})
+        return PipelineRun(
+            **{k: v for k, v in data.items() if k in PipelineRun.__dataclass_fields__}
+        )
 
 
 _SAFE_BRANCH_RE = re.compile(r"^[a-zA-Z0-9._/-]+$")
@@ -463,7 +482,14 @@ def _build_code_prompt(issue: LinearIssue, run: PipelineRun, *, past_lessons: st
     if past_lessons:
         parts.extend(["", "# Lessons from similar past tasks", past_lessons])
     if run.retries > 0 and run.test_output:
-        parts.extend(["", "Previous attempt failed. Test output:", f"```\n{run.test_output[:2000]}\n```", "Fix the failing tests."])
+        parts.extend(
+            [
+                "",
+                "Previous attempt failed. Test output:",
+                f"```\n{run.test_output[:2000]}\n```",
+                "Fix the failing tests.",
+            ]
+        )
     return "\n".join(parts)
 
 
@@ -593,7 +619,9 @@ def _paths_with_diff_headers(diff_text: str) -> set[str]:
     return paths
 
 
-def _run_tests(wt_path: Path, *, timeout: int = 300, isolation_mode: str = "host_sanitized") -> tuple[bool, str]:
+def _run_tests(
+    wt_path: Path, *, timeout: int = 300, isolation_mode: str = "host_sanitized"
+) -> tuple[bool, str]:
     try:
         result = sandboxed_run(
             ["python", "-m", "pytest", "-x", "-q"],
@@ -658,7 +686,10 @@ def _retrieve_lessons(memory: MemoryStore | None, description: str) -> str:
 
 
 def _record_outcome(
-    memory: MemoryStore | None, issue: LinearIssue, run: PipelineRun, outcome: str,
+    memory: MemoryStore | None,
+    issue: LinearIssue,
+    run: PipelineRun,
+    outcome: str,
 ) -> None:
     if not memory:
         return

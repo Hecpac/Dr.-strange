@@ -25,6 +25,7 @@ DEBT TRACKED (per Hector F3b.0 trailing notes):
     `forbidden_field_values={"remote_push_attempted": (True, "true", "yes")}`
     when that field starts appearing in the handler result.
 """
+
 from __future__ import annotations
 
 
@@ -60,11 +61,13 @@ EXTERNAL_TOOL_SUCCESS_CONDITIONS: dict[str, SuccessCondition] = {
             json_path_equals={"status": "completed"},
         ),
         forbidden_reasons=(
-            "api_error", "rate_limited", "invalid_api_key", "timeout",
+            "api_error",
+            "rate_limited",
+            "invalid_api_key",
+            "timeout",
             "content_policy_violation",
         ),
     ),
-
     # 1. HeyGenDeliver — poll job → download → ffmpeg compress → Telegram send.
     "HeyGenDeliver": SuccessCondition(
         must_contain_keys=("video_id", "output_path", "telegram_msg_id"),
@@ -94,7 +97,6 @@ EXTERNAL_TOOL_SUCCESS_CONDITIONS: dict[str, SuccessCondition] = {
             "compress_failed",
         ),
     ),
-
     # 3. GPTImage — generate an image from a prompt.
     "GPTImage": SuccessCondition(
         must_contain_keys=("output_path", "mime_type", "size_bytes"),
@@ -115,7 +117,6 @@ EXTERNAL_TOOL_SUCCESS_CONDITIONS: dict[str, SuccessCondition] = {
             "invalid_api_key",
         ),
     ),
-
     # 4. SkillExecute — run a registered skill (Tier 3 because the skill may
     #    mutate external state). The contract only enforces the wrapper-level
     #    invariants; the skill itself is responsible for finer-grained checks.
@@ -129,7 +130,6 @@ EXTERNAL_TOOL_SUCCESS_CONDITIONS: dict[str, SuccessCondition] = {
             "outside_workspace",
         ),
     ),
-
     # 5. A2ASend — deliver a task to an A2A peer over HTTP.
     "A2ASend": SuccessCondition(
         must_contain_keys=("to_agent", "task_id", "delivered"),
@@ -147,7 +147,6 @@ EXTERNAL_TOOL_SUCCESS_CONDITIONS: dict[str, SuccessCondition] = {
             "timeout",
         ),
     ),
-
     # 7. InstagramPublish — publish a local video as a Reel via CDP Chrome.
     #    Verified by Instagram's own share-confirmation modal (verified=True).
     #    No external_check: there is no clean HTTP endpoint; the in-flow modal
@@ -167,7 +166,6 @@ EXTERNAL_TOOL_SUCCESS_CONDITIONS: dict[str, SuccessCondition] = {
             "cdp_unavailable",
         ),
     ),
-
     # 6. WikiDelete — cascade-delete a wiki entry. Irreversible.
     #    The contract requires `approval_artifact` to be a non-empty string;
     #    the upstream approval gate is responsible for setting it.
@@ -236,17 +234,34 @@ EXTERNAL_TOOL_PREFLIGHTS: dict[str, PreflightSpec] = {
 # ---------------------------------------------------------------------------
 
 
-EXTERNAL_TOOL_REDACTED_KEYS: frozenset[str] = frozenset({
-    # Local-tool keys (kept for completeness)
-    "content", "old_text", "new_text",
-    "image_bytes", "image_b64", "image_data",
-    # Tier-3 additions
-    "prompt", "prompt_text", "text",
-    "image_url", "video_url", "audio_url",
-    "video_bytes", "audio_bytes", "audio_b64",
-    "api_key", "token", "secret", "password",
-    "telegram_token", "openai_key", "anthropic_key",
-})
+EXTERNAL_TOOL_REDACTED_KEYS: frozenset[str] = frozenset(
+    {
+        # Local-tool keys (kept for completeness)
+        "content",
+        "old_text",
+        "new_text",
+        "image_bytes",
+        "image_b64",
+        "image_data",
+        # Tier-3 additions
+        "prompt",
+        "prompt_text",
+        "text",
+        "image_url",
+        "video_url",
+        "audio_url",
+        "video_bytes",
+        "audio_bytes",
+        "audio_b64",
+        "api_key",
+        "token",
+        "secret",
+        "password",
+        "telegram_token",
+        "openai_key",
+        "anthropic_key",
+    }
+)
 
 
 def get_external_success_condition(tool_name: str) -> SuccessCondition | None:

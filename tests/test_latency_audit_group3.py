@@ -7,6 +7,7 @@
 3. Telegram processes updates concurrently with per-chat ordering; operator
    interrupt commands bypass the chat lock.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -86,9 +87,7 @@ class ObserveStreamTurnIdIndexTests(unittest.TestCase):
         deleted = self.observe.prune(retention_days=30, max_rows=1000, max_total_rows=20)
 
         self.assertEqual(deleted, 30)
-        rows = self.observe._conn.execute(
-            "SELECT id FROM observe_stream ORDER BY id"
-        ).fetchall()
+        rows = self.observe._conn.execute("SELECT id FROM observe_stream ORDER BY id").fetchall()
         self.assertEqual(len(rows), 20)
         ids = [r[0] for r in rows]
         # survivors are the highest ids (31..50)
@@ -143,12 +142,28 @@ class ObservePruneSchedulerJobTests(unittest.TestCase):
 
 class InterruptCommandMatcherTests(unittest.TestCase):
     def test_operator_interrupts_match(self) -> None:
-        for text in ("/freeze", "/unfreeze", "/status", "/approvals", "/approve abc token", "/action_abort abc", "/FREEZE", "/freeze@DrStrangeBot"):
+        for text in (
+            "/freeze",
+            "/unfreeze",
+            "/status",
+            "/approvals",
+            "/approve abc token",
+            "/action_abort abc",
+            "/FREEZE",
+            "/freeze@DrStrangeBot",
+        ):
             with self.subTest(text=text):
                 self.assertTrue(_is_interrupt_command(text))
 
     def test_regular_messages_and_other_commands_do_not_match(self) -> None:
-        for text in ("hola", "/computer abre chrome", "/design un mockup", "/task_run", "aprueba el deploy", ""):
+        for text in (
+            "hola",
+            "/computer abre chrome",
+            "/design un mockup",
+            "/task_run",
+            "aprueba el deploy",
+            "",
+        ):
             with self.subTest(text=text):
                 self.assertFalse(_is_interrupt_command(text))
 
@@ -162,7 +177,15 @@ class _BlockingBotService:
         self.first_started = asyncio.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
 
-    def handle_text(self, *, user_id: str, session_id: str, text: str, runtime_channel: str, context_metadata=None) -> str:
+    def handle_text(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        text: str,
+        runtime_channel: str,
+        context_metadata=None,
+    ) -> str:
         loop = self._loop
         assert loop is not None
         self.calls.append(f"start:{text}")

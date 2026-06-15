@@ -99,11 +99,7 @@ def acquire_polling_lock(
         except (OSError, ValueError):
             existing_pid = None
 
-    if (
-        existing_pid is not None
-        and existing_pid != os.getpid()
-        and _pid_alive(existing_pid)
-    ):
+    if existing_pid is not None and existing_pid != os.getpid() and _pid_alive(existing_pid):
         if observe is not None:
             try:
                 observe(
@@ -157,7 +153,9 @@ logger = logging.getLogger(__name__)
 
 MAX_TELEGRAM_LEN = 4096
 MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024  # 20 MB
-DEFAULT_IMAGE_PROMPT = "El usuario envio esta imagen por Telegram. Analizala y responde de forma util."
+DEFAULT_IMAGE_PROMPT = (
+    "El usuario envio esta imagen por Telegram. Analizala y responde de forma util."
+)
 DEFAULT_VIDEO_PROMPT = "El usuario envio este video por Telegram. Analiza los frames adjuntos y responde de forma util."
 _IMAGES_DIR = Path.home() / ".claw" / "images"
 _VIDEOS_DIR = Path.home() / ".claw" / "videos"
@@ -201,6 +199,7 @@ def _is_interrupt_command(text: str) -> bool:
         return False
     command = stripped.split()[0][1:].split("@", 1)[0].lower()
     return command in _INTERRUPT_COMMANDS
+
 
 _IMAGE_PATH_RE = re.compile(r"(/[^`\s]+?\.(?:png|jpe?g|webp))", re.IGNORECASE)
 _SEND_IMAGE_REQUEST_WORDS = (
@@ -264,9 +263,8 @@ def _split_message(text: str, max_len: int = MAX_TELEGRAM_LEN) -> list[str]:
 
 def _looks_like_latest_image_send_request(text: str) -> bool:
     lowered = text.strip().lower()
-    return (
-        any(word in lowered for word in _SEND_IMAGE_REQUEST_WORDS)
-        and any(word in lowered for word in _TELEGRAM_TARGET_WORDS)
+    return any(word in lowered for word in _SEND_IMAGE_REQUEST_WORDS) and any(
+        word in lowered for word in _TELEGRAM_TARGET_WORDS
     )
 
 
@@ -399,9 +397,13 @@ def _build_video_content_blocks(
     if transcript and transcript.strip():
         detail_lines.extend(["", "[Audio transcrito]:", transcript.strip()[:8000]])
     elif audio_error:
-        detail_lines.append("[Audio]: no disponible o no extraible; analiza visualmente los frames.")
+        detail_lines.append(
+            "[Audio]: no disponible o no extraible; analiza visualmente los frames."
+        )
 
-    memory_lines = [f"[Video adjunto] path: {durable_video_path}" if durable_video_path else "[Video adjunto]"]
+    memory_lines = [
+        f"[Video adjunto] path: {durable_video_path}" if durable_video_path else "[Video adjunto]"
+    ]
     if duration_seconds is not None and duration_seconds > 0:
         memory_lines.append(f"duracion_aproximada={duration_seconds:.1f}s")
     memory_lines.append("frames=" + ", ".join(str(path) for path in frame_paths))
@@ -462,7 +464,10 @@ def _video_frame_timestamps(duration_seconds: float, max_frames: int) -> list[fl
     if max_frames != len(anchors):
         step = 1.0 / (max_frames + 1)
         anchors = [step * index for index in range(1, max_frames + 1)]
-    return [max(0.0, min(duration_seconds - 0.25, duration_seconds * anchor)) for anchor in anchors[:max_frames]]
+    return [
+        max(0.0, min(duration_seconds - 0.25, duration_seconds * anchor))
+        for anchor in anchors[:max_frames]
+    ]
 
 
 async def _probe_video_duration_seconds(video_path: Path) -> float | None:
@@ -510,7 +515,9 @@ async def _extract_video_frame_paths(
     duration_seconds = await _probe_video_duration_seconds(video_path)
     frame_paths: list[Path] = []
     if duration_seconds is not None:
-        for index, timestamp in enumerate(_video_frame_timestamps(duration_seconds, max_frames), start=1):
+        for index, timestamp in enumerate(
+            _video_frame_timestamps(duration_seconds, max_frames), start=1
+        ):
             frame_path = _IMAGES_DIR / f"{stem}-frame-{index:02d}.jpg"
             ok = await _run_ffmpeg_silent(
                 [
@@ -568,6 +575,7 @@ def _extract_document_text(path: Path, mime_type: str | None, file_name: str | N
     if suffix == ".pdf" or (mime_type and "pdf" in mime_type):
         try:
             from pypdf import PdfReader
+
             reader = PdfReader(str(path))
             pages = []
             for page in reader.pages:
@@ -727,16 +735,26 @@ class TelegramTransport:
         # mistyped env value cannot silently disable the limiter (review #100).
         self._rate_max = min(120, max(1, _env_int("TELEGRAM_RATE_MAX", 30)))
         self._rate_window = max(1.0, _env_float("TELEGRAM_RATE_WINDOW", 60.0))
-        self._connection_pool_size = _env_int("TELEGRAM_CONNECTION_POOL_SIZE", DEFAULT_CONNECTION_POOL_SIZE)
+        self._connection_pool_size = _env_int(
+            "TELEGRAM_CONNECTION_POOL_SIZE", DEFAULT_CONNECTION_POOL_SIZE
+        )
         self._pool_timeout = _env_float("TELEGRAM_POOL_TIMEOUT", DEFAULT_POOL_TIMEOUT)
         self._request_timeout = _env_float("TELEGRAM_REQUEST_TIMEOUT", DEFAULT_REQUEST_TIMEOUT)
-        self._media_write_timeout = _env_float("TELEGRAM_MEDIA_WRITE_TIMEOUT", DEFAULT_MEDIA_WRITE_TIMEOUT)
-        self._get_updates_pool_size = _env_int("TELEGRAM_GET_UPDATES_POOL_SIZE", DEFAULT_GET_UPDATES_POOL_SIZE)
-        self._concurrent_updates = _env_int("TELEGRAM_CONCURRENT_UPDATES", DEFAULT_CONCURRENT_UPDATES)
+        self._media_write_timeout = _env_float(
+            "TELEGRAM_MEDIA_WRITE_TIMEOUT", DEFAULT_MEDIA_WRITE_TIMEOUT
+        )
+        self._get_updates_pool_size = _env_int(
+            "TELEGRAM_GET_UPDATES_POOL_SIZE", DEFAULT_GET_UPDATES_POOL_SIZE
+        )
+        self._concurrent_updates = _env_int(
+            "TELEGRAM_CONCURRENT_UPDATES", DEFAULT_CONCURRENT_UPDATES
+        )
         # Per-chat ordering: agent turns for the same session run one at a
         # time even with concurrent update processing enabled.
         self._chat_locks: dict[str, asyncio.Lock] = {}
-        self._text_send_retries = max(1, _env_int("TELEGRAM_TEXT_SEND_RETRIES", DEFAULT_TEXT_SEND_RETRIES))
+        self._text_send_retries = max(
+            1, _env_int("TELEGRAM_TEXT_SEND_RETRIES", DEFAULT_TEXT_SEND_RETRIES)
+        )
         # Render brain replies as Telegram HTML (bold/code/lists/quotes). On a
         # parse error the part auto-degrades to plain text, so the message is
         # never lost. Set TELEGRAM_REPLY_HTML=0 to revert to plain delivery.
@@ -804,9 +822,7 @@ class TelegramTransport:
         if executor is None:
             # Created on the event-loop thread (the only caller of the async
             # emit path), so this lazy init needs no extra locking.
-            executor = ThreadPoolExecutor(
-                max_workers=1, thread_name_prefix="tg-observe-emit"
-            )
+            executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tg-observe-emit")
             self._observe_executor = executor
         return executor
 
@@ -819,9 +835,7 @@ class TelegramTransport:
             # diagnostic emits still drain on the worker before it exits.
             executor.shutdown(wait=False)
 
-    async def _aemit_transport_event(
-        self, event_type: str, payload: dict[str, Any]
-    ) -> None:
+    async def _aemit_transport_event(self, event_type: str, payload: dict[str, Any]) -> None:
         """Persist a transport event off the event-loop thread.
 
         ``observe.emit`` -> ``ObserveStream._persist_event`` retries
@@ -911,9 +925,7 @@ class TelegramTransport:
         event_type: str,
         **kwargs: Any,
     ) -> None:
-        await self._aemit_transport_event(
-            event_type, self._outbound_text_payload(**kwargs)
-        )
+        await self._aemit_transport_event(event_type, self._outbound_text_payload(**kwargs))
 
     def _emit_outbound_text_event_nowait(
         self,
@@ -1259,6 +1271,7 @@ class TelegramTransport:
                 old_pid = int(self._PID_FILE.read_text().strip())
                 import os
                 import signal
+
                 if old_pid != os.getpid():
                     proc = await run_subprocess_bounded_off_loop(
                         ["ps", "-p", str(old_pid), "-o", "command="],
@@ -1279,6 +1292,7 @@ class TelegramTransport:
                 pass
         self._PID_FILE.parent.mkdir(parents=True, exist_ok=True)
         import os
+
         # P0 hotfix E: acquire token-hash flock BEFORE writing the PID file.
         # If a conflict aborts startup, we must not leave a pidfile that lies
         # about who owns polling — the watchdog would SIGTERM the wrong PID
@@ -1320,11 +1334,15 @@ class TelegramTransport:
         self._app.add_handler(MessageHandler(filters.VOICE, self._handle_voice))
         self._app.add_handler(MessageHandler(filters.AUDIO, self._handle_audio))
         self._app.add_handler(MessageHandler(filters.Document.AUDIO, self._handle_audio_document))
-        self._app.add_handler(MessageHandler(filters.VIDEO | filters.VIDEO_NOTE, self._handle_video))
-        self._app.add_handler(MessageHandler(
-            filters.Document.ALL & ~filters.Document.IMAGE & ~filters.Document.AUDIO,
-            self._handle_document,
-        ))
+        self._app.add_handler(
+            MessageHandler(filters.VIDEO | filters.VIDEO_NOTE, self._handle_video)
+        )
+        self._app.add_handler(
+            MessageHandler(
+                filters.Document.ALL & ~filters.Document.IMAGE & ~filters.Document.AUDIO,
+                self._handle_document,
+            )
+        )
         await self._app.initialize()
         await self._app.start()
         # Default 0: after downtime the backlog is processed, never dropped.
@@ -1339,6 +1357,7 @@ class TelegramTransport:
         if self._app is None:
             return
         from datetime import datetime
+
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         logger.info("Dr. Strange online at %s", now)
 
@@ -1370,6 +1389,7 @@ class TelegramTransport:
             )
         try:
             import os
+
             if self._PID_FILE.exists() and self._PID_FILE.read_text().strip() == str(os.getpid()):
                 self._PID_FILE.unlink(missing_ok=True)
         except Exception:
@@ -1385,6 +1405,7 @@ class TelegramTransport:
 
     async def _set_commands(self) -> None:
         from telegram import BotCommand
+
         commands = [
             BotCommand("browse", "Abrir y revisar cualquier URL — /browse <url>"),
             BotCommand("status", "Estado del sistema (heartbeat)"),
@@ -1469,7 +1490,9 @@ class TelegramTransport:
                 progress.arm(response_task)
                 response = await _asyncio_shield(response_task)
         except _AsyncioCancelledError:
-            logger.warning("Telegram text handler cancelled before normal delivery; late delivery guard armed")
+            logger.warning(
+                "Telegram text handler cancelled before normal delivery; late delivery guard armed"
+            )
             raise
         except Exception as exc:
             logger.exception("Error handling message")
@@ -1484,7 +1507,10 @@ class TelegramTransport:
                     )
                 except Exception:
                     response = "Error procesando tu mensaje. Intenta de nuevo."
-            elif "Claude SDK execution failed" in err_str or "Control request timeout: initialize" in err_str:
+            elif (
+                "Claude SDK execution failed" in err_str
+                or "Control request timeout: initialize" in err_str
+            ):
                 short = err_str[:300] if len(err_str) > 300 else err_str
                 response = f"El runtime de Claude falló: {short}"
             elif "API Error" in err_str or "invalid_request" in err_str:
@@ -1671,7 +1697,6 @@ class TelegramTransport:
                 response_chars=len(response),
             )
 
-
     async def _maybe_send_latest_generated_image(
         self,
         *,
@@ -1700,18 +1725,26 @@ class TelegramTransport:
         )
         if not sent:
             return f"Encontré la imagen, pero Telegram bloqueó el envío desde `{image_path}`."
-        self._record_direct_image_send(session_id=session_id, user_id=user_id, text=text, image_path=image_path)
+        self._record_direct_image_send(
+            session_id=session_id, user_id=user_id, text=text, image_path=image_path
+        )
         return "Te la puse aquí en Telegram."
 
-    def _record_direct_image_send(self, *, session_id: str, user_id: str, text: str, image_path: Path) -> None:
+    def _record_direct_image_send(
+        self, *, session_id: str, user_id: str, text: str, image_path: Path
+    ) -> None:
         memory = getattr(self._bot_service, "memory", None)
         if memory is None or not hasattr(memory, "store_message"):
             return
         try:
             memory.store_message(session_id, "user", text)
-            memory.store_message(session_id, "assistant", f"Imagen enviada por Telegram: `{image_path}`")
+            memory.store_message(
+                session_id, "assistant", f"Imagen enviada por Telegram: `{image_path}`"
+            )
         except Exception:
-            logger.debug("Could not record direct Telegram image send for user %s", user_id, exc_info=True)
+            logger.debug(
+                "Could not record direct Telegram image send for user %s", user_id, exc_info=True
+            )
 
     async def _handle_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_authorized(update):
@@ -1782,7 +1815,9 @@ class TelegramTransport:
         prefix = f"{caption}\n[Audio transcrito]: " if caption else "[Audio transcrito]: "
         await self._handle_text_content(update, prefix + text)
 
-    async def _handle_audio_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _handle_audio_document(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         if not self._is_authorized(update):
             return
         if self._is_rate_limited(str(update.effective_user.id)):
@@ -1800,7 +1835,9 @@ class TelegramTransport:
             await file.download_to_drive(str(tmp_path))
         except Exception:
             logger.exception("Audio document download failed")
-            await update.message.reply_text("No pude descargar el archivo de audio. Intenta de nuevo.")
+            await update.message.reply_text(
+                "No pude descargar el archivo de audio. Intenta de nuevo."
+            )
             return
         try:
             text = await transcribe(tmp_path, api_key=self._voice_api_key)
@@ -1851,7 +1888,9 @@ class TelegramTransport:
                 transcript = await transcribe(tmp_audio, api_key=self._voice_api_key)
             except VoiceUnavailableError as exc:
                 audio_error = "voice_unavailable"
-                logger.debug("Video audio transcription unavailable; falling back to frames: %s", exc)
+                logger.debug(
+                    "Video audio transcription unavailable; falling back to frames: %s", exc
+                )
             except RuntimeError as exc:
                 audio_error = "audio_extract_failed"
                 logger.debug("Video audio extraction failed; falling back to frames: %s", exc)
@@ -1966,7 +2005,9 @@ class TelegramTransport:
             caption=update.message.caption,
         )
 
-    async def _handle_image_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _handle_image_document(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         if not self._is_authorized(update):
             return
         if self._is_rate_limited(str(update.effective_user.id)):
@@ -1975,7 +2016,11 @@ class TelegramTransport:
         document = update.message.document
         if document is None:
             return
-        if hasattr(document, "file_size") and document.file_size and document.file_size > MAX_DOWNLOAD_BYTES:
+        if (
+            hasattr(document, "file_size")
+            and document.file_size
+            and document.file_size > MAX_DOWNLOAD_BYTES
+        ):
             await update.message.reply_text("Documento demasiado grande (máx 20 MB).")
             return
         await self._handle_image_content(
@@ -2003,7 +2048,7 @@ class TelegramTransport:
         await _maybe_send_chat_action(update.message, "typing")
         try:
             file = await context.bot.get_file(file_id)
-            suffix = _download_suffix(getattr(file, 'file_path', None), mime_type)
+            suffix = _download_suffix(getattr(file, "file_path", None), mime_type)
             tmp_path = Path(f"/tmp/claw-image-{file_unique_id}{suffix}")
             _IMAGES_DIR.mkdir(parents=True, exist_ok=True)
             durable_path = _IMAGES_DIR / f"{file_unique_id}{suffix}"
@@ -2033,6 +2078,7 @@ class TelegramTransport:
             return
         try:
             import shutil
+
             shutil.copy2(str(tmp_path), str(durable_path))
         except Exception:
             durable_path = tmp_path
@@ -2110,7 +2156,11 @@ class TelegramTransport:
         await _maybe_send_chat_action(update.message, "typing")
         text_content = _extract_document_text(tmp_path, doc.mime_type, doc.file_name)
         caption = update.message.caption or ""
-        prompt = caption if caption else f"El usuario envió el archivo '{doc.file_name or 'documento'}'. Analízalo."
+        prompt = (
+            caption
+            if caption
+            else f"El usuario envió el archivo '{doc.file_name or 'documento'}'. Analízalo."
+        )
         memory_text = f"[archivo: {doc.file_name}] {caption}".strip()
         content_blocks: list[dict[str, Any]] = [
             {"type": "text", "text": f"{prompt}\n\n--- Contenido del archivo ---\n{text_content}"},
@@ -2154,12 +2204,20 @@ class TelegramTransport:
             response_chars=len(response),
         )
 
-    async def send_photo(self, *, chat_id: int, photo_path: str, caption: str | None = None) -> bool:
+    async def send_photo(
+        self, *, chat_id: int, photo_path: str, caption: str | None = None
+    ) -> bool:
         if self._app is None:
             return False
         import tempfile
+
         resolved = Path(photo_path).resolve()
-        allowed_roots = (Path(tempfile.gettempdir()).resolve(), Path("/tmp"), Path("/private/tmp"), Path.home())
+        allowed_roots = (
+            Path(tempfile.gettempdir()).resolve(),
+            Path("/tmp"),
+            Path("/private/tmp"),
+            Path.home(),
+        )
         if not any(resolved.is_relative_to(root) for root in allowed_roots):
             logger.error("send_photo blocked: %s is outside allowed directories", resolved)
             return False
@@ -2177,7 +2235,9 @@ class TelegramTransport:
             return False
         return True
 
-    async def send_video_url(self, *, chat_id: int, video_url: str, caption: str | None = None) -> None:
+    async def send_video_url(
+        self, *, chat_id: int, video_url: str, caption: str | None = None
+    ) -> None:
         """Send a video by URL to a Telegram chat."""
         if self._app is None:
             return
@@ -2311,7 +2371,9 @@ class TelegramTransport:
         session_id = f"tg-{update.effective_chat.id}"
         started_at = time.perf_counter()
         try:
-            response = await self._handle_agent_text(user_id=user_id, session_id=session_id, text=text)
+            response = await self._handle_agent_text(
+                user_id=user_id, session_id=session_id, text=text
+            )
         except Exception:
             logger.exception("Error handling voice message")
             response = "Error processing your voice message."

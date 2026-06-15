@@ -122,9 +122,7 @@ class SkillExpandJobTests(unittest.TestCase):
             observe = MagicMock()
             jobs = JobService(Path(tmpdir) / "claw.db")
             skill_registry = MagicMock()
-            skill_registry.auto_expand.side_effect = RuntimeError(
-                "boom api_key=sk-secret-value"
-            )
+            skill_registry.auto_expand.side_effect = RuntimeError("boom api_key=sk-secret-value")
             enqueue_skill_expand_job(job_service=jobs)
             runner = SkillExpandJobRunner(
                 job_service=jobs,
@@ -191,7 +189,9 @@ class SkillExpandJobTests(unittest.TestCase):
 class SkillExpandRuntimeTests(unittest.IsolatedAsyncioTestCase):
     def test_runtime_scheduler_skill_expand_handler_enqueues_only(self) -> None:
         def fake_anthropic(req: LLMRequest) -> LLMResponse:
-            return LLMResponse(content="<response>ok</response>", lane=req.lane, provider="anthropic")
+            return LLMResponse(
+                content="<response>ok</response>", lane=req.lane, provider="anthropic"
+            )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -225,7 +225,9 @@ class SkillExpandRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_run_loop_processes_skill_expand_job_outside_tick(self) -> None:
         def fake_anthropic(req: LLMRequest) -> LLMResponse:
-            return LLMResponse(content="<response>ok</response>", lane=req.lane, provider="anthropic")
+            return LLMResponse(
+                content="<response>ok</response>", lane=req.lane, provider="anthropic"
+            )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

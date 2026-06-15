@@ -46,7 +46,9 @@ class TerminalBridgeService:
         self._policy_context = policy_context
         self._default_cwd = Path(default_cwd) if default_cwd is not None else None
 
-    def open(self, tool: str, *, cwd: str | Path | None = None, args: list[str] | None = None) -> dict[str, Any]:
+    def open(
+        self, tool: str, *, cwd: str | Path | None = None, args: list[str] | None = None
+    ) -> dict[str, Any]:
         command = self._resolve_command(tool, args=args)
         return self.open_command(tool=tool, command=command, cwd=cwd)
 
@@ -107,7 +109,13 @@ class TerminalBridgeService:
         stderr_handle = error_path.open("a", encoding="utf-8")
         try:
             runner = self._popen(
-                [sys.executable, "-m", "claw_v2.terminal_bridge", "__run_session", str(session_dir)],
+                [
+                    sys.executable,
+                    "-m",
+                    "claw_v2.terminal_bridge",
+                    "__run_session",
+                    str(session_dir),
+                ],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=stderr_handle,
@@ -139,14 +147,20 @@ class TerminalBridgeService:
         return sessions
 
     def status(self, session_id: str) -> dict[str, Any]:
-        self._enforce_policy("terminal.status", {"session_id": session_id, "storage_root": str(self.root)}, mutates_state=False)
+        self._enforce_policy(
+            "terminal.status",
+            {"session_id": session_id, "storage_root": str(self.root)},
+            mutates_state=False,
+        )
         session_dir = self._session_dir(session_id)
         meta = self._read_meta(session_dir)
         meta["alive"] = self._session_alive(meta)
         return meta
 
     def send(self, session_id: str, text: str, *, append_newline: bool = True) -> dict[str, Any]:
-        self._enforce_policy("terminal.send", {"session_id": session_id, "text": text}, mutates_state=True)
+        self._enforce_policy(
+            "terminal.send", {"session_id": session_id, "text": text}, mutates_state=True
+        )
         session_dir = self._session_dir(session_id)
         meta = self._read_meta(session_dir)
         payload = text if not append_newline or text.endswith("\n") else f"{text}\n"
@@ -158,7 +172,11 @@ class TerminalBridgeService:
         return {"session_id": session_id, "bytes_written": len(raw)}
 
     def read(self, session_id: str, *, offset: int = 0, limit: int = 4000) -> dict[str, Any]:
-        self._enforce_policy("terminal.read", {"session_id": session_id, "storage_root": str(self.root)}, mutates_state=False)
+        self._enforce_policy(
+            "terminal.read",
+            {"session_id": session_id, "storage_root": str(self.root)},
+            mutates_state=False,
+        )
         session_dir = self._session_dir(session_id)
         output_path = session_dir / "output.log"
         raw = output_path.read_bytes()
@@ -173,7 +191,9 @@ class TerminalBridgeService:
         }
 
     def close(self, session_id: str, *, force: bool = False) -> dict[str, Any]:
-        self._enforce_policy("terminal.close", {"session_id": session_id, "force": force}, mutates_state=True)
+        self._enforce_policy(
+            "terminal.close", {"session_id": session_id, "force": force}, mutates_state=True
+        )
         session_dir = self._session_dir(session_id)
         meta = self._read_meta(session_dir)
         sig = signal.SIGKILL if force else signal.SIGTERM
@@ -236,7 +256,9 @@ class TerminalBridgeService:
         return json.loads(self._meta_path(session_dir).read_text(encoding="utf-8"))
 
     def _write_meta(self, session_dir: Path, meta: dict[str, Any]) -> None:
-        self._meta_path(session_dir).write_text(json.dumps(meta, indent=2, sort_keys=True), encoding="utf-8")
+        self._meta_path(session_dir).write_text(
+            json.dumps(meta, indent=2, sort_keys=True), encoding="utf-8"
+        )
 
     @staticmethod
     def _session_alive(meta: dict[str, Any]) -> bool:

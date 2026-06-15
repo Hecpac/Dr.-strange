@@ -36,7 +36,9 @@ class SpeciesPoolTests(unittest.TestCase):
 
     def test_all_species_have_5_stats(self) -> None:
         for sp in SPECIES_POOL:
-            self.assertEqual(set(sp.base_stats.keys()), {"DEBUGGING", "PATIENCE", "CHAOS", "WISDOM", "SNARK"})
+            self.assertEqual(
+                set(sp.base_stats.keys()), {"DEBUGGING", "PATIENCE", "CHAOS", "WISDOM", "SNARK"}
+            )
 
 
 class HatchTests(unittest.TestCase):

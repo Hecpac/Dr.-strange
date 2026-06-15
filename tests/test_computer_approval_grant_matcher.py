@@ -5,6 +5,7 @@ The matcher used substring containment, so unrelated messages containing
 vuelta al plan") silently approved pending Tier-3 desktop actions. The matcher
 now requires the whole normalized message to be an approval phrase.
 """
+
 from __future__ import annotations
 
 import unittest

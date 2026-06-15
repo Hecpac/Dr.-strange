@@ -10,6 +10,7 @@ off to Claw production. This module persists the handoff so:
 
 The user-facing message is single-command and unambiguous.
 """
+
 from __future__ import annotations
 
 import hashlib

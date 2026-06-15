@@ -23,7 +23,9 @@ class BotCommand:
     prefixes: tuple[str, ...] = field(default_factory=tuple)
 
     def matches(self, stripped: str) -> bool:
-        return stripped in self.exact or any(stripped.startswith(prefix) for prefix in self.prefixes)
+        return stripped in self.exact or any(
+            stripped.startswith(prefix) for prefix in self.prefixes
+        )
 
 
 def dispatch_commands(commands: list[BotCommand], context: CommandContext) -> str | None:

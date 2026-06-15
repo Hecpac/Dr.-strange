@@ -26,7 +26,10 @@ HTML_ATTR_PAYLOAD_RE = re.compile(r"\b(?:alt|title|aria-label)\s*=\s*\"([^\"]+)\
 SUSPICIOUS_PATTERN_REGEXES: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
     (label, re.compile(pattern, re.IGNORECASE))
     for label, pattern in (
-        ("ignore previous instructions", r"ignore\W*(?:all\W*)?(?:the\W*)?(?:previous|prior|above)\W*instructions"),
+        (
+            "ignore previous instructions",
+            r"ignore\W*(?:all\W*)?(?:the\W*)?(?:previous|prior|above)\W*instructions",
+        ),
         ("disregard previous", r"disregard\W*(?:the\W*)?(?:previous|prior|above)"),
         ("forget everything", r"forget\W*everything"),
         ("override your", r"override\W*your\W*(?:instructions|rules|guidelines)"),
@@ -47,7 +50,10 @@ SUSPICIOUS_PATTERN_REGEXES: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
         ("sudo command", r"\bsudo\s+\w+"),
         ("rm -rf", r"\brm\s+-rf\b"),
         ("dangerous url scheme", r"(?:javascript:|data:text/html|file://)"),
-        ("exfil python", r"```python\s*\n\s*(?:import\s+(?:os|subprocess|requests)|open\(|eval\(|exec\()"),
+        (
+            "exfil python",
+            r"```python\s*\n\s*(?:import\s+(?:os|subprocess|requests)|open\(|eval\(|exec\()",
+        ),
     )
 )
 
@@ -135,7 +141,9 @@ def sanitize(content: str, source: str, target_agent_class: AgentClass) -> Sanit
     )
 
 
-def extract_structured(content: str, *, source_url: str | None, reason: str) -> QuarantinedExtraction:
+def extract_structured(
+    content: str, *, source_url: str | None, reason: str
+) -> QuarantinedExtraction:
     scrubbed = _normalize_for_scan(content)
     numbers = {
         f"value_{idx}": float(match)

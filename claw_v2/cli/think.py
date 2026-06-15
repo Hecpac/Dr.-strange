@@ -11,6 +11,7 @@ Subcommands:
 
 Bot does not have to be running. Reads the same SQLite the live bot writes to.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -38,9 +39,7 @@ def _resolve_db_path(arg: str | None) -> Path:
     for candidate in _DEFAULT_DB_CANDIDATES:
         if candidate.exists() and candidate.stat().st_size > 0:
             return candidate
-    raise SystemExit(
-        "No claw.db found (tried data/claw.db, ~/.claw/claw.db). Pass --db <path>."
-    )
+    raise SystemExit("No claw.db found (tried data/claw.db, ~/.claw/claw.db). Pass --db <path>.")
 
 
 def _short_ts(ts: object) -> str:
@@ -119,7 +118,9 @@ def _generic_summary(payload: dict) -> str:
     return " ".join(parts)[:140]
 
 
-def _filter_events(events: Iterable[dict], event_type: str | None, session: str | None) -> Iterable[dict]:
+def _filter_events(
+    events: Iterable[dict], event_type: str | None, session: str | None
+) -> Iterable[dict]:
     for event in events:
         if event_type and event.get("event_type") != event_type:
             continue
@@ -174,7 +175,11 @@ def cmd_circuit(args: argparse.Namespace, observe: ObserveStream) -> int:
 
 def cmd_replay(args: argparse.Namespace, observe: ObserveStream) -> int:
     events = observe.recent_events(limit=args.scan)
-    chain = [event for event in events if (event.get("payload") or {}).get("session_id") == args.session_id]
+    chain = [
+        event
+        for event in events
+        if (event.get("payload") or {}).get("session_id") == args.session_id
+    ]
     chain.reverse()
     print(f"# Session {args.session_id}  ({len(chain)} events shown)")
     for event in chain[: args.limit]:
@@ -242,7 +247,9 @@ def cmd_failures(args: argparse.Namespace, observe: ObserveStream) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="claw-think", description=__doc__.splitlines()[0] if __doc__ else "")
+    parser = argparse.ArgumentParser(
+        prog="claw-think", description=__doc__.splitlines()[0] if __doc__ else ""
+    )
     parser.add_argument("--db", help="Override path to claw.db")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -262,11 +269,17 @@ def main(argv: list[str] | None = None) -> int:
     p_replay = sub.add_parser("replay", help="Reconstruct a session's reasoning chain")
     p_replay.add_argument("session_id")
     p_replay.add_argument("--limit", type=int, default=200)
-    p_replay.add_argument("--scan", type=int, default=2000, help="Recent events to scan for the session")
+    p_replay.add_argument(
+        "--scan", type=int, default=2000, help="Recent events to scan for the session"
+    )
 
     p_failures = sub.add_parser("failures", help="Aggregate failure events by tool + error")
-    p_failures.add_argument("--type", default="sdk_post_tool_use_failure", help="event_type to aggregate")
-    p_failures.add_argument("--limit", type=int, default=25, help="Top (tool, error) groups to show")
+    p_failures.add_argument(
+        "--type", default="sdk_post_tool_use_failure", help="event_type to aggregate"
+    )
+    p_failures.add_argument(
+        "--limit", type=int, default=25, help="Top (tool, error) groups to show"
+    )
     p_failures.add_argument("--days", type=int, default=14, help="Daily distribution window")
     p_failures.add_argument("--error-chars", type=int, default=90, help="Error message truncation")
 

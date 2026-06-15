@@ -31,8 +31,12 @@ class _UrlopenResponse:
         return self._body
 
 
-def _completed(args: list[str], returncode: int, stdout: str = "", stderr: str = "") -> subprocess.CompletedProcess[str]:
-    return subprocess.CompletedProcess(args=args, returncode=returncode, stdout=stdout, stderr=stderr)
+def _completed(
+    args: list[str], returncode: int, stdout: str = "", stderr: str = ""
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(
+        args=args, returncode=returncode, stdout=stdout, stderr=stderr
+    )
 
 
 def _healthy_runner(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
@@ -58,9 +62,7 @@ class ComputerDiagnosticsTests(unittest.TestCase):
                 "media_type": "image/png",
             }
             browser_use = SimpleNamespace(cdp_url="http://127.0.0.1:9250")
-            cdp_payload = (
-                b'{"Browser":"Chrome/148","User-Agent":"Mozilla/5.0 HeadlessChrome/148"}'
-            )
+            cdp_payload = b'{"Browser":"Chrome/148","User-Agent":"Mozilla/5.0 HeadlessChrome/148"}'
             handler = ComputerHandler(
                 computer=computer,
                 browser_use=browser_use,
@@ -78,7 +80,9 @@ class ComputerDiagnosticsTests(unittest.TestCase):
             self.assertIn("screenshot: ok - image/png", response)
             self.assertIn("browser_use_cdp: ok - Chrome/148; headless=True", response)
             events = observe.recent_events(limit=10)
-            result = next(event for event in events if event["event_type"] == "computer_diagnostic_result")
+            result = next(
+                event for event in events if event["event_type"] == "computer_diagnostic_result"
+            )
             self.assertEqual(result["payload"]["status"], "ok")
             checks = {item["name"]: item for item in result["payload"]["checks"]}
             self.assertEqual(checks["screenshot"]["status"], "ok")
@@ -114,11 +118,15 @@ class ComputerDiagnosticsTests(unittest.TestCase):
             event_types = [event["event_type"] for event in events]
             self.assertIn("computer_browser_use_timeout", event_types)
             self.assertIn("computer_session_failed", event_types)
-            timeout_event = next(event for event in events if event["event_type"] == "computer_browser_use_timeout")
+            timeout_event = next(
+                event for event in events if event["event_type"] == "computer_browser_use_timeout"
+            )
             self.assertEqual(timeout_event["payload"]["backend"], "browser_use")
             self.assertEqual(timeout_event["payload"]["timeout_seconds"], 180)
 
-    def test_startup_health_reports_display_and_missing_openai_key_without_disabling_mocks(self) -> None:
+    def test_startup_health_reports_display_and_missing_openai_key_without_disabling_mocks(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             config = make_config(root)
@@ -135,9 +143,15 @@ class ComputerDiagnosticsTests(unittest.TestCase):
             self.assertIn("openai_api_key", degraded)
             self.assertIsNone(degraded["openai_api_key"].capability)
             events = observe.recent_events(limit=20)
-            degraded_events = [event for event in events if event["event_type"] == "startup_healthcheck_degraded"]
-            self.assertTrue(any(event["payload"]["name"] == "computer_display" for event in degraded_events))
-            self.assertTrue(any(event["payload"]["name"] == "openai_api_key" for event in degraded_events))
+            degraded_events = [
+                event for event in events if event["event_type"] == "startup_healthcheck_degraded"
+            ]
+            self.assertTrue(
+                any(event["payload"]["name"] == "computer_display" for event in degraded_events)
+            )
+            self.assertTrue(
+                any(event["payload"]["name"] == "openai_api_key" for event in degraded_events)
+            )
 
     def test_runtime_diagnostics_include_structured_computer_failures(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -148,7 +162,9 @@ class ComputerDiagnosticsTests(unittest.TestCase):
                 payload={"backend": "browser_use", "timeout_seconds": 180},
             )
 
-            report = collect_diagnostics(db_path=db_path, port=8765, runner=_healthy_runner, limit=5)
+            report = collect_diagnostics(
+                db_path=db_path, port=8765, runner=_healthy_runner, limit=5
+            )
 
             self.assertEqual(report["checks"]["status"], "attention")
             latest = report["database"]["observe"]["latest_errors"]
@@ -166,7 +182,9 @@ class ComputerDiagnosticsTests(unittest.TestCase):
                 },
             )
 
-            report = collect_diagnostics(db_path=db_path, port=8765, runner=_healthy_runner, limit=5)
+            report = collect_diagnostics(
+                db_path=db_path, port=8765, runner=_healthy_runner, limit=5
+            )
 
             self.assertEqual(report["checks"]["status"], "attention")
             latest = report["database"]["observe"]["latest_errors"]

@@ -522,7 +522,9 @@ class ScheduledBackgroundJobTests(unittest.TestCase):
 class ScheduledBackgroundRuntimeTests(unittest.IsolatedAsyncioTestCase):
     def test_runtime_scheduler_handlers_enqueue_only(self) -> None:
         def fake_anthropic(req: LLMRequest) -> LLMResponse:
-            return LLMResponse(content="<response>ok</response>", lane=req.lane, provider="anthropic")
+            return LLMResponse(
+                content="<response>ok</response>", lane=req.lane, provider="anthropic"
+            )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -575,7 +577,9 @@ class ScheduledBackgroundRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_run_loop_processes_kairos_tick_job_outside_tick(self) -> None:
         def fake_anthropic(req: LLMRequest) -> LLMResponse:
-            return LLMResponse(content="<response>ok</response>", lane=req.lane, provider="anthropic")
+            return LLMResponse(
+                content="<response>ok</response>", lane=req.lane, provider="anthropic"
+            )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -634,7 +638,9 @@ class ScheduledBackgroundRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_run_loop_processes_wiki_and_perf_jobs_outside_tick(self) -> None:
         def fake_anthropic(req: LLMRequest) -> LLMResponse:
-            return LLMResponse(content="<response>ok</response>", lane=req.lane, provider="anthropic")
+            return LLMResponse(
+                content="<response>ok</response>", lane=req.lane, provider="anthropic"
+            )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -703,9 +709,15 @@ class ScheduledBackgroundRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 async def stop_after_jobs() -> None:
                     deadline = loop.time() + 1.0
                     while loop.time() < deadline:
-                        wiki_rows = runtime.job_service.list(kinds=(WIKI_RESEARCH_JOB_KIND,), limit=10)
-                        scrape_rows = runtime.job_service.list(kinds=(WIKI_SCRAPE_JOB_KIND,), limit=10)
-                        perf_rows = runtime.job_service.list(kinds=(PERF_OPTIMIZER_JOB_KIND,), limit=10)
+                        wiki_rows = runtime.job_service.list(
+                            kinds=(WIKI_RESEARCH_JOB_KIND,), limit=10
+                        )
+                        scrape_rows = runtime.job_service.list(
+                            kinds=(WIKI_SCRAPE_JOB_KIND,), limit=10
+                        )
+                        perf_rows = runtime.job_service.list(
+                            kinds=(PERF_OPTIMIZER_JOB_KIND,), limit=10
+                        )
                         if (
                             wiki_rows
                             and scrape_rows

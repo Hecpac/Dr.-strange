@@ -174,7 +174,10 @@ class IdleOwnershipExecutor:
             return None
         for record in records:
             metadata = dict(getattr(record, "metadata", {}) or {})
-            if getattr(record, "runtime", None) != "coordinator" or metadata.get("autonomous") is not True:
+            if (
+                getattr(record, "runtime", None) != "coordinator"
+                or metadata.get("autonomous") is not True
+            ):
                 continue
             objective = str(getattr(record, "objective", "") or "").strip()
             if not objective:
@@ -203,7 +206,10 @@ class IdleOwnershipExecutor:
         previous_task_id = idle_state.get("task_id")
         previous_verification = idle_state.get("verification_status")
         count = int(idle_state.get("unchanged_count") or 0)
-        if previous_task_id == candidate.task_id and previous_verification == candidate.verification_status:
+        if (
+            previous_task_id == candidate.task_id
+            and previous_verification == candidate.verification_status
+        ):
             next_count = count + 1
         else:
             next_count = 1
@@ -240,7 +246,9 @@ class IdleOwnershipExecutor:
         }
         self._memory.update_session_state(candidate.session_id, active_object=active_object)
 
-    def _record_advance_state(self, candidate: IdleCandidate, *, advanced: bool, result: str) -> None:
+    def _record_advance_state(
+        self, candidate: IdleCandidate, *, advanced: bool, result: str
+    ) -> None:
         state = self._safe_state(candidate.session_id)
         active_object = dict(state.get("active_object") or {})
         previous = dict(active_object.get("idle_executor") or {})
@@ -335,7 +343,9 @@ class IdleOwnershipExecutor:
                 reason="idle_resume_failed",
                 message=f"No pude retomar la tarea: {exc}",
             )
-        return self._result_from_advance_response(candidate, result, previous_events=previous_events)
+        return self._result_from_advance_response(
+            candidate, result, previous_events=previous_events
+        )
 
     def _start_candidate(
         self,
@@ -359,7 +369,10 @@ class IdleOwnershipExecutor:
                 source_text=f"idle_executor:{candidate.source}",
                 task_kind="idle_executor_advance",
                 risk_tier="tier_1",
-                delegation_metadata={"source": "idle_executor", "candidate_source": candidate.source},
+                delegation_metadata={
+                    "source": "idle_executor",
+                    "candidate_source": candidate.source,
+                },
             )
         except Exception as exc:
             return self._blocked_result(

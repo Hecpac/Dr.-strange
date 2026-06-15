@@ -53,8 +53,12 @@ class ProgressIndicatorTests(unittest.IsolatedAsyncioTestCase):
     async def test_disabled_never_sends_placeholder(self) -> None:
         bot = self._bot()
         ind = _ProgressIndicator(
-            bot, 1, MagicMock(), enabled=False,
-            threshold_seconds=0.01, interval_seconds=0.01,
+            bot,
+            1,
+            MagicMock(),
+            enabled=False,
+            threshold_seconds=0.01,
+            interval_seconds=0.01,
         )
 
         async def slow() -> str:
@@ -70,8 +74,12 @@ class ProgressIndicatorTests(unittest.IsolatedAsyncioTestCase):
     async def test_fast_turn_posts_no_placeholder(self) -> None:
         bot = self._bot()
         ind = _ProgressIndicator(
-            bot, 1, MagicMock(), enabled=True,
-            threshold_seconds=5.0, interval_seconds=1.0,
+            bot,
+            1,
+            MagicMock(),
+            enabled=True,
+            threshold_seconds=5.0,
+            interval_seconds=1.0,
         )
 
         async def fast() -> str:
@@ -87,8 +95,12 @@ class ProgressIndicatorTests(unittest.IsolatedAsyncioTestCase):
     async def test_slow_turn_posts_then_clears_placeholder(self) -> None:
         bot = self._bot()
         ind = _ProgressIndicator(
-            bot, 99, MagicMock(), enabled=True,
-            threshold_seconds=0.02, interval_seconds=0.02,
+            bot,
+            99,
+            MagicMock(),
+            enabled=True,
+            threshold_seconds=0.02,
+            interval_seconds=0.02,
         )
 
         async def slow() -> str:
@@ -106,8 +118,12 @@ class ProgressIndicatorTests(unittest.IsolatedAsyncioTestCase):
         bot = self._bot()
         bot.send_message.side_effect = RuntimeError("network down")
         ind = _ProgressIndicator(
-            bot, 1, MagicMock(), enabled=True,
-            threshold_seconds=0.02, interval_seconds=0.02,
+            bot,
+            1,
+            MagicMock(),
+            enabled=True,
+            threshold_seconds=0.02,
+            interval_seconds=0.02,
         )
 
         async def slow() -> str:
@@ -164,9 +180,7 @@ class RateLimitConfigTests(unittest.TestCase):
         self.assertEqual(transport._rate_window, 60.0)
 
     def test_env_overrides_and_limit_enforced(self) -> None:
-        with patch.dict(
-            "os.environ", {"TELEGRAM_RATE_MAX": "2", "TELEGRAM_RATE_WINDOW": "30"}
-        ):
+        with patch.dict("os.environ", {"TELEGRAM_RATE_MAX": "2", "TELEGRAM_RATE_WINDOW": "30"}):
             transport = TelegramTransport(bot_service=MagicMock(), token="t")
         self.assertEqual(transport._rate_max, 2)
         self.assertEqual(transport._rate_window, 30.0)
@@ -212,15 +226,11 @@ class TransportStartTests(unittest.IsolatedAsyncioTestCase):
         mock_builder.get_updates_pool_timeout.assert_called_once_with(30.0)
         mock_app.initialize.assert_awaited_once()
         mock_app.start.assert_awaited_once()
-        mock_app.updater.start_polling.assert_awaited_once_with(
-            drop_pending_updates=False
-        )
+        mock_app.updater.start_polling.assert_awaited_once_with(drop_pending_updates=False)
         await transport.stop()
 
     @patch("claw_v2.telegram.ApplicationBuilder")
-    async def test_start_polling_drops_pending_updates_when_env_set(
-        self, mock_builder_cls
-    ) -> None:
+    async def test_start_polling_drops_pending_updates_when_env_set(self, mock_builder_cls) -> None:
         mock_app = AsyncMock()
         mock_app.updater = AsyncMock()
         mock_app.add_handler = MagicMock()
@@ -232,9 +242,7 @@ class TransportStartTests(unittest.IsolatedAsyncioTestCase):
         transport = TelegramTransport(bot_service=MagicMock(), token="test-token")
         with patch.dict("os.environ", {"TELEGRAM_DROP_PENDING_UPDATES": "1"}):
             await transport.start()
-        mock_app.updater.start_polling.assert_awaited_once_with(
-            drop_pending_updates=True
-        )
+        mock_app.updater.start_polling.assert_awaited_once_with(drop_pending_updates=True)
         await transport.stop()
 
     @patch("claw_v2.telegram.ApplicationBuilder")
@@ -250,7 +258,9 @@ class TransportStartTests(unittest.IsolatedAsyncioTestCase):
         mock_builder_cls.return_value = mock_builder
 
         transport = TelegramTransport(
-            bot_service=MagicMock(), token="test-token", allowed_user_id="1234",
+            bot_service=MagicMock(),
+            token="test-token",
+            allowed_user_id="1234",
         )
         with self.assertLogs("claw_v2.telegram", level="INFO") as captured:
             await transport.start()
@@ -309,7 +319,9 @@ class TransportStartTests(unittest.IsolatedAsyncioTestCase):
         app.stop.assert_awaited_once()
         app.shutdown.assert_awaited_once()
         bot_service.observe.emit.assert_called_once()
-        self.assertEqual(bot_service.observe.emit.call_args.args[0], "telegram_transport_stop_error")
+        self.assertEqual(
+            bot_service.observe.emit.call_args.args[0], "telegram_transport_stop_error"
+        )
         payload = bot_service.observe.emit.call_args.kwargs["payload"]
         self.assertEqual(payload["error_count"], 1)
         self.assertIn("Pool timeout", payload["errors"][0])
@@ -361,7 +373,9 @@ class TransportStartTests(unittest.IsolatedAsyncioTestCase):
 class HandleTextTests(unittest.IsolatedAsyncioTestCase):
     async def test_unauthorized_user_silently_dropped(self) -> None:
         transport = TelegramTransport(
-            bot_service=MagicMock(), token="t", allowed_user_id="999",
+            bot_service=MagicMock(),
+            token="t",
+            allowed_user_id="999",
         )
         update = MagicMock()
         update.effective_user.id = 123
@@ -374,7 +388,9 @@ class HandleTextTests(unittest.IsolatedAsyncioTestCase):
         bot_service.handle_text.return_value = "response text"
         bot_service.observe = MagicMock()
         transport = TelegramTransport(
-            bot_service=bot_service, token="t", allowed_user_id="123",
+            bot_service=bot_service,
+            token="t",
+            allowed_user_id="123",
         )
         update = MagicMock()
         update.effective_user.id = 123
@@ -393,7 +409,9 @@ class HandleTextTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("telegram_outbound_sent", event_names)
         self.assertIn("telegram_latency", event_names)
         latency_call = next(
-            call for call in bot_service.observe.emit.call_args_list if call.args[0] == "telegram_latency"
+            call
+            for call in bot_service.observe.emit.call_args_list
+            if call.args[0] == "telegram_latency"
         )
         payload = latency_call.kwargs["payload"]
         self.assertEqual(payload["message_kind"], "text")
@@ -407,7 +425,9 @@ class HandleTextTests(unittest.IsolatedAsyncioTestCase):
         bot_service.observe = MagicMock()
         bot_service.is_voice_mode.return_value = None
         transport = TelegramTransport(
-            bot_service=bot_service, token="t", allowed_user_id="123",
+            bot_service=bot_service,
+            token="t",
+            allowed_user_id="123",
         )
         update = MagicMock()
         update.effective_user.id = 123
@@ -428,7 +448,9 @@ class HandleTextTests(unittest.IsolatedAsyncioTestCase):
         bot_service.handle_text.return_value = "response text"
         bot_service.observe = MagicMock()
         transport = TelegramTransport(
-            bot_service=bot_service, token="t", allowed_user_id="123",
+            bot_service=bot_service,
+            token="t",
+            allowed_user_id="123",
         )
         update = MagicMock()
         update.effective_user.id = 123
@@ -457,7 +479,9 @@ class HandleTextTests(unittest.IsolatedAsyncioTestCase):
         bot_service.handle_text.return_value = "response text"
         bot_service.observe = MagicMock()
         transport = TelegramTransport(
-            bot_service=bot_service, token="t", allowed_user_id="123",
+            bot_service=bot_service,
+            token="t",
+            allowed_user_id="123",
         )
         transport._text_send_retry_delay = 0.0
         transport._app = MagicMock()
@@ -471,6 +495,7 @@ class HandleTextTests(unittest.IsolatedAsyncioTestCase):
         update.message.chat.send_action = AsyncMock()
 
         with patch("claw_v2.telegram.asyncio") as mock_asyncio:
+
             async def fake_to_thread(func, *args, **kwargs):
                 return func(*args, **kwargs)
 
@@ -512,7 +537,9 @@ class HandleTextTests(unittest.IsolatedAsyncioTestCase):
         bot_service.handle_text.return_value = "response text"
         bot_service.observe = MagicMock()
         transport = TelegramTransport(
-            bot_service=bot_service, token="t", allowed_user_id="123",
+            bot_service=bot_service,
+            token="t",
+            allowed_user_id="123",
         )
         transport._text_send_retries = 3
         transport._text_send_retry_delay = 0.0
@@ -554,7 +581,9 @@ class HandleTextTests(unittest.IsolatedAsyncioTestCase):
         bot_service.handle_text.return_value = "response text"
         bot_service.observe = MagicMock()
         transport = TelegramTransport(
-            bot_service=bot_service, token="t", allowed_user_id="123",
+            bot_service=bot_service,
+            token="t",
+            allowed_user_id="123",
         )
         transport._text_send_retry_delay = 0.0
         transport._app = MagicMock()
@@ -591,7 +620,9 @@ class HandleTextTests(unittest.IsolatedAsyncioTestCase):
         bot_service.handle_text.return_value = "response text"
         bot_service.observe = MagicMock()
         transport = TelegramTransport(
-            bot_service=bot_service, token="t", allowed_user_id="123",
+            bot_service=bot_service,
+            token="t",
+            allowed_user_id="123",
         )
         transport._text_send_retry_delay = 0.0
         transport._app = MagicMock()
@@ -636,7 +667,9 @@ class HandleTextTests(unittest.IsolatedAsyncioTestCase):
         bot_service.observe = MagicMock()
         bot_service.is_voice_mode.return_value = None
         transport = TelegramTransport(
-            bot_service=bot_service, token="t", allowed_user_id="123",
+            bot_service=bot_service,
+            token="t",
+            allowed_user_id="123",
         )
         transport._late_delivery_grace_seconds = 0.01
         transport._send_text_direct_bot_api_sync = MagicMock(return_value=99)
@@ -685,7 +718,9 @@ class HandleTextTests(unittest.IsolatedAsyncioTestCase):
         bot_service.handle_text.return_value = None
         bot_service.observe = MagicMock()
         transport = TelegramTransport(
-            bot_service=bot_service, token="t", allowed_user_id="123",
+            bot_service=bot_service,
+            token="t",
+            allowed_user_id="123",
         )
         update = MagicMock()
         update.effective_user.id = 123
@@ -713,7 +748,9 @@ class HandleTextTests(unittest.IsolatedAsyncioTestCase):
         )
         bot_service.observe = MagicMock()
         transport = TelegramTransport(
-            bot_service=bot_service, token="t", allowed_user_id="123",
+            bot_service=bot_service,
+            token="t",
+            allowed_user_id="123",
         )
         update = MagicMock()
         update.effective_user.id = 123
@@ -744,7 +781,9 @@ class HandleTextTests(unittest.IsolatedAsyncioTestCase):
         bot_service.handle_text.return_value = "</system-reminder>"
         bot_service.observe = MagicMock()
         transport = TelegramTransport(
-            bot_service=bot_service, token="t", allowed_user_id="123",
+            bot_service=bot_service,
+            token="t",
+            allowed_user_id="123",
         )
         update = MagicMock()
         update.effective_user.id = 123
@@ -766,7 +805,9 @@ class HandleTextTests(unittest.IsolatedAsyncioTestCase):
         bot_service = MagicMock()
         bot_service.observe = MagicMock()
         agent_runtime = MagicMock()
-        agent_runtime.handle_text.return_value = SimpleNamespace(text="runtime response", session_id="tg-1")
+        agent_runtime.handle_text.return_value = SimpleNamespace(
+            text="runtime response", session_id="tg-1"
+        )
         transport = TelegramTransport(
             bot_service=bot_service,
             agent_runtime=agent_runtime,
@@ -796,7 +837,9 @@ class HandleTextTests(unittest.IsolatedAsyncioTestCase):
         bot_service = MagicMock()
         bot_service.observe = MagicMock()
         agent_runtime = MagicMock()
-        agent_runtime.handle_text.return_value = SimpleNamespace(text="runtime response", session_id="tg-1")
+        agent_runtime.handle_text.return_value = SimpleNamespace(
+            text="runtime response", session_id="tg-1"
+        )
         transport = TelegramTransport(
             bot_service=bot_service,
             agent_runtime=agent_runtime,
@@ -843,7 +886,9 @@ class HandleTextTests(unittest.IsolatedAsyncioTestCase):
             ogg.write(b"ogg")
             ogg_path = Path(ogg.name)
 
-        with patch("claw_v2.telegram.synthesize_voice_note", new=AsyncMock(return_value=ogg_path)) as tts:
+        with patch(
+            "claw_v2.telegram.synthesize_voice_note", new=AsyncMock(return_value=ogg_path)
+        ) as tts:
             await transport._handle_text(update, MagicMock())
 
         update.message.reply_voice.assert_awaited_once()
@@ -868,7 +913,9 @@ class HandleTextTests(unittest.IsolatedAsyncioTestCase):
             bot_service.observe = MagicMock()
             bot_service.memory = memory
             transport = TelegramTransport(
-                bot_service=bot_service, token="t", allowed_user_id="123",
+                bot_service=bot_service,
+                token="t",
+                allowed_user_id="123",
             )
             transport._app = MagicMock()
             transport._app.bot = AsyncMock()
@@ -883,7 +930,9 @@ class HandleTextTests(unittest.IsolatedAsyncioTestCase):
 
             transport._app.bot.send_photo.assert_awaited_once()
             bot_service.handle_text.assert_not_called()
-            self.assertEqual(update.message.reply_text.await_args.args[0], "Te la puse aquí en Telegram.")
+            self.assertEqual(
+                update.message.reply_text.await_args.args[0], "Te la puse aquí en Telegram."
+            )
             messages = memory.get_recent_messages("tg-1")
             self.assertEqual(messages[-2]["content"], "Ponla aquí en telegram")
             self.assertIn("Imagen enviada por Telegram", messages[-1]["content"])
@@ -892,7 +941,9 @@ class HandleTextTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_claude_sdk_failures_return_specific_message(self) -> None:
         transport = TelegramTransport(
-            bot_service=MagicMock(), token="t", allowed_user_id="123",
+            bot_service=MagicMock(),
+            token="t",
+            allowed_user_id="123",
         )
         update = MagicMock()
         update.effective_user.id = 123
@@ -903,7 +954,9 @@ class HandleTextTests(unittest.IsolatedAsyncioTestCase):
 
         with patch("claw_v2.telegram.asyncio") as mock_asyncio:
             mock_asyncio.to_thread = AsyncMock(
-                side_effect=RuntimeError("Claude SDK execution failed: Control request timeout: initialize")
+                side_effect=RuntimeError(
+                    "Claude SDK execution failed: Control request timeout: initialize"
+                )
             )
             await transport._handle_text(update, MagicMock())
 
@@ -919,7 +972,9 @@ class HandleVoiceTests(unittest.IsolatedAsyncioTestCase):
         bot_service = MagicMock()
         bot_service.handle_text.return_value = "response to voice"
         transport = TelegramTransport(
-            bot_service=bot_service, token="t", allowed_user_id="123",
+            bot_service=bot_service,
+            token="t",
+            allowed_user_id="123",
             voice_api_key="test-key",
         )
         update = MagicMock()
@@ -945,7 +1000,9 @@ class HandleVoiceTests(unittest.IsolatedAsyncioTestCase):
         from claw_v2.voice import VoiceUnavailableError
 
         transport = TelegramTransport(
-            bot_service=MagicMock(), token="t", allowed_user_id="123",
+            bot_service=MagicMock(),
+            token="t",
+            allowed_user_id="123",
         )
         update = MagicMock()
         update.effective_user.id = 123
@@ -975,7 +1032,9 @@ class HandleImageTests(unittest.IsolatedAsyncioTestCase):
         bot_service = MagicMock()
         bot_service.observe = MagicMock()
         transport = TelegramTransport(
-            bot_service=bot_service, token="t", allowed_user_id="123",
+            bot_service=bot_service,
+            token="t",
+            allowed_user_id="123",
         )
         update = MagicMock()
         update.effective_user.id = 123
@@ -1045,7 +1104,9 @@ class HandleImageTests(unittest.IsolatedAsyncioTestCase):
         bot_service = MagicMock()
         bot_service.observe = MagicMock()
         transport = TelegramTransport(
-            bot_service=bot_service, token="t", allowed_user_id="123",
+            bot_service=bot_service,
+            token="t",
+            allowed_user_id="123",
         )
         update = MagicMock()
         update.effective_user.id = 123
@@ -1090,14 +1151,20 @@ class HandleImageTests(unittest.IsolatedAsyncioTestCase):
         bot_service = MagicMock()
         bot_service.observe = MagicMock()
         transport = TelegramTransport(
-            bot_service=bot_service, token="t", allowed_user_id="123",
+            bot_service=bot_service,
+            token="t",
+            allowed_user_id="123",
         )
         update = MagicMock()
         update.effective_user.id = 123
         update.effective_chat.id = 1
         update.message.reply_text = AsyncMock()
 
-        with patch("claw_v2.telegram.asyncio.to_thread", new_callable=AsyncMock, return_value="voice response"):
+        with patch(
+            "claw_v2.telegram.asyncio.to_thread",
+            new_callable=AsyncMock,
+            return_value="voice response",
+        ):
             await transport._handle_text_content(update, "hola")
 
         events = [
@@ -1120,7 +1187,9 @@ class HandleImageTests(unittest.IsolatedAsyncioTestCase):
         bot_service.observe = MagicMock()
         bot_service.is_voice_mode = MagicMock(return_value=None)
         transport = TelegramTransport(
-            bot_service=bot_service, token="t", allowed_user_id="123",
+            bot_service=bot_service,
+            token="t",
+            allowed_user_id="123",
         )
         update = MagicMock()
         update.effective_user.id = 123
@@ -1147,7 +1216,9 @@ class HandleVideoTests(unittest.IsolatedAsyncioTestCase):
         bot_service = MagicMock()
         bot_service.observe = MagicMock()
         transport = TelegramTransport(
-            bot_service=bot_service, token="t", allowed_user_id="123",
+            bot_service=bot_service,
+            token="t",
+            allowed_user_id="123",
         )
         update = MagicMock()
         update.effective_user.id = 123
@@ -1231,13 +1302,16 @@ class SendPhotoTests(unittest.IsolatedAsyncioTestCase):
     async def test_send_screenshot_sends_photo_to_chat(self) -> None:
         bot_service = MagicMock()
         transport = TelegramTransport(
-            bot_service=bot_service, token="t", allowed_user_id="123",
+            bot_service=bot_service,
+            token="t",
+            allowed_user_id="123",
         )
         transport._app = MagicMock()
         mock_bot = AsyncMock()
         transport._app.bot = mock_bot
 
         import tempfile
+
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
             tmp.write(b"\x89PNG\r\n\x1a\n")
             tmp_path = tmp.name
@@ -1253,7 +1327,9 @@ class SendPhotoTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_send_photo_treats_broken_pipe_as_nonfatal(self) -> None:
         transport = TelegramTransport(
-            bot_service=MagicMock(), token="t", allowed_user_id="123",
+            bot_service=MagicMock(),
+            token="t",
+            allowed_user_id="123",
         )
         transport._app = MagicMock()
         transport._app.bot = AsyncMock()
@@ -1272,7 +1348,9 @@ class SendPhotoTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_send_photo_returns_false_on_unexpected_error(self) -> None:
         transport = TelegramTransport(
-            bot_service=MagicMock(), token="t", allowed_user_id="123",
+            bot_service=MagicMock(),
+            token="t",
+            allowed_user_id="123",
         )
         transport._app = MagicMock()
         transport._app.bot = AsyncMock()
@@ -1291,7 +1369,9 @@ class SendPhotoTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_send_text_treats_connection_reset_as_nonfatal(self) -> None:
         transport = TelegramTransport(
-            bot_service=MagicMock(), token="t", allowed_user_id="123",
+            bot_service=MagicMock(),
+            token="t",
+            allowed_user_id="123",
         )
         transport._app = MagicMock()
         transport._app.bot = AsyncMock()
@@ -1305,7 +1385,9 @@ class SendPhotoTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_send_text_sanitizes_proactive_internal_details(self) -> None:
         transport = TelegramTransport(
-            bot_service=MagicMock(), token="t", allowed_user_id="123",
+            bot_service=MagicMock(),
+            token="t",
+            allowed_user_id="123",
         )
         transport._app = MagicMock()
         transport._app.bot = AsyncMock()
@@ -1335,7 +1417,9 @@ class ProactiveSendTextTests(unittest.IsolatedAsyncioTestCase):
         bot_service = MagicMock()
         bot_service.observe = MagicMock()
         transport = TelegramTransport(
-            bot_service=bot_service, token="t", allowed_user_id="123",
+            bot_service=bot_service,
+            token="t",
+            allowed_user_id="123",
         )
         transport._text_send_retries = 2
         transport._text_send_retry_delay = 0.0
@@ -1382,8 +1466,7 @@ class ProactiveSendTextTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(delivered)
         # Both attempts belong to part 1; part 2 is never attempted.
         sent_texts = {
-            call.kwargs["text"]
-            for call in transport._app.bot.send_message.await_args_list
+            call.kwargs["text"] for call in transport._app.bot.send_message.await_args_list
         }
         self.assertEqual(sent_texts, {"a" * 4000})
         transport._send_text_direct_bot_api.assert_awaited_once()
@@ -1416,9 +1499,7 @@ class ProactiveSendTextTests(unittest.IsolatedAsyncioTestCase):
         transport._app.bot.send_message.side_effect = TimedOut("Timed out")
         transport._send_text_direct_bot_api = AsyncMock(return_value=True)
 
-        delivered = await transport.send_text(
-            chat_id=1, text="hello", parse_mode="Markdown"
-        )
+        delivered = await transport.send_text(chat_id=1, text="hello", parse_mode="Markdown")
 
         self.assertFalse(delivered)
         transport._send_text_direct_bot_api.assert_not_awaited()
@@ -1519,9 +1600,7 @@ class ReplyHtmlWiringTests(unittest.IsolatedAsyncioTestCase):
         text_arg = update.message.reply_text.await_args.args[0]
         self.assertIn("<b>negrita</b>", text_arg)
         self.assertIn("<code>code</code>", text_arg)
-        self.assertEqual(
-            update.message.reply_text.await_args.kwargs["parse_mode"], "HTML"
-        )
+        self.assertEqual(update.message.reply_text.await_args.kwargs["parse_mode"], "HTML")
 
     async def test_parse_error_degrades_to_plain_text(self) -> None:
         transport = self._transport()
@@ -1554,9 +1633,7 @@ class ReplyHtmlWiringTests(unittest.IsolatedAsyncioTestCase):
         # Degraded retry: plain text, no parse_mode, no HTML tags.
         self.assertIsNone(second.kwargs["parse_mode"])
         self.assertEqual(second.args[0], "texto con negrita")
-        event_names = [
-            call.args[0] for call in transport._bot_service.observe.emit.call_args_list
-        ]
+        event_names = [call.args[0] for call in transport._bot_service.observe.emit.call_args_list]
         self.assertIn("telegram_outbound_degraded", event_names)
 
     async def test_html_disabled_sends_plain(self) -> None:

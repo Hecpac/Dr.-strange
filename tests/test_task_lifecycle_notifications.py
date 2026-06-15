@@ -11,7 +11,9 @@ from claw_v2.lifecycle import (
 
 
 class TaskLifecycleNotificationTests(unittest.TestCase):
-    def test_skips_successful_telegram_terminal_task_to_avoid_system_completion_message(self) -> None:
+    def test_skips_successful_telegram_terminal_task_to_avoid_system_completion_message(
+        self,
+    ) -> None:
         notified: set[str] = set()
         payload = {
             "task_id": "task-1",
@@ -38,7 +40,9 @@ class TaskLifecycleNotificationTests(unittest.TestCase):
 
         self.assertFalse(should_notify_task_ledger_terminal(payload, set()))
 
-    def test_terminal_message_formatter_keeps_internal_status_out_of_successful_egress_path(self) -> None:
+    def test_terminal_message_formatter_keeps_internal_status_out_of_successful_egress_path(
+        self,
+    ) -> None:
         payload = {
             "task_id": "task-1",
             "session_id": "tg-123",

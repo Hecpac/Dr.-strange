@@ -8,6 +8,7 @@ Reglas clave (no negociables):
   cualquier otra ruta.
 - Si hay una sola ruta segura, `ask_user=False`.
 """
+
 from __future__ import annotations
 
 import re
@@ -31,14 +32,10 @@ RouteKind = Literal[
 
 # Capabilities that genuinely need to execute bash/python/browser/CDP.
 # When the current environment cannot run them, we MUST handoff.
-_EXECUTION_REQUIRING_TASKS: frozenset[str] = frozenset(
-    {"ai_news_brief", "x_trends"}
-)
+_EXECUTION_REQUIRING_TASKS: frozenset[str] = frozenset({"ai_news_brief", "x_trends"})
 
 
-CRITICAL_TASK_KINDS: frozenset[str] = frozenset(
-    {"social_publish", "pipeline_merge", "deploy"}
-)
+CRITICAL_TASK_KINDS: frozenset[str] = frozenset({"social_publish", "pipeline_merge", "deploy"})
 
 
 @dataclass(slots=True)
@@ -277,8 +274,7 @@ def _route_x_trends(
         missing_capabilities=["chrome_cdp", "runtime"],
         ask_user=False,
         next_action=(
-            "No puedo leer X trends ahora: Chrome CDP no está activo y runtime "
-            "está caído."
+            "No puedo leer X trends ahora: Chrome CDP no está activo y runtime está caído."
         ),
     )
 
@@ -330,9 +326,7 @@ def route_request(
         current_environment == "claude_code_sandbox"
         and intent.task_kind in _EXECUTION_REQUIRING_TASKS
     ):
-        return _route_runtime_handoff(
-            intent, reason="claude_code_sandbox_cannot_execute"
-        )
+        return _route_runtime_handoff(intent, reason="claude_code_sandbox_cannot_execute")
     if intent.task_kind == "ai_news_brief":
         skill_ok = bool(skill_available and skill_available("ai-news-daily"))
         return _route_ai_news(

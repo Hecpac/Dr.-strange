@@ -65,7 +65,11 @@ def make_daily_cost_gate(
     real spend. The gate therefore applies only to providers known to be
     API-billed in this runtime.
     """
-    billable = set(billable_providers) if billable_providers is not None else _default_billable_providers(auth_mode)
+    billable = (
+        set(billable_providers)
+        if billable_providers is not None
+        else _default_billable_providers(auth_mode)
+    )
 
     def daily_cost_gate(request: LLMRequest) -> LLMRequest | None:
         if request.provider not in billable:
@@ -75,7 +79,11 @@ def make_daily_cost_gate(
         # price entry ran today, cost_estimate was 0.0 and total_today is blind
         # to it (2026-05-31 audit H5). Block further billable calls until the
         # operator opts in explicitly, so invisible spend cannot accumulate.
-        allow_unknown = os.getenv("CLAW_ALLOW_UNKNOWN_PROVIDER_COST", "").strip().lower() in {"1", "true", "yes"}
+        allow_unknown = os.getenv("CLAW_ALLOW_UNKNOWN_PROVIDER_COST", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+        }
         if not allow_unknown and observe.has_unknown_billable_cost_today(providers=billable):
             logger.warning(
                 "Unknown billable provider cost recorded today; blocking further "
@@ -113,7 +121,9 @@ def make_decision_logger(observe: ObserveStream) -> PostLLMHook:
         agent_name = evidence.get("agent_name") or evidence.get("sub_agent")
         trace = trace_metadata(request.evidence_pack)
         if not trace:
-            trace = {k: v for k, v in current_llm_trace(request.evidence_pack).items() if v is not None}
+            trace = {
+                k: v for k, v in current_llm_trace(request.evidence_pack).items() if v is not None
+            }
         observe.emit(
             "llm_decision",
             lane=response.lane,
@@ -126,7 +136,9 @@ def make_decision_logger(observe: ObserveStream) -> PostLLMHook:
                 "confidence": response.confidence,
                 "cost_estimate": response.cost_estimate,
                 "degraded_mode": response.degraded_mode,
-                "prompt_length": len(request.prompt) if isinstance(request.prompt, str) else len(request.prompt),
+                "prompt_length": len(request.prompt)
+                if isinstance(request.prompt, str)
+                else len(request.prompt),
                 "response_length": len(response.content),
                 "effort": request.effort,
                 "has_evidence_pack": request.evidence_pack is not None,

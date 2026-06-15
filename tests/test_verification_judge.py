@@ -3,6 +3,7 @@
 The judge is dimension-driven: it loads .md rubrics, builds prompts, and
 calls an injected judge_fn. Tests stub the judge_fn so we never hit a real
 LLM in CI."""
+
 from __future__ import annotations
 
 import tempfile
@@ -33,14 +34,7 @@ class JudgeDimensionTests(unittest.TestCase):
         self.assertIn("verification_drift", names)
 
     def test_dimension_threshold_fail_default_is_three(self) -> None:
-        text = (
-            "---\n"
-            "name: stub\n"
-            "description: ignore\n"
-            "tags: []\n"
-            "---\n\n"
-            "rubric body"
-        )
+        text = "---\nname: stub\ndescription: ignore\ntags: []\n---\n\nrubric body"
         dim = JudgeDimension.from_markdown(text)
         self.assertEqual(dim.threshold_fail, 3)
 
@@ -49,7 +43,7 @@ class JudgeDimensionTests(unittest.TestCase):
             "---\n"
             "name: hidden_eval_awareness\n"
             "description: catches eval-aware mode switches\n"
-            "tags: [\"claw\", \"interp\"]\n"
+            'tags: ["claw", "interp"]\n'
             "threshold_fail: 4\n"
             "---\n\n"
             "rubric"
@@ -114,7 +108,9 @@ class JudgeRunTests(unittest.TestCase):
             scripted = iter(
                 [
                     DimensionRawResponse(score=1, reason="fine"),  # state_amnesia
-                    DimensionRawResponse(score=8, reason="claimed succeeded with no commit"),  # verification_drift
+                    DimensionRawResponse(
+                        score=8, reason="claimed succeeded with no commit"
+                    ),  # verification_drift
                 ]
             )
 

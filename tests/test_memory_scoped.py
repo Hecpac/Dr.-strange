@@ -96,7 +96,16 @@ class AgentScopedFactsTests(unittest.TestCase):
             pending_action="Correr pytest",
             active_object={"kind": "url", "url": "https://example.com"},
             last_options=["Revisar", "Corregir"],
-            task_queue=[{"task_id": "coding:assistant:correr-pytest", "summary": "Correr pytest", "mode": "coding", "status": "pending", "source": "assistant", "priority": 1}],
+            task_queue=[
+                {
+                    "task_id": "coding:assistant:correr-pytest",
+                    "summary": "Correr pytest",
+                    "mode": "coding",
+                    "status": "pending",
+                    "source": "assistant",
+                    "priority": 1,
+                }
+            ],
             pending_approvals=[{"approval_id": "abc123", "action": "coordinated_task"}],
             rolling_summary="Se detectó un bug en browse y se está corrigiendo.",
         )
@@ -231,21 +240,27 @@ class LearningRecordEmbeddingTests(unittest.TestCase):
 
     def test_record_writes_embedding(self) -> None:
         oid = self.loop.record(
-            task_type="self_heal", task_id="c1",
+            task_type="self_heal",
+            task_id="c1",
             description="pytest import failure",
             approach="pip install pytest",
             outcome="success",
             lesson="install pytest in the venv",
         )
         row = self.store._conn.execute(
-            "SELECT embedding FROM outcome_embeddings WHERE outcome_id = ?", (oid,),
+            "SELECT embedding FROM outcome_embeddings WHERE outcome_id = ?",
+            (oid,),
         ).fetchone()
         self.assertIsNotNone(row)
 
     def test_record_still_returns_outcome_id(self) -> None:
         oid = self.loop.record(
-            task_type="t", task_id="a",
-            description="d", approach="a", outcome="success", lesson="l",
+            task_type="t",
+            task_id="a",
+            description="d",
+            approach="a",
+            outcome="success",
+            lesson="l",
         )
         self.assertIsInstance(oid, int)
         self.assertEqual(self.store.get_outcome(oid)["task_id"], "a")
@@ -266,7 +281,8 @@ class LearningRetrieveSemanticTests(unittest.TestCase):
 
     def test_semantic_beats_text_match(self) -> None:
         self.store.store_task_outcome_with_embedding(
-            task_type="self_heal", task_id="pytest-fix",
+            task_type="self_heal",
+            task_id="pytest-fix",
             description="missing module: pytest",
             approach="pip install pytest",
             outcome="success",
@@ -274,7 +290,8 @@ class LearningRetrieveSemanticTests(unittest.TestCase):
             embed_fn=self._embed,
         )
         self.store.store_task_outcome_with_embedding(
-            task_type="self_heal", task_id="browser-fix",
+            task_type="self_heal",
+            task_id="browser-fix",
             description="chrome disconnected",
             approach="relaunch",
             outcome="success",
@@ -292,15 +309,19 @@ class LearningRetrieveSemanticTests(unittest.TestCase):
     def test_falls_back_to_text_when_no_semantic_hits(self) -> None:
         def flat(text: str) -> list[float]:
             return [0.0, 0.0, 0.0]
+
         self.store.store_task_outcome(
-            task_type="self_heal", task_id="legacy",
+            task_type="self_heal",
+            task_id="legacy",
             description="pytest missing",
             approach="install",
             outcome="success",
             lesson="install pytest",
         )
         out, _ = self.loop.retrieve_lessons(
-            "pytest missing again", task_type="self_heal", embed_fn=flat,
+            "pytest missing again",
+            task_type="self_heal",
+            embed_fn=flat,
         )
         self.assertIn("install pytest", out)
 
@@ -350,8 +371,11 @@ class LearningRecordCycleTests(unittest.TestCase):
 
     def test_skipped_when_inputs_insufficient(self) -> None:
         oid = self.loop.record_cycle_outcome(
-            session_id="s4", task_type="self_heal",
-            goal="", action_summary="", verification_status="ok",
+            session_id="s4",
+            task_type="self_heal",
+            goal="",
+            action_summary="",
+            verification_status="ok",
             error_snippet=None,
         )
         self.assertIsNone(oid)
@@ -417,23 +441,28 @@ class RetrieveLessonsViaGraphTests(unittest.TestCase):
         # Use the same strict-token embedder pattern from
         # SearchOutcomesWithGraphTests so cosine reflects literal token overlap.
         return self.store.store_task_outcome_with_embedding(
-            embed_fn=strict_token_embed, **kw,
+            embed_fn=strict_token_embed,
+            **kw,
         )
 
     def test_retrieves_graph_neighbor_lesson(self) -> None:
         # Seed match by text: "firecrawl"
         self._store(
-            task_type="browse", task_id="s1:1",
+            task_type="browse",
+            task_id="s1:1",
             description="firecrawl scrape failed",
-            approach="firecrawl scrape https://x", outcome="failure",
+            approach="firecrawl scrape https://x",
+            outcome="failure",
             lesson="firecrawl needs api key in env",
             tags=["firecrawl", "scrape"],
         )
         # Graph-only neighbor: shares tag "scrape" but doesn't mention firecrawl.
         self._store(
-            task_type="browse", task_id="s1:2",
+            task_type="browse",
+            task_id="s1:2",
             description="page extraction stalled",
-            approach="default scraper", outcome="failure",
+            approach="default scraper",
+            outcome="failure",
             lesson="set explicit timeout for SPA pages",
             tags=["scrape", "spa"],
         )
@@ -448,9 +477,12 @@ class RetrieveLessonsViaGraphTests(unittest.TestCase):
     def test_falls_back_to_semantic_when_no_graph_results(self) -> None:
         # Only seeds, no neighbors — old behavior should still produce content.
         self._store(
-            task_type="browse", task_id="s1:1",
-            description="firecrawl scrape", approach="a",
-            outcome="failure", lesson="api key required",
+            task_type="browse",
+            task_id="s1:1",
+            description="firecrawl scrape",
+            approach="a",
+            outcome="failure",
+            lesson="api key required",
         )
         rendered, _ = self.loop.retrieve_lessons(
             "firecrawl",
@@ -461,14 +493,19 @@ class RetrieveLessonsViaGraphTests(unittest.TestCase):
     def test_falls_back_to_semantic_when_graph_raises(self) -> None:
         # Force search_outcomes_with_graph to raise; semantic fallback must still produce content.
         self._store(
-            task_type="browse", task_id="s1:1",
-            description="firecrawl scrape", approach="a",
-            outcome="failure", lesson="api key required",
+            task_type="browse",
+            task_id="s1:1",
+            description="firecrawl scrape",
+            approach="a",
+            outcome="failure",
+            lesson="api key required",
         )
 
         original = self.store.search_outcomes_with_graph
+
         def boom(*args, **kwargs):
             raise RuntimeError("simulated graph failure")
+
         self.store.search_outcomes_with_graph = boom  # type: ignore[method-assign]
         try:
             rendered, _ = self.loop.retrieve_lessons(
@@ -485,30 +522,41 @@ class RetrieveLessonsViaGraphTests(unittest.TestCase):
 class RetrieveLessonsObserveSignalTests(unittest.TestCase):
     def setUp(self) -> None:
         from claw_v2.observe import ObserveStream
+
         self.store = MemoryStore(Path(tempfile.mkdtemp()) / "test.db")
         self.observe = ObserveStream(Path(tempfile.mkdtemp()) / "observe.db")
         self.loop = LearningLoop(memory=self.store, observe=self.observe)
 
     def _store(self, **kw):
         return self.store.store_task_outcome_with_embedding(
-            embed_fn=strict_token_embed, **kw,
+            embed_fn=strict_token_embed,
+            **kw,
         )
 
     def test_emits_event_when_graph_contributes(self) -> None:
         # Direct hit on "firecrawl" with shared tag.
         self._store(
-            task_type="browse", task_id="s1:1",
-            description="firecrawl call", approach="a",
-            outcome="failure", lesson="key required", tags=["firecrawl"],
+            task_type="browse",
+            task_id="s1:1",
+            description="firecrawl call",
+            approach="a",
+            outcome="failure",
+            lesson="key required",
+            tags=["firecrawl"],
         )
         # Graph-only neighbor: shares tag "firecrawl" but mentions nothing about it.
         self._store(
-            task_type="browse", task_id="s1:2",
-            description="another thing entirely", approach="a",
-            outcome="failure", lesson="set timeout", tags=["firecrawl"],
+            task_type="browse",
+            task_id="s1:2",
+            description="another thing entirely",
+            approach="a",
+            outcome="failure",
+            lesson="set timeout",
+            tags=["firecrawl"],
         )
         self.loop.retrieve_lessons(
-            "firecrawl", embed_fn=strict_token_embed,
+            "firecrawl",
+            embed_fn=strict_token_embed,
         )
         events = self.observe.recent_events(limit=10)
         kinds = [e["event_type"] for e in events]
@@ -517,12 +565,16 @@ class RetrieveLessonsObserveSignalTests(unittest.TestCase):
     def test_no_event_when_only_seeds(self) -> None:
         # Single outcome with unique tag → seed only, no graph contribution.
         self._store(
-            task_type="browse", task_id="s1:1",
-            description="solo", approach="a",
-            outcome="success", lesson="ok",
+            task_type="browse",
+            task_id="s1:1",
+            description="solo",
+            approach="a",
+            outcome="success",
+            lesson="ok",
         )
         self.loop.retrieve_lessons(
-            "solo", embed_fn=strict_token_embed,
+            "solo",
+            embed_fn=strict_token_embed,
         )
         events = self.observe.recent_events(limit=10)
         kinds = [e["event_type"] for e in events]
@@ -532,17 +584,26 @@ class RetrieveLessonsObserveSignalTests(unittest.TestCase):
         # Backward compat: LearningLoop without observe must not crash and must not emit.
         loop_without_observe = LearningLoop(memory=self.store)
         self._store(
-            task_type="browse", task_id="s1:1",
-            description="firecrawl", approach="a",
-            outcome="failure", lesson="key required", tags=["firecrawl"],
+            task_type="browse",
+            task_id="s1:1",
+            description="firecrawl",
+            approach="a",
+            outcome="failure",
+            lesson="key required",
+            tags=["firecrawl"],
         )
         self._store(
-            task_type="browse", task_id="s1:2",
-            description="other", approach="a",
-            outcome="failure", lesson="timeout", tags=["firecrawl"],
+            task_type="browse",
+            task_id="s1:2",
+            description="other",
+            approach="a",
+            outcome="failure",
+            lesson="timeout",
+            tags=["firecrawl"],
         )
         # Should not crash; nothing to assert about observe since there isn't one.
         rendered, _ = loop_without_observe.retrieve_lessons(
-            "firecrawl", embed_fn=strict_token_embed,
+            "firecrawl",
+            embed_fn=strict_token_embed,
         )
         self.assertIn("key required", rendered)

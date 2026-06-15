@@ -77,7 +77,9 @@ class FakePromotionCommandRunner:
         key = " ".join(command[:3])
         full_key = " ".join(command)
         returncode = self.fail.get(full_key, self.fail.get(key, 0))
-        return subprocess.CompletedProcess(command, returncode, "", "tool output" if returncode else "")
+        return subprocess.CompletedProcess(
+            command, returncode, "", "tool output" if returncode else ""
+        )
 
 
 class WorktreeRunnerTests(unittest.TestCase):
@@ -109,11 +111,19 @@ class WorktreeRunnerTests(unittest.TestCase):
             repo = root / "repo"
             repo.mkdir()
             subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
-            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "test@example.com"], cwd=repo, check=True
+            )
             subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
             (repo / "README.md").write_text("hello\n", encoding="utf-8")
             subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
-            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True, text=True)
+            subprocess.run(
+                ["git", "commit", "-m", "init"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
 
             router = FakeRouter()
             runner = GitWorktreeExperimentRunner(
@@ -125,7 +135,11 @@ class WorktreeRunnerTests(unittest.TestCase):
             record = runner(
                 "agent-a",
                 1,
-                {"instruction": "Change the workspace", "allowed_tools": ["Write"], "last_verified_state": {"metric": 0.5}},
+                {
+                    "instruction": "Change the workspace",
+                    "allowed_tools": ["Write"],
+                    "last_verified_state": {"metric": 0.5},
+                },
             )
 
             self.assertEqual(record.metric_value, 0.75)
@@ -140,11 +154,19 @@ class WorktreeRunnerTests(unittest.TestCase):
             repo = root / "repo"
             repo.mkdir()
             subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
-            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "test@example.com"], cwd=repo, check=True
+            )
             subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
             (repo / "README.md").write_text("hello\n", encoding="utf-8")
             subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
-            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True, text=True)
+            subprocess.run(
+                ["git", "commit", "-m", "init"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
             observe = ObserveStream(root / "observe.db")
 
             runner = GitWorktreeExperimentRunner(
@@ -189,11 +211,19 @@ class WorktreeRunnerTests(unittest.TestCase):
             repo = root / "repo"
             repo.mkdir()
             subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
-            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "test@example.com"], cwd=repo, check=True
+            )
             subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
             (repo / "README.md").write_text("hello\n", encoding="utf-8")
             subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
-            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True, text=True)
+            subprocess.run(
+                ["git", "commit", "-m", "init"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
 
             class TimeoutRouter(FakeRouter):
                 def ask(self, prompt: str, **kwargs) -> LLMResponse:
@@ -232,11 +262,19 @@ class WorktreeRunnerTests(unittest.TestCase):
             repo = root / "repo"
             repo.mkdir()
             subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
-            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "test@example.com"], cwd=repo, check=True
+            )
             subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
             (repo / "README.md").write_text("hello\n", encoding="utf-8")
             subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
-            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True, text=True)
+            subprocess.run(
+                ["git", "commit", "-m", "init"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
             observe = ObserveStream(root / "observe.db")
 
             class TimeoutRouter(FakeRouter):
@@ -269,7 +307,9 @@ class WorktreeRunnerTests(unittest.TestCase):
             self.assertEqual(events[0]["event_type"], "worktree_experiment_failed")
             self.assertEqual(events[1]["event_type"], "worktree_experiment_started")
             self.assertEqual(events[0]["trace_id"], events[1]["trace_id"])
-            self.assertEqual(events[0]["payload"]["session_id"], "auto-research:agent-observed-failure")
+            self.assertEqual(
+                events[0]["payload"]["session_id"], "auto-research:agent-observed-failure"
+            )
             self.assertEqual(events[0]["payload"]["error_type"], "AdapterError")
             self.assertTrue(events[0]["payload"]["worktree_preserved"])
             self.assertTrue((root / "worktrees" / "agent-observed-failure" / "exp-1").exists())
@@ -285,11 +325,19 @@ class WorktreeRunnerTests(unittest.TestCase):
             repo = root / "repo"
             repo.mkdir()
             subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
-            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "test@example.com"], cwd=repo, check=True
+            )
             subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
             (repo / "README.md").write_text("hello\n", encoding="utf-8")
             subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
-            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True, text=True)
+            subprocess.run(
+                ["git", "commit", "-m", "init"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
             observe = ObserveStream(root / "observe.db")
 
             class FailingPrepRunner(GitWorktreeExperimentRunner):
@@ -311,7 +359,11 @@ class WorktreeRunnerTests(unittest.TestCase):
                 runner(
                     "agent-prep-fail",
                     1,
-                    {"instruction": "x", "allowed_tools": ["Write"], "last_verified_state": {"metric": 0.5}},
+                    {
+                        "instruction": "x",
+                        "allowed_tools": ["Write"],
+                        "last_verified_state": {"metric": 0.5},
+                    },
                 )
 
             self.assertNotIn("preserved experiment workspace", str(ctx.exception))
@@ -330,11 +382,19 @@ class WorktreeRunnerTests(unittest.TestCase):
             repo = root / "repo"
             repo.mkdir()
             subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
-            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "test@example.com"], cwd=repo, check=True
+            )
             subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
             (repo / "README.md").write_text("hello\n", encoding="utf-8")
             subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
-            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True, text=True)
+            subprocess.run(
+                ["git", "commit", "-m", "init"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
             observe = ObserveStream(root / "observe.db")
 
             router = FakeRouter()
@@ -349,12 +409,17 @@ class WorktreeRunnerTests(unittest.TestCase):
             runner(
                 "agent-trace",
                 1,
-                {"instruction": "x", "allowed_tools": ["Write"], "last_verified_state": {"metric": 0.5}},
+                {
+                    "instruction": "x",
+                    "allowed_tools": ["Write"],
+                    "last_verified_state": {"metric": 0.5},
+                },
             )
 
             evidence = router.calls[0]["evidence_pack"]
             started = [
-                event for event in observe.recent_events(limit=5)
+                event
+                for event in observe.recent_events(limit=5)
                 if event["event_type"] == "worktree_experiment_started"
             ][0]
             self.assertEqual(evidence.get("trace_id"), started["trace_id"])
@@ -366,11 +431,19 @@ class WorktreeRunnerTests(unittest.TestCase):
             repo = root / "repo"
             repo.mkdir()
             subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
-            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "test@example.com"], cwd=repo, check=True
+            )
             subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
             (repo / "README.md").write_text("hello\n", encoding="utf-8")
             subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
-            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True, text=True)
+            subprocess.run(
+                ["git", "commit", "-m", "init"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
 
             router = FakeRouter()
             brain = FakeBrain()
@@ -381,7 +454,9 @@ class WorktreeRunnerTests(unittest.TestCase):
                 router=router,
                 brain=brain,
                 evaluator=lambda path, state, diff: ExperimentEvaluation(0.8, "improved", "0.8"),
-                promotion_executor=lambda path, state, diff: promoted.append(path.name) or {"promoted": True},
+                promotion_executor=lambda path, state, diff: (
+                    promoted.append(path.name) or {"promoted": True}
+                ),
             )
             record = runner(
                 "agent-b",
@@ -404,11 +479,19 @@ class WorktreeRunnerTests(unittest.TestCase):
             repo = root / "repo"
             repo.mkdir()
             subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
-            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "test@example.com"], cwd=repo, check=True
+            )
             subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
             (repo / "README.md").write_text("hello\n", encoding="utf-8")
             subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
-            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True, text=True)
+            subprocess.run(
+                ["git", "commit", "-m", "init"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
 
             class BlockingBrain:
                 def __init__(self) -> None:
@@ -437,7 +520,9 @@ class WorktreeRunnerTests(unittest.TestCase):
                 router=FakeRouter(),
                 brain=brain,
                 evaluator=lambda path, state, diff: ExperimentEvaluation(0.8, "improved", "0.8"),
-                promotion_executor=lambda path, state, diff: promoted.append(path.name) or {"promoted": True},
+                promotion_executor=lambda path, state, diff: (
+                    promoted.append(path.name) or {"promoted": True}
+                ),
             )
             record = runner(
                 "self-improve",
@@ -473,7 +558,11 @@ class WorktreeRunnerTests(unittest.TestCase):
             record = runner(
                 "agent-c",
                 1,
-                {"instruction": "Change the workspace", "allowed_tools": ["Write"], "last_verified_state": {"metric": 0.1}},
+                {
+                    "instruction": "Change the workspace",
+                    "allowed_tools": ["Write"],
+                    "last_verified_state": {"metric": 0.1},
+                },
             )
 
             self.assertEqual(record.metric_value, 0.6)
@@ -485,12 +574,20 @@ class WorktreeRunnerTests(unittest.TestCase):
             repo = root / "repo"
             repo.mkdir()
             subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
-            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "test@example.com"], cwd=repo, check=True
+            )
             subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
             (repo / "README.md").write_text("hello\n", encoding="utf-8")
             (repo / "dirty.txt").write_text("base\n", encoding="utf-8")
             subprocess.run(["git", "add", "README.md", "dirty.txt"], cwd=repo, check=True)
-            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True, text=True)
+            subprocess.run(
+                ["git", "commit", "-m", "init"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
             (repo / "dirty.txt").write_text("local only\n", encoding="utf-8")
 
             class SnapshotRouter(FakeRouter):
@@ -578,12 +675,20 @@ class WorktreeRunnerTests(unittest.TestCase):
             repo = root / "repo"
             repo.mkdir()
             subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
-            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "test@example.com"], cwd=repo, check=True
+            )
             subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
             (repo / "tracked.txt").write_text("base\n", encoding="utf-8")
             (repo / "dirty.txt").write_text("keep me dirty\n", encoding="utf-8")
             subprocess.run(["git", "add", "tracked.txt", "dirty.txt"], cwd=repo, check=True)
-            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True, text=True)
+            subprocess.run(
+                ["git", "commit", "-m", "init"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
             (repo / "dirty.txt").write_text("local only\n", encoding="utf-8")
 
             worktree = root / "worktree"
@@ -635,11 +740,19 @@ class WorktreeRunnerTests(unittest.TestCase):
             repo = root / "repo"
             repo.mkdir()
             subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
-            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "test@example.com"], cwd=repo, check=True
+            )
             subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
             (repo / "tracked.txt").write_text("base\n", encoding="utf-8")
             subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True)
-            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True, text=True)
+            subprocess.run(
+                ["git", "commit", "-m", "init"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
 
             worktree = root / "worktree"
             worktree.mkdir()
@@ -667,11 +780,19 @@ class WorktreeRunnerTests(unittest.TestCase):
             repo = root / "repo"
             repo.mkdir()
             subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
-            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "test@example.com"], cwd=repo, check=True
+            )
             subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
             (repo / "tracked.txt").write_text("base\n", encoding="utf-8")
             subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True)
-            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True, text=True)
+            subprocess.run(
+                ["git", "commit", "-m", "init"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
             current_branch = subprocess.run(
                 ["git", "branch", "--show-current"],
                 cwd=repo,
@@ -754,11 +875,19 @@ class WorktreeRunnerTests(unittest.TestCase):
             repo = root / "repo"
             repo.mkdir()
             subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
-            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "test@example.com"], cwd=repo, check=True
+            )
             subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
             (repo / "tracked.txt").write_text("base\n", encoding="utf-8")
             subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True)
-            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True, text=True)
+            subprocess.run(
+                ["git", "commit", "-m", "init"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
             current_head = subprocess.run(
                 ["git", "rev-parse", "HEAD"],
                 cwd=repo,
@@ -812,11 +941,19 @@ class WorktreeRunnerTests(unittest.TestCase):
             repo = root / "repo"
             repo.mkdir()
             subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
-            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "test@example.com"], cwd=repo, check=True
+            )
             subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
             (repo / "tracked.txt").write_text("base\n", encoding="utf-8")
             subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True)
-            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True, text=True)
+            subprocess.run(
+                ["git", "commit", "-m", "init"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
             current_head = subprocess.run(
                 ["git", "rev-parse", "HEAD"],
                 cwd=repo,
@@ -945,7 +1082,10 @@ class WorktreeRunnerTests(unittest.TestCase):
             (baseline / "existing_bad.py").write_text("this is already bad\n", encoding="utf-8")
             (worktree / "existing_bad.py").write_text("this is still bad\n", encoding="utf-8")
             runner = FakePromotionCommandRunner(
-                fail={"uvx ruff check existing_bad.py": 1, "uvx ruff format --check existing_bad.py": 1}
+                fail={
+                    "uvx ruff check existing_bad.py": 1,
+                    "uvx ruff format --check existing_bad.py": 1,
+                }
             )
             gate = PromotionToolingGate(baseline_root=baseline, command_runner=runner)
 
@@ -960,7 +1100,9 @@ class WorktreeRunnerTests(unittest.TestCase):
             self.assertEqual(report.ruff_check_status, "passed_with_baseline_violations")
             self.assertEqual(report.ruff_format_status, "passed_with_baseline_violations")
 
-    def test_promotion_tooling_gate_blocks_new_file_ruff_failure_even_when_baseline_is_red(self) -> None:
+    def test_promotion_tooling_gate_blocks_new_file_ruff_failure_even_when_baseline_is_red(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             baseline = root / "repo"
@@ -1032,11 +1174,19 @@ class WorktreeRunnerTests(unittest.TestCase):
             repo = root / "repo"
             repo.mkdir()
             subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
-            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "test@example.com"], cwd=repo, check=True
+            )
             subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
             (repo / "changed.py").write_text("print('base')\n", encoding="utf-8")
             subprocess.run(["git", "add", "changed.py"], cwd=repo, check=True)
-            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True, text=True)
+            subprocess.run(
+                ["git", "commit", "-m", "init"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
             current_head = subprocess.run(
                 ["git", "rev-parse", "HEAD"],
                 cwd=repo,

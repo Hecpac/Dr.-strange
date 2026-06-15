@@ -7,6 +7,7 @@ to the brain.
 
 100% offline. Autouse `_no_network` fixture blocks sockets/urllib.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -16,8 +17,10 @@ import pytest
 def _no_network(monkeypatch):
     def _boom(*a, **kw):
         raise RuntimeError("Network call attempted from F3b.1.5 test — forbidden")
+
     import socket
     import urllib.request
+
     monkeypatch.setattr(socket.socket, "connect", _boom)
     monkeypatch.setattr(urllib.request, "urlopen", _boom)
     yield
@@ -39,6 +42,7 @@ def matcher_only():
         # F3b.1.5 — task_status_overview is out of scope; stub it.
         def _task_status_overview_query_matches(self, normalized):
             return False
+
         _emitted: list[dict] = []
 
         class _FakeObserve:
@@ -103,8 +107,9 @@ def test_long_block_with_procede_falls_through(matcher_only):
     matcher_only.observe.emitted.clear()
     assert matcher_only._pending_tasks_query_matches(msg) is False
     # Fallthrough event recorded
-    events = [e for e in matcher_only.observe.emitted
-              if e["event"] == "dispatcher_fallthrough_imperative"]
+    events = [
+        e for e in matcher_only.observe.emitted if e["event"] == "dispatcher_fallthrough_imperative"
+    ]
     assert events
     assert events[0]["payload"]["reason"] == "imperative_intent_detected"
 
@@ -118,8 +123,9 @@ def test_ok_final_marca_falls_through(matcher_only):
     msg = "tareas pendientes — OK final: marca F3b.1 como succeeded"
     matcher_only.observe.emitted.clear()
     assert matcher_only._pending_tasks_query_matches(msg) is False
-    assert any(e["event"] == "dispatcher_fallthrough_imperative"
-               for e in matcher_only.observe.emitted)
+    assert any(
+        e["event"] == "dispatcher_fallthrough_imperative" for e in matcher_only.observe.emitted
+    )
 
 
 # ===========================================================================
@@ -168,8 +174,9 @@ def test_regression_2026_05_17_long_block_with_continua(matcher_only):
     )
     matcher_only.observe.emitted.clear()
     assert matcher_only._pending_tasks_query_matches(msg) is False
-    fall_events = [e for e in matcher_only.observe.emitted
-                   if e["event"] == "dispatcher_fallthrough_imperative"]
+    fall_events = [
+        e for e in matcher_only.observe.emitted if e["event"] == "dispatcher_fallthrough_imperative"
+    ]
     assert fall_events, "Regression: long imperative block must emit fallthrough event"
     payload = fall_events[0]["payload"]
     assert payload["text_len"] > 100
@@ -193,8 +200,9 @@ def test_every_veto_emits_telemetry(matcher_only):
     for msg in cases:
         matcher_only.observe.emitted.clear()
         assert matcher_only._pending_tasks_query_matches(msg) is False, msg
-        assert any(e["event"] == "dispatcher_fallthrough_imperative"
-                   for e in matcher_only.observe.emitted), f"no event for: {msg}"
+        assert any(
+            e["event"] == "dispatcher_fallthrough_imperative" for e in matcher_only.observe.emitted
+        ), f"no event for: {msg}"
 
 
 # ===========================================================================

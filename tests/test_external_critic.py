@@ -45,7 +45,9 @@ class ExternalCriticTests(unittest.TestCase):
         self.assertNotIn("chain_of_thought", raw)
 
     def test_rejects_unallowed_spawner(self) -> None:
-        config = ExternalCriticConfig(command=("critic",), allowed_spawners=frozenset({"coordinator"}))
+        config = ExternalCriticConfig(
+            command=("critic",), allowed_spawners=frozenset({"coordinator"})
+        )
         with self.assertRaises(PermissionError):
             config.validate_spawner("worker")
 
@@ -79,4 +81,3 @@ class ExternalCriticTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

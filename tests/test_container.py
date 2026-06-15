@@ -30,7 +30,9 @@ class SandboxedRunTests(unittest.TestCase):
 
     @patch("claw_v2.container.subprocess.run")
     def test_limited_run_uses_sanitized_child_env(self, mock_run) -> None:
-        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
         sandboxed_run("echo ok", cwd="/tmp", policy=ContainerPolicy())
         env = mock_run.call_args.kwargs["env"]
         self.assertIn("PATH", env)
@@ -38,7 +40,9 @@ class SandboxedRunTests(unittest.TestCase):
 
     @patch("claw_v2.container.subprocess.run")
     def test_sandboxed_run_emits_env_counts_without_values(self, mock_run) -> None:
-        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
         observe = MagicMock()
         sandboxed_run("echo ok", cwd="/tmp", policy=ContainerPolicy(), observe=observe)
         payload = observe.emit.call_args.kwargs["payload"]
@@ -51,10 +55,15 @@ class SandboxedRunTests(unittest.TestCase):
 class DockerRunTests(unittest.TestCase):
     @patch("claw_v2.container.subprocess.run")
     def test_docker_command_construction(self, mock_run) -> None:
-        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="ok", stderr="")
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="ok", stderr=""
+        )
         policy = ContainerPolicy(
-            cpu_seconds=60, memory_mb=256, max_processes=32,
-            network_enabled=False, docker_image="python:3.12-slim",
+            cpu_seconds=60,
+            memory_mb=256,
+            max_processes=32,
+            network_enabled=False,
+            docker_image="python:3.12-slim",
             timeout_seconds=120,
         )
         _docker_run("pytest -x", cwd="/tmp/worktree", policy=policy)
@@ -69,7 +78,9 @@ class DockerRunTests(unittest.TestCase):
     def test_docker_cpus_is_core_count_not_cpu_seconds(self, mock_run) -> None:
         # #33: --cpus is a fractional core count; cpu_seconds is a CPU-time
         # budget (RLIMIT_CPU). Mapping --cpus=cpu_seconds requested 120 cores.
-        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="ok", stderr="")
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="ok", stderr=""
+        )
         policy = ContainerPolicy(cpu_seconds=120, docker_image="python:3.12-slim")
         _docker_run("pytest -x", cwd="/tmp/worktree", policy=policy)
         args = mock_run.call_args[0][0]
@@ -86,7 +97,9 @@ class DockerRunTests(unittest.TestCase):
     ) -> None:
         # #15: honouring docker_ephemeral must not crash when docker is absent;
         # degrade to host_sanitized with an observable event (no_silent_degrade).
-        mock_limited.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        mock_limited.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
         observe = MagicMock()
         policy = ContainerPolicy(isolation_mode="docker_ephemeral")
         sandboxed_run("echo ok", cwd="/tmp", policy=policy, observe=observe)
@@ -102,7 +115,10 @@ class DockerAvailableTests(unittest.TestCase):
     def test_false_when_daemon_unresponsive(self, _which, mock_run) -> None:
         # P2: the binary being present is not enough — the daemon must respond.
         mock_run.return_value = subprocess.CompletedProcess(
-            args=[], returncode=1, stdout="", stderr="Cannot connect to the Docker daemon",
+            args=[],
+            returncode=1,
+            stdout="",
+            stderr="Cannot connect to the Docker daemon",
         )
         self.assertFalse(docker_available())
 
@@ -110,7 +126,10 @@ class DockerAvailableTests(unittest.TestCase):
     @patch("claw_v2.container.shutil.which", return_value="/usr/bin/docker")
     def test_true_when_daemon_responds(self, _which, mock_run) -> None:
         mock_run.return_value = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="27.0.0", stderr="",
+            args=[],
+            returncode=0,
+            stdout="27.0.0",
+            stderr="",
         )
         self.assertTrue(docker_available())
 

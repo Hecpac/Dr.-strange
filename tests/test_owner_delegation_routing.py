@@ -71,9 +71,7 @@ def _make_handler() -> tuple[MemoryStore, StateHandler, _RecordingObserve]:
     # returned handler so the GC keeps it alive.
     memory = MemoryStore(Path(tmp.name) / "claw.db")
     observe = _RecordingObserve()
-    handler = StateHandler(
-        brain_memory=memory, task_handler=_StubTaskHandler(), observe=observe
-    )
+    handler = StateHandler(brain_memory=memory, task_handler=_StubTaskHandler(), observe=observe)
     handler.__test_tmpdir__ = tmp  # type: ignore[attr-defined]
     return memory, handler, observe
 
@@ -249,17 +247,13 @@ class OwnerDelegationResolverTests(unittest.TestCase):
         resolution = handler.resolve_delegated_objective(
             session_id="tg-x", text="hazlo tu", intent=self._intent()
         )
-        self.assertEqual(
-            resolution.objective, "generar el resumen semanal del fitness tracker"
-        )
+        self.assertEqual(resolution.objective, "generar el resumen semanal del fitness tracker")
         self.assertEqual(resolution.resolution_source, "session_state.pending_action")
         self.assertFalse(resolution.is_risky)
 
     def test_correlo_tu_resolves_from_recent_assistant_proposal(self) -> None:
         memory, handler, _ = _make_handler()
-        memory.store_message(
-            "tg-x", "user", "puedo correr el script de backup nocturno?"
-        )
+        memory.store_message("tg-x", "user", "puedo correr el script de backup nocturno?")
         memory.store_message(
             "tg-x",
             "assistant",
@@ -411,9 +405,7 @@ class OwnerDelegationContractTests(unittest.TestCase):
     def test_resolver_works_with_assisted_session(self) -> None:
         memory, handler, _ = _make_handler()
         # Session is "assisted" by default — never set autonomy_mode.
-        memory.update_session_state(
-            "tg-x", pending_action="generar el resumen semanal"
-        )
+        memory.update_session_state("tg-x", pending_action="generar el resumen semanal")
         intent = OwnerDelegationIntent(
             kind="execution",
             confidence=0.95,

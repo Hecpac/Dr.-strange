@@ -72,7 +72,9 @@ class BrowserCapability:
                         f"CDP responde en {endpoint}, pero no pude preparar una "
                         f"ventana visible con perfil {profile_path}: {_error_message(exc)}"
                     )
-                    self._fail(payload, message, stage="focus_existing_chrome", first_error=first_error)
+                    self._fail(
+                        payload, message, stage="focus_existing_chrome", first_error=first_error
+                    )
                     raise BrowserCapabilityError(message, endpoint=endpoint) from exc
             self._emit(
                 "browser_capability_preflight_ok",

@@ -64,7 +64,9 @@ class AgentServiceTests(unittest.TestCase):
                     ]
                 ),
             )
-            service.create_agent(AgentDefinition(name="operator-1", agent_class="operator", instruction="Improve"))
+            service.create_agent(
+                AgentDefinition(name="operator-1", agent_class="operator", instruction="Improve")
+            )
             result = service.run_until("operator-1", max_experiments=5, target_metric=0.2)
             self.assertEqual(result.reason, "target_reached")
             self.assertEqual(result.experiments_run, 2)
@@ -82,8 +84,12 @@ class AgentServiceTests(unittest.TestCase):
                     ExperimentRecord(2, 0.10, 0.10, "regressed"),
                 ]
             )
-            service = AutoResearchAgentService(router=router, store=store, experiment_runner=runner, detector=detector)
-            service.create_agent(AgentDefinition(name="deployer-1", agent_class="deployer", instruction="Ship"))
+            service = AutoResearchAgentService(
+                router=router, store=store, experiment_runner=runner, detector=detector
+            )
+            service.create_agent(
+                AgentDefinition(name="deployer-1", agent_class="deployer", instruction="Ship")
+            )
             result = service.run_loop("deployer-1", max_experiments=3)
             self.assertTrue(result.paused)
             self.assertEqual(result.reason, "stagnating")
@@ -98,7 +104,9 @@ class AgentServiceTests(unittest.TestCase):
             observe = MagicMock()
             calls = 0
 
-            def failing_runner(agent_name: str, experiment_number: int, state: dict) -> ExperimentRecord:
+            def failing_runner(
+                agent_name: str, experiment_number: int, state: dict
+            ) -> ExperimentRecord:
                 nonlocal calls
                 calls += 1
                 raise AdapterError("Codex CLI timed out after 120.0s")
@@ -109,7 +117,11 @@ class AgentServiceTests(unittest.TestCase):
                 experiment_runner=failing_runner,
                 observe=observe,
             )
-            service.create_agent(AgentDefinition(name="operator-timeout", agent_class="operator", instruction="Improve"))
+            service.create_agent(
+                AgentDefinition(
+                    name="operator-timeout", agent_class="operator", instruction="Improve"
+                )
+            )
 
             result = service.run_loop("operator-timeout", max_experiments=3)
 
@@ -142,7 +154,9 @@ class AgentServiceTests(unittest.TestCase):
             self.assertEqual(calls, 2)
 
             service.resume("operator-timeout")
-            service.experiment_runner = scripted_experiment_runner([ExperimentRecord(1, 0.2, 0.1, "improved")])
+            service.experiment_runner = scripted_experiment_runner(
+                [ExperimentRecord(1, 0.2, 0.1, "improved")]
+            )
             recovered = service.run_loop("operator-timeout", max_experiments=1)
             self.assertEqual(recovered.reason, "completed")
             self.assertFalse(recovered.paused)
@@ -159,7 +173,9 @@ class AgentServiceTests(unittest.TestCase):
                 store=store,
                 experiment_runner=scripted_experiment_runner([]),
             )
-            service.create_agent(AgentDefinition(name="operator-2", agent_class="operator", instruction="Improve"))
+            service.create_agent(
+                AgentDefinition(name="operator-2", agent_class="operator", instruction="Improve")
+            )
 
             updated = service.update_controls(
                 "operator-2",
@@ -190,7 +206,9 @@ class AgentServiceTests(unittest.TestCase):
                 store=store,
                 experiment_runner=scripted_experiment_runner([]),
             )
-            service.create_agent(AgentDefinition(name="operator-3", agent_class="operator", instruction="Improve"))
+            service.create_agent(
+                AgentDefinition(name="operator-3", agent_class="operator", instruction="Improve")
+            )
             store.append_result("operator-3", ExperimentRecord(1, 0.10, 0.05, "improved"))
             store.append_result("operator-3", ExperimentRecord(2, 0.12, 0.10, "improved"))
 
@@ -214,14 +232,22 @@ class AgentServiceTests(unittest.TestCase):
                 store=store,
                 experiment_runner=scripted_experiment_runner([]),
             )
-            service.create_agent(AgentDefinition(name="operator-4", agent_class="operator", instruction="Improve"))
+            service.create_agent(
+                AgentDefinition(name="operator-4", agent_class="operator", instruction="Improve")
+            )
 
             with self.assertRaises(FileExistsError):
-                service.create_agent(AgentDefinition(name="operator-4", agent_class="operator", instruction="Again"))
+                service.create_agent(
+                    AgentDefinition(name="operator-4", agent_class="operator", instruction="Again")
+                )
             with self.assertRaises(ValueError):
-                service.create_agent(AgentDefinition(name="../bad", agent_class="operator", instruction="Bad"))
+                service.create_agent(
+                    AgentDefinition(name="../bad", agent_class="operator", instruction="Bad")
+                )
             with self.assertRaises(ValueError):
-                service.create_agent(AgentDefinition(name="bad-class", agent_class="judge", instruction="Bad"))
+                service.create_agent(
+                    AgentDefinition(name="bad-class", agent_class="judge", instruction="Bad")
+                )
 
 
 class SubAgentServiceTests(unittest.TestCase):
@@ -237,16 +263,16 @@ class SubAgentServiceTests(unittest.TestCase):
             "You run on Gemini because your job needs broad synthesis across large content volumes.\n"
         )
 
-        self.assertEqual(SubAgentService._parse_model_from_soul(hex_soul), ("codex", "codex-mini-latest"))
+        self.assertEqual(
+            SubAgentService._parse_model_from_soul(hex_soul), ("codex", "codex-mini-latest")
+        )
         self.assertEqual(SubAgentService._parse_model_from_soul(lux_soul), ("openai", "gpt-5.4"))
 
     def test_parse_model_recognizes_gpt_5_5(self) -> None:
         """MAX POWER fase 1: parser must route 'GPT-5.5' to gpt-5.5, not the
         gpt-5.4 catch-all."""
         soul = "- **Model:** GPT-5.5 — reasoning frontier\n"
-        self.assertEqual(
-            SubAgentService._parse_model_from_soul(soul), ("openai", "gpt-5.5")
-        )
+        self.assertEqual(SubAgentService._parse_model_from_soul(soul), ("openai", "gpt-5.5"))
 
     def _make_typed_dispatch_service(self) -> SubAgentService:
         defn = SubAgentDefinition(

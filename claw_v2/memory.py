@@ -209,6 +209,7 @@ def _bm25_scores(query_tokens: list[str], corpus_tokens: list[list[str]]) -> lis
         return [0.0 for _ in corpus_tokens]
     try:
         from rank_bm25 import BM25Okapi
+
         return [float(score) for score in BM25Okapi(corpus_tokens).get_scores(query_tokens)]
     except Exception:
         pass
@@ -255,6 +256,7 @@ def _get_st_model():
             if _ST_MODEL is None:
                 try:
                     from sentence_transformers import SentenceTransformer
+
                     _ST_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
                 except Exception:
                     _ST_MODEL = False  # Mark as unavailable
@@ -326,7 +328,7 @@ def _append_rolling_summary(existing: str, entry: str) -> str:
     combined = f"{existing}\n\n{entry}" if existing else entry
     if len(combined) <= _ROLLING_SUMMARY_MAX_CHARS:
         return combined
-    trimmed = combined[-(_ROLLING_SUMMARY_MAX_CHARS - 28):].lstrip()
+    trimmed = combined[-(_ROLLING_SUMMARY_MAX_CHARS - 28) :].lstrip()
     return "[older summary trimmed]\n" + trimmed
 
 
@@ -458,6 +460,7 @@ class MemoryStore:
         # Apply any pending checkpoint restore before opening the persistent connection.
         try:
             from claw_v2.checkpoint import apply_pending_restore_if_any as _apply_pending_restore
+
             _apply_pending_restore(self.db_path)
         except Exception:
             logger.debug("Pending restore check failed", exc_info=True)
@@ -509,8 +512,7 @@ class MemoryStore:
         # _MIGRATION_ADD_OUTCOME_TAGS. Matching the live shape keeps
         # downstream consumers stable when the migration recreates the
         # table.
-        new_check_schema = (
-            """
+        new_check_schema = """
             CREATE TABLE task_outcomes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 task_type TEXT NOT NULL,
@@ -527,7 +529,6 @@ class MemoryStore:
                 feedback TEXT
             )
             """
-        )
 
         with self._lock:
             try:
@@ -573,9 +574,7 @@ class MemoryStore:
                                 "both task_outcomes (legacy CHECK) and "
                                 "task_outcomes_old exist; manual review needed"
                             )
-                        self._conn.execute(
-                            "ALTER TABLE task_outcomes RENAME TO task_outcomes_old"
-                        )
+                        self._conn.execute("ALTER TABLE task_outcomes RENAME TO task_outcomes_old")
                         orphan_present = True
                     self._conn.execute(new_check_schema)
 
@@ -921,7 +920,9 @@ class MemoryStore:
             return int(cursor.rowcount or 0)
 
     @_synchronized
-    def get_messages_since(self, session_id: str, after_id: int, limit: int | None = None) -> list[dict]:
+    def get_messages_since(
+        self, session_id: str, after_id: int, limit: int | None = None
+    ) -> list[dict]:
         # LOW (2026-06-12): with a limit, keep the NEWEST rows of the gap
         # (in chronological order) — plain ASC LIMIT kept the oldest, so a
         # large gap's most recent context never reached the catchup.
@@ -976,7 +977,9 @@ class MemoryStore:
             ).fetchone()
         return int(row["max_id"] or 0) if row else 0
 
-    def replace_latest_assistant_message(self, session_id: str, previous_content: str, new_content: str) -> bool:
+    def replace_latest_assistant_message(
+        self, session_id: str, previous_content: str, new_content: str
+    ) -> bool:
         with self._lock:
             row = self._conn.execute(
                 """
@@ -1070,9 +1073,13 @@ class MemoryStore:
                     "pending_action": row["pending_action"],
                     "verification_status": row["verification_status"] or "unknown",
                     "active_object": active_object,
-                    "active_object_keys": sorted(active_object.keys()) if isinstance(active_object, dict) else [],
+                    "active_object_keys": sorted(active_object.keys())
+                    if isinstance(active_object, dict)
+                    else [],
                     "task_queue": _loads_json_object(row["task_queue_json"], default=[]),
-                    "pending_approvals": _loads_json_object(row["pending_approvals_json"], default=[]),
+                    "pending_approvals": _loads_json_object(
+                        row["pending_approvals_json"], default=[]
+                    ),
                     "last_checkpoint": _loads_json_object(row["last_checkpoint_json"], default={}),
                     "rolling_summary": row["rolling_summary"],
                     "last_turn_summary": row["last_turn_summary"],
@@ -1106,13 +1113,21 @@ class MemoryStore:
                 with self._lock:
                     current = self.get_session_state(session_id)
                     return self._update_session_state_locked(
-                        session_id, current,
-                        autonomy_mode=autonomy_mode, mode=mode, current_goal=current_goal,
-                        pending_action=pending_action, step_budget=step_budget,
-                        steps_taken=steps_taken, verification_status=verification_status,
-                        active_object=active_object, last_options=last_options,
-                        task_queue=task_queue, pending_approvals=pending_approvals,
-                        last_checkpoint=last_checkpoint, rolling_summary=rolling_summary,
+                        session_id,
+                        current,
+                        autonomy_mode=autonomy_mode,
+                        mode=mode,
+                        current_goal=current_goal,
+                        pending_action=pending_action,
+                        step_budget=step_budget,
+                        steps_taken=steps_taken,
+                        verification_status=verification_status,
+                        active_object=active_object,
+                        last_options=last_options,
+                        task_queue=task_queue,
+                        pending_approvals=pending_approvals,
+                        last_checkpoint=last_checkpoint,
+                        rolling_summary=rolling_summary,
                         last_turn_summary=last_turn_summary,
                     )
             except sqlite3.OperationalError as exc:
@@ -1120,7 +1135,9 @@ class MemoryStore:
                     with self._lock:
                         self._conn.rollback()
                 except Exception:
-                    logger.debug("session_state rollback failed after disk I/O error", exc_info=True)
+                    logger.debug(
+                        "session_state rollback failed after disk I/O error", exc_info=True
+                    )
                 # M5: bounded heal burst (concurrent heals can re-close mid-retry).
                 if heals < WAL_HEAL_RETRY_LIMIT and heal_wal_after_disk_io(
                     self.db_path, exc, context="MemoryStore.update_session_state"
@@ -1317,7 +1334,9 @@ class MemoryStore:
         ).fetchone()
         return dict(row) if row else None
 
-    def bump_fact_confidence(self, key: str, delta: float = 0.05, *, cap: float = 1.0) -> float | None:
+    def bump_fact_confidence(
+        self, key: str, delta: float = 0.05, *, cap: float = 1.0
+    ) -> float | None:
         """Increase confidence of the most recent fact with `key` by `delta`,
         capped at `cap`. Returns the new confidence, or None if no row matched.
         """
@@ -1338,7 +1357,9 @@ class MemoryStore:
             return new_value
 
     @_synchronized
-    def search_facts(self, query: str, limit: int = 10, agent_name: str | None = None) -> list[dict]:
+    def search_facts(
+        self, query: str, limit: int = 10, agent_name: str | None = None
+    ) -> list[dict]:
         with self._lock:
             if agent_name:
                 rows = self._conn.execute(
@@ -1532,19 +1553,27 @@ class MemoryStore:
             state_lines.append(f"pending_action={session_state['pending_action']}")
         active_object = session_state.get("active_object") or {}
         if active_object:
-            state_lines.append(f"active_object={json.dumps(active_object, ensure_ascii=True, sort_keys=True)}")
+            state_lines.append(
+                f"active_object={json.dumps(active_object, ensure_ascii=True, sort_keys=True)}"
+            )
         last_options = session_state.get("last_options") or []
         if last_options:
             state_lines.append("last_options=" + " | ".join(last_options[:3]))
         task_queue = session_state.get("task_queue") or []
         if task_queue:
-            state_lines.append(f"task_queue={json.dumps(task_queue[:3], ensure_ascii=True, sort_keys=True)}")
+            state_lines.append(
+                f"task_queue={json.dumps(task_queue[:3], ensure_ascii=True, sort_keys=True)}"
+            )
         pending_approvals = session_state.get("pending_approvals") or []
         if pending_approvals:
-            state_lines.append(f"pending_approvals={json.dumps(pending_approvals[:3], ensure_ascii=True, sort_keys=True)}")
+            state_lines.append(
+                f"pending_approvals={json.dumps(pending_approvals[:3], ensure_ascii=True, sort_keys=True)}"
+            )
         last_checkpoint = session_state.get("last_checkpoint") or {}
         if last_checkpoint:
-            state_lines.append(f"last_checkpoint={json.dumps(last_checkpoint, ensure_ascii=True, sort_keys=True)}")
+            state_lines.append(
+                f"last_checkpoint={json.dumps(last_checkpoint, ensure_ascii=True, sort_keys=True)}"
+            )
         if session_state.get("rolling_summary"):
             state_lines.append(f"rolling_summary={session_state['rolling_summary']}")
         if session_state.get("last_turn_summary"):
@@ -1552,10 +1581,7 @@ class MemoryStore:
         if state_lines:
             sections.extend(["# Session state", *state_lines])
 
-        classified_facts = [
-            (row, classify_memory_fact(row))
-            for row in self.get_profile_facts()
-        ]
+        classified_facts = [(row, classify_memory_fact(row)) for row in self.get_profile_facts()]
         facts = [
             (row, decision)
             for row, decision in classified_facts
@@ -1569,15 +1595,17 @@ class MemoryStore:
             sections.extend(["# Profile facts", *fact_lines])
 
         classified_learning_facts = [
-            (row, classify_memory_fact(row))
-            for row in self.get_learning_facts(limit=50)
+            (row, classify_memory_fact(row)) for row in self.get_learning_facts(limit=50)
         ]
         learning_facts = [
-            row for row, decision in classified_learning_facts
+            row
+            for row, decision in classified_learning_facts
             if decision.residency == "always_in_prompt"
         ][:5]
         if learning_facts:
-            learning_lines = [_format_untrusted_learning_fact(row) for row in learning_facts if row.get("value")]
+            learning_lines = [
+                _format_untrusted_learning_fact(row) for row in learning_facts if row.get("value")
+            ]
             if learning_lines:
                 sections.extend(
                     [
@@ -1635,7 +1663,11 @@ class MemoryStore:
         return "\n".join(sections)
 
     def _provider_session_row(
-        self, app_session_id: str, provider: str, *, max_age_seconds: int = 86_400,
+        self,
+        app_session_id: str,
+        provider: str,
+        *,
+        max_age_seconds: int = 86_400,
     ) -> sqlite3.Row | None:
         with self._lock:
             row = self._conn.execute(
@@ -1650,6 +1682,7 @@ class MemoryStore:
                 return None
             if row["updated_at"] is not None:
                 from datetime import datetime, timezone
+
                 try:
                     updated = datetime.fromisoformat(row["updated_at"]).replace(tzinfo=timezone.utc)
                     age = (datetime.now(timezone.utc) - updated).total_seconds()
@@ -1665,13 +1698,21 @@ class MemoryStore:
             return row
 
     def get_provider_session(
-        self, app_session_id: str, provider: str, *, max_age_seconds: int = 86_400,
+        self,
+        app_session_id: str,
+        provider: str,
+        *,
+        max_age_seconds: int = 86_400,
     ) -> str | None:
         row = self._provider_session_row(app_session_id, provider, max_age_seconds=max_age_seconds)
         return row["provider_session_id"] if row else None
 
     def get_provider_session_cursor(
-        self, app_session_id: str, provider: str, *, max_age_seconds: int = 86_400,
+        self,
+        app_session_id: str,
+        provider: str,
+        *,
+        max_age_seconds: int = 86_400,
     ) -> int | None:
         row = self._provider_session_row(app_session_id, provider, max_age_seconds=max_age_seconds)
         return int(row["last_message_id"] or 0) if row else None
@@ -1886,7 +1927,9 @@ class MemoryStore:
     @_synchronized
     def load_cron_state(self) -> dict[str, tuple[float, int]]:
         with self._lock:
-            rows = self._conn.execute("SELECT job_name, last_run_at, runs FROM cron_state").fetchall()
+            rows = self._conn.execute(
+                "SELECT job_name, last_run_at, runs FROM cron_state"
+            ).fetchall()
         return {row["job_name"]: (row["last_run_at"], row["runs"]) for row in rows}
 
     def save_cron_job(self, job_name: str, last_run_at: float, runs: int) -> None:
@@ -2006,15 +2049,21 @@ class MemoryStore:
                 stale_ids.append((row["id"], row["key"], row["value"]))
             sim = _cosine_similarity(query_vec, stored_vec)
             corpus_tokens.append(_tokenize(f"{row['key']} {row['value']}"))
-            candidates.append({
-                "key": row["key"], "value": row["value"],
-                "source": row["source"], "confidence": row["confidence"],
-                "similarity_raw": sim,
-            })
+            candidates.append(
+                {
+                    "key": row["key"],
+                    "value": row["value"],
+                    "source": row["source"],
+                    "confidence": row["confidence"],
+                    "similarity_raw": sim,
+                }
+            )
 
         scored = self._hybrid_rank(
-            query_vec=query_vec, query_tokens=query_tokens,
-            candidates=candidates, corpus_tokens=corpus_tokens,
+            query_vec=query_vec,
+            query_tokens=query_tokens,
+            candidates=candidates,
+            corpus_tokens=corpus_tokens,
             min_similarity=min_similarity,
         )
 
@@ -2046,7 +2095,8 @@ class MemoryStore:
         return len(rows)
 
     def backfill_outcome_embeddings(
-        self, embed_fn: Callable[..., list[float]] | None = None,
+        self,
+        embed_fn: Callable[..., list[float]] | None = None,
     ) -> int:
         embedder = embed_fn or _simple_embedding
         rows = self._conn.execute(
@@ -2106,8 +2156,7 @@ class MemoryStore:
                 continue
             seen.add(t)
             self._conn.execute(
-                "INSERT OR IGNORE INTO outcome_entity_edges (outcome_id, entity_tag) "
-                "VALUES (?, ?)",
+                "INSERT OR IGNORE INTO outcome_entity_edges (outcome_id, entity_tag) VALUES (?, ?)",
                 (outcome_id, t),
             )
 
@@ -2134,8 +2183,18 @@ class MemoryStore:
                      error_snippet, retries, tags, predicted_confidence)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (task_type, task_id, description, approach, outcome, lesson,
-                 error_snippet, retries, json.dumps(tag_list), predicted_confidence),
+                (
+                    task_type,
+                    task_id,
+                    description,
+                    approach,
+                    outcome,
+                    lesson,
+                    error_snippet,
+                    retries,
+                    json.dumps(tag_list),
+                    predicted_confidence,
+                ),
             )
             oid = cursor.lastrowid
             if tag_list:
@@ -2172,8 +2231,18 @@ class MemoryStore:
                      error_snippet, retries, tags, predicted_confidence)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (task_type, task_id, description, approach, outcome, lesson,
-                 error_snippet, retries, json.dumps(tag_list), predicted_confidence),
+                (
+                    task_type,
+                    task_id,
+                    description,
+                    approach,
+                    outcome,
+                    lesson,
+                    error_snippet,
+                    retries,
+                    json.dumps(tag_list),
+                    predicted_confidence,
+                ),
             )
             oid = cursor.lastrowid
             self._conn.execute(
@@ -2211,8 +2280,13 @@ class MemoryStore:
                 "INSERT OR REPLACE INTO calibration_stats "
                 "(task_type, avg_predicted_conf, actual_success_rate, calibration_delta, sample_count) "
                 "VALUES (?, ?, ?, ?, ?)",
-                (task_type, stats["avg_predicted_conf"], stats["actual_success_rate"],
-                 stats["calibration_delta"], total),
+                (
+                    task_type,
+                    stats["avg_predicted_conf"],
+                    stats["actual_success_rate"],
+                    stats["calibration_delta"],
+                    total,
+                ),
             )
             self._conn.commit()
         return stats
@@ -2236,7 +2310,11 @@ class MemoryStore:
 
     @_synchronized
     def search_past_outcomes(
-        self, query: str, *, task_type: str | None = None, limit: int = 5,
+        self,
+        query: str,
+        *,
+        task_type: str | None = None,
+        limit: int = 5,
     ) -> list[dict]:
         if task_type:
             rows = self._conn.execute(
@@ -2278,7 +2356,9 @@ class MemoryStore:
             record = dict(row)
             tags_raw = record.get("tags") or "[]"
             try:
-                record["tags"] = json.loads(tags_raw) if isinstance(tags_raw, str) else list(tags_raw or [])
+                record["tags"] = (
+                    json.loads(tags_raw) if isinstance(tags_raw, str) else list(tags_raw or [])
+                )
             except (TypeError, ValueError):
                 record["tags"] = []
             out.append(record)
@@ -2328,8 +2408,7 @@ class MemoryStore:
         sql = (
             "SELECT task_type, task_id, description, approach, outcome, lesson, "
             "error_snippet, retries, created_at, feedback "
-            "FROM task_outcomes WHERE " + " AND ".join(clauses)
-            + " ORDER BY id DESC LIMIT ?"
+            "FROM task_outcomes WHERE " + " AND ".join(clauses) + " ORDER BY id DESC LIMIT ?"
         )
         rows = self._conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
@@ -2388,7 +2467,9 @@ class MemoryStore:
                     (task_type, _SEMANTIC_SCAN_MAX_ROWS),
                 ).fetchall()
             else:
-                rows = self._conn.execute(base_sql + tail_sql, (_SEMANTIC_SCAN_MAX_ROWS,)).fetchall()
+                rows = self._conn.execute(
+                    base_sql + tail_sql, (_SEMANTIC_SCAN_MAX_ROWS,)
+                ).fetchall()
         if not rows:
             return []
 
@@ -2412,8 +2493,10 @@ class MemoryStore:
             candidates.append(item)
 
         scored = self._hybrid_rank(
-            query_vec=query_vec, query_tokens=query_tokens,
-            candidates=candidates, corpus_tokens=corpus_tokens,
+            query_vec=query_vec,
+            query_tokens=query_tokens,
+            candidates=candidates,
+            corpus_tokens=corpus_tokens,
             min_similarity=min_similarity,
         )
 
@@ -2461,8 +2544,11 @@ class MemoryStore:
         take the store lock.
         """
         seeds = self.search_outcomes_semantic(
-            query, task_type=task_type, limit=max(limit, seed_k * 2),
-            min_similarity=min_similarity, embed_fn=embed_fn,
+            query,
+            task_type=task_type,
+            limit=max(limit, seed_k * 2),
+            min_similarity=min_similarity,
+            embed_fn=embed_fn,
         )
         for seed in seeds:
             seed["via_graph"] = False
@@ -2506,7 +2592,8 @@ class MemoryStore:
     @_synchronized
     def get_outcome(self, outcome_id: int) -> dict | None:
         row = self._conn.execute(
-            "SELECT * FROM task_outcomes WHERE id = ?", (outcome_id,),
+            "SELECT * FROM task_outcomes WHERE id = ?",
+            (outcome_id,),
         ).fetchone()
         return dict(row) if row else None
 

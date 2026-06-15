@@ -21,6 +21,7 @@ Network is done via stdlib urllib in a daemon thread so we avoid pulling in
 new deps and keep this module decoupled from the python-telegram-bot
 event loop.
 """
+
 from __future__ import annotations
 
 import json
@@ -161,7 +162,11 @@ class StopNotifier:
         summary: str,
         duration_sec: float | None,
     ) -> str:
-        emoji = "✅" if status == "succeeded" else ("⚠️" if status in {"blocked", "interrupted"} else "❌")
+        emoji = (
+            "✅"
+            if status == "succeeded"
+            else ("⚠️" if status in {"blocked", "interrupted"} else "❌")
+        )
         kind_label = kind.replace("_", " ").strip() or "tarea"
         duration_label = ""
         if duration_sec is not None:
@@ -182,12 +187,14 @@ class StopNotifier:
         try:
             text = _sanitize_outbound(text)
             url = _TELEGRAM_API_URL.format(token=self.token)
-            payload = json.dumps({
-                "chat_id": chat_id,
-                "text": text,
-                "disable_notification": False,
-                "disable_web_page_preview": True,
-            }).encode("utf-8")
+            payload = json.dumps(
+                {
+                    "chat_id": chat_id,
+                    "text": text,
+                    "disable_notification": False,
+                    "disable_web_page_preview": True,
+                }
+            ).encode("utf-8")
             req = urllib.request.Request(
                 url,
                 data=payload,

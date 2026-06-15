@@ -9,6 +9,7 @@ Wires the production-style Anthropic adapter so Echo runs on its configured
 provider (claude-opus-4-7), and surfaces silent fallbacks via the
 dispatch_typed failures channel.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -70,14 +71,23 @@ No inventes metricas. No propongas acciones Tier 3 sin marcarlas como tales.
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--skill", default=None,
-                        help="Optional skill name to invoke instead of free dispatch")
-    parser.add_argument("--prompt-file", default=None,
-                        help="Path to a prompt file; overrides the default IG-audit prompt")
-    parser.add_argument("--lane", default="research", choices=["research", "worker"],
-                        help="Dispatch lane (default: research)")
-    parser.add_argument("--out-dir", default="artifacts/content",
-                        help="Directory for the .md output and meta JSON")
+    parser.add_argument(
+        "--skill", default=None, help="Optional skill name to invoke instead of free dispatch"
+    )
+    parser.add_argument(
+        "--prompt-file",
+        default=None,
+        help="Path to a prompt file; overrides the default IG-audit prompt",
+    )
+    parser.add_argument(
+        "--lane",
+        default="research",
+        choices=["research", "worker"],
+        help="Dispatch lane (default: research)",
+    )
+    parser.add_argument(
+        "--out-dir", default="artifacts/content", help="Directory for the .md output and meta JSON"
+    )
     args = parser.parse_args(argv)
 
     if args.prompt_file:
@@ -102,7 +112,9 @@ def main(argv: list[str] | None = None) -> int:
     echo = svc.get_agent("echo")
     print(f"Echo loaded: {echo.display_name} / {echo.provider}:{echo.model}")
     print(f"Skills: {sorted(echo.skills.keys())}")
-    print(f"Dispatching {'skill=' + args.skill if args.skill else 'free instruction'} via lane={args.lane}...")
+    print(
+        f"Dispatching {'skill=' + args.skill if args.skill else 'free instruction'} via lane={args.lane}..."
+    )
 
     t0 = time.time()
     if args.skill:
@@ -133,8 +145,7 @@ def main(argv: list[str] | None = None) -> int:
                 "elapsed_sec": round(elapsed, 2),
                 "failures": list(failures),
                 "evidence": [
-                    {"kind": e.kind, "ref": e.ref, "summary": e.summary}
-                    for e in evidence
+                    {"kind": e.kind, "ref": e.ref, "summary": e.summary} for e in evidence
                 ],
                 "chars": len(summary),
             },

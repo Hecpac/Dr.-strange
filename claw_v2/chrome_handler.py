@@ -31,7 +31,13 @@ class ChromeHandler:
             BotCommand(
                 "chrome",
                 self.handle_command,
-                exact=("/chrome_pages", "/chrome_browse", "/chrome_login", "/chrome_headless", "/chrome_download"),
+                exact=(
+                    "/chrome_pages",
+                    "/chrome_browse",
+                    "/chrome_login",
+                    "/chrome_headless",
+                    "/chrome_download",
+                ),
                 prefixes=("/chrome_browse ", "/chrome_shot", "/chrome_download "),
             ),
         ]
@@ -78,7 +84,9 @@ class ChromeHandler:
             return degraded
         if self.browser is None or self.managed_chrome is None:
             return "Chrome no disponible."
-        tweet_fallback = _tweet_fxtwitter_read(normalized_url) if _is_tweet_url(normalized_url) else ""
+        tweet_fallback = (
+            _tweet_fxtwitter_read(normalized_url) if _is_tweet_url(normalized_url) else ""
+        )
         try:
             host = urlparse(normalized_url).netloc.lower()
             result = self.browser.chrome_navigate(
@@ -123,11 +131,14 @@ class ChromeHandler:
             result = self.browser.chrome_screenshot(cdp_url=self.managed_chrome.cdp_url)
         except Exception as exc:
             return _format_chrome_cdp_error(exc, prefix="chrome screenshot error")
-        return json.dumps({
-            "url": result.url,
-            "title": result.title,
-            "screenshot_path": result.screenshot_path,
-        }, indent=2)
+        return json.dumps(
+            {
+                "url": result.url,
+                "title": result.title,
+                "screenshot_path": result.screenshot_path,
+            },
+            indent=2,
+        )
 
     def login_response(self) -> str:
         degraded = self._check_capability("chrome_cdp", "Chrome no disponible.")
@@ -156,11 +167,21 @@ class ChromeHandler:
         if path:
             return json.dumps({"downloaded": path, "size": __import__("os").path.getsize(path)})
 
-        existing = sorted(glob.glob(f"{_CDP_DOWNLOAD_DIR}/*"), key=__import__("os").path.getmtime, reverse=True)
+        existing = sorted(
+            glob.glob(f"{_CDP_DOWNLOAD_DIR}/*"), key=__import__("os").path.getmtime, reverse=True
+        )
         if existing:
             latest = existing[0]
-            return json.dumps({"no_new_download": True, "latest_existing": latest, "size": __import__("os").path.getsize(latest)})
-        return json.dumps({"error": "No download detected in 30s", "download_dir": _CDP_DOWNLOAD_DIR})
+            return json.dumps(
+                {
+                    "no_new_download": True,
+                    "latest_existing": latest,
+                    "size": __import__("os").path.getsize(latest),
+                }
+            )
+        return json.dumps(
+            {"error": "No download detected in 30s", "download_dir": _CDP_DOWNLOAD_DIR}
+        )
 
     def headless_response(self) -> str:
         degraded = self._check_capability("chrome_cdp", "Chrome no disponible.")

@@ -1,4 +1,5 @@
 """Module-level helper functions and constants extracted from bot.py."""
+
 from __future__ import annotations
 
 import contextlib
@@ -389,7 +390,6 @@ _SCHEME_URL_RE = re.compile(r"(?P<url>https?://[^\s<>()]+)", re.IGNORECASE)
 _HOST_URL_RE = re.compile(
     r"(?P<url>(?<!@)(?:localhost|(?:\d{1,3}\.){3}\d{1,3}|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,})(?::\d+)?(?:[/?#][^\s<>()]*)?)",
     re.IGNORECASE,
-
 )
 _RUNTIME_CAPABILITY_SECTION_TITLES = (
     "Implementado hoy",
@@ -519,7 +519,14 @@ _PUBLISH_CONTEXT_ONLY_RE = re.compile(
 )
 _AUTONOMY_TASK_ACTION_PATTERNS: dict[str, tuple[str, ...]] = {
     "inspect": (r"\brevisa\b", r"\binspect\b", r"\banaliza\b", r"\bdebug\b", r"\bcheck\b"),
-    "edit": (r"\bcorrige\b", r"\barregla\b", r"\bfix\b", r"\bimplementa\b", r"\bedit\b", r"\bpatch\b"),
+    "edit": (
+        r"\bcorrige\b",
+        r"\barregla\b",
+        r"\bfix\b",
+        r"\bimplementa\b",
+        r"\bedit\b",
+        r"\bpatch\b",
+    ),
     "test": (r"\btest\b", r"\bpytest\b", r"\bverifica\b", r"\bverify\b"),
     "browse": (
         r"\bbrowse\b",
@@ -543,7 +550,6 @@ _AUTONOMY_TASK_ACTION_PATTERNS: dict[str, tuple[str, ...]] = {
     "push": (r"\bgit\s+push\b", r"\bpush\b", r"\bpushea\b", r"\bempuja\b"),
     "research": (r"\binvestiga\b", r"\bresearch\b", r"\bfind\b", r"\bgather\b"),
     "summarize": (r"\bresume\b", r"\bsummariza\b", r"\bsummary\b", r"\bsintetiza\b"),
-
 }
 _AUTONOMY_POLICY_MATRIX: dict[str, dict[str, Any]] = {
     "manual": {
@@ -570,7 +576,16 @@ _AUTONOMY_POLICY_MATRIX: dict[str, dict[str, Any]] = {
         "automatic_coordinator_modes": ["coding", "research", "browse", "ops"],
         "blocked_actions": ("deploy", "publish", "merge", "send", "purchase", "destructive"),
         "approval_required_actions": (),
-        "allowed_task_actions": ("inspect", "edit", "test", "browse", "commit", "push", "research", "summarize"),
+        "allowed_task_actions": (
+            "inspect",
+            "edit",
+            "test",
+            "browse",
+            "commit",
+            "push",
+            "research",
+            "summarize",
+        ),
         "notes": [
             "Autonomous coordinator runs are limited to coding, research, browse, and browser/CDP-shaped ops.",
             "Browser/CDP flows may run through the daemon in-process browser executor; generic ops still require explicit routing.",
@@ -635,15 +650,18 @@ def _extract_nlm_artifact_kind(text: str) -> str | None:
     for token, kind in _NLM_ARTIFACT_KINDS.items():
         if token in normalized:
             idx = normalized.find(token)
-            preceding = normalized[max(0, idx - 40):idx]
-            if any(meta in preceding for meta in (
-                "cuando te pido",
-                "cuando te diga",
-                "cuando te pida",
-                "como te pido",
-                "si te pido",
-                "te pido",
-            )):
+            preceding = normalized[max(0, idx - 40) : idx]
+            if any(
+                meta in preceding
+                for meta in (
+                    "cuando te pido",
+                    "cuando te diga",
+                    "cuando te pida",
+                    "como te pido",
+                    "si te pido",
+                    "te pido",
+                )
+            ):
                 continue
             return kind
     return None
@@ -887,8 +905,19 @@ _OWNER_DELEGATION_NO_MANUAL_PATTERNS_EN: tuple[str, ...] = (
 
 # Verbs/objects that almost always need context to resolve.
 _PRONOUN_ONLY_TOKENS = (
-    "lo", "los", "la", "las", "eso", "esos", "ello", "ellos", "it", "this",
-    "that", "them", "those",
+    "lo",
+    "los",
+    "la",
+    "las",
+    "eso",
+    "esos",
+    "ello",
+    "ellos",
+    "it",
+    "this",
+    "that",
+    "them",
+    "those",
 )
 
 # Destructive / external / irreversible / credential markers.
@@ -1001,7 +1030,10 @@ def _build_owner_delegation_intent(
     hint = _extract_inline_hint(match)
     lexical_score = _owner_delegation_lexical_score(normalized, match.group(0))
     direction_score = _owner_delegation_direction_score(normalized, kind=kind)
-    if lexical_score < _OWNER_DELEGATION_MIN_SIGNAL or direction_score < _OWNER_DELEGATION_MIN_SIGNAL:
+    if (
+        lexical_score < _OWNER_DELEGATION_MIN_SIGNAL
+        or direction_score < _OWNER_DELEGATION_MIN_SIGNAL
+    ):
         return None
     confidence = min(0.99, round((lexical_score + direction_score) / 2, 3))
     return OwnerDelegationIntent(
@@ -1047,7 +1079,9 @@ def detect_owner_delegation(text: str) -> OwnerDelegationIntent | None:
             if intent is not None:
                 return intent
 
-    for pattern in _OWNER_DELEGATION_NO_MANUAL_PATTERNS_ES + _OWNER_DELEGATION_NO_MANUAL_PATTERNS_EN:
+    for pattern in (
+        _OWNER_DELEGATION_NO_MANUAL_PATTERNS_ES + _OWNER_DELEGATION_NO_MANUAL_PATTERNS_EN
+    ):
         match = re.search(pattern, normalized)
         if match:
             intent = _build_owner_delegation_intent(
@@ -1281,7 +1315,10 @@ def looks_like_actionable_telegram_message(text: str) -> bool:
         return False
     if detect_owner_delegation(text) is not None or detect_telegram_imperative(text) is not None:
         return True
-    return any(re.search(rf"\b{re.escape(marker)}\b", normalized) for marker in _ACTIONABLE_TELEGRAM_MARKERS)
+    return any(
+        re.search(rf"\b{re.escape(marker)}\b", normalized)
+        for marker in _ACTIONABLE_TELEGRAM_MARKERS
+    )
 
 
 def detect_meta_introspection_request(text: str) -> MetaIntrospectionIntent | None:
@@ -1347,10 +1384,15 @@ def _extract_option_reference(text: str) -> int | None:
     if match:
         value = match.group(1)
         return int(value) if value.isdigit() else _OPTION_ORDINALS.get(value)
-    match = re.fullmatch(r"(?:vamos|vete|ve|dale|procede|continua|sigue)\s+con\s+(?:la\s+)?(?:opcion\s+)?(\d+)", normalized)
+    match = re.fullmatch(
+        r"(?:vamos|vete|ve|dale|procede|continua|sigue)\s+con\s+(?:la\s+)?(?:opcion\s+)?(\d+)",
+        normalized,
+    )
     if match:
         return int(match.group(1))
-    match = re.fullmatch(r"(?:vamos|vete|ve|dale|procede|continua|sigue)\s+con\s+la\s+(\w+)", normalized)
+    match = re.fullmatch(
+        r"(?:vamos|vete|ve|dale|procede|continua|sigue)\s+con\s+la\s+(\w+)", normalized
+    )
     if match:
         return _OPTION_ORDINALS.get(match.group(1))
     match = re.fullmatch(r"(\d+)", normalized)
@@ -1378,9 +1420,7 @@ def _looks_like_proceed_request(text: str) -> bool:
     if re.search(r"^(?:haz|hace|crea|genera|regenera|arma)(?:lo|la|los|las)\b", normalized):
         return True
     return any(
-        " " in token and (
-            normalized.startswith(f"{token} ") or stripped.startswith(f"{token} ")
-        )
+        " " in token and (normalized.startswith(f"{token} ") or stripped.startswith(f"{token} "))
         for token in _PROCEED_TOKENS
     )
 
@@ -1389,7 +1429,10 @@ def _looks_like_ratio_reference_request(text: str) -> bool:
     normalized = _normalize_command_text(text)
     if "ratio" not in normalized:
         return False
-    if not any(token in normalized for token in ("dame", "manda", "mandame", "envia", "enviame", "pasame", "tira", "tirame")):
+    if not any(
+        token in normalized
+        for token in ("dame", "manda", "mandame", "envia", "enviame", "pasame", "tira", "tirame")
+    ):
         return False
     return bool(
         re.search(r"\b(?:los\s+)?2\b", normalized)
@@ -1417,8 +1460,13 @@ _INTERNAL_LEAK_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bchat[_ -]?id\b", re.IGNORECASE),
     re.compile(r"\btg-[A-Za-z0-9_-]+\b"),
     re.compile(r"\bnlm-[A-Za-z0-9_-]+\b"),
-    re.compile(r"(?<!\w)to=(?:functions|multi_tool_use|web|image_gen|tool_search)\.", re.IGNORECASE),
-    re.compile(r'"recipient_name"\s*:\s*"(?:functions|multi_tool_use|web|image_gen|tool_search)\.', re.IGNORECASE),
+    re.compile(
+        r"(?<!\w)to=(?:functions|multi_tool_use|web|image_gen|tool_search)\.", re.IGNORECASE
+    ),
+    re.compile(
+        r'"recipient_name"\s*:\s*"(?:functions|multi_tool_use|web|image_gen|tool_search)\.',
+        re.IGNORECASE,
+    ),
     re.compile(r'"tool_uses"\s*:\s*\[', re.IGNORECASE),
     re.compile(r"\blocalhost(?::\d+)?\b", re.IGNORECASE),
     re.compile(r"\b127\.0\.0\.1(?::\d+)?\b"),
@@ -1456,8 +1504,14 @@ _INTERNAL_LEAK_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bruntime lost authoritative backing state\b", re.IGNORECASE),
     re.compile(r"\b(?:observe_stream|agent_tasks)\b", re.IGNORECASE),
     re.compile(r"\bbinary\s+'[^']+'\s+requires higher privilege level\b", re.IGNORECASE),
-    re.compile(r"\b(?:allowed whitelist|sandbox\.excludedCommands|Seatbelt OS-level|runtime host|CLI host|Bash tool|tool Bash)\b", re.IGNORECASE),
-    re.compile(r"\bsandbox\s+(?:embebido|del entorno local|que est[aá] bloqueando|carga policies)\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:allowed whitelist|sandbox\.excludedCommands|Seatbelt OS-level|runtime host|CLI host|Bash tool|tool Bash)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bsandbox\s+(?:embebido|del entorno local|que est[aá] bloqueando|carga policies)\b",
+        re.IGNORECASE,
+    ),
     re.compile(r"(?:~|/Users/hector)/\.claude/settings\.json(?:\.[A-Za-z0-9_.-]+)?", re.IGNORECASE),
     re.compile(r"\bclaw_v2/sandbox\.py\b", re.IGNORECASE),
 )
@@ -1527,8 +1581,16 @@ _OUTBOUND_SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bgh[posru]_[A-Za-z0-9]{20,}\b"), "[secreto omitido]"),
     (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"), "[secreto omitido]"),
     (re.compile(r"\bAIza[A-Za-z0-9_-]{20,}\b"), "[secreto omitido]"),
-    (re.compile(r"\b(?:Authorization:?\s*)?Bearer\s+[A-Za-z0-9._~+/=-]{12,}", re.IGNORECASE), "[secreto omitido]"),
-    (re.compile(r"Traceback \(most recent call last\):[\s\S]+?(?:Error|Exception)[^\n]*", re.IGNORECASE), "[traza interna omitida]"),
+    (
+        re.compile(r"\b(?:Authorization:?\s*)?Bearer\s+[A-Za-z0-9._~+/=-]{12,}", re.IGNORECASE),
+        "[secreto omitido]",
+    ),
+    (
+        re.compile(
+            r"Traceback \(most recent call last\):[\s\S]+?(?:Error|Exception)[^\n]*", re.IGNORECASE
+        ),
+        "[traza interna omitida]",
+    ),
 )
 
 
@@ -1538,16 +1600,30 @@ def _sanitize_chat_response(text: str) -> str:
     from claw_v2.leak_scrub import redact_system_reminders
 
     precleaned = redact_system_reminders(text)
-    if any(_INTERNAL_LEAK_PATTERNS[i].search(precleaned) for i in _NUKE_PATTERN_INDICES) or _role_echo_dominates(precleaned):
+    if any(
+        _INTERNAL_LEAK_PATTERNS[i].search(precleaned) for i in _NUKE_PATTERN_INDICES
+    ) or _role_echo_dominates(precleaned):
         return (
             "Tuve un error preparando la respuesta. "
             "Retomo la acción con el contexto disponible o te diré el bloqueo verificado."
         )
 
     sanitized = precleaned
-    sanitized = re.sub(r"\[redacted:\s*system-reminder\]", "[redacted: internal marker]", sanitized, flags=re.IGNORECASE)
-    sanitized = re.sub(r"&lt;/?\s*system-reminder\s*&gt;", "[redacted: internal marker]", sanitized, flags=re.IGNORECASE)
-    sanitized = re.sub(r"</?\s*system-reminder\s*>", "[redacted: internal marker]", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(
+        r"\[redacted:\s*system-reminder\]",
+        "[redacted: internal marker]",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"&lt;/?\s*system-reminder\s*&gt;",
+        "[redacted: internal marker]",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"</?\s*system-reminder\s*>", "[redacted: internal marker]", sanitized, flags=re.IGNORECASE
+    )
     # Defense-in-depth: a leaked <response>/</response> contract wrapper must
     # never egress (2026-06-10 incident, unclosed-tag truncation). Strip the
     # bare tag to empty — it is a wrapper, not user-visible content.
@@ -1565,7 +1641,9 @@ def _sanitize_chat_response(text: str) -> str:
         flags=re.IGNORECASE,
     )
     sanitized = re.sub(r"\bMessage ID\s+\d+\b", "Mensaje enviado", sanitized, flags=re.IGNORECASE)
-    sanitized = re.sub(r"\bmessage_id\s*[:#]?\s*\d+\b", "mensaje enviado", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(
+        r"\bmessage_id\s*[:#]?\s*\d+\b", "mensaje enviado", sanitized, flags=re.IGNORECASE
+    )
     sanitized = re.sub(r"\bchat_id\s*[:#]?\s*-?\d+\b", "chat", sanitized, flags=re.IGNORECASE)
     sanitized = re.sub(r"\btg-[A-Za-z0-9_-]+\b", "[id interno omitido]", sanitized)
     sanitized = re.sub(
@@ -1576,7 +1654,9 @@ def _sanitize_chat_response(text: str) -> str:
     )
     sanitized = re.sub(r"\bnlm-[A-Za-z0-9_-]+\b", "[id interno omitido]", sanitized)
     sanitized = re.sub(r"\bPID\s*[:#]?\s*\d+\b", "proceso local", sanitized, flags=re.IGNORECASE)
-    sanitized = re.sub(r"\blocalhost(?::\d+)?\b", "[endpoint local interno]", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(
+        r"\blocalhost(?::\d+)?\b", "[endpoint local interno]", sanitized, flags=re.IGNORECASE
+    )
     sanitized = re.sub(r"\b127\.0\.0\.1(?::\d+)?\b", "[endpoint local interno]", sanitized)
     sanitized = re.sub(
         r"\bbrain_tooluse_with_manifest_pending_verification\b",
@@ -1644,39 +1724,103 @@ def _sanitize_chat_response(text: str) -> str:
         sanitized,
         flags=re.IGNORECASE,
     )
-    sanitized = re.sub(r"\ballowed whitelist\b", "política de ejecución", sanitized, flags=re.IGNORECASE)
-    sanitized = re.sub(r"\bel allowlist real\b", "la política efectiva", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(
+        r"\ballowed whitelist\b", "política de ejecución", sanitized, flags=re.IGNORECASE
+    )
+    sanitized = re.sub(
+        r"\bel allowlist real\b", "la política efectiva", sanitized, flags=re.IGNORECASE
+    )
     sanitized = re.sub(r"\ballowlist real\b", "política efectiva", sanitized, flags=re.IGNORECASE)
-    sanitized = re.sub(r"\bSeatbelt OS-level\b", "política del sistema", sanitized, flags=re.IGNORECASE)
-    sanitized = re.sub(r"\bClaude Code\s+\(CLI host\)", "el entorno local", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(
+        r"\bSeatbelt OS-level\b", "política del sistema", sanitized, flags=re.IGNORECASE
+    )
+    sanitized = re.sub(
+        r"\bClaude Code\s+\(CLI host\)", "el entorno local", sanitized, flags=re.IGNORECASE
+    )
     sanitized = re.sub(r"\bCLI host\b", "entorno local", sanitized, flags=re.IGNORECASE)
     sanitized = re.sub(r"\bruntime host\b", "entorno local", sanitized, flags=re.IGNORECASE)
-    sanitized = re.sub(r"\bBash tool\b|\btool Bash\b", "herramienta local", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(
+        r"\bBash tool\b|\btool Bash\b", "herramienta local", sanitized, flags=re.IGNORECASE
+    )
     sanitized = re.sub(r"\bsub-runtime\b", "entorno local", sanitized, flags=re.IGNORECASE)
-    sanitized = re.sub(r"\bsandbox que est[aá] bloqueando\b", "política de ejecución que está bloqueando", sanitized, flags=re.IGNORECASE)
-    sanitized = re.sub(r"\bsandbox embebido\b", "política de ejecución embebida", sanitized, flags=re.IGNORECASE)
-    sanitized = re.sub(r"\bsandbox del entorno local\b", "política de ejecución local", sanitized, flags=re.IGNORECASE)
-    sanitized = re.sub(r"\bsandbox carga policies\b", "la política de ejecución carga reglas", sanitized, flags=re.IGNORECASE)
-    sanitized = re.sub(r"\bruntime de la herramienta local\b", "entorno de ejecución local", sanitized, flags=re.IGNORECASE)
-    sanitized = re.sub(r"\bclaw_v2/sandbox\.py\b", "política local del agente", sanitized, flags=re.IGNORECASE)
-    sanitized = re.sub(r"\bconfig de el entorno local\b", "config del entorno local", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(
+        r"\bsandbox que est[aá] bloqueando\b",
+        "política de ejecución que está bloqueando",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"\bsandbox embebido\b", "política de ejecución embebida", sanitized, flags=re.IGNORECASE
+    )
+    sanitized = re.sub(
+        r"\bsandbox del entorno local\b",
+        "política de ejecución local",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"\bsandbox carga policies\b",
+        "la política de ejecución carga reglas",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"\bruntime de la herramienta local\b",
+        "entorno de ejecución local",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"\bclaw_v2/sandbox\.py\b", "política local del agente", sanitized, flags=re.IGNORECASE
+    )
+    sanitized = re.sub(
+        r"\bconfig de el entorno local\b",
+        "config del entorno local",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
     sanitized = re.sub(r"\bel política\b", "la política", sanitized, flags=re.IGNORECASE)
     sanitized = re.sub(r"\bpuerto\s+\d{2,5}\b", "puerto interno", sanitized, flags=re.IGNORECASE)
     sanitized = re.sub(r"\ben\s+:\d{2,5}\b", "en un puerto interno", sanitized, flags=re.IGNORECASE)
     sanitized = re.sub(r"\bterminal bridge\b", "herramienta local", sanitized, flags=re.IGNORECASE)
-    sanitized = re.sub(r"\bblocked model response\b", "respuesta interna suprimida", sanitized, flags=re.IGNORECASE)
-    sanitized = re.sub(r"\brespuesta del modelo fue bloqueada\b", "respuesta interna suprimida", sanitized, flags=re.IGNORECASE)
-    sanitized = re.sub(r"\brespuesta bloqueada\b", "respuesta interna suprimida", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(
+        r"\bblocked model response\b", "respuesta interna suprimida", sanitized, flags=re.IGNORECASE
+    )
+    sanitized = re.sub(
+        r"\brespuesta del modelo fue bloqueada\b",
+        "respuesta interna suprimida",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"\brespuesta bloqueada\b", "respuesta interna suprimida", sanitized, flags=re.IGNORECASE
+    )
     sanitized = re.sub(r"\bsalida del modelo\b", "salida interna", sanitized, flags=re.IGNORECASE)
     sanitized = re.sub(r"\btrazas internas\b", "detalles internos", sanitized, flags=re.IGNORECASE)
-    sanitized = re.sub(r"\bherramientas internas\b", "herramientas locales", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(
+        r"\bherramientas internas\b", "herramientas locales", sanitized, flags=re.IGNORECASE
+    )
     sanitized = re.sub(r"\bla ocult[eé]\b", "se omitió", sanitized, flags=re.IGNORECASE)
     sanitized = re.sub(r"\btool traces\b", "trazas locales", sanitized, flags=re.IGNORECASE)
     sanitized = re.sub(r"\bsanitizer\b", "filtro defensivo", sanitized, flags=re.IGNORECASE)
-    sanitized = re.sub(r"\brepite la instrucci[oó]n\b", "indícame el siguiente paso", sanitized, flags=re.IGNORECASE)
-    sanitized = re.sub(r"\bcontradice las capacidades\b", "contradice el contexto operacional", sanitized, flags=re.IGNORECASE)
-    sanitized = re.sub(r"\bCircuit breaker\b", "bloqueo operacional interno", sanitized, flags=re.IGNORECASE)
-    sanitized = re.sub(r"`sendVideo`|`sendDocument`|sendVideo|sendDocument", "envío de Telegram", sanitized)
+    sanitized = re.sub(
+        r"\brepite la instrucci[oó]n\b",
+        "indícame el siguiente paso",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"\bcontradice las capacidades\b",
+        "contradice el contexto operacional",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(
+        r"\bCircuit breaker\b", "bloqueo operacional interno", sanitized, flags=re.IGNORECASE
+    )
+    sanitized = re.sub(
+        r"`sendVideo`|`sendDocument`|sendVideo|sendDocument", "envío de Telegram", sanitized
+    )
 
     def _redact_backticked_path(match: re.Match[str]) -> str:
         raw_path = match.group(1)
@@ -1751,7 +1895,9 @@ def _extract_pending_action_from_reply(text: str) -> str | None:
         )
         if match:
             pending = match.group(1).strip()
-            pending = re.split(r"\s+[—-]\s+requiere\b", pending, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+            pending = re.split(r"\s+[—-]\s+requiere\b", pending, maxsplit=1, flags=re.IGNORECASE)[
+                0
+            ].strip()
             return pending
     return None
 
@@ -1760,13 +1906,20 @@ def _filter_task_queue_by_mode(task_queue: list[dict[str, Any]], mode: str) -> l
     normalized_mode = _normalize_command_text(mode).strip()
     if not normalized_mode:
         return task_queue
-    return [item for item in task_queue if _normalize_command_text(str(item.get("mode", ""))) == normalized_mode]
+    return [
+        item
+        for item in task_queue
+        if _normalize_command_text(str(item.get("mode", ""))) == normalized_mode
+    ]
 
 
-def _select_next_task_queue_item(task_queue: list[dict[str, Any]], *, preferred_mode: str) -> dict[str, Any] | None:
+def _select_next_task_queue_item(
+    task_queue: list[dict[str, Any]], *, preferred_mode: str
+) -> dict[str, Any] | None:
     normalized_mode = _normalize_command_text(preferred_mode).strip()
     preferred = [
-        item for item in task_queue
+        item
+        for item in task_queue
         if item.get("status") == "pending"
         and item.get("summary")
         and not _task_queue_item_is_stale(item)
@@ -1888,7 +2041,9 @@ def verify_brain_tooluse(
     return _extract_verification_status(text) or "pending"
 
 
-def _build_checkpoint(text: str, *, pending_action: str | None, verification_status: str) -> dict[str, str]:
+def _build_checkpoint(
+    text: str, *, pending_action: str | None, verification_status: str
+) -> dict[str, str]:
     checkpoint = {
         "summary": _compact_summary(text, limit=180) or "",
         "verification_status": verification_status,
@@ -2045,16 +2200,14 @@ def _long_operation_timeout_for_mode(mode: str, objective: str) -> float | None:
         return _LONG_BROWSER_OPERATION_TIMEOUT_SECONDS
     text = objective or ""
     if mode in {"ops", "publish"} and (
-        _BROWSER_OPERATION_SIGNAL_RE.search(text)
-        or _looks_like_x_browser_request(text)
+        _BROWSER_OPERATION_SIGNAL_RE.search(text) or _looks_like_x_browser_request(text)
     ):
         return _LONG_BROWSER_OPERATION_TIMEOUT_SECONDS
     # research: a bare platform mention ("investiga la historia de Twitter") must
     # stay on the coordinator. Only an explicit browse ACTION (e.g. "haz un repaso
     # por X" — action verb + platform) routes to the in-process browser executor.
     if mode == "research" and (
-        _looks_like_x_browser_request(text)
-        or _looks_like_social_browser_request(text)
+        _looks_like_x_browser_request(text) or _looks_like_social_browser_request(text)
     ):
         return _LONG_BROWSER_OPERATION_TIMEOUT_SECONDS
     return None
@@ -2112,7 +2265,9 @@ def _coordinator_checkpoint(result: CoordinatorResult, *, objective: str) -> dic
     verification_text = "\n".join(item.content for item in verification_results if item.content)
     implementation_text = "\n".join(item.content for item in implementation_results if item.content)
     critical_worker_error = _is_critical_worker_error(result)
-    pending_action = _extract_pending_action_from_reply(verification_text) or _extract_pending_action_from_reply(implementation_text)
+    pending_action = _extract_pending_action_from_reply(
+        verification_text
+    ) or _extract_pending_action_from_reply(implementation_text)
     implementation_error = next(
         (item.error for item in implementation_results if item.error),
         "",
@@ -2124,7 +2279,11 @@ def _coordinator_checkpoint(result: CoordinatorResult, *, objective: str) -> dic
         or ("failed" if result.error else None)
         or ("pending" if verification_results else "unknown")
     )
-    summary_source = _CRITICAL_WORKER_VISIBLE_MESSAGE if critical_worker_error else (result.synthesis or objective)
+    summary_source = (
+        _CRITICAL_WORKER_VISIBLE_MESSAGE
+        if critical_worker_error
+        else (result.synthesis or objective)
+    )
     summary = _compact_summary(summary_source, limit=180) or summary_source
     checkpoint = {
         "summary": summary,
@@ -2152,7 +2311,9 @@ def _coordinator_checkpoint(result: CoordinatorResult, *, objective: str) -> dic
     if pending_action:
         checkpoint["pending_action"] = pending_action
     elif critical_worker_error:
-        checkpoint["pending_action"] = "reparar error crítico del subagente antes de reintentar la misión principal"
+        checkpoint["pending_action"] = (
+            "reparar error crítico del subagente antes de reintentar la misión principal"
+        )
     elif implementation_error:
         checkpoint["pending_action"] = f"reintentar implementación: {implementation_error}"
     if result.error:
@@ -2179,12 +2340,14 @@ def _coordinator_result_to_structured(
                 continue
             if not getattr(item, "content", None):
                 continue
-            actions.append({
-                "agent": "coordinator",
-                "action": str(getattr(item, "task_name", phase)),
-                "tool": str(phase),
-                "result": str(item.content)[:500],
-            })
+            actions.append(
+                {
+                    "agent": "coordinator",
+                    "action": str(getattr(item, "task_name", phase)),
+                    "tool": str(phase),
+                    "result": str(item.content)[:500],
+                }
+            )
 
     evidence: list[dict[str, str]] = []
     if verification_status == "passed" and not implementation_error:
@@ -2203,11 +2366,13 @@ def _coordinator_result_to_structured(
             for item in result.phase_results.get(phase, []):
                 if item.error or not getattr(item, "content", None):
                     continue
-                evidence.append({
-                    "type": phase,
-                    "name": str(getattr(item, "task_name", phase)),
-                    "value": str(item.content)[:500],
-                })
+                evidence.append(
+                    {
+                        "type": phase,
+                        "name": str(getattr(item, "task_name", phase)),
+                        "value": str(item.content)[:500],
+                    }
+                )
 
     blockers: list[str] = []
     if result.error:
@@ -2241,7 +2406,9 @@ def _coordinator_result_to_structured(
         "evidence": evidence,
         "changed_files": [],
         "verification": {
-            "status": verification_status if verification_status in {"passed", "pending", "failed", "blocked"} else "pending",
+            "status": verification_status
+            if verification_status in {"passed", "pending", "failed", "blocked"}
+            else "pending",
             "checks": [],
         },
         "blockers": blockers,
@@ -2262,11 +2429,15 @@ def _format_worker_results(results: list[Any]) -> str:
         if item.error:
             lines.append(f"- {item.task_name}: ERROR {item.error}")
         else:
-            lines.append(f"- {item.task_name}: {_compact_summary(item.content, limit=240) or '(no content)'}")
+            lines.append(
+                f"- {item.task_name}: {_compact_summary(item.content, limit=240) or '(no content)'}"
+            )
     return "\n".join(lines) if lines else "- none"
 
 
-def _format_coordinator_response(result: CoordinatorResult, *, checkpoint: dict[str, str], forced: bool) -> str:
+def _format_coordinator_response(
+    result: CoordinatorResult, *, checkpoint: dict[str, str], forced: bool
+) -> str:
     if _is_critical_worker_error(result):
         lines = [_CRITICAL_WORKER_VISIBLE_MESSAGE]
         if checkpoint.get("pending_action"):
@@ -2307,8 +2478,12 @@ def _autonomy_policy_payload(state: dict[str, Any]) -> dict[str, Any]:
         "step_budget": state.get("step_budget"),
         "verification_status": state.get("verification_status"),
         "blocked_actions": list(policy["blocked_actions"]),
-        "action_patterns": {name: list(patterns) for name, patterns in _AUTONOMY_ACTION_PATTERNS.items()},
-        "task_action_patterns": {name: list(patterns) for name, patterns in _AUTONOMY_TASK_ACTION_PATTERNS.items()},
+        "action_patterns": {
+            name: list(patterns) for name, patterns in _AUTONOMY_ACTION_PATTERNS.items()
+        },
+        "task_action_patterns": {
+            name: list(patterns) for name, patterns in _AUTONOMY_TASK_ACTION_PATTERNS.items()
+        },
         "notes": list(policy["notes"]),
     }
 
@@ -2417,7 +2592,9 @@ def _policy_for_mode(autonomy_mode: str) -> dict[str, Any]:
     return _AUTONOMY_POLICY_MATRIX.get(autonomy_mode, _AUTONOMY_POLICY_MATRIX["assisted"])
 
 
-def _matched_policy_actions(normalized_text: str, *, blocked_actions: tuple[str, ...] | list[str]) -> list[str]:
+def _matched_policy_actions(
+    normalized_text: str, *, blocked_actions: tuple[str, ...] | list[str]
+) -> list[str]:
     matches = _matched_named_actions(
         normalized_text,
         names=blocked_actions,
@@ -2472,9 +2649,7 @@ def _classify_task_actions(normalized_text: str, *, mode: str) -> list[str]:
         return ["inspect", "edit", "test"]
     if mode == "research":
         return ["research", "summarize"]
-    if mode == "browse" or (
-        mode == "ops" and _should_use_browser_executor(mode, normalized_text)
-    ):
+    if mode == "browse" or (mode == "ops" and _should_use_browser_executor(mode, normalized_text)):
         return ["browse"]
     return []
 
@@ -2487,43 +2662,52 @@ def _infer_session_mode(user_text: str, reply_text: str | None = None) -> str:
         or _looks_like_social_browser_request(normalized)
     ):
         return "browse"
-    if any(token in normalized for token in ("terminal", "chrome", "screen", "computer", "click", "scroll", "sesion")):
+    if any(
+        token in normalized
+        for token in ("terminal", "chrome", "screen", "computer", "click", "scroll", "sesion")
+    ):
         return "ops"
-    if any(token in normalized for token in (
-        "commit",
-        "push",
-        "git push",
-        "test",
-        "pytest",
-        "fix",
-        "corrige",
-        "arregla",
-        "bug",
-        "repo",
-        "codigo",
-        "code",
-        "patch",
-        "completa",
-        "termina",
-        "implementa",
-        "coloca",
-        "colócala",
-        "colocalo",
-        "colócalo",
-        "sube",
-        "ponlo vivo",
-        "ponla vivo",
-        "produccion",
-        "producción",
-        "branding",
-        "pagina",
-        "página",
-        "ga4",
-    )):
+    if any(
+        token in normalized
+        for token in (
+            "commit",
+            "push",
+            "git push",
+            "test",
+            "pytest",
+            "fix",
+            "corrige",
+            "arregla",
+            "bug",
+            "repo",
+            "codigo",
+            "code",
+            "patch",
+            "completa",
+            "termina",
+            "implementa",
+            "coloca",
+            "colócala",
+            "colocalo",
+            "colócalo",
+            "sube",
+            "ponlo vivo",
+            "ponla vivo",
+            "produccion",
+            "producción",
+            "branding",
+            "pagina",
+            "página",
+            "ga4",
+        )
+    ):
         return "coding"
     if _looks_like_publish_execution_request(normalized):
         return "publish"
-    if any(token in normalized for token in ("investiga", "research", "analiza", "notebook", "cuaderno")):
+    if any(
+        token in normalized
+        for token in ("investiga", "research", "analiza", "notebook", "cuaderno")
+    ):
         return "research"
     return "chat"
 
@@ -2631,7 +2815,9 @@ def _url_identity(url: str) -> str:
     return f"{host}{path}".lower()
 
 
-def _nested_url_candidates(text: str, *, skip_urls: list[str] | tuple[str, ...] = (), max_urls: int = 3) -> list[str]:
+def _nested_url_candidates(
+    text: str, *, skip_urls: list[str] | tuple[str, ...] = (), max_urls: int = 3
+) -> list[str]:
     skip = {_url_identity(url) for url in skip_urls}
     candidates: list[str] = []
     for url in _extract_url_candidates(text):
@@ -2657,7 +2843,9 @@ def _textual_nested_url_review_blocks(
         if content:
             blocks.append(f"[URL anidada analizada]: {url}\n{content[:3000]}")
         else:
-            blocks.append(f"[URL anidada intentada]: {url}\nNo se pudo extraer contenido útil con lectura textual.")
+            blocks.append(
+                f"[URL anidada intentada]: {url}\nNo se pudo extraer contenido útil con lectura textual."
+            )
     return blocks
 
 
@@ -2717,32 +2905,41 @@ def _strip_url_permission_deferrals(text: str, *, context: str = "") -> str:
         return text
     stripped = "\n".join(kept)
     stripped = re.sub(r"\n{3,}", "\n\n", stripped).strip()
-    return stripped or "Detecté una URL Tier 1 que no debe convertirse en pregunta; la revisión queda como acción autónoma."
+    return (
+        stripped
+        or "Detecté una URL Tier 1 que no debe convertirse en pregunta; la revisión queda como acción autónoma."
+    )
 
 
 # Domains that require real browser cookies (auth) or heavy JS rendering.
 # Headless browsers always hit login walls on these.
-_AUTH_DOMAINS = frozenset({
-    "x.com", "twitter.com",
-    "instagram.com",
-    "facebook.com", "fb.com",
-    "linkedin.com",
-    "reddit.com",
-    "tiktok.com",
-    "threads.net",
-    "mail.google.com",
-    "web.whatsapp.com",
-    "flow.google",
-})
+_AUTH_DOMAINS = frozenset(
+    {
+        "x.com",
+        "twitter.com",
+        "instagram.com",
+        "facebook.com",
+        "fb.com",
+        "linkedin.com",
+        "reddit.com",
+        "tiktok.com",
+        "threads.net",
+        "mail.google.com",
+        "web.whatsapp.com",
+        "flow.google",
+    }
+)
 
-_JS_RENDERED_DOMAINS = frozenset({
-    "notion.so",
-    "airtable.com",
-    "figma.com",
-    "linear.app",
-    "github.com",
-    "vercel.app",
-})
+_JS_RENDERED_DOMAINS = frozenset(
+    {
+        "notion.so",
+        "airtable.com",
+        "figma.com",
+        "linear.app",
+        "github.com",
+        "vercel.app",
+    }
+)
 
 
 def _needs_real_browser(url: str) -> bool:
@@ -2812,7 +3009,9 @@ def _enrich_tweet_urls(text: str) -> str:
             enriched += f"\n\n---\n[Contenido del tweet pre-cargado]:\n{content}"
             nested_blocks = _textual_nested_url_review_blocks(content, skip_urls=seen_urls)
             if nested_blocks:
-                enriched += "\n\n---\n[URLs anidadas revisadas autónomamente]\n" + "\n\n".join(nested_blocks)
+                enriched += "\n\n---\n[URLs anidadas revisadas autónomamente]\n" + "\n\n".join(
+                    nested_blocks
+                )
     return enriched
 
 
@@ -2923,11 +3122,17 @@ def _format_runtime_capability_prompt(text: str) -> str:
 
 
 def _has_runtime_capability_sections(text: str) -> bool:
-    return all(re.search(rf"(?m)^##\s+{re.escape(title)}\s*$", text) for title in _RUNTIME_CAPABILITY_SECTION_TITLES)
+    return all(
+        re.search(rf"(?m)^##\s+{re.escape(title)}\s*$", text)
+        for title in _RUNTIME_CAPABILITY_SECTION_TITLES
+    )
 
 
 def _has_link_analysis_sections(text: str) -> bool:
-    return all(re.search(rf"(?m)^##\s+{re.escape(title)}\s*$", text) for title in _LINK_ANALYSIS_SECTION_TITLES)
+    return all(
+        re.search(rf"(?m)^##\s+{re.escape(title)}\s*$", text)
+        for title in _LINK_ANALYSIS_SECTION_TITLES
+    )
 
 
 def _bulletize_runtime_capability_body(text: str) -> str:
@@ -2983,7 +3188,9 @@ def _summarize_prefetched_link_content(fetched_content: str) -> str:
         if len(bullets) >= 4:
             break
     if not bullets:
-        bullets.append("- El enlace fue leído, pero no se pudo extraer un resumen claro del contenido pre-cargado.")
+        bullets.append(
+            "- El enlace fue leído, pero no se pudo extraer un resumen claro del contenido pre-cargado."
+        )
     return "\n".join(bullets)
 
 
@@ -3028,7 +3235,9 @@ def _is_tweet_url(url: str) -> bool:
     except Exception:
         return False
     host = parsed.netloc.lower()
-    if not any(host == domain or host.endswith(f".{domain}") for domain in ("x.com", "twitter.com")):
+    if not any(
+        host == domain or host.endswith(f".{domain}") for domain in ("x.com", "twitter.com")
+    ):
         return False
     return "/status/" in parsed.path
 
@@ -3036,7 +3245,10 @@ def _is_tweet_url(url: str) -> bool:
 def _looks_like_tweet_followup_request(normalized_text: str) -> bool:
     if not any(token in normalized_text for token in _BROWSE_SHORTCUT_TOKENS):
         return False
-    if not any(token in normalized_text for token in ("tweet", "tweets", "tuit", "tuits", "post", "hilo", "hilos", "thread")):
+    if not any(
+        token in normalized_text
+        for token in ("tweet", "tweets", "tuit", "tuits", "post", "hilo", "hilos", "thread")
+    ):
         return False
     # Only reuse the prior tweet when the user clearly points back to it.
     return any(
@@ -3151,6 +3363,7 @@ def _jina_read(url: str, *, timeout: float = 10) -> str:
     """Fetch URL content as markdown via Jina Reader."""
     import httpx
     from urllib.parse import quote
+
     try:
         response = httpx.get(
             f"https://r.jina.ai/{quote(url, safe=':/')}",
@@ -3255,7 +3468,15 @@ def _tweet_oembed_fallback(url: str, *, timeout: float = 10) -> str:
 def _format_chrome_cdp_error(exc: Exception, *, prefix: str) -> str:
     message = str(exc)
     lowered = message.lower()
-    if any(token in lowered for token in ("econnrefused", "connection refused", "connect_over_cdp", "browser_type.connect_over_cdp")):
+    if any(
+        token in lowered
+        for token in (
+            "econnrefused",
+            "connection refused",
+            "connect_over_cdp",
+            "browser_type.connect_over_cdp",
+        )
+    ):
         return "Chrome del bot no responde. Reinicia el bot o verifica que Chrome esté instalado."
     return f"{prefix}: {message}"
 

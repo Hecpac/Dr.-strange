@@ -38,8 +38,10 @@ class DaemonHealthCheckHandlerTests(unittest.TestCase):
             fake_pgrep = subprocess.CompletedProcess(
                 args=["pgrep"], returncode=0, stdout="12345 python claw_v2\n", stderr=""
             )
-            with patch("claw_v2.kairos.subprocess.run", return_value=fake_pgrep), \
-                 patch("claw_v2.kairos.Path") as mock_path:
+            with (
+                patch("claw_v2.kairos.subprocess.run", return_value=fake_pgrep),
+                patch("claw_v2.kairos.Path") as mock_path,
+            ):
                 mock_path.return_value = log_path
                 svc._handle_daemon_health_check(TickDecision(action="daemon_health_check"), None)
 
@@ -61,8 +63,10 @@ class DaemonHealthCheckHandlerTests(unittest.TestCase):
             fake_pgrep = subprocess.CompletedProcess(
                 args=["pgrep"], returncode=0, stdout="42 python claw_v2\n", stderr=""
             )
-            with patch("claw_v2.kairos.subprocess.run", return_value=fake_pgrep), \
-                 patch("claw_v2.kairos.Path") as mock_path:
+            with (
+                patch("claw_v2.kairos.subprocess.run", return_value=fake_pgrep),
+                patch("claw_v2.kairos.Path") as mock_path,
+            ):
                 mock_path.return_value = log_path
                 svc._handle_daemon_health_check(TickDecision(action="daemon_health_check"), None)
 
@@ -93,8 +97,10 @@ class DaemonHealthCheckHandlerTests(unittest.TestCase):
         missing = Path(tempfile.gettempdir()) / "definitely_not_a_log_xyz.log"
         if missing.exists():
             missing.unlink()
-        with patch("claw_v2.kairos.subprocess.run", return_value=fake_pgrep), \
-             patch("claw_v2.kairos.Path") as mock_path:
+        with (
+            patch("claw_v2.kairos.subprocess.run", return_value=fake_pgrep),
+            patch("claw_v2.kairos.Path") as mock_path,
+        ):
             mock_path.return_value = missing
             svc._handle_daemon_health_check(TickDecision(action="daemon_health_check"), None)
 
@@ -111,9 +117,7 @@ class DaemonHealthCheckHandlerTests(unittest.TestCase):
         ):
             svc._handle_daemon_health_check(TickDecision(action="daemon_health_check"), None)
         _, kwargs = observe.emit.call_args
-        self.assertEqual(
-            kwargs["payload"]["auto_approved_reason"], "Scheduled Daemon Health Check"
-        )
+        self.assertEqual(kwargs["payload"]["auto_approved_reason"], "Scheduled Daemon Health Check")
 
     def test_emit_failure_does_not_crash_handler(self) -> None:
         svc, observe = _make_service()
@@ -126,7 +130,9 @@ class DaemonHealthCheckHandlerTests(unittest.TestCase):
 
     def test_run_health_check_dispatches_event(self) -> None:
         svc, _ = _make_service()
-        with patch.object(svc, "handle_event", return_value=TickDecision(action="daemon_health_check")) as mock_he:
+        with patch.object(
+            svc, "handle_event", return_value=TickDecision(action="daemon_health_check")
+        ) as mock_he:
             result = svc.run_health_check()
         mock_he.assert_called_once_with("daemon_health_check", payload={})
         self.assertEqual(result.action, "daemon_health_check")

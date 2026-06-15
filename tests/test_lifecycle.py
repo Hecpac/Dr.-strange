@@ -23,9 +23,7 @@ class TerminalNotificationDedupTests(unittest.TestCase):
         from claw_v2.lifecycle import terminal_notification_key
 
         self.assertEqual(terminal_notification_key({"task_id": "t1"}), "t1#attempt-0")
-        self.assertEqual(
-            terminal_notification_key({"task_id": "t1", "attempt": 2}), "t1#attempt-2"
-        )
+        self.assertEqual(terminal_notification_key({"task_id": "t1", "attempt": 2}), "t1#attempt-2")
         self.assertEqual(
             terminal_notification_key({"task_id": "t1", "metadata": {"resume_count": 3}}),
             "t1#attempt-3",
@@ -105,7 +103,9 @@ class LoadSoulTests(unittest.TestCase):
 
     def test_fallback_when_no_file(self) -> None:
         prompt = load_soul(Path("/nonexistent/SOUL.md"))
-        self.assertEqual(prompt, "You are Dr. Strange, the autonomous personal agent for Hector Pachano.")
+        self.assertEqual(
+            prompt, "You are Dr. Strange, the autonomous personal agent for Hector Pachano."
+        )
 
 
 class FitnessReminderTests(unittest.TestCase):
@@ -225,7 +225,9 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
                         with patch("claw_v2.lifecycle.WebTransport") as mock_web_transport_cls:
                             mock_web_transport = AsyncMock()
                             mock_web_transport_cls.return_value = mock_web_transport
-                            with patch("claw_v2.lifecycle.ManagedChrome") as mock_managed_chrome_cls:
+                            with patch(
+                                "claw_v2.lifecycle.ManagedChrome"
+                            ) as mock_managed_chrome_cls:
                                 with patch("claw_v2.lifecycle.build_runtime") as mock_build:
                                     mock_runtime = MagicMock()
                                     mock_runtime.config.telegram_bot_token = None
@@ -261,7 +263,9 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
                         with patch("claw_v2.lifecycle.WebTransport") as mock_web_transport_cls:
                             mock_web_transport = AsyncMock()
                             mock_web_transport_cls.return_value = mock_web_transport
-                            with patch("claw_v2.lifecycle.ManagedChrome") as mock_managed_chrome_cls:
+                            with patch(
+                                "claw_v2.lifecycle.ManagedChrome"
+                            ) as mock_managed_chrome_cls:
                                 mock_managed_chrome = MagicMock()
                                 mock_managed_chrome.start.side_effect = RuntimeError("boom")
                                 mock_managed_chrome_cls.return_value = mock_managed_chrome
@@ -306,7 +310,9 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
                         with patch("claw_v2.lifecycle.WebTransport") as mock_web_transport_cls:
                             mock_web_transport = AsyncMock()
                             mock_web_transport_cls.return_value = mock_web_transport
-                            with patch("claw_v2.lifecycle.ManagedChrome") as mock_managed_chrome_cls:
+                            with patch(
+                                "claw_v2.lifecycle.ManagedChrome"
+                            ) as mock_managed_chrome_cls:
                                 with patch("claw_v2.lifecycle.build_runtime") as mock_build:
                                     mock_runtime = MagicMock()
                                     mock_runtime.config.telegram_bot_token = None

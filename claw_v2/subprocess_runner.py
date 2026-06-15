@@ -156,9 +156,7 @@ def run_subprocess_bounded(
             if remaining <= 0:
                 raise subprocess.TimeoutExpired(command, timeout_s)
             try:
-                stdout, stderr = proc.communicate(
-                    timeout=min(_COMMUNICATE_POLL_SECONDS, remaining)
-                )
+                stdout, stderr = proc.communicate(timeout=min(_COMMUNICATE_POLL_SECONDS, remaining))
                 break
             except subprocess.TimeoutExpired:
                 continue
@@ -195,18 +193,18 @@ def run_subprocess_bounded(
             killed = _force_kill_process_group(proc, kill_process_group=kill_process_group)
             _emit(
                 observe,
-                    "subprocess_killed",
-                    {
-                        "args": event_command,
-                        "cwd": str(cwd) if cwd is not None else None,
-                        "timeout_s": timeout_s,
-                        "elapsed_s": round(time.monotonic() - start, 3),
-                        "terminated": terminated,
-                        "killed": killed,
-                        "cancelled": cancelled,
-                        "timed_out": True,
-                    },
-                )
+                "subprocess_killed",
+                {
+                    "args": event_command,
+                    "cwd": str(cwd) if cwd is not None else None,
+                    "timeout_s": timeout_s,
+                    "elapsed_s": round(time.monotonic() - start, 3),
+                    "terminated": terminated,
+                    "killed": killed,
+                    "cancelled": cancelled,
+                    "timed_out": True,
+                },
+            )
             # LOW (2026-06-12): even post-SIGKILL, communicate() can hang
             # forever when a surviving grandchild holds the pipes open.
             # PR #95 review: keep whatever partial output the exception
@@ -219,18 +217,18 @@ def run_subprocess_bounded(
         else:
             _emit(
                 observe,
-                    "subprocess_killed",
-                    {
-                        "args": event_command,
-                        "cwd": str(cwd) if cwd is not None else None,
-                        "timeout_s": timeout_s,
-                        "elapsed_s": round(time.monotonic() - start, 3),
-                        "terminated": terminated,
-                        "killed": False,
-                        "cancelled": cancelled,
-                        "timed_out": True,
-                    },
-                )
+                "subprocess_killed",
+                {
+                    "args": event_command,
+                    "cwd": str(cwd) if cwd is not None else None,
+                    "timeout_s": timeout_s,
+                    "elapsed_s": round(time.monotonic() - start, 3),
+                    "terminated": terminated,
+                    "killed": False,
+                    "cancelled": cancelled,
+                    "timed_out": True,
+                },
+            )
         exc.output = _truncate_output(stdout or "", max_output_chars)
         exc.stderr = _truncate_output(stderr or "", max_output_chars)
         raise exc

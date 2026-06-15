@@ -1,4 +1,5 @@
 """Trace Visualizer — renders ObserveStream events as a self-contained HTML waterfall."""
+
 from __future__ import annotations
 
 import json
@@ -140,15 +141,17 @@ class TraceVisualizerService:
                     f'<div class="ev-entry" data-lane="{escape(ev_lane)}">'
                     f'<span class="ev-ts">{escape(ev_ts)}</span> '
                     f'<span class="ev-type" style="color:{EVENT_COLORS.get(ev_type, DEFAULT_COLOR)}">'
-                    f'{escape(ev_type)}</span>'
+                    f"{escape(ev_type)}</span>"
                     f'<pre class="payload">{escape(json.dumps(p, indent=2, ensure_ascii=False, default=str))}</pre>'
-                    f'</div>'
+                    f"</div>"
                 )
             payloads_html = "\n".join(payload_blocks)
 
             children_html = ""
             if node.children:
-                children_html = f'<ul class="span-children">{self._render_tree(node.children, depth + 1)}</ul>'
+                children_html = (
+                    f'<ul class="span-children">{self._render_tree(node.children, depth + 1)}</ul>'
+                )
 
             parts.append(
                 f'<li class="span-node" data-lane="{escape(lane)}">'
@@ -159,10 +162,10 @@ class TraceVisualizerService:
                 f'<span class="span-lane">{escape(lane)}</span> '
                 f'<span class="span-ts">{escape(ts)}</span> '
                 f'<span class="ev-count">({len(node.events)} ev)</span>'
-                f'</div>'
+                f"</div>"
                 f'<div class="span-payload" style="display:none">{payloads_html}</div>'
-                f'{children_html}'
-                f'</li>'
+                f"{children_html}"
+                f"</li>"
             )
         return "\n".join(parts)
 
@@ -179,7 +182,7 @@ class TraceVisualizerService:
                 f'<span class="tl-ts">{escape(ts)}</span> '
                 f'<span class="tl-type" style="color:{color}">{escape(et)}</span> '
                 f'<span class="tl-lane">{escape(lane)}</span>'
-                f'</div>'
+                f"</div>"
             )
         return "\n".join(parts)
 

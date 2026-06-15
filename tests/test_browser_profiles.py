@@ -24,8 +24,10 @@ class ClassifyHealthTests(unittest.TestCase):
     def test_ok_when_logged_in_timeline(self) -> None:
         self.assertEqual(
             classify_health(
-                final_url="https://x.com/home", title="Home / X",
-                body_text="For you ... Post your reply", profile=_X,
+                final_url="https://x.com/home",
+                title="Home / X",
+                body_text="For you ... Post your reply",
+                profile=_X,
             ),
             BrowserProfileHealth.OK,
         )
@@ -33,8 +35,10 @@ class ClassifyHealthTests(unittest.TestCase):
     def test_needs_login_when_login_flow(self) -> None:
         self.assertEqual(
             classify_health(
-                final_url="https://x.com/i/flow/login", title="Sign in to X",
-                body_text="Sign in to X", profile=_X,
+                final_url="https://x.com/i/flow/login",
+                title="Sign in to X",
+                body_text="Sign in to X",
+                profile=_X,
             ),
             BrowserProfileHealth.NEEDS_LOGIN,
         )
@@ -42,8 +46,10 @@ class ClassifyHealthTests(unittest.TestCase):
     def test_challenge_detected(self) -> None:
         self.assertEqual(
             classify_health(
-                final_url="https://x.com/", title="Just a moment...",
-                body_text="Verifying you are human. cf-challenge", profile=_X,
+                final_url="https://x.com/",
+                title="Just a moment...",
+                body_text="Verifying you are human. cf-challenge",
+                profile=_X,
             ),
             BrowserProfileHealth.BLOCKED_BY_CHALLENGE,
         )
@@ -52,8 +58,10 @@ class ClassifyHealthTests(unittest.TestCase):
         # A challenge wall can also look logged-out; challenge must win.
         self.assertEqual(
             classify_health(
-                final_url="https://x.com/i/flow/login", title="Just a moment...",
-                body_text="checking your browser ... sign in to x", profile=_X,
+                final_url="https://x.com/i/flow/login",
+                title="Just a moment...",
+                body_text="checking your browser ... sign in to x",
+                profile=_X,
             ),
             BrowserProfileHealth.BLOCKED_BY_CHALLENGE,
         )
@@ -79,7 +87,9 @@ class CheckProfileHealthTests(unittest.TestCase):
 
     def test_prober_needs_login(self) -> None:
         health, _ = check_profile_health(
-            _X, "cdp", prober=lambda c, h, t: ("https://x.com/i/flow/login", "Sign in to X", "sign in to x")
+            _X,
+            "cdp",
+            prober=lambda c, h, t: ("https://x.com/i/flow/login", "Sign in to X", "sign in to x"),
         )
         self.assertEqual(health, BrowserProfileHealth.NEEDS_LOGIN)
 
@@ -168,7 +178,9 @@ class RunDelegatedGateWiringTests(_GateHarness):
             handler, _ = self._handler(Path(tmp))
             self._wire(handler)
             ran = {"agent": False}
-            handler._run_browser_use_task = lambda *a, **k: ran.__setitem__("agent", True) or "AGENT"
+            handler._run_browser_use_task = lambda *a, **k: (
+                ran.__setitem__("agent", True) or "AGENT"
+            )
             with patch.object(handler, "_browser_profile_gate", return_value="LOGIN NEEDED"):
                 out = handler.run_delegated_browser_task("repaso por X", task_id="t", mode="browse")
             self.assertEqual(out, "LOGIN NEEDED")

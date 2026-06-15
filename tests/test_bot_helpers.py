@@ -166,7 +166,8 @@ class BotHelperRegressionTests(unittest.TestCase):
         sanitized = _sanitize_chat_response(text)
 
         self.assertNotIn(
-            "Tuve un error preparando la respuesta", sanitized,
+            "Tuve un error preparando la respuesta",
+            sanitized,
             "loopback host/IP should be inlined, not bump the whole reply to the error template",
         )
         self.assertNotIn("127.0.0.1", sanitized)
@@ -259,7 +260,9 @@ class BotHelperRegressionTests(unittest.TestCase):
         sanitized = _sanitize_chat_response(text)
         self.assertNotIn("Tuve un error preparando la respuesta", sanitized)
 
-    def test_visible_chat_response_redacts_system_reminder_marker_without_nuking_reply(self) -> None:
+    def test_visible_chat_response_redacts_system_reminder_marker_without_nuking_reply(
+        self,
+    ) -> None:
         text = (
             "Barrido útil de noticias.\n"
             "Nota: un resultado web traía [redacted: system-reminder] como ruido.\n"
@@ -319,7 +322,8 @@ class BotHelperRegressionTests(unittest.TestCase):
         lowered = sanitized.lower()
 
         self.assertNotIn(
-            "Tuve un error preparando la respuesta", sanitized,
+            "Tuve un error preparando la respuesta",
+            sanitized,
             "legit technical references should be inlined, not bumped to error template",
         )
         self.assertIn("filtro defensivo", lowered)
@@ -334,7 +338,9 @@ class BotHelperRegressionTests(unittest.TestCase):
 
     def test_permission_preflight_distinguishes_allowed_missing_and_policy_blocked(self) -> None:
         policy = SandboxPolicy(workspace_root=Path("/tmp"), capability_profile="engineer")
-        which = lambda binary: f"/usr/bin/{binary}" if binary in {"python3", "codex", "claude"} else None
+        which = lambda binary: (
+            f"/usr/bin/{binary}" if binary in {"python3", "codex", "claude"} else None
+        )
 
         allowed = preflight_command(
             CommandSpec("python3 --version", "python_check"),
@@ -413,12 +419,16 @@ class CoordinatorTaskBuilderTests(unittest.TestCase):
 
     def test_build_coordinator_tasks_long_browser_timeout(self) -> None:
         # browse always gets the long browser/CDP timeout + the guard directive.
-        _, implementation, _ = _build_coordinator_tasks("browse", "Abre la página y extrae la tabla")
+        _, implementation, _ = _build_coordinator_tasks(
+            "browse", "Abre la página y extrae la tabla"
+        )
         self.assertEqual(implementation[0].timeout_seconds, 1200.0)
         self.assertIn("browser/CDP guard", implementation[0].instruction)
 
         # ops/publish get it only when the objective signals browser/CDP work.
-        _, impl_cdp, _ = _build_coordinator_tasks("ops", "Driver Chrome CDP en localhost:9250 y screenshotea")
+        _, impl_cdp, _ = _build_coordinator_tasks(
+            "ops", "Driver Chrome CDP en localhost:9250 y screenshotea"
+        )
         self.assertEqual(impl_cdp[0].timeout_seconds, 1200.0)
 
         _, impl_nlm, _ = _build_coordinator_tasks("publish", "Genera el podcast en NotebookLM")
@@ -426,7 +436,9 @@ class CoordinatorTaskBuilderTests(unittest.TestCase):
 
         # Instagram publishing is CDP-based (claw_v2/instagram_publish.py) even
         # when the objective only says "Instagram"/"reel", not "Chrome/CDP".
-        _, impl_ig, _ = _build_coordinator_tasks("publish", "Publica el reel en Instagram @pachanodesign")
+        _, impl_ig, _ = _build_coordinator_tasks(
+            "publish", "Publica el reel en Instagram @pachanodesign"
+        )
         self.assertEqual(impl_ig[0].timeout_seconds, 1200.0)
 
         # plain ops without browser signals keeps the default (no override).

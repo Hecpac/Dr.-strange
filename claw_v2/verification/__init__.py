@@ -7,6 +7,7 @@ Today this module exposes only the v2 telemetry transcript writer/reader
 (commit #6). The judge wiring (commit #7), the verifier swap (commit #8),
 and the default-on flip (commit #9) land in subsequent commits.
 """
+
 from __future__ import annotations
 
 from claw_v2.verification.judge import (

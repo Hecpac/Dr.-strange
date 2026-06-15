@@ -84,7 +84,9 @@ class SkillRegistryTests(unittest.TestCase):
             self.assertFalse(executed["success"])
             self.assertTrue(executed["blocked"])
             self.assertEqual(executed["reason"], "skill_status_pending_review_not_executable")
-            denied = [payload for name, payload in observe.events if name == "codeskill_governance_denied"]
+            denied = [
+                payload for name, payload in observe.events if name == "codeskill_governance_denied"
+            ]
             self.assertTrue(denied)
             self.assertEqual(denied[-1]["action"], "execute")
             self.assertTrue(denied[-1]["requires_approval"])
@@ -107,7 +109,11 @@ class SkillRegistryTests(unittest.TestCase):
             self.assertTrue(executed["success"])
             self.assertEqual(executed["result"]["result"], 7)
             self.assertEqual(registry.list_skills()[0]["use_count"], 1)
-            allowed = [payload for name, payload in observe.events if name == "codeskill_governance_allowed"]
+            allowed = [
+                payload
+                for name, payload in observe.events
+                if name == "codeskill_governance_allowed"
+            ]
             self.assertEqual(allowed[-1]["action"], "execute")
 
     def test_generate_skill_blocks_sensitive_task_before_router(self) -> None:
@@ -127,7 +133,9 @@ class SkillRegistryTests(unittest.TestCase):
             self.assertTrue(result["requires_approval"])
             self.assertEqual(result["reason"], "sensitive_generation_target_requires_approval")
             self.assertEqual(registry.list_skills(), [])
-            denied = [payload for name, payload in observe.events if name == "codeskill_governance_denied"]
+            denied = [
+                payload for name, payload in observe.events if name == "codeskill_governance_denied"
+            ]
             self.assertEqual(denied[-1]["action"], "generate")
 
     def test_generate_skill_blocks_dotenv_target_before_router(self) -> None:
@@ -175,7 +183,9 @@ class SkillRegistryTests(unittest.TestCase):
 
             serialized = json.dumps(observe.events)
             self.assertNotIn("sk-secret-value", serialized)
-            denied = [payload for name, payload in observe.events if name == "codeskill_governance_denied"]
+            denied = [
+                payload for name, payload in observe.events if name == "codeskill_governance_denied"
+            ]
             self.assertEqual(denied[-1]["tag_count"], 1)
             self.assertNotIn("tags", denied[-1])
             self.assertRegex(denied[-1]["tag_sha256"][0], r"^[0-9a-f]{64}$")
@@ -211,7 +221,9 @@ class SkillRegistryTests(unittest.TestCase):
             registry = SkillRegistry(root=root, router=Router())
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
                 futures = [
-                    executor.submit(registry.generate_skill, task_description=f"create race skill {index}")
+                    executor.submit(
+                        registry.generate_skill, task_description=f"create race skill {index}"
+                    )
                     for index in range(2)
                 ]
                 results = [future.result(timeout=10) for future in futures]
@@ -273,7 +285,9 @@ class SkillRegistryTests(unittest.TestCase):
             self.assertTrue(first["success"])
             self.assertFalse(second["success"])
             self.assertIn("already exists", second["error"])
-            self.assertEqual((Path(tmp) / "safe_skill.py").read_text(encoding="utf-8"), original_code)
+            self.assertEqual(
+                (Path(tmp) / "safe_skill.py").read_text(encoding="utf-8"), original_code
+            )
 
     def test_discover_gaps_passes_evidence_pack_to_judge_lane(self) -> None:
         calls: list[dict] = []

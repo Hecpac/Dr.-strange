@@ -21,17 +21,25 @@ class AlertRule:
 
 
 DEFAULT_ALERT_RULES: dict[str, AlertRule] = {
-    "firecrawl_paused": AlertRule("Firecrawl paused", severity="critical", cooldown_seconds=6 * 3600),
+    "firecrawl_paused": AlertRule(
+        "Firecrawl paused", severity="critical", cooldown_seconds=6 * 3600
+    ),
     "wiki_scrape_skipped": AlertRule("Wiki scrape skipped", cooldown_seconds=3600),
-    "scheduled_job_error": AlertRule("Scheduled job failed", severity="critical", cooldown_seconds=1800),
-    "daemon_tick_error": AlertRule("Daemon tick failed", severity="critical", cooldown_seconds=1800),
+    "scheduled_job_error": AlertRule(
+        "Scheduled job failed", severity="critical", cooldown_seconds=1800
+    ),
+    "daemon_tick_error": AlertRule(
+        "Daemon tick failed", severity="critical", cooldown_seconds=1800
+    ),
     "daemon_task_reconciliation": AlertRule(
         "Stale task reconciliation",
         cooldown_seconds=1800,
         notify_user=False,
     ),
     "session_resume_failed": AlertRule("Provider session resume failed", cooldown_seconds=1800),
-    "llm_circuit_open": AlertRule("LLM provider circuit opened", severity="critical", cooldown_seconds=1800),
+    "llm_circuit_open": AlertRule(
+        "LLM provider circuit opened", severity="critical", cooldown_seconds=1800
+    ),
     "autonomy_degraded_by_token_window": AlertRule(
         "Autonomy degraded: token window breaker",
         severity="critical",
@@ -42,11 +50,17 @@ DEFAULT_ALERT_RULES: dict[str, AlertRule] = {
         severity="critical",
         cooldown_seconds=1800,
     ),
-    "auto_research_adapter_error": AlertRule("Auto-research provider failure", severity="critical", cooldown_seconds=1800),
+    "auto_research_adapter_error": AlertRule(
+        "Auto-research provider failure", severity="critical", cooldown_seconds=1800
+    ),
     "pipeline_poll_degraded": AlertRule("Pipeline poll degraded", cooldown_seconds=1800),
-    "telegram_transport_stop_error": AlertRule("Telegram transport stop degraded", cooldown_seconds=1800),
+    "telegram_transport_stop_error": AlertRule(
+        "Telegram transport stop degraded", cooldown_seconds=1800
+    ),
     "nlm_research_degraded": AlertRule("NotebookLM degraded", cooldown_seconds=1800),
-    "nlm_research_failed": AlertRule("NotebookLM failed", severity="critical", cooldown_seconds=1800),
+    "nlm_research_failed": AlertRule(
+        "NotebookLM failed", severity="critical", cooldown_seconds=1800
+    ),
     # Paso 9 (2026-06-12): an approval the user was asked for must not die in
     # silence — the action it gated simply never happens otherwise.
     "approval_expired": AlertRule(
@@ -87,10 +101,14 @@ class OperationalAlertRouter:
         if rule is None:
             return False
         if event_payload.get("user_notified") is True:
-            self._emit_status("operational_alert_suppressed", event_type, event_payload, reason="user_notified")
+            self._emit_status(
+                "operational_alert_suppressed", event_type, event_payload, reason="user_notified"
+            )
             return False
         if not rule.notify_user:
-            self._emit_status("operational_alert_suppressed", event_type, event_payload, reason="observe_only")
+            self._emit_status(
+                "operational_alert_suppressed", event_type, event_payload, reason="observe_only"
+            )
             return False
         if rule.require_truthy and not event_payload.get(rule.require_truthy):
             self._emit_status(
@@ -101,7 +119,9 @@ class OperationalAlertRouter:
         now = self.clock()
         last_sent = self._last_sent.get(dedupe_key)
         if last_sent is not None and now - last_sent < rule.cooldown_seconds:
-            self._emit_status("operational_alert_suppressed", event_type, event_payload, reason="cooldown")
+            self._emit_status(
+                "operational_alert_suppressed", event_type, event_payload, reason="cooldown"
+            )
             return False
         message = _format_alert(event_type, rule, event_payload)
         self.notify(message)
@@ -109,7 +129,9 @@ class OperationalAlertRouter:
         self._emit_status("operational_alert_sent", event_type, event_payload, reason="")
         return True
 
-    def _emit_status(self, status_event: str, event_type: str, payload: dict[str, Any], *, reason: str) -> None:
+    def _emit_status(
+        self, status_event: str, event_type: str, payload: dict[str, Any], *, reason: str
+    ) -> None:
         try:
             self.observe.emit(
                 status_event,
@@ -194,7 +216,9 @@ def _event_detail(event_type: str, payload: dict[str, Any]) -> str:
         )
     if event_type == "telegram_transport_stop_error":
         errors = payload.get("errors") or []
-        first_error = errors[0] if isinstance(errors, list) and errors else payload.get("error", "unknown")
+        first_error = (
+            errors[0] if isinstance(errors, list) and errors else payload.get("error", "unknown")
+        )
         return (
             f"Errors: {payload.get('error_count', len(errors) if isinstance(errors, list) else '?')}\n"
             f"First error: {first_error}"
@@ -211,8 +235,21 @@ def _event_detail(event_type: str, payload: dict[str, Any]) -> str:
 def _dedupe_key(event_type: str, payload: dict[str, Any]) -> str:
     parts = [
         event_type,
-        str(payload.get("job") or payload.get("agent") or payload.get("poller") or payload.get("reason") or payload.get("failure_kind") or ""),
-        str(payload.get("notebook_id") or payload.get("stale_session") or payload.get("approval_id") or payload.get("error") or "")[:120],
+        str(
+            payload.get("job")
+            or payload.get("agent")
+            or payload.get("poller")
+            or payload.get("reason")
+            or payload.get("failure_kind")
+            or ""
+        ),
+        str(
+            payload.get("notebook_id")
+            or payload.get("stale_session")
+            or payload.get("approval_id")
+            or payload.get("error")
+            or ""
+        )[:120],
     ]
     return ":".join(parts)
 

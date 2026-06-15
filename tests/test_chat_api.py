@@ -181,7 +181,8 @@ class LocalChatAPITests(unittest.TestCase):
             self.assertEqual(json.loads(body.decode("utf-8"))["reply"], "reply text")
             events = observe.recent_events(limit=5)
             session_events = [
-                event for event in events
+                event
+                for event in events
                 if (event.get("payload") or {}).get("session_id") == "mac-main"
             ]
             self.assertEqual(
@@ -250,14 +251,34 @@ class LocalChatAPITests(unittest.TestCase):
     def test_get_traces_returns_recent_trace_index(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             observe = ObserveStream(Path(tmpdir) / "observe.db")
-            observe.emit("llm_response", lane="brain", provider="anthropic", model="claude", trace_id="trace-1")
-            observe.emit("brain_turn_complete", lane="brain", provider="anthropic", model="claude", trace_id="trace-1")
-            observe.emit("llm_response", lane="brain", provider="anthropic", model="claude", trace_id="trace-2")
+            observe.emit(
+                "llm_response",
+                lane="brain",
+                provider="anthropic",
+                model="claude",
+                trace_id="trace-1",
+            )
+            observe.emit(
+                "brain_turn_complete",
+                lane="brain",
+                provider="anthropic",
+                model="claude",
+                trace_id="trace-1",
+            )
+            observe.emit(
+                "llm_response",
+                lane="brain",
+                provider="anthropic",
+                model="claude",
+                trace_id="trace-2",
+            )
             bot_service = MagicMock()
             bot_service.allowed_user_id = "123"
             api = LocalChatAPI(bot_service=bot_service, observe=observe)
 
-            status_code, _, body = api.handle_http(method="GET", path="/api/traces?limit=2", body=b"")
+            status_code, _, body = api.handle_http(
+                method="GET", path="/api/traces?limit=2", body=b""
+            )
 
             self.assertEqual(status_code, 200)
             payload = json.loads(body.decode("utf-8"))
@@ -268,13 +289,27 @@ class LocalChatAPITests(unittest.TestCase):
     def test_get_trace_replay_returns_events(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             observe = ObserveStream(Path(tmpdir) / "observe.db")
-            observe.emit("brain_turn_start", lane="brain", provider="anthropic", model="claude", trace_id="trace-1")
-            observe.emit("llm_response", lane="brain", provider="anthropic", model="claude", trace_id="trace-1")
+            observe.emit(
+                "brain_turn_start",
+                lane="brain",
+                provider="anthropic",
+                model="claude",
+                trace_id="trace-1",
+            )
+            observe.emit(
+                "llm_response",
+                lane="brain",
+                provider="anthropic",
+                model="claude",
+                trace_id="trace-1",
+            )
             bot_service = MagicMock()
             bot_service.allowed_user_id = "123"
             api = LocalChatAPI(bot_service=bot_service, observe=observe)
 
-            status_code, _, body = api.handle_http(method="GET", path="/api/traces/trace-1", body=b"")
+            status_code, _, body = api.handle_http(
+                method="GET", path="/api/traces/trace-1", body=b""
+            )
 
             self.assertEqual(status_code, 200)
             payload = json.loads(body.decode("utf-8"))
@@ -288,7 +323,9 @@ class LocalChatAPITests(unittest.TestCase):
         bot_service.observe = None
         api = LocalChatAPI(bot_service=bot_service)
 
-        status_code, _, body = api.handle_http(method="GET", path="/api/traces/trace-missing", body=b"")
+        status_code, _, body = api.handle_http(
+            method="GET", path="/api/traces/trace-missing", body=b""
+        )
 
         self.assertEqual(status_code, 503)
         payload = json.loads(body.decode("utf-8"))
@@ -301,7 +338,9 @@ class LocalChatAPITests(unittest.TestCase):
             bot_service.allowed_user_id = "123"
             api = LocalChatAPI(bot_service=bot_service, observe=observe)
 
-            status_code, _, body = api.handle_http(method="GET", path="/api/traces/trace-missing", body=b"")
+            status_code, _, body = api.handle_http(
+                method="GET", path="/api/traces/trace-missing", body=b""
+            )
 
             self.assertEqual(status_code, 404)
             payload = json.loads(body.decode("utf-8"))

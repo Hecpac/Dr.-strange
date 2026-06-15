@@ -54,9 +54,7 @@ _MEMORY_FILES = frozenset(
     }
 )
 _PY_SOURCE_SUFFIXES = (".py", ".pyi")
-_REQUIREMENT_CHANGE_RE = re.compile(
-    r"^[+-]\s*([A-Za-z0-9_.-]+)==(\d+)\.(\d+)\.(\d+)(?:\b|$)"
-)
+_REQUIREMENT_CHANGE_RE = re.compile(r"^[+-]\s*([A-Za-z0-9_.-]+)==(\d+)\.(\d+)\.(\d+)(?:\b|$)")
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,11 +90,15 @@ class TrivialPatchClassifier:
     ) -> TrivialPatchDecision:
         metadata = dict(metadata or {})
         if changed_files is None:
-            changed_files = _coerce_changed_files(metadata.get("changed_files") or metadata.get("paths"))
+            changed_files = _coerce_changed_files(
+                metadata.get("changed_files") or metadata.get("paths")
+            )
         if diff is None:
             diff = _coerce_diff(metadata.get("diff"))
 
-        normalized_files = tuple(_normalize_path(path) for path in (changed_files or ()) if str(path).strip())
+        normalized_files = tuple(
+            _normalize_path(path) for path in (changed_files or ()) if str(path).strip()
+        )
         diff_text = str(diff or "")
         reasons: list[str] = []
         categories: set[str] = set()
@@ -205,10 +207,12 @@ def _is_pipeline_or_merge_path(lowered_path: str) -> bool:
 
 def _is_runtime_path(lowered_path: str) -> bool:
     name = PurePosixPath(lowered_path).name
-    return (
-        "runtime" in lowered_path
-        or name in {"main.py", "daemon.py", "lifecycle.py", "runtime_policy.py"}
-    )
+    return "runtime" in lowered_path or name in {
+        "main.py",
+        "daemon.py",
+        "lifecycle.py",
+        "runtime_policy.py",
+    }
 
 
 def _sensitivity_requires_rejection(*, categories: tuple[str, ...], paths: tuple[str, ...]) -> bool:
@@ -258,12 +262,18 @@ def _is_doc_path(lowered_path: str) -> bool:
     suffix = PurePosixPath(lowered_path).suffix
     if name in _MEMORY_FILES:
         return False
-    return lowered_path.startswith("docs/") or lowered_path.startswith("internal_docs/") or suffix in _DOC_EXTENSIONS
+    return (
+        lowered_path.startswith("docs/")
+        or lowered_path.startswith("internal_docs/")
+        or suffix in _DOC_EXTENSIONS
+    )
 
 
 def _is_test_path(lowered_path: str) -> bool:
     suffix = PurePosixPath(lowered_path).suffix
-    return (lowered_path.startswith("tests/") or "/tests/" in lowered_path) and suffix in _TEST_EXTENSIONS
+    return (
+        lowered_path.startswith("tests/") or "/tests/" in lowered_path
+    ) and suffix in _TEST_EXTENSIONS
 
 
 def _is_dev_dep_file(path: str) -> bool:
@@ -371,16 +381,12 @@ def _is_python_typing_only_change(changed_lines: list[str]) -> bool:
     if all(_is_comment_line(line) or _is_typing_line(line) for line in changed_lines):
         return True
     non_typing = [
-        line
-        for line in changed_lines
-        if not _is_comment_line(line) and not _is_typing_line(line)
+        line for line in changed_lines if not _is_comment_line(line) and not _is_typing_line(line)
     ]
     if not non_typing or not all(_is_untyped_def_line(line) for line in non_typing):
         return False
     typed_defs = {
-        _def_name(line)
-        for line in changed_lines
-        if _is_typing_line(line) and _def_name(line)
+        _def_name(line) for line in changed_lines if _is_typing_line(line) and _def_name(line)
     }
     return all(_def_name(line) in typed_defs for line in non_typing)
 
@@ -389,7 +395,11 @@ def _is_untyped_def_line(raw_line: str) -> bool:
     if not raw_line.startswith(("+", "-")):
         return False
     line = raw_line[1:].strip()
-    return line.startswith(("def ", "async def ")) and "->" not in line and not re.search(r"\([^)]*:\s*[^)]+\)", line)
+    return (
+        line.startswith(("def ", "async def "))
+        and "->" not in line
+        and not re.search(r"\([^)]*:\s*[^)]+\)", line)
+    )
 
 
 def _def_name(raw_line: str) -> str | None:

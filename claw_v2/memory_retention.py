@@ -81,7 +81,9 @@ def normalize_prompt_residency(value: Any) -> MemoryPromptResidency | None:
     return None
 
 
-def classify_memory_fact(row: dict[str, Any], *, now: datetime | None = None) -> MemoryResidencyDecision:
+def classify_memory_fact(
+    row: dict[str, Any], *, now: datetime | None = None
+) -> MemoryResidencyDecision:
     key = str(row.get("key") or "")
     value = str(row.get("value") or "")
     source = str(row.get("source") or "unknown")
@@ -92,26 +94,58 @@ def classify_memory_fact(row: dict[str, Any], *, now: datetime | None = None) ->
     tags = _entity_tags(row.get("entity_tags"))
 
     if _contains_secret_like_payload(row):
-        return _decision("never_in_prompt", "secret_like_payload", source, source_trust, confidence, freshness)
+        return _decision(
+            "never_in_prompt", "secret_like_payload", source, source_trust, confidence, freshness
+        )
     if explicit == "never_in_prompt":
-        return _decision("never_in_prompt", "explicit_policy", source, source_trust, confidence, freshness)
+        return _decision(
+            "never_in_prompt", "explicit_policy", source, source_trust, confidence, freshness
+        )
     if source_trust == "untrusted" and _INSTRUCTION_SHAPED_RE.search(f"{key}\n{value}"):
-        return _decision("never_in_prompt", "untrusted_instruction_shaped", source, source_trust, confidence, freshness)
+        return _decision(
+            "never_in_prompt",
+            "untrusted_instruction_shaped",
+            source,
+            source_trust,
+            confidence,
+            freshness,
+        )
     if explicit == "retrieval_on_demand":
-        return _decision("retrieval_on_demand", "explicit_policy", source, source_trust, confidence, freshness)
+        return _decision(
+            "retrieval_on_demand", "explicit_policy", source, source_trust, confidence, freshness
+        )
     if freshness == "expired":
-        return _decision("retrieval_on_demand", "expired_fact", source, source_trust, confidence, freshness)
+        return _decision(
+            "retrieval_on_demand", "expired_fact", source, source_trust, confidence, freshness
+        )
     if confidence < ALWAYS_IN_PROMPT_CONFIDENCE:
-        return _decision("retrieval_on_demand", "low_confidence", source, source_trust, confidence, freshness)
+        return _decision(
+            "retrieval_on_demand", "low_confidence", source, source_trust, confidence, freshness
+        )
     if len(value) > LONG_EVIDENCE_CHARS:
-        return _decision("retrieval_on_demand", "long_evidence", source, source_trust, confidence, freshness)
+        return _decision(
+            "retrieval_on_demand", "long_evidence", source, source_trust, confidence, freshness
+        )
     if explicit == "always_in_prompt":
-        return _decision("always_in_prompt", "explicit_policy", source, source_trust, confidence, freshness)
+        return _decision(
+            "always_in_prompt", "explicit_policy", source, source_trust, confidence, freshness
+        )
     if _is_learning_fact(key, tags):
-        return _decision("always_in_prompt", "durable_learning_fact", source, source_trust, confidence, freshness)
+        return _decision(
+            "always_in_prompt", "durable_learning_fact", source, source_trust, confidence, freshness
+        )
     if key.startswith("profile.") or source_trust in {"trusted", "verified", "system"}:
-        return _decision("always_in_prompt", "durable_high_confidence", source, source_trust, confidence, freshness)
-    return _decision("retrieval_on_demand", "default_retrieval", source, source_trust, confidence, freshness)
+        return _decision(
+            "always_in_prompt",
+            "durable_high_confidence",
+            source,
+            source_trust,
+            confidence,
+            freshness,
+        )
+    return _decision(
+        "retrieval_on_demand", "default_retrieval", source, source_trust, confidence, freshness
+    )
 
 
 def format_memory_fact_for_prompt(

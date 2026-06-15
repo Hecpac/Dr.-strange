@@ -6,6 +6,7 @@ Usage:
 
 The --latest flag picks the most recent video from /v1/video.list.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -31,8 +32,9 @@ def _latest_video_id() -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("video_id", nargs="?", help="HeyGen video_id to deliver")
-    parser.add_argument("--latest", action="store_true",
-                        help="Pick the most recent video from the account")
+    parser.add_argument(
+        "--latest", action="store_true", help="Pick the most recent video from the account"
+    )
     parser.add_argument("--caption", default=None, help="Telegram caption")
     parser.add_argument("--slug", default=None, help="Filename slug for the saved mp4")
     parser.add_argument("--chat-id", default=None, help="Override target chat_id")

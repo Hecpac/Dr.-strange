@@ -6,6 +6,7 @@ Layers:
   index.md — navigable catalog by category
   log.md — append-only operation timeline
 """
+
 from __future__ import annotations
 
 import json
@@ -68,6 +69,7 @@ def classify_firecrawl_failure(text: str) -> str | None:
 def _tokenize(text: str) -> list[str]:
     return [tok.lower() for tok in _TOKEN_RE.findall(text)]
 
+
 # ---------- Embedding helpers (shared with memory.py pattern) ----------
 
 _ST_MODEL = None
@@ -81,6 +83,7 @@ def _get_st_model():
             if _ST_MODEL is None:
                 try:
                     from sentence_transformers import SentenceTransformer
+
                     _ST_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
                 except Exception:
                     _ST_MODEL = False
@@ -178,7 +181,13 @@ class WikiService:
         dup = self._find_duplicate(content)
         if dup:
             logger.info("Skipping ingest of '%s': duplicate of '%s'", title, dup)
-            return {"slug": slug, "raw_path": "", "pages_written": 0, "skipped": True, "duplicate_of": dup}
+            return {
+                "slug": slug,
+                "raw_path": "",
+                "pages_written": 0,
+                "skipped": True,
+                "duplicate_of": dup,
+            }
 
         raw_path.write_text(
             f"---\ntitle: {title}\ntype: {source_type}\ningested: {now}\n---\n\n{content}",
@@ -197,10 +206,14 @@ class WikiService:
                 pass
 
         # Step 1: Analyze
-        analysis = self._ingest_analyze(title, content, source_type, existing_summaries, schema_text)
+        analysis = self._ingest_analyze(
+            title, content, source_type, existing_summaries, schema_text
+        )
 
         # Step 2: Generate
-        result = self._ingest_generate(slug, title, content, analysis, existing_summaries, index_text, schema_text, now)
+        result = self._ingest_generate(
+            slug, title, content, analysis, existing_summaries, index_text, schema_text, now
+        )
 
         pages_written = 0
         summary = result.get("summary_page", {})
@@ -254,9 +267,13 @@ class WikiService:
         self._append_log("ingest", title, pages_written)
 
         return {
-            "slug": slug, "raw_path": str(raw_path), "pages_written": pages_written,
-            "updates": len(result.get("updates", [])), "new_pages": len(result.get("new_pages", [])),
-            "entities": len(analysis.get("entities", [])), "relations": len(analysis.get("relations", [])),
+            "slug": slug,
+            "raw_path": str(raw_path),
+            "pages_written": pages_written,
+            "updates": len(result.get("updates", [])),
+            "new_pages": len(result.get("new_pages", [])),
+            "entities": len(analysis.get("entities", [])),
+            "relations": len(analysis.get("relations", [])),
             "confidence": confidence,
         }
 
@@ -290,15 +307,29 @@ class WikiService:
             For "supersedes": identify existing wiki pages whose claims are contradicted or made obsolete by this new source. Only flag clear factual supersessions, not minor differences.
         """)
         try:
-            resp = self.router.ask(prompt, lane=self.lane, max_budget=0.25, timeout=90.0,
-                                   evidence_pack={"step": "analyze", "source": title})
+            resp = self.router.ask(
+                prompt,
+                lane=self.lane,
+                max_budget=0.25,
+                timeout=90.0,
+                evidence_pack={"step": "analyze", "source": title},
+            )
             return self._parse_json(resp.content)
         except Exception:
             logger.exception("Wiki ingest analysis failed for '%s'", title)
-            return {"entities": [], "relations": [], "key_facts": [], "category": "Research",
-                    "tags": ["research"], "pages_to_update": [], "new_concepts": []}
+            return {
+                "entities": [],
+                "relations": [],
+                "key_facts": [],
+                "category": "Research",
+                "tags": ["research"],
+                "pages_to_update": [],
+                "new_concepts": [],
+            }
 
-    def _ingest_generate(self, slug, title, content, analysis, existing_summaries, index_text, schema_text, now) -> dict:
+    def _ingest_generate(
+        self, slug, title, content, analysis, existing_summaries, index_text, schema_text, now
+    ) -> dict:
         """Step 2: Generate wiki pages from analysis."""
         analysis_json = json.dumps(analysis, ensure_ascii=False)[:4000]
         prompt = textwrap.dedent(f"""\
@@ -322,15 +353,23 @@ class WikiService:
             Rules: [[wikilinks]] for cross-refs. Frontmatter: title, tags, category, sources, created ({now}), updated ({now}). Spanish by default. Only update pages from analysis.pages_to_update. Only create pages for analysis.new_concepts. ONLY valid JSON.
         """)
         try:
-            resp = self.router.ask(prompt, lane=self.lane, max_budget=0.35, timeout=120.0,
-                                   evidence_pack={"step": "generate", "source": title})
+            resp = self.router.ask(
+                prompt,
+                lane=self.lane,
+                max_budget=0.35,
+                timeout=120.0,
+                evidence_pack={"step": "generate", "source": title},
+            )
             return self._parse_json(resp.content)
         except Exception:
             logger.exception("Wiki ingest generation failed for '%s'", title)
             return {
-                "summary_page": {"filename": f"{slug}.md",
-                    "content": f"---\ntitle: {title}\ntags: [research]\nsources: [{slug}]\ncreated: {now}\nupdated: {now}\n---\n\n# {title}\n\n{content[:2000]}"},
-                "updates": [], "new_pages": [],
+                "summary_page": {
+                    "filename": f"{slug}.md",
+                    "content": f"---\ntitle: {title}\ntags: [research]\nsources: [{slug}]\ncreated: {now}\nupdated: {now}\n---\n\n# {title}\n\n{content[:2000]}",
+                },
+                "updates": [],
+                "new_pages": [],
                 "index_entries": [{"category": "Research", "entry": f"- [[{slug}]] — {title}"}],
             }
 
@@ -413,7 +452,10 @@ class WikiService:
 
         try:
             response = self.router.ask(
-                prompt, lane=self.lane, max_budget=0.30, timeout=90.0,
+                prompt,
+                lane=self.lane,
+                max_budget=0.30,
+                timeout=90.0,
                 evidence_pack={"question": question, "pages": len(page_contents)},
             )
             answer = response.content.strip()
@@ -422,9 +464,15 @@ class WikiService:
             return ""
 
         if evidence_status == "insufficient" and answer:
-            answer = "Evidencia incompleta: las paginas wiki usadas no tienen fuentes raw verificables.\n\n" + answer
+            answer = (
+                "Evidencia incompleta: las paginas wiki usadas no tienen fuentes raw verificables.\n\n"
+                + answer
+            )
         elif evidence_status == "partial" and answer:
-            answer = "Evidencia parcial: algunas paginas wiki usadas no tienen fuentes raw verificables.\n\n" + answer
+            answer = (
+                "Evidencia parcial: algunas paginas wiki usadas no tienen fuentes raw verificables.\n\n"
+                + answer
+            )
 
         if archive and answer:
             slug = _slugify(f"query-{question[:40]}")
@@ -466,7 +514,9 @@ class WikiService:
                     missing_links.add(link)
 
         orphans = [slug for slug, count in inbound.items() if count == 0]
-        self._append_log("lint", f"pages={len(pages)} orphans={len(orphans)} missing={len(missing_links)}", 0)
+        self._append_log(
+            "lint", f"pages={len(pages)} orphans={len(orphans)} missing={len(missing_links)}", 0
+        )
 
         return {
             "total_pages": len(pages),
@@ -502,11 +552,9 @@ class WikiService:
                     for line in m.group(1).splitlines():
                         if line.strip().startswith("updated:"):
                             updated = line.split(":", 1)[1].strip()
-                body = text[text.find("---", 3) + 3:].strip() if "---" in text[3:] else text
+                body = text[text.find("---", 3) + 3 :].strip() if "---" in text[3:] else text
                 page_summaries.append(
-                    f"### [[{page.stem}]] — {title}\n"
-                    f"Updated: {updated or 'unknown'}\n"
-                    f"{body[:400]}"
+                    f"### [[{page.stem}]] — {title}\nUpdated: {updated or 'unknown'}\n{body[:400]}"
                 )
             except Exception:
                 continue
@@ -526,8 +574,8 @@ class WikiService:
             Today's date: {now}
 
             Structural issues already detected:
-            - Orphan pages (no inbound links): {structural['orphans'][:10]}
-            - Missing pages (linked but don't exist): {structural['missing'][:10]}
+            - Orphan pages (no inbound links): {structural["orphans"][:10]}
+            - Missing pages (linked but don't exist): {structural["missing"][:10]}
 
             Wiki pages snapshot:
             {wiki_snapshot}
@@ -559,7 +607,10 @@ class WikiService:
 
         try:
             response = self.router.ask(
-                prompt, lane=self.lane, max_budget=0.40, timeout=120.0,
+                prompt,
+                lane=self.lane,
+                max_budget=0.40,
+                timeout=120.0,
                 evidence_pack={"operation": "deep_lint", "pages": len(pages)},
             )
             result = self._parse_json(response.content)
@@ -603,7 +654,9 @@ class WikiService:
                     )
                     gap_path.write_text(stub, encoding="utf-8")
                     self._index_page_embedding(gap_slug, stub)
-                    self._update_index("Research", f"- [[{gap_slug}]] — {gap.get('topic', '')} (stub)")
+                    self._update_index(
+                        "Research", f"- [[{gap_slug}]] — {gap.get('topic', '')} (stub)"
+                    )
                     auto_fixed.append(f"stub:{gap_slug}")
 
             if auto_fixed:
@@ -641,9 +694,7 @@ class WikiService:
         if not pages:
             return {"topics_researched": 0, "pages_written": 0}
 
-        existing = "\n".join(
-            f"- [[{p.stem}]]: {self._extract_title(p)}" for p in pages[:30]
-        )
+        existing = "\n".join(f"- [[{p.stem}]]: {self._extract_title(p)}" for p in pages[:30])
 
         prompt = textwrap.dedent(f"""\
             You are a knowledge curator for an AI/tech wiki. Analyze the existing pages
@@ -669,8 +720,13 @@ class WikiService:
         """)
 
         try:
-            resp = self.router.ask(prompt, lane=self.lane, max_budget=0.40, timeout=120.0,
-                                   evidence_pack={"operation": "auto_research"})
+            resp = self.router.ask(
+                prompt,
+                lane=self.lane,
+                max_budget=0.40,
+                timeout=120.0,
+                evidence_pack={"operation": "auto_research"},
+            )
             topics = self._parse_json_array(resp.content)
         except Exception:
             logger.exception("Wiki auto_research failed")
@@ -685,15 +741,19 @@ class WikiService:
             slug = _slugify(title)
             if (self.wiki_dir / f"{slug}.md").exists():
                 continue
-            candidates.append({
-                "topic": title,
-                "slug": slug,
-                "category": self._normalize_category(category),
-                "reason": topic.get("reason", ""),
-                "source_queries": topic.get("source_queries", []),
-            })
+            candidates.append(
+                {
+                    "topic": title,
+                    "slug": slug,
+                    "category": self._normalize_category(category),
+                    "reason": topic.get("reason", ""),
+                    "source_queries": topic.get("source_queries", []),
+                }
+            )
 
-        self._append_log("auto_research", f"topics={len(candidates)} candidates={len(candidates)} written=0", 0)
+        self._append_log(
+            "auto_research", f"topics={len(candidates)} candidates={len(candidates)} written=0", 0
+        )
         return {"topics_researched": len(candidates), "pages_written": 0, "candidates": candidates}
 
     # ------------------------------------------------------------------
@@ -738,6 +798,7 @@ class WikiService:
     def auto_scrape_sources(self) -> dict:
         """Scrape watched sources via firecrawl, extract key items, ingest new ones."""
         import subprocess
+
         now = time.time()
         if self._firecrawl_paused_until > now:
             remaining = int(self._firecrawl_paused_until - now)
@@ -763,7 +824,9 @@ class WikiService:
             try:
                 result = subprocess.run(
                     ["firecrawl", "scrape", url],
-                    capture_output=True, text=True, timeout=60,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
                 )
                 if result.returncode != 0 or not result.stdout.strip():
                     failure = classify_firecrawl_failure(result.stderr or result.stdout)
@@ -796,8 +859,13 @@ class WikiService:
                     - Write in Spanish.
                     - Skip opinion pieces or vague trend summaries.
                 """)
-                resp = self.router.ask(prompt, lane=self.lane, max_budget=0.30, timeout=90.0,
-                                       evidence_pack={"operation": "auto_scrape", "source": name})
+                resp = self.router.ask(
+                    prompt,
+                    lane=self.lane,
+                    max_budget=0.30,
+                    timeout=90.0,
+                    evidence_pack={"operation": "auto_scrape", "source": name},
+                )
                 items = self._parse_json_array(resp.content)
                 for item in items[:3]:
                     title = item.get("title", "")
@@ -844,10 +912,12 @@ class WikiService:
     def _save_firecrawl_state(self) -> None:
         try:
             self._firecrawl_state_path.write_text(
-                json.dumps({
-                    "paused_until": self._firecrawl_paused_until,
-                    "reason": self._firecrawl_pause_reason,
-                }),
+                json.dumps(
+                    {
+                        "paused_until": self._firecrawl_paused_until,
+                        "reason": self._firecrawl_pause_reason,
+                    }
+                ),
                 encoding="utf-8",
             )
         except Exception:
@@ -865,7 +935,9 @@ class WikiService:
     # NotebookLM → Wiki sync
     # ------------------------------------------------------------------
 
-    def ingest_from_notebooklm(self, nlm_service: object, *, max_notebooks: int = 3, questions_per_nb: int = 2) -> dict:
+    def ingest_from_notebooklm(
+        self, nlm_service: object, *, max_notebooks: int = 3, questions_per_nb: int = 2
+    ) -> dict:
         """Extract knowledge from NotebookLM notebooks and ingest into wiki.
 
         For each recent notebook, asks targeted questions via chat() to
@@ -933,8 +1005,13 @@ class WikiService:
                 """)
 
                 try:
-                    resp = self.router.ask(prompt, lane=self.lane, max_budget=0.30, timeout=90.0,
-                                           evidence_pack={"operation": "nlm_wiki_sync", "notebook": nb_title})
+                    resp = self.router.ask(
+                        prompt,
+                        lane=self.lane,
+                        max_budget=0.30,
+                        timeout=90.0,
+                        evidence_pack={"operation": "nlm_wiki_sync", "notebook": nb_title},
+                    )
                     items = self._parse_json_array(resp.content)
                 except Exception:
                     logger.debug("LLM extraction failed for NLM response", exc_info=True)
@@ -953,12 +1030,16 @@ class WikiService:
                     if self._find_duplicate(body):
                         continue
                     source_content = f"NotebookLM: {nb_title}\nNotebook ID: {nb_id}\n\n{body}"
-                    ingest_result = self.ingest(title, source_content, source_type="notebooklm-sync")
+                    ingest_result = self.ingest(
+                        title, source_content, source_type="notebooklm-sync"
+                    )
                     if ingest_result.get("pages_written", 0):
                         existing_titles.add(title.lower())
                         pages_written += int(ingest_result.get("pages_written", 0))
 
-        self._append_log("nlm_wiki_sync", f"notebooks={notebooks_scanned} written={pages_written}", pages_written)
+        self._append_log(
+            "nlm_wiki_sync", f"notebooks={notebooks_scanned} written={pages_written}", pages_written
+        )
         return {"notebooks_scanned": notebooks_scanned, "pages_written": pages_written}
 
     def _parse_json_array(self, text: str) -> list[dict]:
@@ -995,11 +1076,13 @@ class WikiService:
         with self._lock:
             embedding_items = list(self._embeddings.items())
         indexed_slugs = {
-            slug for slug, vector in embedding_items
+            slug
+            for slug, vector in embedding_items
             if slug in active_slugs and isinstance(vector, list) and bool(vector)
         }
         stale_embeddings = {
-            slug for slug, vector in embedding_items
+            slug
+            for slug, vector in embedding_items
             if slug not in active_slugs and isinstance(vector, list) and bool(vector)
         }
 
@@ -1036,7 +1119,10 @@ class WikiService:
         for page in pages:
             title = self._extract_title(page)
             query = title if title and title != page.stem else page.stem.replace("-", " ")
-            top_slugs = [item["slug"] for item in self._rank_pages(query, persist_missing_embeddings=False)[:safe_limit]]
+            top_slugs = [
+                item["slug"]
+                for item in self._rank_pages(query, persist_missing_embeddings=False)[:safe_limit]
+            ]
             if page.stem in top_slugs:
                 search_hits += 1
             else:
@@ -1102,7 +1188,9 @@ class WikiService:
             removed.append("graph_node")
         for node, edges in list(self._graph.items()):
             before = len(edges)
-            self._graph[node] = [e for e in edges if e.get("target") != slug and e.get("source_page") != slug]
+            self._graph[node] = [
+                e for e in edges if e.get("target") != slug and e.get("source_page") != slug
+            ]
             if len(self._graph[node]) < before:
                 removed.append(f"graph_edges[{node}]")
         if self._graph:
@@ -1157,10 +1245,7 @@ class WikiService:
         score = 0.3  # base
 
         # Source count: more edges referencing this slug = higher confidence
-        inbound = sum(
-            1 for edges in self._graph.values()
-            for e in edges if e.get("target") == slug
-        )
+        inbound = sum(1 for edges in self._graph.values() for e in edges if e.get("target") == slug)
         score += min(inbound * 0.1, 0.3)  # cap at 0.3
 
         # Inbound wikilinks from other pages
@@ -1217,7 +1302,7 @@ class WikiService:
         if not m:
             return
         fm = m.group(1)
-        body = text[m.end():]
+        body = text[m.end() :]
         # Update or append field
         field_re = re.compile(rf"^{re.escape(field)}:.*$", re.MULTILINE)
         if field_re.search(fm):
@@ -1264,7 +1349,9 @@ class WikiService:
         """Find wiki pages relevant to a question using hybrid retrieval + graph expansion."""
         ranked = self._rank_pages(question)
         scored: dict[str, tuple[float, Path]] = {
-            item["slug"]: (float(item["score"]), item["page"]) for item in ranked if item["score"] > 0
+            item["slug"]: (float(item["score"]), item["page"])
+            for item in ranked
+            if item["score"] > 0
         }
 
         top_slugs = [item["slug"] for item in ranked[:3]]
@@ -1330,13 +1417,15 @@ class WikiService:
             similarity = max(0.0, _cosine(query_vec, page_vec)) * self._time_decay(page)
             tokens = _tokenize(search_text)
             corpus_tokens.append(tokens)
-            page_records.append({
-                "slug": slug,
-                "page": page,
-                "title": title,
-                "text": text,
-                "similarity": similarity,
-            })
+            page_records.append(
+                {
+                    "slug": slug,
+                    "page": page,
+                    "title": title,
+                    "text": text,
+                    "similarity": similarity,
+                }
+            )
         if embeddings_dirty:
             self._save_embeddings()
 
@@ -1347,7 +1436,9 @@ class WikiService:
             keyword_score = raw_keyword / max_keyword if max_keyword > 0 else 0.0
             if keyword_score <= 0 and query_tokens and idx < len(corpus_tokens):
                 token_set = set(corpus_tokens[idx])
-                keyword_score = len(set(query_tokens).intersection(token_set)) / max(len(set(query_tokens)), 1)
+                keyword_score = len(set(query_tokens).intersection(token_set)) / max(
+                    len(set(query_tokens)), 1
+                )
             similarity = float(record["similarity"])
             score = (similarity * 0.65) + (keyword_score * 0.35)
             record["keyword_score"] = keyword_score
@@ -1444,7 +1535,7 @@ class WikiService:
         if len(text) <= max_chars:
             return [text.strip()]
         if not separators:
-            return [text[i:i + max_chars].strip() for i in range(0, len(text), max_chars)]
+            return [text[i : i + max_chars].strip() for i in range(0, len(text), max_chars)]
 
         sep = separators[0]
         parts = text.split(sep)
@@ -1484,7 +1575,7 @@ class WikiService:
         if not positions:
             return text[:size]
         start = max(0, min(positions) - 80)
-        return text[start:start + size]
+        return text[start : start + size]
 
     def _ensure_raw_source(self, page: Path, raw_slug: str) -> None:
         try:
@@ -1498,7 +1589,7 @@ class WikiService:
         if raw_slug not in sources:
             sources.append(raw_slug)
         fm = m.group(1)
-        body = text[m.end():]
+        body = text[m.end() :]
         source_line = f"sources: [{', '.join(sources)}]"
         if re.search(r"^sources:.*$", fm, flags=re.MULTILINE):
             fm = re.sub(r"^sources:.*(?:\n[ \t]+-.*)*", source_line, fm, flags=re.MULTILINE)
@@ -1518,10 +1609,14 @@ class WikiService:
                 continue
             value = stripped.split(":", 1)[1].strip()
             if value.startswith("[") and value.endswith("]"):
-                return [self._clean_source(item) for item in value[1:-1].split(",") if self._clean_source(item)]
+                return [
+                    self._clean_source(item)
+                    for item in value[1:-1].split(",")
+                    if self._clean_source(item)
+                ]
             if value:
                 return [self._clean_source(value)]
-            for follow in lines[idx + 1:]:
+            for follow in lines[idx + 1 :]:
                 if follow and not follow.startswith((" ", "\t")):
                     break
                 item = follow.strip()
@@ -1556,7 +1651,11 @@ class WikiService:
     def _category_match(category: str) -> str | None:
         cat_lower = category.lower().strip()
         for valid in VALID_CATEGORIES:
-            if cat_lower == valid.lower() or cat_lower in valid.lower() or valid.lower() in cat_lower:
+            if (
+                cat_lower == valid.lower()
+                or cat_lower in valid.lower()
+                or valid.lower() in cat_lower
+            ):
                 return valid
         return None
 
@@ -1587,6 +1686,7 @@ class WikiService:
         with self._lock:
             try:
                 import os
+
                 tmp = self._embeddings_path.with_suffix(".tmp")
                 tmp.write_text(json.dumps(self._embeddings), encoding="utf-8")
                 os.replace(tmp, self._embeddings_path)
@@ -1609,8 +1709,11 @@ class WikiService:
         with self._lock:
             try:
                 import os
+
                 tmp = self._graph_path.with_suffix(".tmp")
-                tmp.write_text(json.dumps(self._graph, ensure_ascii=False, indent=1), encoding="utf-8")
+                tmp.write_text(
+                    json.dumps(self._graph, ensure_ascii=False, indent=1), encoding="utf-8"
+                )
                 os.replace(tmp, self._graph_path)
             except Exception:
                 logger.warning("Failed to save wiki graph")
@@ -1756,6 +1859,7 @@ class WikiService:
 
     def _parse_json(self, text: str) -> dict:
         import json
+
         cleaned = text.strip()
         # Strip markdown fences
         if cleaned.startswith("```"):
@@ -1771,6 +1875,7 @@ class WikiService:
 def _slugify(text: str) -> str:
     """Convert text to a filesystem-safe slug."""
     import unicodedata
+
     text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
     text = re.sub(r"[^\w\s-]", "", text.lower())
     return re.sub(r"[-\s]+", "-", text).strip("-")[:80]

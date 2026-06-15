@@ -19,6 +19,7 @@ Demonstrates the 11 invariants Hector required for F3b.1:
   10. valid file with sha256/size/MIME/extension → succeeded
   11. video_id with invalid format → failed
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -52,8 +53,10 @@ from claw_v2.verification.promote_gate import apply_promote_gate_to_checkpoint
 def _no_network(monkeypatch):
     def _boom(*a, **kw):
         raise RuntimeError("Network call attempted from F3b.1 test — forbidden")
+
     import socket
     import urllib.request
+
     monkeypatch.setattr(socket.socket, "connect", _boom)
     monkeypatch.setattr(urllib.request, "urlopen", _boom)
     yield
@@ -107,7 +110,9 @@ def _set_handler_result(result: dict) -> None:
     _HANDLER_RESULT = dict(result)
 
 
-def _make_mp4(tmp: Path, body: bytes = b"\x00\x00\x00 ftypisom" + b"X" * 2000) -> tuple[Path, str, int]:
+def _make_mp4(
+    tmp: Path, body: bytes = b"\x00\x00\x00 ftypisom" + b"X" * 2000
+) -> tuple[Path, str, int]:
     path = tmp / "video.mp4"
     path.write_bytes(body)
     return path, hashlib.sha256(body).hexdigest(), len(body)
@@ -115,10 +120,10 @@ def _make_mp4(tmp: Path, body: bytes = b"\x00\x00\x00 ftypisom" + b"X" * 2000) -
 
 def _run(reg: ToolRegistry, args: dict | None = None) -> tuple[str, str, dict, list, dict]:
     a = args or {"video_id": "abc123def456ghij", "caption": "test"}
-    result = reg.execute("HeyGenDeliver", a, agent_class="deployer", approval_gate=_noop_approval_gate)
-    checkpoint = lift_artifact_to_checkpoint(
-        {"verification_status": "passed"}, result
+    result = reg.execute(
+        "HeyGenDeliver", a, agent_class="deployer", approval_gate=_noop_approval_gate
     )
+    checkpoint = lift_artifact_to_checkpoint({"verification_status": "passed"}, result)
     terminal, verification, new_checkpoint, events = apply_promote_gate_to_checkpoint(
         raw_terminal_status="succeeded",
         raw_verification_status="passed",
@@ -136,7 +141,12 @@ def test_artifact_missing_blocks(tmp_path):
     _set_handler_result({"ok": True})  # no fields
     reg = _registry(tmp_path)
     # Drop the artifact deliberately to simulate downstream bug.
-    result = reg.execute("HeyGenDeliver", {"video_id": "abc123def456ghij"}, agent_class="deployer", approval_gate=_noop_approval_gate)
+    result = reg.execute(
+        "HeyGenDeliver",
+        {"video_id": "abc123def456ghij"},
+        agent_class="deployer",
+        approval_gate=_noop_approval_gate,
+    )
     assert result[CONTRACT_REQUIRED_KEY] is True
     broken_checkpoint = {
         "verification_status": "passed",
@@ -162,14 +172,16 @@ def test_artifact_missing_blocks(tmp_path):
 
 def test_no_evidence_uri_blocks(tmp_path):
     mp4, sha, size = _make_mp4(tmp_path)
-    _set_handler_result({
-        "ok": True,
-        "video_id": "abc123def456ghij",
-        "output_path": "",            # forces evidence_uri to None
-        "output_sha256": sha,
-        "output_size_bytes": size,
-        "telegram_msg_id": "12345",
-    })
+    _set_handler_result(
+        {
+            "ok": True,
+            "video_id": "abc123def456ghij",
+            "output_path": "",  # forces evidence_uri to None
+            "output_sha256": sha,
+            "output_size_bytes": size,
+            "telegram_msg_id": "12345",
+        }
+    )
     # Preflight present + external_obs present, but evidence_uri missing.
     register_preflight_provider("HeyGenDeliver", lambda t, a: (True, "ok"))
     register_external_observation_provider(
@@ -185,14 +197,16 @@ def test_no_evidence_uri_blocks(tmp_path):
 
 def test_no_preflight_provider_blocks(tmp_path):
     mp4, sha, size = _make_mp4(tmp_path)
-    _set_handler_result({
-        "ok": True,
-        "video_id": "abc123def456ghij",
-        "output_path": str(mp4),
-        "output_sha256": sha,
-        "output_size_bytes": size,
-        "telegram_msg_id": "12345",
-    })
+    _set_handler_result(
+        {
+            "ok": True,
+            "video_id": "abc123def456ghij",
+            "output_path": str(mp4),
+            "output_sha256": sha,
+            "output_size_bytes": size,
+            "telegram_msg_id": "12345",
+        }
+    )
     # external observation provider but NO preflight provider
     register_external_observation_provider(
         "HeyGenDeliver", lambda t, a, r: {"json": {"ok": True}, "body_text": "delivered"}
@@ -204,10 +218,7 @@ def test_no_preflight_provider_blocks(tmp_path):
     errors = new_ck["promote_gate_envelope"]["verification_result"]["errors"]
     # Either tier3_preflight_not_passed (no_provider → passed=False) or the
     # blocking is via preflight_passed=False; both satisfy §3.
-    assert (
-        "tier3_preflight_not_passed" in errors
-        or "tier3_requires_preflight" in errors
-    )
+    assert "tier3_preflight_not_passed" in errors or "tier3_requires_preflight" in errors
 
 
 # ---------------------------------------------------------------------------
@@ -217,14 +228,16 @@ def test_no_preflight_provider_blocks(tmp_path):
 
 def test_external_check_failed_yields_failed(tmp_path):
     mp4, sha, size = _make_mp4(tmp_path)
-    _set_handler_result({
-        "ok": True,
-        "video_id": "abc123def456ghij",
-        "output_path": str(mp4),
-        "output_sha256": sha,
-        "output_size_bytes": size,
-        "telegram_msg_id": "12345",
-    })
+    _set_handler_result(
+        {
+            "ok": True,
+            "video_id": "abc123def456ghij",
+            "output_path": str(mp4),
+            "output_sha256": sha,
+            "output_size_bytes": size,
+            "telegram_msg_id": "12345",
+        }
+    )
     register_preflight_provider("HeyGenDeliver", lambda t, a: (True, "ok"))
     register_external_observation_provider(
         "HeyGenDeliver",
@@ -245,20 +258,20 @@ def test_external_check_failed_yields_failed(tmp_path):
 
 def test_external_check_processing_yields_pending(tmp_path):
     mp4, sha, size = _make_mp4(tmp_path)
-    _set_handler_result({
-        "ok": True,
-        "video_id": "abc123def456ghij",
-        "output_path": str(mp4),
-        "output_sha256": sha,
-        "output_size_bytes": size,
-        "telegram_msg_id": "12345",
-    })
+    _set_handler_result(
+        {
+            "ok": True,
+            "video_id": "abc123def456ghij",
+            "output_path": str(mp4),
+            "output_sha256": sha,
+            "output_size_bytes": size,
+            "telegram_msg_id": "12345",
+        }
+    )
     register_preflight_provider("HeyGenDeliver", lambda t, a: (True, "ok"))
     # Provider returns None when status is still processing — observation
     # is not pre-fetched yet, gate must keep the task open.
-    register_external_observation_provider(
-        "HeyGenDeliver", lambda t, a, r: None
-    )
+    register_external_observation_provider("HeyGenDeliver", lambda t, a, r: None)
     reg = _registry(tmp_path)
     terminal, verification, _new_ck, _events, _r = _run(reg)
     assert terminal == ""
@@ -272,14 +285,16 @@ def test_external_check_processing_yields_pending(tmp_path):
 
 def test_happy_path_with_mocked_completed_status(tmp_path):
     mp4, sha, size = _make_mp4(tmp_path)
-    _set_handler_result({
-        "ok": True,
-        "video_id": "abc123def456ghij",
-        "output_path": str(mp4),
-        "output_sha256": sha,
-        "output_size_bytes": size,
-        "telegram_msg_id": "12345",
-    })
+    _set_handler_result(
+        {
+            "ok": True,
+            "video_id": "abc123def456ghij",
+            "output_path": str(mp4),
+            "output_sha256": sha,
+            "output_size_bytes": size,
+            "telegram_msg_id": "12345",
+        }
+    )
     register_preflight_provider("HeyGenDeliver", lambda t, a: (True, "auth_ok"))
     register_external_observation_provider(
         "HeyGenDeliver", lambda t, a, r: {"json": {"ok": True}, "body_text": "delivered"}
@@ -302,15 +317,17 @@ def test_happy_path_with_mocked_completed_status(tmp_path):
 
 
 def test_output_file_missing_fails(tmp_path):
-    fake_path = tmp_path / "ghost.mp4"     # never created
-    _set_handler_result({
-        "ok": True,
-        "video_id": "abc123def456ghij",
-        "output_path": str(fake_path),
-        "output_sha256": "0" * 64,
-        "output_size_bytes": 100,
-        "telegram_msg_id": "12345",
-    })
+    fake_path = tmp_path / "ghost.mp4"  # never created
+    _set_handler_result(
+        {
+            "ok": True,
+            "video_id": "abc123def456ghij",
+            "output_path": str(fake_path),
+            "output_sha256": "0" * 64,
+            "output_size_bytes": 100,
+            "telegram_msg_id": "12345",
+        }
+    )
     register_preflight_provider("HeyGenDeliver", lambda t, a: (True, "ok"))
     register_external_observation_provider(
         "HeyGenDeliver", lambda t, a, r: {"json": {"ok": True}, "body_text": "ok"}
@@ -333,14 +350,16 @@ def test_output_file_missing_fails(tmp_path):
 def test_declared_hash_differs_from_real_fails(tmp_path):
     mp4, real_sha, size = _make_mp4(tmp_path)
     wrong_sha = "f" * 64
-    _set_handler_result({
-        "ok": True,
-        "video_id": "abc123def456ghij",
-        "output_path": str(mp4),
-        "output_sha256": wrong_sha,
-        "output_size_bytes": size,
-        "telegram_msg_id": "12345",
-    })
+    _set_handler_result(
+        {
+            "ok": True,
+            "video_id": "abc123def456ghij",
+            "output_path": str(mp4),
+            "output_sha256": wrong_sha,
+            "output_size_bytes": size,
+            "telegram_msg_id": "12345",
+        }
+    )
     register_preflight_provider("HeyGenDeliver", lambda t, a: (True, "ok"))
     register_external_observation_provider(
         "HeyGenDeliver", lambda t, a, r: {"json": {"ok": True}, "body_text": "ok"}
@@ -359,14 +378,16 @@ def test_declared_hash_differs_from_real_fails(tmp_path):
 
 def test_invalid_video_id_format_fails(tmp_path):
     mp4, sha, size = _make_mp4(tmp_path)
-    _set_handler_result({
-        "ok": True,
-        "video_id": "bad!id",     # contains invalid chars + too short
-        "output_path": str(mp4),
-        "output_sha256": sha,
-        "output_size_bytes": size,
-        "telegram_msg_id": "12345",
-    })
+    _set_handler_result(
+        {
+            "ok": True,
+            "video_id": "bad!id",  # contains invalid chars + too short
+            "output_path": str(mp4),
+            "output_sha256": sha,
+            "output_size_bytes": size,
+            "telegram_msg_id": "12345",
+        }
+    )
     register_preflight_provider("HeyGenDeliver", lambda t, a: (True, "ok"))
     register_external_observation_provider(
         "HeyGenDeliver", lambda t, a, r: {"json": {"ok": True}, "body_text": "ok"}
@@ -385,24 +406,29 @@ def test_invalid_video_id_format_fails(tmp_path):
 
 def test_no_video_bytes_in_artifact(tmp_path):
     mp4, sha, size = _make_mp4(tmp_path, body=b"\x89PNG..MAGIC_VIDEO_PAYLOAD_XYZ" + b"X" * 500)
-    _set_handler_result({
-        "ok": True,
-        "video_id": "abc123def456ghij",
-        "output_path": str(mp4),
-        "output_sha256": sha,
-        "output_size_bytes": size,
-        "telegram_msg_id": "12345",
-    })
+    _set_handler_result(
+        {
+            "ok": True,
+            "video_id": "abc123def456ghij",
+            "output_path": str(mp4),
+            "output_sha256": sha,
+            "output_size_bytes": size,
+            "telegram_msg_id": "12345",
+        }
+    )
     register_preflight_provider("HeyGenDeliver", lambda t, a: (True, "ok"))
     register_external_observation_provider(
         "HeyGenDeliver", lambda t, a, r: {"json": {"ok": True}, "body_text": "ok"}
     )
     reg = _registry(tmp_path)
-    _t, _v, _nc, _ev, result = _run(reg, {
-        "video_id": "abc123def456ghij",
-        "video_bytes": "RAW_BINARY_BLOB_NEVER_PERSISTED",
-        "video_url": "https://heygen.example/video.mp4",
-    })
+    _t, _v, _nc, _ev, result = _run(
+        reg,
+        {
+            "video_id": "abc123def456ghij",
+            "video_bytes": "RAW_BINARY_BLOB_NEVER_PERSISTED",
+            "video_url": "https://heygen.example/video.mp4",
+        },
+    )
     artifact = result[ARTIFACT_RESULT_KEY]
     artifact_str = str(artifact)
     assert "MAGIC_VIDEO_PAYLOAD_XYZ" not in artifact_str

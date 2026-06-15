@@ -5,6 +5,7 @@ Conflict: terminated by other getUpdates request`` — two processes were
 polling the same token. The PID-file guard wasn't enough. A token-hash
 flock keeps two daemons on different PIDs from racing.
 """
+
 from __future__ import annotations
 
 import os

@@ -9,6 +9,7 @@ The caption may also be read from a file with --caption-file. Verification is
 done in-flow via Instagram's share-confirmation modal; photo posts also verify
 the profile changed. Exit code 0 only when the media is verified as shared.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -30,8 +31,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--caption", default="", help="Reel caption text")
     parser.add_argument("--caption-file", default=None, help="Read caption from a file")
-    parser.add_argument("--account", default=None,
-                        help="Expected logged-in account handle (guard against wrong account)")
+    parser.add_argument(
+        "--account",
+        default=None,
+        help="Expected logged-in account handle (guard against wrong account)",
+    )
     args = parser.parse_args(argv)
 
     caption = args.caption

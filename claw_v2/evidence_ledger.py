@@ -63,7 +63,9 @@ class Claim:
         if self.verification_status == "verified" and not any(
             ref.kind in VERIFICATION_EVIDENCE_KINDS for ref in self.evidence_refs
         ):
-            raise ValueError("verified claims require tool_call, file_read, or external_api evidence")
+            raise ValueError(
+                "verified claims require tool_call, file_read, or external_api evidence"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return {

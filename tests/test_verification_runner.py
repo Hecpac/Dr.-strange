@@ -1,4 +1,5 @@
 """Tests for the Petri verifier swap point (commit #8)."""
+
 from __future__ import annotations
 
 import os
@@ -47,9 +48,7 @@ class PetriEnvFlagTests(unittest.TestCase):
 class ShouldUsePetriVerifierTests(unittest.TestCase):
     def test_off_when_flag_disabled(self) -> None:
         env = {PETRI_VERIFIER_ENV_FLAG: "0"}
-        self.assertFalse(
-            should_use_petri_verifier({"verify": "strict"}, env=env)
-        )
+        self.assertFalse(should_use_petri_verifier({"verify": "strict"}, env=env))
 
     def test_off_when_metadata_missing_or_none(self) -> None:
         env = {PETRI_VERIFIER_ENV_FLAG: "1"}
@@ -58,19 +57,13 @@ class ShouldUsePetriVerifierTests(unittest.TestCase):
 
     def test_off_for_routine_tasks_even_when_flag_enabled(self) -> None:
         env = {PETRI_VERIFIER_ENV_FLAG: "1"}
-        self.assertFalse(
-            should_use_petri_verifier({"verify": "routine"}, env=env)
-        )
+        self.assertFalse(should_use_petri_verifier({"verify": "routine"}, env=env))
         self.assertFalse(should_use_petri_verifier({"verify": ""}, env=env))
 
     def test_on_when_flag_enabled_and_metadata_strict(self) -> None:
         env = {PETRI_VERIFIER_ENV_FLAG: "1"}
-        self.assertTrue(
-            should_use_petri_verifier({"verify": "strict"}, env=env)
-        )
-        self.assertTrue(
-            should_use_petri_verifier({"verify": "STRICT"}, env=env)
-        )
+        self.assertTrue(should_use_petri_verifier({"verify": "strict"}, env=env))
+        self.assertTrue(should_use_petri_verifier({"verify": "STRICT"}, env=env))
 
 
 class PetriRunOrchestratorTests(unittest.TestCase):

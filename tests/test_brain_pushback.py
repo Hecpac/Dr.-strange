@@ -11,6 +11,7 @@ Reference: Anthropic, "Sycophancy in personal guidance" (2026-04). The
 prefill stress-test methodology described there is the validation method
 behind these contracts (real prefill tests live separately as integration).
 """
+
 from __future__ import annotations
 
 import unittest

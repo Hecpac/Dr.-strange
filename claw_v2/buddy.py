@@ -57,28 +57,118 @@ class BuddyState:
 
 SPECIES_POOL: list[BuddySpecies] = [
     # Common (6)
-    BuddySpecies("ByteBug", "\U0001f41b", "common", {"DEBUGGING": 5, "PATIENCE": 3, "CHAOS": 4, "WISDOM": 3, "SNARK": 3}),
-    BuddySpecies("PixelSlime", "\U0001f7e2", "common", {"DEBUGGING": 3, "PATIENCE": 5, "CHAOS": 3, "WISDOM": 4, "SNARK": 3}),
-    BuddySpecies("LogCat", "\U0001f431", "common", {"DEBUGGING": 4, "PATIENCE": 3, "CHAOS": 3, "WISDOM": 5, "SNARK": 3}),
-    BuddySpecies("NullPointer", "\U0001f4a8", "common", {"DEBUGGING": 3, "PATIENCE": 3, "CHAOS": 5, "WISDOM": 3, "SNARK": 4}),
-    BuddySpecies("StackPup", "\U0001f436", "common", {"DEBUGGING": 4, "PATIENCE": 5, "CHAOS": 2, "WISDOM": 3, "SNARK": 4}),
-    BuddySpecies("GitGoblin", "\U0001f47a", "common", {"DEBUGGING": 3, "PATIENCE": 2, "CHAOS": 5, "WISDOM": 3, "SNARK": 5}),
+    BuddySpecies(
+        "ByteBug",
+        "\U0001f41b",
+        "common",
+        {"DEBUGGING": 5, "PATIENCE": 3, "CHAOS": 4, "WISDOM": 3, "SNARK": 3},
+    ),
+    BuddySpecies(
+        "PixelSlime",
+        "\U0001f7e2",
+        "common",
+        {"DEBUGGING": 3, "PATIENCE": 5, "CHAOS": 3, "WISDOM": 4, "SNARK": 3},
+    ),
+    BuddySpecies(
+        "LogCat",
+        "\U0001f431",
+        "common",
+        {"DEBUGGING": 4, "PATIENCE": 3, "CHAOS": 3, "WISDOM": 5, "SNARK": 3},
+    ),
+    BuddySpecies(
+        "NullPointer",
+        "\U0001f4a8",
+        "common",
+        {"DEBUGGING": 3, "PATIENCE": 3, "CHAOS": 5, "WISDOM": 3, "SNARK": 4},
+    ),
+    BuddySpecies(
+        "StackPup",
+        "\U0001f436",
+        "common",
+        {"DEBUGGING": 4, "PATIENCE": 5, "CHAOS": 2, "WISDOM": 3, "SNARK": 4},
+    ),
+    BuddySpecies(
+        "GitGoblin",
+        "\U0001f47a",
+        "common",
+        {"DEBUGGING": 3, "PATIENCE": 2, "CHAOS": 5, "WISDOM": 3, "SNARK": 5},
+    ),
     # Uncommon (5)
-    BuddySpecies("CacheFox", "\U0001f98a", "uncommon", {"DEBUGGING": 5, "PATIENCE": 4, "CHAOS": 3, "WISDOM": 6, "SNARK": 4}),
-    BuddySpecies("TerminalOwl", "\U0001f989", "uncommon", {"DEBUGGING": 4, "PATIENCE": 5, "CHAOS": 3, "WISDOM": 7, "SNARK": 3}),
-    BuddySpecies("DockerWhale", "\U0001f433", "uncommon", {"DEBUGGING": 6, "PATIENCE": 5, "CHAOS": 2, "WISDOM": 5, "SNARK": 4}),
-    BuddySpecies("RegexWraith", "\U0001f47b", "uncommon", {"DEBUGGING": 7, "PATIENCE": 2, "CHAOS": 5, "WISDOM": 4, "SNARK": 4}),
-    BuddySpecies("ShellSprite", "\U0001f9da", "uncommon", {"DEBUGGING": 4, "PATIENCE": 4, "CHAOS": 4, "WISDOM": 5, "SNARK": 5}),
+    BuddySpecies(
+        "CacheFox",
+        "\U0001f98a",
+        "uncommon",
+        {"DEBUGGING": 5, "PATIENCE": 4, "CHAOS": 3, "WISDOM": 6, "SNARK": 4},
+    ),
+    BuddySpecies(
+        "TerminalOwl",
+        "\U0001f989",
+        "uncommon",
+        {"DEBUGGING": 4, "PATIENCE": 5, "CHAOS": 3, "WISDOM": 7, "SNARK": 3},
+    ),
+    BuddySpecies(
+        "DockerWhale",
+        "\U0001f433",
+        "uncommon",
+        {"DEBUGGING": 6, "PATIENCE": 5, "CHAOS": 2, "WISDOM": 5, "SNARK": 4},
+    ),
+    BuddySpecies(
+        "RegexWraith",
+        "\U0001f47b",
+        "uncommon",
+        {"DEBUGGING": 7, "PATIENCE": 2, "CHAOS": 5, "WISDOM": 4, "SNARK": 4},
+    ),
+    BuddySpecies(
+        "ShellSprite",
+        "\U0001f9da",
+        "uncommon",
+        {"DEBUGGING": 4, "PATIENCE": 4, "CHAOS": 4, "WISDOM": 5, "SNARK": 5},
+    ),
     # Rare (4)
-    BuddySpecies("NeuralNeko", "\U0001f63a", "rare", {"DEBUGGING": 6, "PATIENCE": 5, "CHAOS": 4, "WISDOM": 8, "SNARK": 5}),
-    BuddySpecies("QuantumQuokka", "\U0001f43f\ufe0f", "rare", {"DEBUGGING": 5, "PATIENCE": 6, "CHAOS": 6, "WISDOM": 7, "SNARK": 4}),
-    BuddySpecies("CipherSerpent", "\U0001f40d", "rare", {"DEBUGGING": 7, "PATIENCE": 4, "CHAOS": 5, "WISDOM": 7, "SNARK": 5}),
-    BuddySpecies("VoidPhoenix", "\U0001f525", "rare", {"DEBUGGING": 5, "PATIENCE": 5, "CHAOS": 7, "WISDOM": 6, "SNARK": 5}),
+    BuddySpecies(
+        "NeuralNeko",
+        "\U0001f63a",
+        "rare",
+        {"DEBUGGING": 6, "PATIENCE": 5, "CHAOS": 4, "WISDOM": 8, "SNARK": 5},
+    ),
+    BuddySpecies(
+        "QuantumQuokka",
+        "\U0001f43f\ufe0f",
+        "rare",
+        {"DEBUGGING": 5, "PATIENCE": 6, "CHAOS": 6, "WISDOM": 7, "SNARK": 4},
+    ),
+    BuddySpecies(
+        "CipherSerpent",
+        "\U0001f40d",
+        "rare",
+        {"DEBUGGING": 7, "PATIENCE": 4, "CHAOS": 5, "WISDOM": 7, "SNARK": 5},
+    ),
+    BuddySpecies(
+        "VoidPhoenix",
+        "\U0001f525",
+        "rare",
+        {"DEBUGGING": 5, "PATIENCE": 5, "CHAOS": 7, "WISDOM": 6, "SNARK": 5},
+    ),
     # Epic (2)
-    BuddySpecies("OracleLeviathan", "\U0001f409", "epic", {"DEBUGGING": 7, "PATIENCE": 6, "CHAOS": 5, "WISDOM": 9, "SNARK": 6}),
-    BuddySpecies("SingularityDrake", "\U0001f30c", "epic", {"DEBUGGING": 8, "PATIENCE": 5, "CHAOS": 7, "WISDOM": 8, "SNARK": 5}),
+    BuddySpecies(
+        "OracleLeviathan",
+        "\U0001f409",
+        "epic",
+        {"DEBUGGING": 7, "PATIENCE": 6, "CHAOS": 5, "WISDOM": 9, "SNARK": 6},
+    ),
+    BuddySpecies(
+        "SingularityDrake",
+        "\U0001f30c",
+        "epic",
+        {"DEBUGGING": 8, "PATIENCE": 5, "CHAOS": 7, "WISDOM": 8, "SNARK": 5},
+    ),
     # Legendary (1)
-    BuddySpecies("ClawPrime", "\U0001f9be", "legendary", {"DEBUGGING": 9, "PATIENCE": 8, "CHAOS": 6, "WISDOM": 10, "SNARK": 7}),
+    BuddySpecies(
+        "ClawPrime",
+        "\U0001f9be",
+        "legendary",
+        {"DEBUGGING": 9, "PATIENCE": 8, "CHAOS": 6, "WISDOM": 10, "SNARK": 7},
+    ),
 ]
 
 RARITY_WEIGHTS = {"common": 50, "uncommon": 30, "rare": 15, "epic": 4, "legendary": 1}
@@ -94,29 +184,29 @@ MOOD_LABELS = [(80, "ecstatic"), (60, "happy"), (40, "neutral"), (20, "grumpy"),
 
 # Event → (stat, xp, mood_delta, reaction_chance)
 EVENT_MAP: dict[str, tuple[str, int, int, float]] = {
-    "llm_response":           ("WISDOM",    2,  1, 0.1),
-    "self_improve_start":     ("DEBUGGING", 5,  3, 0.5),
-    "self_improve_complete":  ("DEBUGGING", 10, 5, 1.0),
-    "self_improve_blocked":   ("CHAOS",     3, -5, 1.0),
-    "heartbeat":              ("PATIENCE",  1,  1, 0.05),
-    "coordinator_complete":   ("WISDOM",    5,  3, 0.8),
-    "morning_brief":          ("PATIENCE",  3,  2, 0.5),
-    "kairos_tick":            ("SNARK",     3,  2, 0.3),
-    "auto_dream_complete":    ("WISDOM",    5,  4, 0.8),
-    "pipeline_checkpoint":    ("DEBUGGING", 4,  2, 0.5),
+    "llm_response": ("WISDOM", 2, 1, 0.1),
+    "self_improve_start": ("DEBUGGING", 5, 3, 0.5),
+    "self_improve_complete": ("DEBUGGING", 10, 5, 1.0),
+    "self_improve_blocked": ("CHAOS", 3, -5, 1.0),
+    "heartbeat": ("PATIENCE", 1, 1, 0.05),
+    "coordinator_complete": ("WISDOM", 5, 3, 0.8),
+    "morning_brief": ("PATIENCE", 3, 2, 0.5),
+    "kairos_tick": ("SNARK", 3, 2, 0.3),
+    "auto_dream_complete": ("WISDOM", 5, 4, 0.8),
+    "pipeline_checkpoint": ("DEBUGGING", 4, 2, 0.5),
 }
 
 REACTIONS: dict[str, list[str]] = {
-    "llm_response":          ["{e} *asiente*", "{e} hmm, interesante..."],
-    "self_improve_start":    ["{e} Hora de mejorar!", "{e} *se concentra*"],
-    "self_improve_complete":  ["{e} Mejora completa!", "{e} *baila de alegria*"],
-    "self_improve_blocked":  ["{e} *gruñe* Tests rotos...", "{e} Otra vez no..."],
-    "heartbeat":             ["{e} *ronronea*"],
-    "coordinator_complete":  ["{e} Trabajo en equipo!", "{e} *choca los cinco*"],
-    "morning_brief":         ["{e} Buenos dias!", "{e} *bosteza y se estira*"],
-    "kairos_tick":           ["{e} Vigilando...", "{e} *observa atentamente*"],
-    "auto_dream_complete":   ["{e} Memorias consolidadas", "{e} *sueña despierto*"],
-    "pipeline_checkpoint":   ["{e} Pipeline avanzando!", "{e} *supervisa*"],
+    "llm_response": ["{e} *asiente*", "{e} hmm, interesante..."],
+    "self_improve_start": ["{e} Hora de mejorar!", "{e} *se concentra*"],
+    "self_improve_complete": ["{e} Mejora completa!", "{e} *baila de alegria*"],
+    "self_improve_blocked": ["{e} *gruñe* Tests rotos...", "{e} Otra vez no..."],
+    "heartbeat": ["{e} *ronronea*"],
+    "coordinator_complete": ["{e} Trabajo en equipo!", "{e} *choca los cinco*"],
+    "morning_brief": ["{e} Buenos dias!", "{e} *bosteza y se estira*"],
+    "kairos_tick": ["{e} Vigilando...", "{e} *observa atentamente*"],
+    "auto_dream_complete": ["{e} Memorias consolidadas", "{e} *sueña despierto*"],
+    "pipeline_checkpoint": ["{e} Pipeline avanzando!", "{e} *supervisa*"],
 }
 
 AGE_COSMETICS = [(7, "Week-Old Badge"), (30, "Monthly Survivor Scarf"), (100, "Centurion Crown")]
@@ -173,10 +263,18 @@ class BuddyService:
         if row is None:
             return None
         state = BuddyState(
-            species_name=row[0], species_emoji=row[1], rarity=row[2],
-            nickname=row[3], level=row[4], xp=row[5], mood_score=row[6],
-            stats=json.loads(row[7]), hatched_at=row[8], last_fed_at=row[9],
-            cosmetics=json.loads(row[10]), total_events_witnessed=row[11],
+            species_name=row[0],
+            species_emoji=row[1],
+            rarity=row[2],
+            nickname=row[3],
+            level=row[4],
+            xp=row[5],
+            mood_score=row[6],
+            stats=json.loads(row[7]),
+            hatched_at=row[8],
+            last_fed_at=row[9],
+            cosmetics=json.loads(row[10]),
+            total_events_witnessed=row[11],
         )
         self._apply_mood_decay(state)
         self._check_age_cosmetics(state)
@@ -236,7 +334,13 @@ class BuddyService:
         name = state.nickname or state.species_name
         age = self._age_days(state)
         mood = _mood_label(state.mood_score)
-        rarity_stars = {"common": "", "uncommon": "\u2b50", "rare": "\u2b50\u2b50", "epic": "\u2b50\u2b50\u2b50", "legendary": "\u2b50\u2b50\u2b50\u2b50"}
+        rarity_stars = {
+            "common": "",
+            "uncommon": "\u2b50",
+            "rare": "\u2b50\u2b50",
+            "epic": "\u2b50\u2b50\u2b50",
+            "legendary": "\u2b50\u2b50\u2b50\u2b50",
+        }
         cosmetic_str = ", ".join(state.cosmetics) if state.cosmetics else "ninguno"
         return (
             f"{state.species_emoji} **{name}** ({state.species_name})\n"
@@ -280,11 +384,22 @@ class BuddyService:
                  mood_score, stats, hatched_at, last_fed_at, cosmetics,
                  total_events_witnessed, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (owner_id, state.species_name, state.species_emoji, state.rarity,
-                 state.nickname, state.level, state.xp, state.mood_score,
-                 json.dumps(state.stats), state.hatched_at, state.last_fed_at,
-                 json.dumps(state.cosmetics), state.total_events_witnessed,
-                 datetime.now(UTC).isoformat()),
+                (
+                    owner_id,
+                    state.species_name,
+                    state.species_emoji,
+                    state.rarity,
+                    state.nickname,
+                    state.level,
+                    state.xp,
+                    state.mood_score,
+                    json.dumps(state.stats),
+                    state.hatched_at,
+                    state.last_fed_at,
+                    json.dumps(state.cosmetics),
+                    state.total_events_witnessed,
+                    datetime.now(UTC).isoformat(),
+                ),
             )
             self._conn.commit()
 

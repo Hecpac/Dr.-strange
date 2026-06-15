@@ -16,8 +16,12 @@ from claw_v2.observe import ObserveStream
 from claw_v2.task_ledger import TaskLedger
 
 
-def _completed(args: list[str], returncode: int, stdout: str = "", stderr: str = "") -> subprocess.CompletedProcess[str]:
-    return subprocess.CompletedProcess(args=args, returncode=returncode, stdout=stdout, stderr=stderr)
+def _completed(
+    args: list[str], returncode: int, stdout: str = "", stderr: str = ""
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(
+        args=args, returncode=returncode, stdout=stdout, stderr=stderr
+    )
 
 
 def _healthy_runner(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
@@ -88,7 +92,9 @@ class DiagnosticsTests(unittest.TestCase):
                 artifact_id="artifact-1",
                 payload={"reason": "rate_limited"},
             )
-            JobService(db_path).enqueue(kind="notebooklm.research", payload={"topic": "ai"}, job_id="job-1")
+            JobService(db_path).enqueue(
+                kind="notebooklm.research", payload={"topic": "ai"}, job_id="job-1"
+            )
             TaskLedger(db_path).create(
                 task_id="task-1",
                 session_id="telegram-1",
@@ -101,10 +107,15 @@ class DiagnosticsTests(unittest.TestCase):
                 conn.execute(
                     "CREATE TABLE IF NOT EXISTS cron_state (job_name TEXT PRIMARY KEY, last_run_at REAL NOT NULL DEFAULT 0.0, runs INTEGER NOT NULL DEFAULT 0)"
                 )
-                conn.execute("INSERT INTO cron_state (job_name, last_run_at, runs) VALUES (?, ?, ?)", ("rook.health", 123.0, 2))
+                conn.execute(
+                    "INSERT INTO cron_state (job_name, last_run_at, runs) VALUES (?, ?, ?)",
+                    ("rook.health", 123.0, 2),
+                )
                 conn.commit()
 
-            report = collect_diagnostics(db_path=db_path, port=8765, runner=_healthy_runner, limit=5)
+            report = collect_diagnostics(
+                db_path=db_path, port=8765, runner=_healthy_runner, limit=5
+            )
 
             self.assertEqual(report["checks"]["status"], "attention")
             self.assertTrue(report["checks"]["launchd_loaded"])
@@ -119,7 +130,10 @@ class DiagnosticsTests(unittest.TestCase):
             self.assertEqual(report["database"]["tasks"]["counts"], {"queued": 1})
             self.assertEqual(report["database"]["tasks"]["active"][0]["task_id"], "task-1")
             self.assertEqual(report["database"]["cron"][0]["job_name"], "rook.health")
-            self.assertEqual(report["database"]["observe"]["latest_errors"][0]["payload"]["reason"], "rate_limited")
+            self.assertEqual(
+                report["database"]["observe"]["latest_errors"][0]["payload"]["reason"],
+                "rate_limited",
+            )
             self.assertIn("Dr. Strange diagnostics: attention", format_text(report))
             self.assertIn("llm_circuit_open", format_text(report))
 
@@ -155,7 +169,9 @@ class DiagnosticsTests(unittest.TestCase):
                 conn.execute("UPDATE observe_stream SET timestamp = datetime('now', '-3 days')")
                 conn.commit()
 
-            report = collect_diagnostics(db_path=db_path, port=8765, runner=_healthy_runner, limit=5)
+            report = collect_diagnostics(
+                db_path=db_path, port=8765, runner=_healthy_runner, limit=5
+            )
 
             self.assertEqual(report["checks"]["status"], "healthy")
             self.assertEqual(report["checks"]["recent_error_events"], 0)
@@ -169,7 +185,9 @@ class DiagnosticsTests(unittest.TestCase):
                 payload={"pid": 123, "ts": time.time(), "web_transport_serving": True},
             )
 
-            report = collect_diagnostics(db_path=db_path, port=8765, runner=_sandboxed_process_runner)
+            report = collect_diagnostics(
+                db_path=db_path, port=8765, runner=_sandboxed_process_runner
+            )
 
             self.assertEqual(report["checks"]["status"], "healthy")
             self.assertTrue(report["checks"]["process_running"])
@@ -183,17 +201,25 @@ class DiagnosticsTests(unittest.TestCase):
             observe = ObserveStream(db_path)
             observe.emit("firecrawl_paused", payload={"reason": "insufficient_credits"})
 
-            attention = collect_diagnostics(db_path=db_path, ack_path=ack_path, port=8765, runner=_healthy_runner)
+            attention = collect_diagnostics(
+                db_path=db_path, ack_path=ack_path, port=8765, runner=_healthy_runner
+            )
             event_id = attention["database"]["observe"]["latest_errors"][0]["id"]
-            acknowledge_events([event_id], ack_path=ack_path, hours=2, reason="known external credits")
-            report = collect_diagnostics(db_path=db_path, ack_path=ack_path, port=8765, runner=_healthy_runner)
+            acknowledge_events(
+                [event_id], ack_path=ack_path, hours=2, reason="known external credits"
+            )
+            report = collect_diagnostics(
+                db_path=db_path, ack_path=ack_path, port=8765, runner=_healthy_runner
+            )
 
             self.assertEqual(report["checks"]["status"], "healthy")
             self.assertEqual(report["checks"]["recent_error_events"], 0)
             self.assertEqual(report["checks"]["acknowledged_error_events"], 1)
             self.assertEqual(report["database"]["observe"]["latest_errors"], [])
             self.assertEqual(
-                report["database"]["observe"]["acknowledged_errors"][0]["acknowledgement"]["reason"],
+                report["database"]["observe"]["acknowledged_errors"][0]["acknowledgement"][
+                    "reason"
+                ],
                 "known external credits",
             )
 

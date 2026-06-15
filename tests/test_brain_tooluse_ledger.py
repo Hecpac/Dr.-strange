@@ -136,9 +136,7 @@ class BrainToolUseLedgerTests(unittest.TestCase):
         self._ledger_observe = _RecordingObserve()
         # Wire the recording observe into the ledger too so the defense-
         # in-depth `task_false_success_prevented` event is observable.
-        self.ledger = TaskLedger(
-            Path(self._tmp.name) / "claw.db", observe=self._ledger_observe
-        )
+        self.ledger = TaskLedger(Path(self._tmp.name) / "claw.db", observe=self._ledger_observe)
 
     # --- A. chat with no tools -> no task -------------------------------------
 
@@ -162,7 +160,9 @@ class BrainToolUseLedgerTests(unittest.TestCase):
     def test_b_brain_fallback_with_tier1_tools_creates_synthetic_task(self) -> None:
         observe = _RecordingObserve()
         observe.canned_trace_events = [
-            _tool_event("Read", tool_input={"file_path": "/Users/hector/Projects/Dr.-strange/CLAUDE.md"}),
+            _tool_event(
+                "Read", tool_input={"file_path": "/Users/hector/Projects/Dr.-strange/CLAUDE.md"}
+            ),
             _tool_event("Grep", tool_input={"pattern": "TODO"}),
             _tool_event("Glob", tool_input={"pattern": "**/*.py"}),
         ]
@@ -316,7 +316,10 @@ class BrainToolUseLedgerTests(unittest.TestCase):
         self.assertEqual(task.verification_status, "needs_verification")
         substeps = task.artifacts.get("substeps", [])
         self.assertTrue(
-            any(step.get("status") == "failed" and step.get("reason") == "file_too_large" for step in substeps),
+            any(
+                step.get("status") == "failed" and step.get("reason") == "file_too_large"
+                for step in substeps
+            ),
             substeps,
         )
         events = [name for name, _ in observe.events]
@@ -365,7 +368,9 @@ class BrainToolUseLedgerTests(unittest.TestCase):
         events = [name for name, _ in observe.events]
         self.assertIn("brain_tooluse_ledger_needs_verification", events)
 
-    def test_g3_external_action_without_verifier_blocks_instead_of_completed_unverified(self) -> None:
+    def test_g3_external_action_without_verifier_blocks_instead_of_completed_unverified(
+        self,
+    ) -> None:
         observe = _RecordingObserve()
         observe.canned_trace_events = [
             _tool_event("Write", tool_input={"file_path": "artifacts/instagram/_publish_reel.py"}),
@@ -441,7 +446,9 @@ class BrainToolUseLedgerTests(unittest.TestCase):
     def test_g4_external_status_check_without_verifier_blocks_even_with_read_tool(self) -> None:
         observe = _RecordingObserve()
         observe.canned_trace_events = [
-            _tool_event("Read", tool_input={"file_path": "artifacts/instagram/check_publish_profile.png"}),
+            _tool_event(
+                "Read", tool_input={"file_path": "artifacts/instagram/check_publish_profile.png"}
+            ),
         ]
         bot = _make_bot(observe, self.ledger)
 
@@ -463,9 +470,15 @@ class BrainToolUseLedgerTests(unittest.TestCase):
     def test_instagram_readonly_review_with_browser_evidence_closes_verified_readonly(self) -> None:
         observe = _RecordingObserve()
         observe.canned_trace_events = [
-            _tool_event("Bash", tool_input={"command": "python3 artifacts/ig_feed/_ig_feed_sweep.py"}),
-            _tool_event("Read", tool_input={"file_path": "artifacts/ig_feed/ig_feed_1780891885_top.png"}),
-            _tool_event("Read", tool_input={"file_path": "artifacts/ig_feed/ig_feed_1780891885.json"}),
+            _tool_event(
+                "Bash", tool_input={"command": "python3 artifacts/ig_feed/_ig_feed_sweep.py"}
+            ),
+            _tool_event(
+                "Read", tool_input={"file_path": "artifacts/ig_feed/ig_feed_1780891885_top.png"}
+            ),
+            _tool_event(
+                "Read", tool_input={"file_path": "artifacts/ig_feed/ig_feed_1780891885.json"}
+            ),
         ]
         bot = _make_bot(observe, self.ledger)
 
@@ -482,7 +495,9 @@ class BrainToolUseLedgerTests(unittest.TestCase):
         task = self.ledger.list(limit=10)[0]
         self.assertEqual(task.status, "succeeded")
         self.assertEqual(task.verification_status, "passed")
-        self.assertEqual(task.artifacts["evidence_manifest"]["verification_result"], "passed_readonly")
+        self.assertEqual(
+            task.artifacts["evidence_manifest"]["verification_result"], "passed_readonly"
+        )
         self.assertEqual(task.artifacts["outcome_manifest"]["final_outcome"], "passed")
 
     def test_b_mutation_without_action_text_blocks_even_with_verifier_off(self) -> None:
@@ -609,7 +624,9 @@ class BrainToolUseLedgerTests(unittest.TestCase):
     def test_b1_on_passed_closes_succeeded_for_keyword_required_read(self) -> None:
         observe = _RecordingObserve()
         observe.canned_trace_events = [
-            _tool_event("Read", tool_input={"file_path": "artifacts/instagram/check_publish_profile.png"}),
+            _tool_event(
+                "Read", tool_input={"file_path": "artifacts/instagram/check_publish_profile.png"}
+            ),
         ]
         bot = _make_bot(
             observe,
@@ -723,7 +740,12 @@ class BrainToolUseLedgerTests(unittest.TestCase):
                 "event_type": "tool_blocked_by_freeze",
                 "trace_id": "trace-X",
                 "payload": json.dumps(
-                    {"tool": "Bash", "tier": 3, "actor": "brain", "reason": "circuit_breaker:cost_per_hour"}
+                    {
+                        "tool": "Bash",
+                        "tier": 3,
+                        "actor": "brain",
+                        "reason": "circuit_breaker:cost_per_hour",
+                    }
                 ),
             }
         ]
@@ -880,7 +902,8 @@ class BrainToolUseLedgerEdgeCasesTests(unittest.TestCase):
         )
         events = [name for name, _ in observe.events]
         self.assertIn(
-            "brain_tooluse_ledger_observe_failed", events,
+            "brain_tooluse_ledger_observe_failed",
+            events,
             f"Expected brain_tooluse_ledger_observe_failed in {events}",
         )
         # Ledger must remain untouched on observe failure.
@@ -950,13 +973,12 @@ class BrainToolUseLedgerEdgeCasesTests(unittest.TestCase):
                 f"Tarea autónoma iniciada: `{session_id}:promoted`\nModo: research"
             )
 
-        bot._task_handler = SimpleNamespace(
-            coordinator=object(), start_autonomous_task=_fake_start
-        )
+        bot._task_handler = SimpleNamespace(coordinator=object(), start_autonomous_task=_fake_start)
         # Objective resolution from session_state has its own tests; isolate the
         # promotion wiring here.
-        bot._resolve_actionable_task_objective = (
-            lambda text, *, state: ("Haz el barrido de noticias", "pending_action")
+        bot._resolve_actionable_task_objective = lambda text, *, state: (
+            "Haz el barrido de noticias",
+            "pending_action",
         )
 
         content = (
@@ -1016,9 +1038,7 @@ class BrainToolUseLedgerEdgeCasesTests(unittest.TestCase):
             )
             return f"Tarea autónoma iniciada: `{session_id}:promoted`\nModo: research"
 
-        bot._task_handler = SimpleNamespace(
-            coordinator=object(), start_autonomous_task=_fake_start
-        )
+        bot._task_handler = SimpleNamespace(coordinator=object(), start_autonomous_task=_fake_start)
 
         content = (
             "Va A+B encadenado.\n\n"
@@ -1052,8 +1072,7 @@ class BrainToolUseLedgerEdgeCasesTests(unittest.TestCase):
         bot._resolve_actionable_task_objective = lambda text, *, state: (None, "missing_context")
 
         content = (
-            "Voy a hacer dispatch durable y cuando termine te entrego el digest.\n\n"
-            "Disparo ahora."
+            "Voy a hacer dispatch durable y cuando termine te entrego el digest.\n\nDisparo ahora."
         )
 
         rendered = bot._enforce_background_monitor_contract(
@@ -1118,11 +1137,7 @@ class BrainToolUseLedgerEdgeCasesTests(unittest.TestCase):
         # line is strippable. The reply must be preserved, not replaced wholesale.
         observe = _RecordingObserve()
         bot = _make_bot(observe, self.ledger)
-        content = (
-            "Listo, lo dejé anotado.\n\n"
-            "Cuando el proceso\n"
-            "termine te entrego el resultado."
-        )
+        content = "Listo, lo dejé anotado.\n\nCuando el proceso\ntermine te entrego el resultado."
 
         rendered = bot._enforce_background_monitor_contract(
             session_id="tg-test",

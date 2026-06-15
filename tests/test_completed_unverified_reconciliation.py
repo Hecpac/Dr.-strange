@@ -130,13 +130,9 @@ class CompletedUnverifiedReconciliationTests(unittest.TestCase):
         report = build_reconciliation_report(self.ledger)
         case_by_id = {case["task_id"]: case for case in report["cases"]}
         # tg-tA had Read+Grep → not require_human_verification
-        self.assertNotEqual(
-            case_by_id["tg-tA"]["recommended_action"], "require_human_verification"
-        )
+        self.assertNotEqual(case_by_id["tg-tA"]["recommended_action"], "require_human_verification")
         # tg-tB had Bash+Write → require_human_verification
-        self.assertEqual(
-            case_by_id["tg-tB"]["recommended_action"], "require_human_verification"
-        )
+        self.assertEqual(case_by_id["tg-tB"]["recommended_action"], "require_human_verification")
 
     def test_emits_pending_verification_reconciliation_event(self) -> None:
         observe = _RecordingObserve()
@@ -249,9 +245,7 @@ class DrainReconcilableUnverifiedTests(unittest.TestCase):
         # Drained row: cancelled + auto_closed_unverified_lookup (prod convention),
         # provenance stamped. completed_at preserved (terminal already).
         self.assertEqual(self.ledger.get("ro-overdue").status, "cancelled")
-        self.assertEqual(
-            self._verification_status("ro-overdue"), "auto_closed_unverified_lookup"
-        )
+        self.assertEqual(self._verification_status("ro-overdue"), "auto_closed_unverified_lookup")
         self.assertTrue(self.ledger.get("ro-overdue").metadata.get("reconciled_drained"))
         # Mutating / error / not-yet-overdue rows are left untouched.
         self.assertEqual(self._verification_status("mut-overdue"), "needs_verification")
@@ -393,9 +387,7 @@ class DrainReconcilableUnverifiedTests(unittest.TestCase):
         self.assertEqual(result["eligible_count"], 4)
         self.assertEqual(result["drained_count"], 2)
         self.assertEqual(result["skipped_over_max_apply"], 2)
-        cancelled = sum(
-            1 for i in range(4) if self.ledger.get(f"ro{i}").status == "cancelled"
-        )
+        cancelled = sum(1 for i in range(4) if self.ledger.get(f"ro{i}").status == "cancelled")
         self.assertEqual(cancelled, 2)
 
     def test_eligible_behind_scan_cap_reachable_with_larger_scan(self) -> None:

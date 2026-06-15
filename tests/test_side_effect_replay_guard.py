@@ -6,6 +6,7 @@ side effects (sends, pushes, publishes) would run twice. Adapters mark the
 failure with ``tools_executed_before_failure`` metadata; the router and the
 brain suppress their replays when the marker is present.
 """
+
 from __future__ import annotations
 
 import tempfile
@@ -69,7 +70,9 @@ class RouterFallbackSuppressionTests(unittest.TestCase):
             router = LLMRouter(
                 config=config,
                 adapters={
-                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=failing_after_tools),
+                    "anthropic": StaticAdapter(
+                        "anthropic", tool_capable=True, responder=failing_after_tools
+                    ),
                     "openai": StaticAdapter("openai", tool_capable=True, responder=counting_openai),
                 },
                 audit_sink=audit_events.append,
@@ -95,8 +98,12 @@ class RouterFallbackSuppressionTests(unittest.TestCase):
             router = LLMRouter(
                 config=config,
                 adapters={
-                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=failing_clean),
-                    "openai": StaticAdapter("openai", tool_capable=True, responder=echo_response("openai")),
+                    "anthropic": StaticAdapter(
+                        "anthropic", tool_capable=True, responder=failing_clean
+                    ),
+                    "openai": StaticAdapter(
+                        "openai", tool_capable=True, responder=echo_response("openai")
+                    ),
                 },
                 audit_sink=audit_events.append,
             )

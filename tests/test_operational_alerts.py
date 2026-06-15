@@ -64,7 +64,9 @@ class OperationalAlertRouterTests(unittest.TestCase):
 
         self.assertEqual(notifications, [])
         events = self.observe.recent_events(limit=2)
-        suppressed = [event for event in events if event["event_type"] == "operational_alert_suppressed"]
+        suppressed = [
+            event for event in events if event["event_type"] == "operational_alert_suppressed"
+        ]
         self.assertEqual(suppressed[0]["payload"]["reason"], "user_notified")
 
     def test_dedupes_repeated_alerts_within_cooldown(self) -> None:
@@ -83,7 +85,9 @@ class OperationalAlertRouterTests(unittest.TestCase):
 
         self.assertEqual(len(notifications), 1)
         events = self.observe.recent_events(limit=3)
-        self.assertTrue(any(event["event_type"] == "operational_alert_suppressed" for event in events))
+        self.assertTrue(
+            any(event["event_type"] == "operational_alert_suppressed" for event in events)
+        )
 
     def test_daemon_task_reconciliation_is_observe_only(self) -> None:
         notifications: list[str] = []
@@ -97,7 +101,9 @@ class OperationalAlertRouterTests(unittest.TestCase):
 
         self.assertEqual(notifications, [])
         events = self.observe.recent_events(limit=3)
-        suppressed = [event for event in events if event["event_type"] == "operational_alert_suppressed"]
+        suppressed = [
+            event for event in events if event["event_type"] == "operational_alert_suppressed"
+        ]
         self.assertEqual(suppressed[0]["payload"]["reason"], "observe_only")
         self.assertFalse(any(event["event_type"] == "operational_alert_sent" for event in events))
 

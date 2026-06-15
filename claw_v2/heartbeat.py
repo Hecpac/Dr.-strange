@@ -42,8 +42,14 @@ def update_agent_registry(snapshot: HeartbeatSnapshot, registry_path: Path) -> N
         cost = f"${info.get('cost_today', 0):.2f}"
         health = _compute_health(info)
         model = info.get("model", "-")
-        rows.append(f"| {name} | {model} | {status} | {last_action} | {last_metric} | {cost} | {health} |")
-    content = f"# Agent Registry\n\nAuto-updated every heartbeat.\n\n{header}{separator}" + "\n".join(rows) + "\n"
+        rows.append(
+            f"| {name} | {model} | {status} | {last_action} | {last_metric} | {cost} | {health} |"
+        )
+    content = (
+        f"# Agent Registry\n\nAuto-updated every heartbeat.\n\n{header}{separator}"
+        + "\n".join(rows)
+        + "\n"
+    )
     registry_path.parent.mkdir(parents=True, exist_ok=True)
     registry_path.write_text(content, encoding="utf-8")
 

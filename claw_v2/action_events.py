@@ -142,7 +142,9 @@ class ActionEvent:
             "originating_event_id": self.originating_event_id,
             "session_id": self.session_id,
             "proposed_next_action": (
-                self.proposed_next_action.to_dict() if self.proposed_next_action is not None else None
+                self.proposed_next_action.to_dict()
+                if self.proposed_next_action is not None
+                else None
             ),
             "risk_level": self.risk_level,
             "claims": list(self.claims),
@@ -163,7 +165,9 @@ class ActionEvent:
             goal_revision=int(data.get("goal_revision") or 1),
             originating_event_id=_optional_str(data.get("originating_event_id")),
             session_id=str(data["session_id"]),
-            proposed_next_action=ProposedAction.from_dict(proposed) if isinstance(proposed, dict) else None,
+            proposed_next_action=ProposedAction.from_dict(proposed)
+            if isinstance(proposed, dict)
+            else None,
             risk_level=str(data.get("risk_level") or "low"),  # type: ignore[arg-type]
             claims=[str(item) for item in data.get("claims", [])],
             evidence_refs=[str(item) for item in data.get("evidence_refs", [])],
@@ -225,7 +229,9 @@ def recover_orphan_actions(telemetry_root: Path | str, *, observe: Any | None = 
     for event in load_events(telemetry_root):
         if event.event_type == "action_proposed":
             proposed[event.event_id] = event
-        elif event.event_type in {"action_executed", "action_failed"} and event.originating_event_id:
+        elif (
+            event.event_type in {"action_executed", "action_failed"} and event.originating_event_id
+        ):
             finalized.add(event.originating_event_id)
 
     count = 0
@@ -271,7 +277,9 @@ def _latest_goal_revision(telemetry_root: Path | str, goal_id: str) -> int:
     return int(latest.get("goal_revision") or 1)
 
 
-def _record_restart_risk_signal(telemetry_root: Path | str, event: ActionEvent, *, observe: Any | None) -> str | None:
+def _record_restart_risk_signal(
+    telemetry_root: Path | str, event: ActionEvent, *, observe: Any | None
+) -> str | None:
     if event.proposed_next_action is None:
         return None
     from claw_v2.evidence_ledger import record_claim

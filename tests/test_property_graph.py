@@ -99,7 +99,9 @@ class PropertyGraphMaterializationTests(unittest.TestCase):
             wiki_dir = wiki_root / "wiki"
             wiki_dir.mkdir(parents=True)
             (wiki_dir / "alpha.md").write_text("# Alpha\n\nLinks to [[beta]].", encoding="utf-8")
-            (wiki_dir / "beta.md").write_text("---\ntitle: Beta Page\n---\n\nBack to [[alpha]].", encoding="utf-8")
+            (wiki_dir / "beta.md").write_text(
+                "---\ntitle: Beta Page\n---\n\nBack to [[alpha]].", encoding="utf-8"
+            )
 
             observe = ObserveStream(db_path)
             ledger = TaskLedger(db_path, observe=observe)
@@ -142,7 +144,9 @@ class PropertyGraphMaterializationTests(unittest.TestCase):
                 goal_id=goal.goal_id,
                 claim_text="Focused tests passed",
                 claim_type="fact",
-                evidence_refs=[EvidenceRef(kind="tool_call", ref="pytest tests/test_property_graph.py -q")],
+                evidence_refs=[
+                    EvidenceRef(kind="tool_call", ref="pytest tests/test_property_graph.py -q")
+                ],
                 verification_status="verified",
                 confidence=1.0,
             )
@@ -208,8 +212,12 @@ class PropertyGraphMaterializationTests(unittest.TestCase):
 
 
 def _graph_counts(graph: PropertyGraphProjection) -> tuple[int, int]:
-    node_count = graph._conn.execute("SELECT COUNT(*) AS count FROM graph_nodes").fetchone()["count"]
-    edge_count = graph._conn.execute("SELECT COUNT(*) AS count FROM graph_edges").fetchone()["count"]
+    node_count = graph._conn.execute("SELECT COUNT(*) AS count FROM graph_nodes").fetchone()[
+        "count"
+    ]
+    edge_count = graph._conn.execute("SELECT COUNT(*) AS count FROM graph_edges").fetchone()[
+        "count"
+    ]
     return int(node_count), int(edge_count)
 
 

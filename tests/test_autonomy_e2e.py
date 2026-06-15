@@ -4,6 +4,7 @@ Each test exercises BotService through ``runtime.bot.handle_text`` to
 confirm the full chain: capability classification, routing, slash-command
 guarding, NotebookLM resolver, and approval-required negative controls.
 """
+
 from __future__ import annotations
 
 import os
@@ -80,9 +81,7 @@ class AutonomyE2ETests(unittest.TestCase):
                 runtime = build_runtime(anthropic_executor=_stub_llm)
                 self._force_production_env(runtime)
                 # Force runtime probe to True to avoid socket fluctuation
-                runtime.bot._runtime_probe = type(
-                    "P", (), {"is_alive": lambda self: True}
-                )()
+                runtime.bot._runtime_probe = type("P", (), {"is_alive": lambda self: True})()
                 reply = runtime.bot.handle_text(
                     user_id="123",
                     session_id="s1",
@@ -102,12 +101,12 @@ class AutonomyE2ETests(unittest.TestCase):
             with patch.dict(os.environ, _runtime(root), clear=False):
                 runtime = build_runtime(anthropic_executor=_stub_llm)
                 self._force_production_env(runtime)
-                runtime.bot._runtime_probe = type(
-                    "P", (), {"is_alive": lambda self: True}
-                )()
+                runtime.bot._runtime_probe = type("P", (), {"is_alive": lambda self: True})()
                 calls: list[tuple[str, str, str, str]] = []
 
-                def fake_run_skill(agent: str, skill: str, context: str = "", *, lane: str = "research") -> str:
+                def fake_run_skill(
+                    agent: str, skill: str, context: str = "", *, lane: str = "research"
+                ) -> str:
                     calls.append((agent, skill, context, lane))
                     return "AI Brief listo\nFuente: test"
 
@@ -140,9 +139,7 @@ class AutonomyE2ETests(unittest.TestCase):
             root = Path(tmpdir)
             with patch.dict(os.environ, _runtime(root), clear=False):
                 runtime = build_runtime(anthropic_executor=_stub_llm)
-                runtime.bot._runtime_probe = type(
-                    "P", (), {"is_alive": lambda self: True}
-                )()
+                runtime.bot._runtime_probe = type("P", (), {"is_alive": lambda self: True})()
                 reply = runtime.bot.handle_text(
                     user_id="123",
                     session_id="tg-1",
@@ -161,9 +158,7 @@ class AutonomyE2ETests(unittest.TestCase):
                 runtime = build_runtime(anthropic_executor=_stub_llm)
                 # Strip the ai-news-daily skill from config and force runtime down.
                 runtime.bot.config.scheduled_sub_agents = []
-                runtime.bot._runtime_probe = type(
-                    "P", (), {"is_alive": lambda self: False}
-                )()
+                runtime.bot._runtime_probe = type("P", (), {"is_alive": lambda self: False})()
                 # Pretend we're running on a local terminal (not sandbox) so
                 # router can compute the blocked path instead of handoff.
                 runtime.bot._execution_environment = ExecutionEnvironment(
@@ -174,9 +169,7 @@ class AutonomyE2ETests(unittest.TestCase):
                     can_restart_launchd=True,
                     reason="forced_for_test",
                 )
-                runtime.bot.set_capability_status(
-                    "browser_use", available=False, reason="degraded"
-                )
+                runtime.bot.set_capability_status("browser_use", available=False, reason="degraded")
                 reply = runtime.bot.handle_text(
                     user_id="123",
                     session_id="s1",
@@ -201,9 +194,7 @@ class AutonomyE2ETests(unittest.TestCase):
                     can_restart_launchd=False,
                     reason="forced_for_test",
                 )
-                runtime.bot._runtime_probe = type(
-                    "P", (), {"is_alive": lambda self: False}
-                )()
+                runtime.bot._runtime_probe = type("P", (), {"is_alive": lambda self: False})()
                 runtime.config.web_chat_port = 1
                 reply = runtime.bot.handle_text(
                     user_id="123",
@@ -224,9 +215,7 @@ class AutonomyE2ETests(unittest.TestCase):
                 runtime = build_runtime(anthropic_executor=_stub_llm)
                 self._force_production_env(runtime)
                 runtime.bot.set_capability_status("chrome_cdp", available=True)
-                runtime.bot._runtime_probe = type(
-                    "P", (), {"is_alive": lambda self: True}
-                )()
+                runtime.bot._runtime_probe = type("P", (), {"is_alive": lambda self: True})()
                 # CDP route returns None (let chrome handler proceed); confirm
                 # event is emitted before fallthrough.
                 runtime.bot.handle_text(
@@ -245,9 +234,7 @@ class AutonomyE2ETests(unittest.TestCase):
                 runtime = build_runtime(anthropic_executor=_stub_llm)
                 self._force_production_env(runtime)
                 runtime.bot.set_capability_status("chrome_cdp", available=False)
-                runtime.bot._runtime_probe = type(
-                    "P", (), {"is_alive": lambda self: True}
-                )()
+                runtime.bot._runtime_probe = type("P", (), {"is_alive": lambda self: True})()
                 reply = runtime.bot.handle_text(
                     user_id="123",
                     session_id="s1",
@@ -264,11 +251,9 @@ class AutonomyE2ETests(unittest.TestCase):
             with patch.dict(os.environ, _runtime(root), clear=False):
                 runtime = build_runtime(anthropic_executor=_stub_llm)
                 # /quality is a real slash command — must not get hijacked.
-                reply = runtime.bot.handle_text(
-                    user_id="123", session_id="s1", text="/quality"
-                )
+                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/quality")
                 # Quality returns a JSON payload string
-                self.assertIn("\"tasks\"", reply)
+                self.assertIn('"tasks"', reply)
                 events = self._events_of(runtime, "capability_route_selected")
                 self.assertEqual(events, [])
 
@@ -277,9 +262,7 @@ class AutonomyE2ETests(unittest.TestCase):
         from claw_v2.nlm_handler import NlmHandler
 
         def get_state(_: str):
-            return {
-                "active_object": {"kind": "notebook", "id": "nb-final", "title": "FinalDoc"}
-            }
+            return {"active_object": {"kind": "notebook", "id": "nb-final", "title": "FinalDoc"}}
 
         handler = NlmHandler(get_session_state=get_state)
         message = handler._missing_notebook_response("s1")
@@ -293,9 +276,7 @@ class AutonomyE2ETests(unittest.TestCase):
             root = Path(tmpdir)
             with patch.dict(os.environ, _runtime(root), clear=False):
                 runtime = build_runtime(anthropic_executor=_stub_llm)
-                runtime.bot.handle_text(
-                    user_id="123", session_id="s1", text="/autonomy autonomous"
-                )
+                runtime.bot.handle_text(user_id="123", session_id="s1", text="/autonomy autonomous")
                 reply = runtime.bot.handle_text(
                     user_id="123",
                     session_id="s1",
@@ -310,9 +291,7 @@ class AutonomyE2ETests(unittest.TestCase):
             root = Path(tmpdir)
             with patch.dict(os.environ, _runtime(root), clear=False):
                 runtime = build_runtime(anthropic_executor=_stub_llm)
-                runtime.bot.handle_text(
-                    user_id="123", session_id="s1", text="/autonomy autonomous"
-                )
+                runtime.bot.handle_text(user_id="123", session_id="s1", text="/autonomy autonomous")
                 reply = runtime.bot.handle_text(
                     user_id="123",
                     session_id="s1",
@@ -331,9 +310,7 @@ class AutonomyE2ETests(unittest.TestCase):
         def update(session_id: str, **kwargs):
             states.setdefault(session_id, {}).update(kwargs)
 
-        mc = MissionController(
-            get_session_state=get, update_session_state=update
-        )
+        mc = MissionController(get_session_state=get, update_session_state=update)
         mc.start_or_resume(
             session_id="s1",
             objective="dame ai news",
@@ -359,19 +336,13 @@ class AutonomyE2ETests(unittest.TestCase):
                     "capability_route_blocked",
                     payload={"route": "blocked", "task_kind": "x_trends"},
                 )
-                reply = runtime.bot.handle_text(
-                    user_id="123", session_id="s1", text="/quality"
-                )
+                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/quality")
                 import json as _json
 
                 payload = _json.loads(reply)
                 self.assertIn("autonomy_routing", payload)
-                self.assertEqual(
-                    payload["autonomy_routing"]["capability_route_selected_count"], 1
-                )
-                self.assertEqual(
-                    payload["autonomy_routing"]["capability_route_blocked_count"], 1
-                )
+                self.assertEqual(payload["autonomy_routing"]["capability_route_selected_count"], 1)
+                self.assertEqual(payload["autonomy_routing"]["capability_route_blocked_count"], 1)
 
 
 if __name__ == "__main__":

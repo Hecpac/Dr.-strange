@@ -66,9 +66,7 @@ class WatchdogConfig:
     def from_env(cls, env: Mapping[str, str] | None = None) -> "WatchdogConfig":
         env = os.environ if env is None else env
         strikes = _env_int(env, "CLAW_WATCHDOG_STRIKES", DEFAULT_STRIKES_REQUIRED)
-        grace = _env_float(
-            env, "CLAW_WATCHDOG_BOOTSTRAP_GRACE_S", DEFAULT_BOOTSTRAP_GRACE_S
-        )
+        grace = _env_float(env, "CLAW_WATCHDOG_BOOTSTRAP_GRACE_S", DEFAULT_BOOTSTRAP_GRACE_S)
         return cls(
             # A negative grace would silently disable the bootstrap window
             # (uptime < grace is never true); treat it as a misconfiguration
@@ -233,9 +231,7 @@ def main(
         print(OK)
         return 0
 
-    decision = run_cycle(
-        report, uptime_s=uptime_s, state_path=state_path, config=config
-    )
+    decision = run_cycle(report, uptime_s=uptime_s, state_path=state_path, config=config)
     sys.stderr.write(f"claw-watchdog: {decision.action} ({decision.reason})\n")
     print(decision.action)
     return 0

@@ -21,6 +21,7 @@ Verified live 2026-05-28 on @pachanodesign. The success signal is the IG
 confirmation modal text (matched case-insensitively — the modal capitalizes
 "Se compartió tu reel", which a naive lowercase check misses).
 """
+
 from __future__ import annotations
 
 import time
@@ -49,8 +50,10 @@ SHARE_SUCCESS_PHRASES = (
 CREATE_LABELS = ("Crear", "Create")
 POST_SUBMENU_LABELS = ("Publicación", "Post")
 SELECT_FILE_LABELS = (
-    "Seleccionar desde la computadora", "Seleccionar desde el dispositivo",
-    "Select from computer", "Select From Computer",
+    "Seleccionar desde la computadora",
+    "Seleccionar desde el dispositivo",
+    "Select from computer",
+    "Select From Computer",
 )
 OK_LABELS = ("OK", "Aceptar")
 NEXT_LABELS = ("Siguiente", "Next")
@@ -64,8 +67,7 @@ CAPTION_SELECTORS = (
 
 def _norm_text(text: str) -> str:
     return "".join(
-        ch for ch in unicodedata.normalize("NFD", text or "")
-        if unicodedata.category(ch) != "Mn"
+        ch for ch in unicodedata.normalize("NFD", text or "") if unicodedata.category(ch) != "Mn"
     ).lower()
 
 
@@ -194,7 +196,9 @@ class InstagramPublishService:
         except Exception:
             pass
         try:
-            page.locator('svg[aria-label="Nueva publicación"], svg[aria-label="New post"]').first.click(timeout=timeout)
+            page.locator(
+                'svg[aria-label="Nueva publicación"], svg[aria-label="New post"]'
+            ).first.click(timeout=timeout)
             return True
         except Exception:
             return False
@@ -215,7 +219,11 @@ class InstagramPublishService:
 
     def _profile_snapshot(self, page: Any, account: str) -> tuple[str | None, str | None]:
         try:
-            page.goto(f"https://www.instagram.com/{account}/", wait_until="domcontentloaded", timeout=45000)
+            page.goto(
+                f"https://www.instagram.com/{account}/",
+                wait_until="domcontentloaded",
+                timeout=45000,
+            )
             page.wait_for_timeout(6000)
         except Exception:
             # Navigation failed: evaluating whatever page is still loaded would
@@ -405,7 +413,9 @@ class InstagramPublishService:
             before_count = before_top = None
             if require_profile_verification:
                 before_count, before_top = self._profile_snapshot(page, account)
-                page.goto("https://www.instagram.com/", wait_until="domcontentloaded", timeout=45000)
+                page.goto(
+                    "https://www.instagram.com/", wait_until="domcontentloaded", timeout=45000
+                )
                 page.wait_for_timeout(2500)
 
             if not self._click_instagram_create(page, 6000):
@@ -422,9 +432,11 @@ class InstagramPublishService:
             page.wait_for_timeout(2000)
             self._shot(page, "01_menu", shots)
 
-            for loc in (page.get_by_text("Publicación", exact=True),
-                        page.get_by_role("link", name="Publicación"),
-                        page.get_by_text("Post", exact=True)):
+            for loc in (
+                page.get_by_text("Publicación", exact=True),
+                page.get_by_role("link", name="Publicación"),
+                page.get_by_text("Post", exact=True),
+            ):
                 try:
                     loc.first.click(timeout=3000)
                     break
@@ -486,7 +498,9 @@ class InstagramPublishService:
                     pass
                 if not self._click_any_role(page, NEXT_LABELS, 4000):
                     try:
-                        page.locator('div[role="button"]:has-text("Siguiente"), div[role="button"]:has-text("Next")').first.click(timeout=4000)
+                        page.locator(
+                            'div[role="button"]:has-text("Siguiente"), div[role="button"]:has-text("Next")'
+                        ).first.click(timeout=4000)
                     except Exception:
                         pass
                 page.wait_for_timeout(3000)
@@ -521,7 +535,9 @@ class InstagramPublishService:
             shared_click = self._click_any_role(page, SHARE_LABELS, 5000)
             if not shared_click:
                 try:
-                    page.locator('div[role="button"]:has-text("Compartir"), div[role="button"]:has-text("Share")').first.click(timeout=5000)
+                    page.locator(
+                        'div[role="button"]:has-text("Compartir"), div[role="button"]:has-text("Share")'
+                    ).first.click(timeout=5000)
                     shared_click = True
                 except Exception:
                     pass
@@ -557,7 +573,9 @@ class InstagramPublishService:
             if require_profile_verification:
                 after_count, after_top = self._profile_snapshot(page, account)
                 self._shot(page, "05_profile", shots)
-                profile_verified = self._profile_changed(before_count, after_count, before_top, after_top)
+                profile_verified = self._profile_changed(
+                    before_count, after_count, before_top, after_top
+                )
 
             ok = verified and (profile_verified if require_profile_verification else True)
             if not verified:

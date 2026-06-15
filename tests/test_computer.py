@@ -60,7 +60,14 @@ class ActionExecutorTests(unittest.TestCase):
     def test_scroll_action(self) -> None:
         svc = ComputerUseService(display_width=1280, display_height=800)
         with patch("claw_v2.computer.pyautogui") as mock_pag:
-            svc.execute_action({"action": "scroll", "coordinate": [500, 400], "scroll_direction": "down", "scroll_amount": 3})
+            svc.execute_action(
+                {
+                    "action": "scroll",
+                    "coordinate": [500, 400],
+                    "scroll_direction": "down",
+                    "scroll_amount": 3,
+                }
+            )
         mock_pag.moveTo.assert_called_once()
         mock_pag.scroll.assert_called_once_with(-3)
 
@@ -72,7 +79,9 @@ class ActionExecutorTests(unittest.TestCase):
 
     def test_screenshot_action_calls_capture(self) -> None:
         svc = ComputerUseService(display_width=1280, display_height=800)
-        with patch.object(svc, "capture_screenshot", return_value={"data": "abc", "media_type": "image/png"}) as mock_cap:
+        with patch.object(
+            svc, "capture_screenshot", return_value={"data": "abc", "media_type": "image/png"}
+        ) as mock_cap:
             result = svc.execute_action({"action": "screenshot"})
         mock_cap.assert_called_once()
         self.assertEqual(result["data"], "abc")
@@ -107,7 +116,9 @@ def _mock_openai_response(*, computer_calls=None, text=None, response_id="resp_1
         for call in computer_calls:
             action_mock = MagicMock()
             action_mock.model_dump.return_value = call["action"]
-            output.append(MagicMock(type="computer_call", call_id=call["call_id"], action=action_mock))
+            output.append(
+                MagicMock(type="computer_call", call_id=call["call_id"], action=action_mock)
+            )
     if text:
         output.append(MagicMock(type="text", text=text))
     return MagicMock(id=response_id, output=output)
@@ -125,7 +136,12 @@ class AgentLoopTests(unittest.TestCase):
             call_count[0] += 1
             if call_count[0] == 1:
                 return _mock_openai_response(
-                    computer_calls=[{"call_id": "call_1", "action": {"type": "click", "x": 500, "y": 300, "button": "left"}}],
+                    computer_calls=[
+                        {
+                            "call_id": "call_1",
+                            "action": {"type": "click", "x": 500, "y": 300, "button": "left"},
+                        }
+                    ],
                     response_id="resp_1",
                 )
             return _mock_openai_response(text="Done! I clicked the button.", response_id="resp_2")
@@ -134,7 +150,9 @@ class AgentLoopTests(unittest.TestCase):
         mock_client.responses.create.side_effect = fake_create
 
         with patch("claw_v2.computer.pyautogui"):
-            with patch.object(svc, "capture_screenshot", return_value={"data": "fake", "media_type": "image/png"}):
+            with patch.object(
+                svc, "capture_screenshot", return_value={"data": "fake", "media_type": "image/png"}
+            ):
                 result = svc.run_agent_loop(
                     session=session,
                     client=mock_client,
@@ -151,7 +169,9 @@ class AgentLoopTests(unittest.TestCase):
     def test_agent_loop_stops_at_max_iterations(self) -> None:
         svc = ComputerUseService(display_width=1280, display_height=800)
         gate = ActionGate(sensitive_urls=[])
-        session = ComputerSession(task="infinite task", max_iterations=2, current_url="https://example.com")
+        session = ComputerSession(
+            task="infinite task", max_iterations=2, current_url="https://example.com"
+        )
 
         def always_computer_call(**kwargs):
             return _mock_openai_response(
@@ -161,7 +181,9 @@ class AgentLoopTests(unittest.TestCase):
         mock_client = MagicMock()
         mock_client.responses.create.side_effect = always_computer_call
 
-        with patch.object(svc, "capture_screenshot", return_value={"data": "fake", "media_type": "image/png"}):
+        with patch.object(
+            svc, "capture_screenshot", return_value={"data": "fake", "media_type": "image/png"}
+        ):
             result = svc.run_agent_loop(
                 session=session,
                 client=mock_client,
@@ -179,13 +201,20 @@ class AgentLoopTests(unittest.TestCase):
 
         def fake_create(**kwargs):
             return _mock_openai_response(
-                computer_calls=[{"call_id": "call_1", "action": {"type": "click", "x": 500, "y": 300, "button": "left"}}],
+                computer_calls=[
+                    {
+                        "call_id": "call_1",
+                        "action": {"type": "click", "x": 500, "y": 300, "button": "left"},
+                    }
+                ],
             )
 
         mock_client = MagicMock()
         mock_client.responses.create.side_effect = fake_create
 
-        with patch.object(svc, "capture_screenshot", return_value={"data": "fake", "media_type": "image/png"}):
+        with patch.object(
+            svc, "capture_screenshot", return_value={"data": "fake", "media_type": "image/png"}
+        ):
             result = svc.run_agent_loop(
                 session=session,
                 client=mock_client,
@@ -202,18 +231,31 @@ class AgentLoopTests(unittest.TestCase):
         gate = ActionGate(sensitive_urls=[])
         session = ComputerSession(
             task="click continue",
-            messages=[{"role": "user", "content": [{"type": "input_text", "text": "click continue"}]}],
-            pending_action={"call_id": "call_1", "type": "click", "x": 500, "y": 300, "button": "left"},
+            messages=[
+                {"role": "user", "content": [{"type": "input_text", "text": "click continue"}]}
+            ],
+            pending_action={
+                "call_id": "call_1",
+                "type": "click",
+                "x": 500,
+                "y": 300,
+                "button": "left",
+            },
             status="running",
         )
 
         mock_client = MagicMock()
         mock_client.responses.create.return_value = _mock_openai_response(
-            text="Done after approval.", response_id="resp_2",
+            text="Done after approval.",
+            response_id="resp_2",
         )
 
-        with patch.object(svc, "execute_action", return_value={"data": "fake", "media_type": "image/png"}) as mock_exec:
-            with patch.object(svc, "capture_screenshot", return_value={"data": "fake", "media_type": "image/png"}):
+        with patch.object(
+            svc, "execute_action", return_value={"data": "fake", "media_type": "image/png"}
+        ) as mock_exec:
+            with patch.object(
+                svc, "capture_screenshot", return_value={"data": "fake", "media_type": "image/png"}
+            ):
                 result = svc.run_agent_loop(
                     session=session,
                     client=mock_client,
@@ -241,7 +283,12 @@ class AgentLoopTests(unittest.TestCase):
             call_count[0] += 1
             if call_count[0] == 1:
                 return _mock_openai_response(
-                    computer_calls=[{"call_id": "call_1", "action": {"type": "click", "x": 500, "y": 300, "button": "left"}}],
+                    computer_calls=[
+                        {
+                            "call_id": "call_1",
+                            "action": {"type": "click", "x": 500, "y": 300, "button": "left"},
+                        }
+                    ],
                     response_id="resp_1",
                 )
             return _mock_openai_response(text="Done.", response_id="resp_2")
@@ -270,12 +317,14 @@ class AgentLoopTests(unittest.TestCase):
 class BrowserUseServiceTests(unittest.TestCase):
     def test_init_defaults(self) -> None:
         from claw_v2.computer import BrowserUseService
+
         svc = BrowserUseService()
         self.assertEqual(svc.cdp_url, "http://localhost:9250")
         self.assertTrue(svc.headless)
 
     def test_init_custom(self) -> None:
         from claw_v2.computer import BrowserUseService
+
         svc = BrowserUseService(cdp_url="http://localhost:9333", headless=False)
         self.assertEqual(svc.cdp_url, "http://localhost:9333")
         self.assertFalse(svc.headless)
@@ -286,16 +335,20 @@ class BrowserUseServiceTests(unittest.TestCase):
         # NEVER patch("browser_use.X") here: that imports the real browser_use,
         # which loads the repo .env into os.environ and pollutes later tests.
         import types
+
         module = types.SimpleNamespace(ChatAnthropic=MagicMock(), ChatOpenAI=MagicMock())
         return module
 
     def test_build_llm_claude_uses_max_oauth_token_and_fallback(self) -> None:
         import sys
         from claw_v2.computer import BrowserUseService
+
         svc = BrowserUseService()
         module = self._fake_browser_use_llm_module()
-        with patch.dict(sys.modules, {"browser_use": module}), \
-                patch("claw_v2.computer._resolve_claude_oauth_token", return_value="tok123"):
+        with (
+            patch.dict(sys.modules, {"browser_use": module}),
+            patch("claw_v2.computer._resolve_claude_oauth_token", return_value="tok123"),
+        ):
             primary, fallback = svc._build_browser_llm("claude-sonnet-4-6")
         module.ChatOpenAI.assert_not_called()
         self.assertEqual(module.ChatAnthropic.call_count, 2)  # primary + fallback
@@ -309,16 +362,20 @@ class BrowserUseServiceTests(unittest.TestCase):
     def test_build_llm_claude_without_token_raises(self) -> None:
         import sys
         from claw_v2.computer import BrowserUseService
+
         svc = BrowserUseService()
         module = self._fake_browser_use_llm_module()
-        with patch.dict(sys.modules, {"browser_use": module}), \
-                patch("claw_v2.computer._resolve_claude_oauth_token", return_value=None):
+        with (
+            patch.dict(sys.modules, {"browser_use": module}),
+            patch("claw_v2.computer._resolve_claude_oauth_token", return_value=None),
+        ):
             with self.assertRaises(RuntimeError):
                 svc._build_browser_llm("claude-sonnet-4-6")
 
     def test_build_llm_non_claude_uses_openai_no_fallback(self) -> None:
         import sys
         from claw_v2.computer import BrowserUseService
+
         svc = BrowserUseService()
         module = self._fake_browser_use_llm_module()
         with patch.dict(sys.modules, {"browser_use": module}):
@@ -330,6 +387,7 @@ class BrowserUseServiceTests(unittest.TestCase):
     def test_suppress_anthropic_api_key_guard(self) -> None:
         import os
         from claw_v2.computer import _suppress_anthropic_api_key
+
         with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-api03-x"}, clear=False):
             with _suppress_anthropic_api_key(True):
                 self.assertNotIn("ANTHROPIC_API_KEY", os.environ)
@@ -342,12 +400,14 @@ class BrowserUseServiceTests(unittest.TestCase):
 class CodexComputerBackendTests(unittest.TestCase):
     def test_transport_override_returns_fixed_result(self) -> None:
         from claw_v2.computer import CodexComputerBackend
+
         backend = CodexComputerBackend(transport=lambda task: "done: opened Chrome")
         result = backend.run("open Chrome")
         self.assertEqual(result, "done: opened Chrome")
 
     def test_raises_runtime_error_when_cli_not_found(self) -> None:
         from claw_v2.computer import CodexComputerBackend
+
         backend = CodexComputerBackend(cli_path="nonexistent-codex-xyz")
         with self.assertRaises(RuntimeError):
             backend.run("open Chrome")
@@ -355,6 +415,7 @@ class CodexComputerBackendTests(unittest.TestCase):
     def test_raises_runtime_error_on_nonzero_exit(self) -> None:
         from claw_v2.computer import CodexComputerBackend
         from unittest.mock import patch, MagicMock
+
         backend = CodexComputerBackend(cli_path="codex")
         fake_result = MagicMock(returncode=1, stdout="", stderr="failed")
         with patch("claw_v2.computer.subprocess.run", return_value=fake_result):
@@ -365,6 +426,7 @@ class CodexComputerBackendTests(unittest.TestCase):
     def test_successful_run_returns_stdout(self) -> None:
         from claw_v2.computer import CodexComputerBackend
         from unittest.mock import patch, MagicMock
+
         backend = CodexComputerBackend(cli_path="codex", model="codex-mini-latest")
         fake_result = MagicMock(returncode=0, stdout="Opened Chrome successfully.\n", stderr="")
         with patch("claw_v2.computer.subprocess.run", return_value=fake_result):
@@ -374,11 +436,16 @@ class CodexComputerBackendTests(unittest.TestCase):
 
     def test_computer_use_service_pauses_codex_backend_for_approval(self) -> None:
         from claw_v2.computer import CodexComputerBackend, ComputerUseService, ComputerSession
+
         calls: list[str] = []
-        backend = CodexComputerBackend(transport=lambda task: calls.append(task) or f"completed: {task}")
+        backend = CodexComputerBackend(
+            transport=lambda task: calls.append(task) or f"completed: {task}"
+        )
         svc = ComputerUseService(display_width=1280, display_height=800, codex_backend=backend)
         session = ComputerSession(task="open Safari")
-        result = svc.run_agent_loop(session=session, client=None, gate=None, model="codex-mini-latest")
+        result = svc.run_agent_loop(
+            session=session, client=None, gate=None, model="codex-mini-latest"
+        )
         self.assertIn("needs approval", result)
         self.assertEqual(session.status, "awaiting_approval")
         self.assertEqual(session.pending_action["action"], "codex_computer_task")
@@ -386,8 +453,11 @@ class CodexComputerBackendTests(unittest.TestCase):
 
     def test_computer_use_service_runs_codex_backend_after_approval(self) -> None:
         from claw_v2.computer import CodexComputerBackend, ComputerUseService, ComputerSession
+
         calls: list[str] = []
-        backend = CodexComputerBackend(transport=lambda task: calls.append(task) or f"completed: {task}")
+        backend = CodexComputerBackend(
+            transport=lambda task: calls.append(task) or f"completed: {task}"
+        )
         svc = ComputerUseService(display_width=1280, display_height=800, codex_backend=backend)
         session = ComputerSession(
             task="open Safari",
@@ -397,7 +467,9 @@ class CodexComputerBackendTests(unittest.TestCase):
                 "approval_id": "approval-1",
             },
         )
-        result = svc.run_agent_loop(session=session, client=None, gate=None, model="codex-mini-latest")
+        result = svc.run_agent_loop(
+            session=session, client=None, gate=None, model="codex-mini-latest"
+        )
         self.assertEqual(result, "completed: open Safari")
         self.assertEqual(session.status, "done")
         self.assertIsNone(session.pending_action)
@@ -447,8 +519,10 @@ class BrowserUseModelTests(unittest.TestCase):
             ChatOpenAI=FakeChatLLM,
             ChatAnthropic=FakeChatLLM,
         )
-        with patch.dict(sys.modules, {"browser_use": module}), \
-                patch("claw_v2.computer._resolve_claude_oauth_token", return_value="tok"):
+        with (
+            patch.dict(sys.modules, {"browser_use": module}),
+            patch("claw_v2.computer._resolve_claude_oauth_token", return_value="tok"),
+        ):
             svc = BrowserUseService()
             if explicit is None:
                 asyncio.run(svc.run_task("t"))
@@ -474,7 +548,6 @@ class _ComputerHandlerConfigTest(unittest.TestCase):
 
 
 class ComputerHandlerModelTests(_ComputerHandlerConfigTest):
-
     def test_reads_config_model(self) -> None:
         import types
 
@@ -491,7 +564,9 @@ class ComputerHandlerModelTests(_ComputerHandlerConfigTest):
             self._handler(types.SimpleNamespace())._browser_use_model(), DEFAULT_BROWSER_USE_MODEL
         )
         self.assertEqual(
-            self._handler(types.SimpleNamespace(computer_browser_use_model="  "))._browser_use_model(),
+            self._handler(
+                types.SimpleNamespace(computer_browser_use_model="  ")
+            )._browser_use_model(),
             DEFAULT_BROWSER_USE_MODEL,
         )
 
@@ -546,8 +621,12 @@ class BrowserUseArtifactTests(unittest.TestCase):
 
         module, events = self._fakes()
         with tempfile.TemporaryDirectory() as tmp:
-            with patch.dict(sys.modules, {"browser_use": module}), \
-                    patch.object(BrowserUseService, "_build_browser_llm", return_value=(object(), None)):
+            with (
+                patch.dict(sys.modules, {"browser_use": module}),
+                patch.object(
+                    BrowserUseService, "_build_browser_llm", return_value=(object(), None)
+                ),
+            ):
                 svc = BrowserUseService()
                 result = asyncio.run(svc.run_task("crea imagen", artifact_dir=tmp))
             self.assertIn("imagen creada", result)
@@ -564,8 +643,10 @@ class BrowserUseArtifactTests(unittest.TestCase):
         from claw_v2.computer import BrowserUseService
 
         module, _ = self._fakes(screenshot_raises=True, final="texto resultado")
-        with patch.dict(sys.modules, {"browser_use": module}), \
-                patch.object(BrowserUseService, "_build_browser_llm", return_value=(object(), None)):
+        with (
+            patch.dict(sys.modules, {"browser_use": module}),
+            patch.object(BrowserUseService, "_build_browser_llm", return_value=(object(), None)),
+        ):
             svc = BrowserUseService()
             result = asyncio.run(svc.run_task("hola"))
         self.assertEqual(result, "texto resultado")
@@ -600,8 +681,10 @@ class BrowserUseArtifactTests(unittest.TestCase):
         module = types.SimpleNamespace(
             Agent=FakeAgent, BrowserSession=FakeBrowserSession, ChatOpenAI=FakeChatOpenAI
         )
-        with patch.dict(sys.modules, {"browser_use": module}), \
-                patch.object(BrowserUseService, "_build_browser_llm", return_value=(object(), None)):
+        with (
+            patch.dict(sys.modules, {"browser_use": module}),
+            patch.object(BrowserUseService, "_build_browser_llm", return_value=(object(), None)),
+        ):
             svc = BrowserUseService()
             with self.assertRaises(asyncio.TimeoutError):
                 asyncio.run(svc.run_task("t", timeout=0.05))
@@ -648,8 +731,12 @@ class BrowserUseArtifactTests(unittest.TestCase):
             Agent=FakeAgent, BrowserSession=FakeBrowserSession, ChatOpenAI=FakeChatOpenAI
         )
         with patch.object(computer_mod, "_BROWSER_USE_CAPTURE_TIMEOUT_SECONDS", 0.05):
-            with patch.dict(sys.modules, {"browser_use": module}), \
-                    patch.object(BrowserUseService, "_build_browser_llm", return_value=(object(), None)):
+            with (
+                patch.dict(sys.modules, {"browser_use": module}),
+                patch.object(
+                    BrowserUseService, "_build_browser_llm", return_value=(object(), None)
+                ),
+            ):
                 svc = BrowserUseService()
                 result = asyncio.run(svc.run_task("t", timeout=5))
         self.assertEqual(result, "completado")
@@ -691,8 +778,10 @@ class BrowserUseArtifactTests(unittest.TestCase):
         module = types.SimpleNamespace(
             Agent=FakeAgent, BrowserSession=FakeBrowserSession, ChatOpenAI=FakeChatOpenAI
         )
-        with patch.dict(sys.modules, {"browser_use": module}), \
-                patch.object(BrowserUseService, "_build_browser_llm", return_value=(object(), None)):
+        with (
+            patch.dict(sys.modules, {"browser_use": module}),
+            patch.object(BrowserUseService, "_build_browser_llm", return_value=(object(), None)),
+        ):
             svc = BrowserUseService()
             result = asyncio.run(
                 svc.run_task(
@@ -746,8 +835,10 @@ class BrowserUseArtifactTests(unittest.TestCase):
         module = types.SimpleNamespace(
             Agent=FakeAgent, BrowserSession=FakeBrowserSession, ChatOpenAI=FakeChatOpenAI
         )
-        with patch.dict(sys.modules, {"browser_use": module}), \
-                patch.object(BrowserUseService, "_build_browser_llm", return_value=(object(), None)):
+        with (
+            patch.dict(sys.modules, {"browser_use": module}),
+            patch.object(BrowserUseService, "_build_browser_llm", return_value=(object(), None)),
+        ):
             svc = BrowserUseService()
             asyncio.run(svc.run_task("t"))
         self.assertTrue(
@@ -792,9 +883,7 @@ class BrowserUseArtifactTests(unittest.TestCase):
             def __init__(self, **kwargs):
                 pass
 
-        module = types.SimpleNamespace(
-            BrowserSession=FakeBrowserSession, ChatOpenAI=FakeChatOpenAI
-        )
+        module = types.SimpleNamespace(BrowserSession=FakeBrowserSession, ChatOpenAI=FakeChatOpenAI)
         with patch.dict(sys.modules, {"browser_use": module}):
             svc = BrowserUseService()
             asyncio.run(svc.quick_screenshot("https://example.com"))
@@ -828,7 +917,9 @@ class BrowserUseGuardTests(unittest.TestCase):
                 approved_domains=[],
                 allow_high_risk_actions=False,
             )
-            self.assertEqual({key: os.environ.get(key) for key in keys}, {key: None for key in keys})
+            self.assertEqual(
+                {key: os.environ.get(key) for key in keys}, {key: None for key in keys}
+            )
         finally:
             for key, value in original.items():
                 if value is None:
@@ -949,7 +1040,9 @@ class ComputerHandlerSessionArtifactTests(unittest.TestCase):
             scope = {
                 "backend": "openai",
                 "action_hash": hashlib.sha256(
-                    json.dumps(session.pending_action, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                    json.dumps(
+                        session.pending_action, sort_keys=True, separators=(",", ":")
+                    ).encode("utf-8")
                 ).hexdigest(),
                 "current_url": "https://example.com",
                 "url_origin": "https://example.com",
@@ -1070,9 +1163,7 @@ class ComputerHandlerSessionArtifactTests(unittest.TestCase):
 
         approvals.create.assert_called_once()
         self.assertNotIn("aprobación segura", result)
-        self.assertFalse(
-            any(e[0] == "computer_approval_blocked_no_screenshot" for e in events)
-        )
+        self.assertFalse(any(e[0] == "computer_approval_blocked_no_screenshot" for e in events))
 
 
 class DelegatedBrowserTaskTests(unittest.TestCase):
@@ -1328,7 +1419,9 @@ class DelegatedBrowserTaskTests(unittest.TestCase):
 
         failed = handler.run_delegated_browser_task("repaso por X", task_id="t-fail", mode="browse")
         capability.fail = False
-        succeeded = handler.run_delegated_browser_task("repaso por X", task_id="t-ok", mode="browse")
+        succeeded = handler.run_delegated_browser_task(
+            "repaso por X", task_id="t-ok", mode="browse"
+        )
 
         self.assertIn("Necesito abrir/login Chrome", failed)
         self.assertEqual(succeeded, "ran")
@@ -1392,7 +1485,9 @@ class DelegatedBrowserTaskTests(unittest.TestCase):
             browser_capability=capability,
         )
         ports_by_thread = {"browser-first": 9250, "browser-second": 9251}
-        handler._delegated_browser_cdp_port = lambda: ports_by_thread[threading.current_thread().name]
+        handler._delegated_browser_cdp_port = lambda: ports_by_thread[
+            threading.current_thread().name
+        ]
         results: dict[str, str] = {}
         errors: list[BaseException] = []
 
@@ -1442,7 +1537,6 @@ class DelegatedBrowserTaskTests(unittest.TestCase):
 
 
 class ComputerHandlerTimeoutTests(_ComputerHandlerConfigTest):
-
     def test_timeout_defaults_to_constant_without_config(self) -> None:
         from claw_v2.computer_handler import BROWSER_USE_TIMEOUT_SECONDS
 

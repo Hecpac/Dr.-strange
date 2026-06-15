@@ -1,4 +1,5 @@
 """Tests for the two-timeline transcript writer (Petri verifier commit #6)."""
+
 from __future__ import annotations
 
 import tempfile

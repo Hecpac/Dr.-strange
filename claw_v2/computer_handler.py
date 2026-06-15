@@ -189,7 +189,12 @@ class ComputerHandler:
                 "encoded_bytes": len(str(screenshot.get("data") or "")),
             },
         )
-        return json.dumps({"screenshot_data": screenshot["data"][:100] + "...", "media_type": screenshot["media_type"]})
+        return json.dumps(
+            {
+                "screenshot_data": screenshot["data"][:100] + "...",
+                "media_type": screenshot["media_type"],
+            }
+        )
 
     def computer_response(self, instruction: str, session_id: str) -> str:
         degraded = self._check_capability("computer_use", "computer use unavailable")
@@ -304,7 +309,9 @@ class ComputerHandler:
                     gate=gate,
                     model=self.computer_model,
                     system_prompt=self.computer_system_prompt,
-                    current_url_resolver=lambda: self._resolve_current_url(session_id, getattr(session, "task", "")),
+                    current_url_resolver=lambda: self._resolve_current_url(
+                        session_id, getattr(session, "task", "")
+                    ),
                 )
         except Exception as exc:
             self._sessions.pop(session_id, None)
@@ -332,7 +339,9 @@ class ComputerHandler:
                 },
             )
             if self.observe is not None:
-                self.observe.emit("error", payload={"source": "computer_use", "error": message[:200]})
+                self.observe.emit(
+                    "error", payload={"source": "computer_use", "error": message[:200]}
+                )
             return f"computer use error: {message}"
 
         if session.status == "awaiting_approval":
@@ -352,10 +361,7 @@ class ComputerHandler:
             screenshot_backend_available = self.computer is not None and hasattr(
                 self.computer, "capture_screenshot"
             )
-            if (
-                screenshot_backend_available
-                and "screenshot_hash" not in screenshot_metadata
-            ):
+            if screenshot_backend_available and "screenshot_hash" not in screenshot_metadata:
                 # Fail-closed: the backend exists but capture failed, so an
                 # approval would have no anti-TOCTOU visual binding
                 # (_validate_pending_approval_scope silently skips the comparison
@@ -408,7 +414,9 @@ class ComputerHandler:
                     "session_id": session_id,
                     "backend": self._session_backend(session),
                     "approval_id": pending_approval.approval_id,
-                    "action": str(pending.get("action") or pending.get("type") or "computer_action"),
+                    "action": str(
+                        pending.get("action") or pending.get("type") or "computer_action"
+                    ),
                     "current_url": getattr(session, "current_url", None),
                     "screenshot_captured": "screenshot_path" in screenshot_metadata,
                     "screenshot_error": screenshot_metadata.get("screenshot_error"),
@@ -483,8 +491,12 @@ class ComputerHandler:
             return self.computer_gate
         from claw_v2.computer_gate import ActionGate
 
-        sensitive_urls = getattr(self.config, "sensitive_urls", []) if self.config is not None else []
-        self.computer_gate = ActionGate(sensitive_urls=sensitive_urls, auto_approve=self._auto_approve_enabled())
+        sensitive_urls = (
+            getattr(self.config, "sensitive_urls", []) if self.config is not None else []
+        )
+        self.computer_gate = ActionGate(
+            sensitive_urls=sensitive_urls, auto_approve=self._auto_approve_enabled()
+        )
         return self.computer_gate
 
     def abort_response(self, session_id: str) -> str:
@@ -506,7 +518,9 @@ class ComputerHandler:
             return "invalid token"
         return self._resume_approved_computer_action(approval_id)
 
-    def action_approve_internal_response(self, approval_id: str, *, session_id: str | None = None) -> str:
+    def action_approve_internal_response(
+        self, approval_id: str, *, session_id: str | None = None
+    ) -> str:
         if self.approvals is None:
             return "approvals unavailable"
         try:
@@ -514,7 +528,11 @@ class ComputerHandler:
         except FileNotFoundError:
             return f"approval {approval_id} not found"
         metadata = payload.get("metadata", {})
-        if metadata.get("kind") == "computer_use" and session_id is not None and metadata.get("session_id") != session_id:
+        if (
+            metadata.get("kind") == "computer_use"
+            and session_id is not None
+            and metadata.get("session_id") != session_id
+        ):
             return "approval does not belong to this session"
         status = str(payload.get("status") or "")
         if status == "pending":
@@ -533,14 +551,34 @@ class ComputerHandler:
             return "approved"
         session_id = metadata.get("session_id")
         if not isinstance(session_id, str):
-            self._emit("computer_approval_resume_blocked", {"approval_id": approval_id, "reason": "missing_session_id"})
+            self._emit(
+                "computer_approval_resume_blocked",
+                {"approval_id": approval_id, "reason": "missing_session_id"},
+            )
             return "approved, but no computer session metadata was found"
         session = self._sessions.get(session_id)
         if session is None:
-            self._emit("computer_approval_resume_blocked", {"approval_id": approval_id, "session_id": session_id, "reason": "session_not_active"})
+            self._emit(
+                "computer_approval_resume_blocked",
+                {
+                    "approval_id": approval_id,
+                    "session_id": session_id,
+                    "reason": "session_not_active",
+                },
+            )
             return "approved, but the computer session is no longer active"
-        if session.pending_action is not None and session.pending_action.get("approval_id") != approval_id:
-            self._emit("computer_approval_resume_blocked", {"approval_id": approval_id, "session_id": session_id, "reason": "approval_mismatch"})
+        if (
+            session.pending_action is not None
+            and session.pending_action.get("approval_id") != approval_id
+        ):
+            self._emit(
+                "computer_approval_resume_blocked",
+                {
+                    "approval_id": approval_id,
+                    "session_id": session_id,
+                    "reason": "approval_mismatch",
+                },
+            )
             return "approved, but no matching pending computer action was found"
         scope_error = self._validate_pending_approval_scope(session_id, session, metadata)
         if scope_error is not None:
@@ -565,7 +603,9 @@ class ComputerHandler:
         )
         return self._run_session(session_id)
 
-    def _validate_pending_approval_scope(self, session_id: str, session: Any, metadata: dict[str, Any]) -> str | None:
+    def _validate_pending_approval_scope(
+        self, session_id: str, session: Any, metadata: dict[str, Any]
+    ) -> str | None:
         pending = dict(session.pending_action or {})
         scope = metadata.get("approval_scope") if isinstance(metadata, dict) else None
         if not isinstance(scope, dict):
@@ -577,7 +617,9 @@ class ComputerHandler:
             return "action_hash_changed"
         expected_origin = str(scope.get("url_origin") or "")
         if expected_origin:
-            current_url = self._resolve_current_url(session_id, getattr(session, "task", "")) or getattr(session, "current_url", None)
+            current_url = self._resolve_current_url(
+                session_id, getattr(session, "task", "")
+            ) or getattr(session, "current_url", None)
             if isinstance(current_url, str) and current_url.strip():
                 session.current_url = current_url.strip()
             current_origin = _url_origin(getattr(session, "current_url", None))
@@ -619,7 +661,9 @@ class ComputerHandler:
         try:
             value = self._current_url_resolver(session_id)
         except Exception:
-            logger.debug("current_url resolver failed for computer session %s", session_id, exc_info=True)
+            logger.debug(
+                "current_url resolver failed for computer session %s", session_id, exc_info=True
+            )
             return None
         return value if isinstance(value, str) and value.strip() else None
 
@@ -627,7 +671,9 @@ class ComputerHandler:
         if self.browser_use is None:
             return False
         normalized = instruction.lower()
-        if any(token in normalized for token in ("chatgpt", "chat.openai.com", "chrome/cdp", "browser")):
+        if any(
+            token in normalized for token in ("chatgpt", "chat.openai.com", "chrome/cdp", "browser")
+        ):
             return True
         if _URL_RE.search(instruction) is not None:
             return True
@@ -636,7 +682,9 @@ class ComputerHandler:
     @staticmethod
     def _is_browser_use_session(session: Any) -> bool:
         pending = session.pending_action if isinstance(session.pending_action, dict) else {}
-        return pending.get("action") == "browser_use_task" or pending.get("backend") == "browser_use"
+        return (
+            pending.get("action") == "browser_use_task" or pending.get("backend") == "browser_use"
+        )
 
     def _run_browser_use_session(self, session: Any) -> str:
         pending = dict(session.pending_action or {})
@@ -646,8 +694,12 @@ class ComputerHandler:
             and isinstance(pending.get("approval_id"), str)
         )
         explicitly_approved = approved
-        if not approved and self._auto_approve_enabled() and not self._browser_task_is_sensitive(
-            session.task, getattr(session, "current_url", None)
+        if (
+            not approved
+            and self._auto_approve_enabled()
+            and not self._browser_task_is_sensitive(
+                session.task, getattr(session, "current_url", None)
+            )
         ):
             approved = True
             self._emit(
@@ -678,7 +730,9 @@ class ComputerHandler:
                     "instruction_hash": _instruction_hash(getattr(session, "task", "")),
                 },
             )
-            return "Browser automation needs approval before executing authenticated browser actions."
+            return (
+                "Browser automation needs approval before executing authenticated browser actions."
+            )
         if self.browser_use is None:
             raise RuntimeError("browser_use unavailable for approved browser automation")
         self._emit(
@@ -794,7 +848,9 @@ class ComputerHandler:
                     action_gate=self._get_gate(),
                     sensitive_urls=list(getattr(self.config, "sensitive_urls", []) or []),
                     allowed_domains=approved_domains if allow_high_risk_actions else None,
-                    prohibited_domains=None if allow_high_risk_actions else list(getattr(self.config, "sensitive_urls", []) or []),
+                    prohibited_domains=None
+                    if allow_high_risk_actions
+                    else list(getattr(self.config, "sensitive_urls", []) or []),
                     allow_high_risk_actions=allow_high_risk_actions,
                     max_actions_per_step=1,
                 )
@@ -932,7 +988,9 @@ class ComputerHandler:
         final_url = str(getattr(result, "url", "") or getattr(screenshot, "url", "") or target_url)
         title = str(getattr(result, "title", "") or getattr(screenshot, "title", "") or "").strip()
         screenshot_path = str(getattr(screenshot, "screenshot_path", "") or "").strip()
-        content = str(getattr(result, "content", "") or getattr(screenshot, "content", "") or "").strip()
+        content = str(
+            getattr(result, "content", "") or getattr(screenshot, "content", "") or ""
+        ).strip()
         # Don't claim success on a login/challenge wall (no_silent_degrade): the
         # named-profile gate above is X-first, so a logged-out Instagram lands here
         # and would otherwise be reported as a completed open. The returned message
@@ -940,9 +998,7 @@ class ComputerHandler:
         wall_probe = " ".join((final_url, title, content)).lower()
         wall_markers = ("accounts/login", "iniciar sesión", "log in", "checkpoint", "challenge")
         if any(marker in wall_probe for marker in wall_markers):
-            message = (
-                f"login/challenge wall en {final_url}; inicia sesión en el perfil de Chrome y reintenta."
-            )
+            message = f"login/challenge wall en {final_url}; inicia sesión en el perfil de Chrome y reintenta."
             self._emit(
                 "deterministic_browser_task_unverifiable_result",
                 {
@@ -1082,7 +1138,9 @@ class ComputerHandler:
             encoded = screenshot.get("data", "")
             media_type = str(screenshot.get("media_type") or "image/png")
             raw = base64.b64decode(encoded)
-            root = Path(getattr(self.approvals, "root", None) or getattr(self.config, "approvals_root", ""))
+            root = Path(
+                getattr(self.approvals, "root", None) or getattr(self.config, "approvals_root", "")
+            )
             if not str(root):
                 root = Path.home() / ".claw" / "pending_approvals"
             target_dir = root / "computer_screenshots"
@@ -1134,9 +1192,19 @@ class ComputerHandler:
         backend = self._configured_backend()
 
         use_degraded = self._check_capability("computer_use", "computer use unavailable")
-        control_degraded = self._check_capability("computer_control", "computer control unavailable")
-        checks.append(("computer_use", "degraded" if use_degraded else "ok", use_degraded or "available"))
-        checks.append(("computer_control", "degraded" if control_degraded else "ok", control_degraded or "available"))
+        control_degraded = self._check_capability(
+            "computer_control", "computer control unavailable"
+        )
+        checks.append(
+            ("computer_use", "degraded" if use_degraded else "ok", use_degraded or "available")
+        )
+        checks.append(
+            (
+                "computer_control",
+                "degraded" if control_degraded else "ok",
+                control_degraded or "available",
+            )
+        )
         checks.append(("backend", "ok" if backend != "unavailable" else "degraded", backend))
 
         checks.append(self._diagnose_pyautogui_display())
@@ -1156,7 +1224,11 @@ class ComputerHandler:
         }
         self._emit("computer_diagnostic_result", payload)
 
-        lines = [f"Diagnostico Computer Use: {status}", f"Backend configurado: {backend}", "Checks:"]
+        lines = [
+            f"Diagnostico Computer Use: {status}",
+            f"Backend configurado: {backend}",
+            "Checks:",
+        ]
         for name, check_status, detail in checks:
             lines.append(f"- {name}: {check_status} - {detail}")
         return "\n".join(lines)

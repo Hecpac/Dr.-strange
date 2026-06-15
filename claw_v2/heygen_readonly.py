@@ -4,6 +4,7 @@ This adapter is intentionally narrower than ``HeygenDeliveryService``:
 it can inspect quota, video status, and recent videos, but it cannot
 generate, delete, download, publish, or deliver anything.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -30,9 +31,7 @@ READ_ONLY_MODE = "read_only_live"
 READ_ONLY_TOOL = "HeyGenDeliver"
 WHITELIST_ERROR = "F3b.2: endpoint not in read-only whitelist"
 
-SENSITIVE_FIELD_RE = re.compile(
-    r"(?i)(secret|token|key|password|signature|signed)"
-)
+SENSITIVE_FIELD_RE = re.compile(r"(?i)(secret|token|key|password|signature|signed)")
 
 _READ_ONLY_WHITELIST: dict[str, frozenset[str]] = {
     "/v3/users/me": frozenset(),

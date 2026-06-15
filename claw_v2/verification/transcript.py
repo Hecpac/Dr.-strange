@@ -14,6 +14,7 @@ does not change the existing single-stream event flow under
 ``config.telemetry_root``. Wiring the runtime to emit through these helpers
 is the job of commit #7.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -112,16 +113,12 @@ def record_harness_event(
     )
 
 
-def read_target_stream(
-    telemetry_root: Path | str, task_id: str
-) -> list[TranscriptRecord]:
+def read_target_stream(telemetry_root: Path | str, task_id: str) -> list[TranscriptRecord]:
     """Read every record from the target timeline for ``task_id``."""
     return _read_stream(telemetry_root, task_id, TranscriptStream.TARGET)
 
 
-def read_harness_stream(
-    telemetry_root: Path | str, task_id: str
-) -> list[TranscriptRecord]:
+def read_harness_stream(telemetry_root: Path | str, task_id: str) -> list[TranscriptRecord]:
     """Read every record from the harness timeline for ``task_id``."""
     return _read_stream(telemetry_root, task_id, TranscriptStream.HARNESS)
 
@@ -131,9 +128,7 @@ def read_harness_stream(
 # ---------------------------------------------------------------------------
 
 
-def _stream_path(
-    telemetry_root: Path | str, task_id: str, stream: TranscriptStream
-) -> Path:
+def _stream_path(telemetry_root: Path | str, task_id: str, stream: TranscriptStream) -> Path:
     if not task_id:
         raise ValueError("task_id is required")
     safe_task_id = task_id.replace("/", "_").replace(":", "_")

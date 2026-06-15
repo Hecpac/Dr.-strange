@@ -4,6 +4,7 @@ When the brain fails on an actionable request after retries, it must persist
 a recovery job (status=pending_recovery) and reply with a recovery message
 instead of the bare INTERNAL_TOOL_TRACE_FALLBACK.
 """
+
 from __future__ import annotations
 
 import tempfile
@@ -21,9 +22,7 @@ from claw_v2.memory import MemoryStore
 from claw_v2.observe import ObserveStream
 
 
-_IMAGE_ERROR = (
-    "API Error: an image in the conversation could not be processed and was removed."
-)
+_IMAGE_ERROR = "API Error: an image in the conversation could not be processed and was removed."
 
 
 def _actionable_image_prompt(text: str = "arregla el deployment de producción ahora") -> list[dict]:

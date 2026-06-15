@@ -58,7 +58,9 @@ class PlanGate:
             parsed = json.loads(response.content)
         except (json.JSONDecodeError, TypeError):
             parsed = {
-                "plan_summary": response.content[:500] if response.content else "Could not parse plan",
+                "plan_summary": response.content[:500]
+                if response.content
+                else "Could not parse plan",
                 "risk_level": "medium",
                 "estimated_files": [],
             }

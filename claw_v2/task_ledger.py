@@ -27,7 +27,9 @@ from claw_v2.task_completion import (
 from claw_v2.turn_context import current_turn_id
 
 
-TERMINAL_STATUSES = frozenset({"succeeded", "failed", "timed_out", "cancelled", "lost", "completed_unverified"})
+TERMINAL_STATUSES = frozenset(
+    {"succeeded", "failed", "timed_out", "cancelled", "lost", "completed_unverified"}
+)
 VALID_STATUSES = frozenset({"queued", "running", *TERMINAL_STATUSES})
 
 _TERMINAL_WRITE_LOCKED_ATTEMPTS = 4
@@ -157,7 +159,9 @@ class TaskLedger:
                 f"INSERT OR IGNORE INTO agent_tasks ({columns}) SELECT {columns} FROM agent_tasks_old"
             )
             new_count = int(self._conn.execute("SELECT COUNT(*) FROM agent_tasks").fetchone()[0])
-            old_count = int(self._conn.execute("SELECT COUNT(*) FROM agent_tasks_old").fetchone()[0])
+            old_count = int(
+                self._conn.execute("SELECT COUNT(*) FROM agent_tasks_old").fetchone()[0]
+            )
             if new_count < old_count:
                 raise sqlite3.IntegrityError(
                     f"agent_tasks migration copied {new_count} of {old_count} rows"
@@ -503,7 +507,10 @@ class TaskLedger:
             changed = cur.rowcount
         reconciled = [self.get(str(row["task_id"])) for row in rows]
         if changed:
-            self._emit("task_ledger_reconciled_lost", {"count": changed, "older_than_seconds": older_than_seconds})
+            self._emit(
+                "task_ledger_reconciled_lost",
+                {"count": changed, "older_than_seconds": older_than_seconds},
+            )
             for record in reconciled:
                 if record is not None:
                     self._emit("task_ledger_terminal", record.to_dict())
@@ -548,7 +555,9 @@ class TaskLedger:
                         "reconciled_at": now,
                     }
                 )
-                verification_status = decision.verification_status or record.verification_status or "pending"
+                verification_status = (
+                    decision.verification_status or record.verification_status or "pending"
+                )
                 error = record.error or f"reconciled false success: {decision.reason}"
                 self._conn.execute(
                     """
@@ -582,9 +591,7 @@ class TaskLedger:
             self._emit("task_false_success_reconciled", {"count": changed, "tasks": reconciled})
         return changed
 
-    def _scan_drainable_candidates(
-        self, *, max_scan: int
-    ) -> tuple[list[TaskRecord], bool]:
+    def _scan_drainable_candidates(self, *, max_scan: int) -> tuple[list[TaskRecord], bool]:
         """Scan the oldest pending ``completed_unverified`` rows for the drain.
 
         Returns ``(records, scan_capped)``. Reads ``max_scan + 1`` rows so the
@@ -670,10 +677,7 @@ class TaskLedger:
             elif action == "needs_evidence_review":
                 skipped_needs_evidence_review += 1
             elif action == "auto_close_as_unverified_lookup":
-                if (
-                    record.completed_at is not None
-                    and float(record.completed_at) < overdue_before
-                ):
+                if record.completed_at is not None and float(record.completed_at) < overdue_before:
                     eligible_ids.append(record.task_id)
                 else:
                     skipped_not_overdue += 1
@@ -817,7 +821,9 @@ class TaskLedger:
 
     def get(self, task_id: str) -> TaskRecord | None:
         with self._lock:
-            row = self._conn.execute("SELECT * FROM agent_tasks WHERE task_id = ?", (task_id,)).fetchone()
+            row = self._conn.execute(
+                "SELECT * FROM agent_tasks WHERE task_id = ?", (task_id,)
+            ).fetchone()
         return self._row_to_record(row) if row is not None else None
 
     def list(

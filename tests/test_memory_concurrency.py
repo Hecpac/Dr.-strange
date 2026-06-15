@@ -49,7 +49,9 @@ class MemoryStoreConcurrencyTests(unittest.TestCase):
             for t in threads:
                 t.join()
 
-            self.assertEqual(errors, [], msg=f"concurrent access raised: {[repr(e) for e in errors[:3]]}")
+            self.assertEqual(
+                errors, [], msg=f"concurrent access raised: {[repr(e) for e in errors[:3]]}"
+            )
 
 
 class MergeActiveObjectTests(unittest.TestCase):

@@ -11,6 +11,7 @@ Reglas clave:
 - Weekday/date sanity check: el día de la semana debe coincidir con la
   fecha real para la timezone configurada.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field

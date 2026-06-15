@@ -54,9 +54,7 @@ class AnthropicAgentAdapter(ProviderAdapter):
     provider_name = "anthropic"
     tool_capable = True
 
-    def __init__(
-        self, executor: Callable[[LLMRequest], LLMResponse] | None = None
-    ) -> None:
+    def __init__(self, executor: Callable[[LLMRequest], LLMResponse] | None = None) -> None:
         self._executor = executor
 
     def complete(self, request: LLMRequest) -> LLMResponse:
@@ -129,9 +127,7 @@ class ClaudeSDKExecutor:
                     )
                 async for message in client.receive_response():
                     if isinstance(message, sdk.AssistantMessage):
-                        assistant_text_chunks.extend(
-                            _extract_assistant_text(message.content)
-                        )
+                        assistant_text_chunks.extend(_extract_assistant_text(message.content))
                         model_name = getattr(message, "model", model_name) or model_name
                     elif isinstance(message, sdk.ResultMessage):
                         result_session_id = message.session_id or result_session_id
@@ -290,9 +286,7 @@ class ClaudeSDKExecutor:
         )
 
     def _policy_for_request(self, request: LLMRequest) -> SandboxPolicy:
-        workspace_root = (
-            Path(request.cwd) if request.cwd else self.config.workspace_root
-        )
+        workspace_root = Path(request.cwd) if request.cwd else self.config.workspace_root
         read_paths = getattr(self.config, "allowed_read_paths", [])
         extra_roots = getattr(self.config, "extra_workspace_roots", [])
         allowed = [
@@ -312,18 +306,14 @@ class ClaudeSDKExecutor:
             ],
             network_policy="allow",
             credential_scope="external",
-            capability_profile=getattr(
-                self.config, "sandbox_capability_profile", "engineer"
-            ),
+            capability_profile=getattr(self.config, "sandbox_capability_profile", "engineer"),
         )
 
     def _runtime_policy_for_request(
         self, request: LLMRequest, policy: SandboxPolicy
     ) -> RuntimePolicyEngine:
         approval_gate = (
-            build_telegram_approval_gate(self.approvals)
-            if self.approvals is not None
-            else None
+            build_telegram_approval_gate(self.approvals) if self.approvals is not None else None
         )
         return RuntimePolicyEngine(
             workspace_root=policy.workspace_root,
@@ -382,9 +372,7 @@ async def _stream_user_content(
 
 
 def _coalesce_content(assistant_text_chunks: list[str], result_text: str | None) -> str:
-    content = "\n".join(
-        chunk.strip() for chunk in assistant_text_chunks if chunk.strip()
-    ).strip()
+    content = "\n".join(chunk.strip() for chunk in assistant_text_chunks if chunk.strip()).strip()
     if content:
         if result_text and result_text.strip() and result_text.strip() not in content:
             return f"{content}\n\n{result_text.strip()}"

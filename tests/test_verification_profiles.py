@@ -102,7 +102,9 @@ class VerifyProfileEvidenceTests(unittest.TestCase):
         self.assertTrue(decision.requires_human_approval)
         self.assertIn("no_fudge_justification", decision.missing_evidence)
 
-    def test_coding_patch_requires_randomized_or_parametrized_check_for_critical_logic(self) -> None:
+    def test_coding_patch_requires_randomized_or_parametrized_check_for_critical_logic(
+        self,
+    ) -> None:
         decision = verify_profile_evidence(
             task_kind="coding_patch",
             evidence={

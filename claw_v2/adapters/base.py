@@ -133,7 +133,9 @@ class LLMRequest:
             raise ValueError("LLM prompt must be a string or list of content blocks.")
         if self.system_prompt is not None and not isinstance(self.system_prompt, str):
             raise ValueError("LLM system_prompt must be a string when provided.")
-        if self.effort is not None and (not isinstance(self.effort, str) or not self.effort.strip()):
+        if self.effort is not None and (
+            not isinstance(self.effort, str) or not self.effort.strip()
+        ):
             raise ValueError("LLM effort must be a non-empty string when provided.")
         if self.session_id is not None and not isinstance(self.session_id, str):
             raise ValueError("LLM session_id must be a string when provided.")
@@ -157,7 +159,11 @@ class LLMRequest:
         if self.cwd is not None and not isinstance(self.cwd, str):
             raise ValueError("LLM cwd must be a string when provided.")
         if self.cache_ttl is not None:
-            if not isinstance(self.cache_ttl, int) or isinstance(self.cache_ttl, bool) or self.cache_ttl < 0:
+            if (
+                not isinstance(self.cache_ttl, int)
+                or isinstance(self.cache_ttl, bool)
+                or self.cache_ttl < 0
+            ):
                 raise ValueError("LLM cache_ttl must be a non-negative integer when provided.")
 
 
@@ -180,7 +186,11 @@ class ProviderAdapter(ABC):
 
 
 def _finite_number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+    )
 
 
 ADVISORY_LANES: frozenset[Lane] = frozenset({"verifier", "research", "judge"})
@@ -216,10 +226,7 @@ def build_effective_input(request: LLMRequest) -> UserPrompt:
         return request.prompt
     sections: list[str] = []
     if request.evidence_pack:
-        sections.append(
-            "# Evidence Pack\n"
-            + render_bounded_evidence_pack(request.evidence_pack)
-        )
+        sections.append("# Evidence Pack\n" + render_bounded_evidence_pack(request.evidence_pack))
     sections.append(f"# Task\n{request.prompt}")
     return "\n\n".join(sections)
 
@@ -257,8 +264,7 @@ def _compact_json_value(value: Any, *, depth: int = 0) -> Any:
     if isinstance(value, dict):
         items = list(value.items())
         compacted = {
-            str(key): _compact_json_value(item, depth=depth + 1)
-            for key, item in items[:30]
+            str(key): _compact_json_value(item, depth=depth + 1) for key, item in items[:30]
         }
         if len(items) > 30:
             compacted["__omitted_keys__"] = len(items) - 30
@@ -287,9 +293,5 @@ def coerce_usage_dict(value: Any) -> dict[str, Any]:
     if hasattr(value, "model_dump"):
         return value.model_dump()
     if hasattr(value, "__dict__"):
-        return {
-            key: item
-            for key, item in vars(value).items()
-            if not key.startswith("_")
-        }
+        return {key: item for key, item in vars(value).items() if not key.startswith("_")}
     return {"value": str(value)}

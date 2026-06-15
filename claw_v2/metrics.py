@@ -15,7 +15,9 @@ class MetricsTracker:
     def __init__(self) -> None:
         self._by_key: dict[tuple[str, str, str], LaneMetrics] = defaultdict(LaneMetrics)
 
-    def record(self, *, lane: str, provider: str, model: str, cost: float, degraded_mode: bool) -> None:
+    def record(
+        self, *, lane: str, provider: str, model: str, cost: float, degraded_mode: bool
+    ) -> None:
         metrics = self._by_key[(lane, provider, model)]
         metrics.invocations += 1
         metrics.total_cost += cost

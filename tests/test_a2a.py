@@ -51,7 +51,9 @@ class A2AServiceTests(unittest.TestCase):
             self.assertEqual(service._inbox[0].status, "failed")
             self.assertIn("router exploded", service._inbox[0].result["error"])
 
-            reloaded = A2AService(root=root, router=SimpleNamespace(ask=lambda *args, **kwargs: None))
+            reloaded = A2AService(
+                root=root, router=SimpleNamespace(ask=lambda *args, **kwargs: None)
+            )
             self.assertEqual(reloaded._inbox[0].status, "failed")
 
 

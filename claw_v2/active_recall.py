@@ -163,7 +163,9 @@ def record_recall_result(
     return result
 
 
-def search_recall_hits(query: str, candidates: list[dict[str, Any]], *, limit: int = 5) -> list[RecallHit]:
+def search_recall_hits(
+    query: str, candidates: list[dict[str, Any]], *, limit: int = 5
+) -> list[RecallHit]:
     query_tokens = _tokens(query)
     hits: list[RecallHit] = []
     for index, candidate in enumerate(candidates):
@@ -223,4 +225,3 @@ def _jaccard(a: set[str], b: set[str]) -> float:
     if not a or not b:
         return 0.0
     return len(a & b) / len(a | b)
-

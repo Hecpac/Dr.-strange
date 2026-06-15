@@ -2,6 +2,7 @@
 
 Offline only. tmp_path fs. Autouse `_no_network` fixture.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -23,8 +24,10 @@ from claw_v2.verification.promote_gate import apply_promote_gate_to_checkpoint
 def _no_network(monkeypatch):
     def _boom(*a, **kw):
         raise RuntimeError("Network call attempted from ext_hardening — forbidden")
+
     import socket
     import urllib.request
+
     monkeypatch.setattr(socket.socket, "connect", _boom)
     monkeypatch.setattr(urllib.request, "urlopen", _boom)
     yield
@@ -69,7 +72,13 @@ def test_skillgen_happy_path_with_real_hash(tmp_path):
     real_sha = hashlib.sha256(body).hexdigest()
 
     def _h(args):
-        return {"ok": True, "name": "ok", "path": str(out), "size_bytes": len(body), "sha256_hash": real_sha}
+        return {
+            "ok": True,
+            "name": "ok",
+            "path": str(out),
+            "size_bytes": len(body),
+            "sha256_hash": real_sha,
+        }
 
     reg = _registry_with("SkillGenerate", _h, workspace_root=tmp_path)
     (terminal, verification, _nc, _ev), _r = _run_and_gate(reg, "SkillGenerate", {"task": "x"})
@@ -84,34 +93,52 @@ def test_skillgen_declared_hash_differs_from_real_fails(tmp_path):
     fake_sha = "0" * 64
 
     def _h(args):
-        return {"ok": True, "name": "x", "path": str(out), "size_bytes": 12, "sha256_hash": fake_sha}
+        return {
+            "ok": True,
+            "name": "x",
+            "path": str(out),
+            "size_bytes": 12,
+            "sha256_hash": fake_sha,
+        }
 
     reg = _registry_with("SkillGenerate", _h, workspace_root=tmp_path)
     (terminal, _v, new_ck, _ev), _r = _run_and_gate(reg, "SkillGenerate", {"task": "x"})
     assert terminal == "failed"
-    assert "integrity_hash_mismatch:path" in new_ck["promote_gate_envelope"]["verification_result"]["errors"]
+    assert (
+        "integrity_hash_mismatch:path"
+        in new_ck["promote_gate_envelope"]["verification_result"]["errors"]
+    )
 
 
 def test_skillgen_declared_size_differs_from_real_fails(tmp_path):
     out = tmp_path / "skills" / "sizebad.md"
     out.parent.mkdir(parents=True, exist_ok=True)
-    body = b"twelve bytes"      # 12 bytes
+    body = b"twelve bytes"  # 12 bytes
     out.write_bytes(body)
     real_sha = hashlib.sha256(body).hexdigest()
 
     def _h(args):
-        return {"ok": True, "name": "x", "path": str(out), "size_bytes": 999, "sha256_hash": real_sha}
+        return {
+            "ok": True,
+            "name": "x",
+            "path": str(out),
+            "size_bytes": 999,
+            "sha256_hash": real_sha,
+        }
 
     reg = _registry_with("SkillGenerate", _h, workspace_root=tmp_path)
     (terminal, _v, new_ck, _ev), _r = _run_and_gate(reg, "SkillGenerate", {"task": "x"})
     assert terminal == "failed"
-    assert "integrity_size_mismatch:path" in new_ck["promote_gate_envelope"]["verification_result"]["errors"]
+    assert (
+        "integrity_size_mismatch:path"
+        in new_ck["promote_gate_envelope"]["verification_result"]["errors"]
+    )
 
 
 def test_skillgen_path_outside_allowed_root_fails(tmp_path):
     """The path lives OUTSIDE the workspace_root (and outside /tmp). Must fail."""
     # Pick a path under root that is NEITHER tmp_path NOR /tmp.
-    outside_dir = Path("/private/etc")    # exists on macOS, never under tmp_path or /tmp prefix
+    outside_dir = Path("/private/etc")  # exists on macOS, never under tmp_path or /tmp prefix
     outside_path = outside_dir / "hosts"  # exists on macOS but outside our roots
     if not outside_path.exists():
         pytest.skip("test depends on /private/etc/hosts existing")
@@ -121,7 +148,8 @@ def test_skillgen_path_outside_allowed_root_fails(tmp_path):
 
     def _h(args):
         return {
-            "ok": True, "name": "x",
+            "ok": True,
+            "name": "x",
             "path": str(outside_path),
             "size_bytes": real_size,
             "sha256_hash": real_sha,
@@ -143,12 +171,21 @@ def test_skillgen_truncated_16hex_sha_fails(tmp_path):
     out.write_bytes(b"x\n")
 
     def _h(args):
-        return {"ok": True, "name": "x", "path": str(out), "size_bytes": 2, "sha256_hash": "deadbeefdeadbeef"}
+        return {
+            "ok": True,
+            "name": "x",
+            "path": str(out),
+            "size_bytes": 2,
+            "sha256_hash": "deadbeefdeadbeef",
+        }
 
     reg = _registry_with("SkillGenerate", _h, workspace_root=tmp_path)
     (terminal, _v, new_ck, _ev), _r = _run_and_gate(reg, "SkillGenerate", {"task": "x"})
     assert terminal == "failed"
-    assert "regex_mismatch:sha256_hash" in new_ck["promote_gate_envelope"]["verification_result"]["errors"]
+    assert (
+        "regex_mismatch:sha256_hash"
+        in new_ck["promote_gate_envelope"]["verification_result"]["errors"]
+    )
 
 
 # ===========================================================================
@@ -162,9 +199,12 @@ def test_git_commit_main_branch_without_reason_fails(tmp_path):
 
     def _h(args):
         return {
-            "ok": True, "exit_code": 0,
+            "ok": True,
+            "exit_code": 0,
             "branch": "main",
-            "before_head": "0" * 40, "after_head": "a" * 40, "commit_hash": "a" * 40,
+            "before_head": "0" * 40,
+            "after_head": "a" * 40,
+            "commit_hash": "a" * 40,
         }
 
     reg = _registry_with("Bash", _h, workspace_root=tmp_path)
@@ -180,9 +220,12 @@ def test_git_commit_main_branch_without_reason_fails(tmp_path):
 def test_git_commit_other_protected_branches_fail(tmp_path, protected_branch):
     def _h(args):
         return {
-            "ok": True, "exit_code": 0,
+            "ok": True,
+            "exit_code": 0,
             "branch": protected_branch,
-            "before_head": "0" * 40, "after_head": "b" * 40, "commit_hash": "b" * 40,
+            "before_head": "0" * 40,
+            "after_head": "b" * 40,
+            "commit_hash": "b" * 40,
         }
 
     reg = _registry_with("Bash", _h, workspace_root=tmp_path)
@@ -197,9 +240,12 @@ def test_git_commit_before_equals_after_without_reason_fails(tmp_path):
 
     def _h(args):
         return {
-            "ok": True, "exit_code": 0,
+            "ok": True,
+            "exit_code": 0,
             "branch": "feat/x",
-            "before_head": "a" * 40, "after_head": "a" * 40, "commit_hash": "a" * 40,
+            "before_head": "a" * 40,
+            "after_head": "a" * 40,
+            "commit_hash": "a" * 40,
         }
 
     reg = _registry_with("Bash", _h, workspace_root=tmp_path)
@@ -214,9 +260,12 @@ def test_git_commit_before_equals_after_without_reason_fails(tmp_path):
 def test_git_commit_after_head_diverges_from_commit_hash_fails(tmp_path):
     def _h(args):
         return {
-            "ok": True, "exit_code": 0,
+            "ok": True,
+            "exit_code": 0,
             "branch": "feat/x",
-            "before_head": "0" * 40, "after_head": "a" * 40, "commit_hash": "b" * 40,
+            "before_head": "0" * 40,
+            "after_head": "a" * 40,
+            "commit_hash": "b" * 40,
         }
 
     reg = _registry_with("Bash", _h, workspace_root=tmp_path)
@@ -231,9 +280,12 @@ def test_git_commit_after_head_diverges_from_commit_hash_fails(tmp_path):
 def test_git_commit_happy_path_still_passes(tmp_path):
     def _h(args):
         return {
-            "ok": True, "exit_code": 0,
+            "ok": True,
+            "exit_code": 0,
             "branch": "feat/clean",
-            "before_head": "0" * 40, "after_head": "c" * 40, "commit_hash": "c" * 40,
+            "before_head": "0" * 40,
+            "after_head": "c" * 40,
+            "commit_hash": "c" * 40,
         }
 
     reg = _registry_with("Bash", _h, workspace_root=tmp_path)
@@ -256,7 +308,10 @@ def test_analyze_image_empty_description_fails(tmp_path):
     reg = _registry_with("AnalyzeImage", _h, workspace_root=tmp_path)
     (terminal, _v, new_ck, _ev), _r = _run_and_gate(reg, "AnalyzeImage", {"image_path": "/tmp/x"})
     assert terminal == "failed"
-    assert "must_be_nonempty_str_violated:description" in new_ck["promote_gate_envelope"]["verification_result"]["errors"]
+    assert (
+        "must_be_nonempty_str_violated:description"
+        in new_ck["promote_gate_envelope"]["verification_result"]["errors"]
+    )
 
 
 def test_analyze_image_whitespace_only_description_fails(tmp_path):
@@ -266,7 +321,10 @@ def test_analyze_image_whitespace_only_description_fails(tmp_path):
     reg = _registry_with("AnalyzeImage", _h, workspace_root=tmp_path)
     (terminal, _v, new_ck, _ev), _r = _run_and_gate(reg, "AnalyzeImage", {"image_path": "/tmp/x"})
     assert terminal == "failed"
-    assert "must_be_nonempty_str_violated:description" in new_ck["promote_gate_envelope"]["verification_result"]["errors"]
+    assert (
+        "must_be_nonempty_str_violated:description"
+        in new_ck["promote_gate_envelope"]["verification_result"]["errors"]
+    )
 
 
 def test_analyze_image_empty_model_used_fails(tmp_path):
@@ -276,7 +334,10 @@ def test_analyze_image_empty_model_used_fails(tmp_path):
     reg = _registry_with("AnalyzeImage", _h, workspace_root=tmp_path)
     (terminal, _v, new_ck, _ev), _r = _run_and_gate(reg, "AnalyzeImage", {"image_path": "/tmp/x"})
     assert terminal == "failed"
-    assert "must_be_nonempty_str_violated:model_used" in new_ck["promote_gate_envelope"]["verification_result"]["errors"]
+    assert (
+        "must_be_nonempty_str_violated:model_used"
+        in new_ck["promote_gate_envelope"]["verification_result"]["errors"]
+    )
 
 
 def test_analyze_image_valid_output_still_passes(tmp_path):
@@ -284,7 +345,9 @@ def test_analyze_image_valid_output_still_passes(tmp_path):
         return {"ok": True, "description": "A photo of a cat.", "model_used": "gpt-vision-stub"}
 
     reg = _registry_with("AnalyzeImage", _h, workspace_root=tmp_path)
-    (terminal, verification, _nc, _ev), _r = _run_and_gate(reg, "AnalyzeImage", {"image_path": "/tmp/x"})
+    (terminal, verification, _nc, _ev), _r = _run_and_gate(
+        reg, "AnalyzeImage", {"image_path": "/tmp/x"}
+    )
     assert terminal == "succeeded"
     assert verification == "passed"
 
@@ -299,7 +362,12 @@ def test_analyze_image_still_redacts_image_bytes(tmp_path):
     reg = _registry_with("AnalyzeImage", _h, workspace_root=tmp_path)
     result = reg.execute(
         "AnalyzeImage",
-        {"image_path": "/tmp/x", "image_b64": blob, "image_bytes": "FF" * 100, "image_data": "more"},
+        {
+            "image_path": "/tmp/x",
+            "image_b64": blob,
+            "image_bytes": "FF" * 100,
+            "image_data": "more",
+        },
         agent_class="operator",
     )
     artifact = result[ARTIFACT_RESULT_KEY]
@@ -325,7 +393,8 @@ def test_must_be_existing_path_rejects_outside_root(tmp_path):
 
     def _h(args):
         return {
-            "ok": True, "name": "x",
+            "ok": True,
+            "name": "x",
             "path": str(outside),
             "size_bytes": outside.stat().st_size,
             "sha256_hash": real_sha,

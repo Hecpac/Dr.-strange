@@ -88,9 +88,7 @@ class TestInline:
 
     def test_underscore_in_identifier_not_italic(self) -> None:
         # snake_case must survive intact.
-        assert markdown_to_telegram_html("send_text y parse_mode") == (
-            "send_text y parse_mode"
-        )
+        assert markdown_to_telegram_html("send_text y parse_mode") == ("send_text y parse_mode")
 
 
 class TestBlocks:

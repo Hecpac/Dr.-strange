@@ -6,6 +6,7 @@ even though brain hotfix B already shipped a recovery_jobs table. This
 hooks that branch into the same machinery so actionable requests are
 preserved.
 """
+
 from __future__ import annotations
 
 import tempfile
@@ -70,9 +71,7 @@ class QueueInternalTraceRecoveryJobTests(_Harness):
 
 class FormatRecoveryMessageBodyTests(unittest.TestCase):
     def test_body_has_no_response_tags(self) -> None:
-        body = _format_recovery_message_body(
-            "provider_repeated_internal_trace", "arregla X", 42
-        )
+        body = _format_recovery_message_body("provider_repeated_internal_trace", "arregla X", 42)
         self.assertNotIn("<response>", body)
         self.assertNotIn("</response>", body)
         self.assertIn("#42", body)
@@ -121,7 +120,7 @@ class BotInternalTraceRepeatedBranchTests(unittest.TestCase):
         # internal_trace_repeated branch.
         def _fake_exec(request):
             return _LLMResponse(
-                content="to=functions.deploy({\"env\": \"prod\"})",
+                content='to=functions.deploy({"env": "prod"})',
                 lane=request.lane,
                 provider="anthropic",
                 model=request.model,

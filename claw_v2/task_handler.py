@@ -187,7 +187,9 @@ class TaskHandler:
         self._merge_active_object = merge_active_object
         self._store_message = store_message
         self._workspace_root = Path(workspace_root) if workspace_root is not None else None
-        self._telemetry_root = Path(telemetry_root).expanduser() if telemetry_root is not None else None
+        self._telemetry_root = (
+            Path(telemetry_root).expanduser() if telemetry_root is not None else None
+        )
         self._max_autonomous_workers = max(1, int(max_autonomous_workers))
         self._autonomous_slots = threading.BoundedSemaphore(self._max_autonomous_workers)
         self._task_threads: dict[str, threading.Thread] = {}
@@ -246,9 +248,7 @@ class TaskHandler:
             )
         return "coordinated task rejected"
 
-    def _reject_non_actionable_objective(
-        self, text: str, *, session_id: str, source: str
-    ) -> bool:
+    def _reject_non_actionable_objective(self, text: str, *, session_id: str, source: str) -> bool:
         """Defensive guard for PR 0B.
 
         Mirrors the meta/introspection guard in the bot router so that any
@@ -283,7 +283,9 @@ class TaskHandler:
     def maybe_run_coordinated_task(self, session_id: str, text: str) -> str | None:
         if self.coordinator is None or not text or text.startswith("/"):
             return None
-        if self._reject_non_actionable_objective(text, session_id=session_id, source="maybe_run_coordinated_task"):
+        if self._reject_non_actionable_objective(
+            text, session_id=session_id, source="maybe_run_coordinated_task"
+        ):
             return None
         state = self._get_session_state(session_id)
         if state.get("autonomy_mode") != "autonomous":
@@ -337,7 +339,7 @@ class TaskHandler:
                 "No inicio el coordinador para esta entrada: parece una "
                 "pregunta reflexiva o un objetivo no accionable. Si quieres "
                 "que implemente algo, dilo explicitamente (por ejemplo, "
-                "\"implementa el fix\" o \"aplica el patch\")."
+                '"implementa el fix" o "aplica el patch").'
             )
         mode = mode or _infer_session_mode(objective)
         task_id = f"{session_id}:{time.time_ns()}"
@@ -349,9 +351,11 @@ class TaskHandler:
         if delegation_metadata:
             checkpoint["delegation_metadata"] = dict(delegation_metadata)
         state = self._get_session_state(session_id)
-        route = active_route = dict(
-            state.get("active_object", {}).get("last_channel_route") or {}
-        ) if isinstance(state.get("active_object"), dict) else {}
+        route = active_route = (
+            dict(state.get("active_object", {}).get("last_channel_route") or {})
+            if isinstance(state.get("active_object"), dict)
+            else {}
+        )
         goal_id = self._p0_create_task_goal(
             task_id=task_id,
             session_id=session_id,
@@ -369,7 +373,9 @@ class TaskHandler:
             status="in_progress",
             source="coordinator",
             priority=0,
-            depends_on=self.derive_task_dependencies(state.get("task_queue") or [], summary=objective),
+            depends_on=self.derive_task_dependencies(
+                state.get("task_queue") or [], summary=objective
+            ),
         )
         active_object = dict(state.get("active_object") or {})
         active_object["active_task"] = {
@@ -407,7 +413,8 @@ class TaskHandler:
             "risk_tier": risk_tier or ("tier_2" if mode == "coding" else "tier_1"),
             "plan": list(plan or planned_phases_for_mode(mode)),
             "current_step": "task_started",
-            "verification_requirement": verification_requirement or "task ledger records terminal or pending state with evidence",
+            "verification_requirement": verification_requirement
+            or "task ledger records terminal or pending state with evidence",
             "blockers": [],
             "task_kind": task_kind or "coordinator_autonomous_task",
         }
@@ -499,9 +506,11 @@ class TaskHandler:
     ) -> str:
         task_id = f"{session_id}:blocked:{time.time_ns()}"
         state = self._get_session_state(session_id)
-        route = dict(
-            state.get("active_object", {}).get("last_channel_route") or {}
-        ) if isinstance(state.get("active_object"), dict) else {}
+        route = (
+            dict(state.get("active_object", {}).get("last_channel_route") or {})
+            if isinstance(state.get("active_object"), dict)
+            else {}
+        )
         goal_id = self._p0_create_task_goal(
             task_id=task_id,
             session_id=session_id,
@@ -566,7 +575,9 @@ class TaskHandler:
             status="blocked",
             source="telegram_preflight",
             priority=0,
-            depends_on=self.derive_task_dependencies(state.get("task_queue") or [], summary=objective),
+            depends_on=self.derive_task_dependencies(
+                state.get("task_queue") or [], summary=objective
+            ),
         )
         checkpoint = {
             "summary": f"Capability preflight blocked task: {objective[:180]}",
@@ -619,7 +630,9 @@ class TaskHandler:
         )
         if not policy["allowed"]:
             if policy["reason"] == "approval_required_action":
-                approval_actions = tuple(str(action) for action in policy.get("matched_approval_actions", ()))
+                approval_actions = tuple(
+                    str(action) for action in policy.get("matched_approval_actions", ())
+                )
                 pending = self.approvals.create(
                     action="coordinated_task",
                     summary=_task_approval_summary(objective, approval_actions=approval_actions),
@@ -694,13 +707,13 @@ class TaskHandler:
         # coordinator whose workers are network-denied (--sandbox workspace-write)
         # and so cannot reach localhost:9250. Falls through to the coordinator
         # when no executor is wired.
-        if self.browser_executor is not None and _should_use_browser_executor(
-            mode, objective
-        ):
+        if self.browser_executor is not None and _should_use_browser_executor(mode, objective):
             return self._run_browser_executor_task(
                 session_id, objective, mode=mode, task_id=task_id
             )
-        research_tasks, implementation_tasks, verification_tasks = _build_coordinator_tasks(mode, objective)
+        research_tasks, implementation_tasks, verification_tasks = _build_coordinator_tasks(
+            mode, objective
+        )
         # F3.1 (2026-06-12): a resumed task loads completed-phase artifacts
         # from scratch instead of re-running coordinator.run() from zero
         # (re-running implementation duplicated external side effects).
@@ -766,14 +779,20 @@ class TaskHandler:
                 current_queue,
                 summary=checkpoint.get("pending_action") or checkpoint.get("summary") or objective,
                 mode=mode,
-                status="pending" if checkpoint.get("pending_action") else checkpoint.get("verification_status", "unknown"),
+                status="pending"
+                if checkpoint.get("pending_action")
+                else checkpoint.get("verification_status", "unknown"),
                 source="coordinator",
                 priority=0,
                 depends_on=self.derive_task_dependencies(
                     self._get_session_state(session_id).get("task_queue") or [],
-                    summary=checkpoint.get("pending_action") or checkpoint.get("summary") or objective,
+                    summary=checkpoint.get("pending_action")
+                    or checkpoint.get("summary")
+                    or objective,
                 ),
-            ) if checkpoint.get("pending_action") or checkpoint.get("summary") else current_queue,
+            )
+            if checkpoint.get("pending_action") or checkpoint.get("summary")
+            else current_queue,
             verification_status=checkpoint.get("verification_status", "unknown"),
             last_checkpoint=checkpoint,
         )
@@ -796,7 +815,12 @@ class TaskHandler:
         """
         self._emit(
             "browser_executor_started",
-            {"session_id": session_id, "task_id": task_id, "mode": mode, "objective": objective[:200]},
+            {
+                "session_id": session_id,
+                "task_id": task_id,
+                "mode": mode,
+                "objective": objective[:200],
+            },
         )
         error_text = ""
         try:
@@ -849,10 +873,14 @@ class TaskHandler:
         resumed: bool = False,
         slot_acquired: bool = False,
     ) -> None:
-        goal_id = self._p0_goal_id_for_task(task_id, session_id=session_id, objective=objective, mode=mode)
+        goal_id = self._p0_goal_id_for_task(
+            task_id, session_id=session_id, objective=objective, mode=mode
+        )
         try:
             if self._is_cancelled(task_id):
-                self._mark_cancelled_task_state(session_id, task_id, objective, reason="cancelled_before_start")
+                self._mark_cancelled_task_state(
+                    session_id, task_id, objective, reason="cancelled_before_start"
+                )
                 self._cancel_autonomous_job(task_id, reason="cancelled_before_start", job_id=job_id)
                 claim_id = self._p0_record_task_claim(
                     goal_id=goal_id,
@@ -909,7 +937,9 @@ class TaskHandler:
                 resumed=resumed,
             )
             if self._is_cancelled(task_id):
-                self._mark_cancelled_task_state(session_id, task_id, objective, reason="cancelled_during_run")
+                self._mark_cancelled_task_state(
+                    session_id, task_id, objective, reason="cancelled_during_run"
+                )
                 self._cancel_autonomous_job(task_id, reason="cancelled_during_run", job_id=job_id)
                 claim_id = self._p0_record_task_claim(
                     goal_id=goal_id,
@@ -942,9 +972,8 @@ class TaskHandler:
                 response=response,
                 verification_status=verification_status,
             )
-            if (
-                verification_status == "passed"
-                and self._response_contradicts_passed_verification(response, completed_checkpoint)
+            if verification_status == "passed" and self._response_contradicts_passed_verification(
+                response, completed_checkpoint
             ):
                 verification_status = "unknown"
                 completed_checkpoint = {
@@ -966,8 +995,10 @@ class TaskHandler:
                     },
                 )
             terminal_status = (
-                "succeeded" if verification_status == "passed"
-                else "failed" if verification_status == "failed"
+                "succeeded"
+                if verification_status == "passed"
+                else "failed"
+                if verification_status == "failed"
                 else ""
             )
             # F2.5 + F2.5.1 (2026-05-26) — promote gate: no task with a declared
@@ -976,6 +1007,7 @@ class TaskHandler:
             # AND raw terminal_status was "succeeded". Legacy passthrough only when
             # no artifact is declared.
             from claw_v2.verification.promote_gate import apply_promote_gate_to_checkpoint
+
             terminal_status, verification_status, completed_checkpoint, _gate_events = (
                 apply_promote_gate_to_checkpoint(
                     raw_terminal_status=terminal_status,
@@ -1179,7 +1211,9 @@ class TaskHandler:
                     artifacts=artifacts,
                 )
             self._emit(
-                "autonomous_task_completed" if terminal_status == "succeeded" else "autonomous_task_failed",
+                "autonomous_task_completed"
+                if terminal_status == "succeeded"
+                else "autonomous_task_failed",
                 {
                     "session_id": session_id,
                     "task_id": task_id,
@@ -1189,7 +1223,11 @@ class TaskHandler:
                     "terminal_status": terminal_status,
                     # AM-NOTIFY: terminal notifications dedupe per attempt.
                     "attempt": self._task_attempt(task_id),
-                    **({"error": checkpoint_error} if terminal_status == "failed" and checkpoint_error else {}),
+                    **(
+                        {"error": checkpoint_error}
+                        if terminal_status == "failed" and checkpoint_error
+                        else {}
+                    ),
                 },
             )
             claim_id = self._p0_record_task_claim(
@@ -1211,6 +1249,7 @@ class TaskHandler:
             )
         except Exception as exc:
             from claw_v2.adapters.base import StreamInterruptedError
+
             if isinstance(exc, StreamInterruptedError):
                 self._handle_stream_interrupted(
                     task_id=task_id,
@@ -1320,13 +1359,18 @@ class TaskHandler:
         try:
             status = subprocess.run(
                 ["git", "-C", str(workspace), "status", "--porcelain", "--untracked-files=normal"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
             self._emit("worktree_precheck_skipped", {"task_id": task_id, "reason": str(exc)[:200]})
             return
         if status.returncode != 0:
-            self._emit("worktree_precheck_skipped", {"task_id": task_id, "reason": status.stderr.strip()[:200]})
+            self._emit(
+                "worktree_precheck_skipped",
+                {"task_id": task_id, "reason": status.stderr.strip()[:200]},
+            )
             return
         dirty_lines = [line for line in status.stdout.splitlines() if line.strip()]
         if not dirty_lines:
@@ -1367,13 +1411,18 @@ class TaskHandler:
                 stash_cmd.extend(["--", *stashable_paths])
             stash = subprocess.run(
                 stash_cmd,
-                capture_output=True, text=True, timeout=15,
+                capture_output=True,
+                text=True,
+                timeout=15,
             )
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
             self._emit("worktree_autostash_failed", {"task_id": task_id, "reason": str(exc)[:200]})
             return
         if stash.returncode != 0:
-            self._emit("worktree_autostash_failed", {"task_id": task_id, "reason": stash.stderr.strip()[:200]})
+            self._emit(
+                "worktree_autostash_failed",
+                {"task_id": task_id, "reason": stash.stderr.strip()[:200]},
+            )
             return
         self._emit(
             "worktree_autostash",
@@ -1478,7 +1527,9 @@ class TaskHandler:
             status="pending",
             source="coordinator",
             priority=0,
-            depends_on=self.derive_task_dependencies(state.get("task_queue") or [], summary=objective),
+            depends_on=self.derive_task_dependencies(
+                state.get("task_queue") or [], summary=objective
+            ),
         )
         self._update_session_state(
             session_id,
@@ -1564,7 +1615,9 @@ class TaskHandler:
                 "reason": "already_running",
                 "message": f"task {task_id} is already running",
             }
-        resumed = self._resume_autonomous_record(record, reason="idle_executor", requested_by_session=session_id)
+        resumed = self._resume_autonomous_record(
+            record, reason="idle_executor", requested_by_session=session_id
+        )
         if not resumed:
             return {
                 "advanced": False,
@@ -1590,7 +1643,9 @@ class TaskHandler:
             return f"task {task_id} is already running"
         if not self._is_resumable_record(record, automatic=False):
             return f"task {task_id} is not resumable"
-        resumed = self._resume_autonomous_record(record, reason="manual_resume", requested_by_session=session_id)
+        resumed = self._resume_autonomous_record(
+            record, reason="manual_resume", requested_by_session=session_id
+        )
         if not resumed:
             return f"La tarea `{task_id}` queda en cola; el límite de tareas autónomas está activo."
         return f"La retomé y queda corriendo de nuevo.\nTarea reanudada: `{task_id}`"
@@ -1645,7 +1700,9 @@ class TaskHandler:
             metadata["goal_id"] = goal_id
         if false_success:
             metadata["false_success_reopened_at"] = metadata["last_resumed_at"]
-            metadata["false_success_verification_status"] = str(record.verification_status or "unknown")
+            metadata["false_success_verification_status"] = str(
+                record.verification_status or "unknown"
+            )
         if requested_by_session:
             metadata["requested_by_session"] = requested_by_session
         with self._task_lock:
@@ -1772,7 +1829,9 @@ class TaskHandler:
             return False
         return True
 
-    def _mark_cancelled_task_state(self, session_id: str, task_id: str, objective: str, *, reason: str) -> None:
+    def _mark_cancelled_task_state(
+        self, session_id: str, task_id: str, objective: str, *, reason: str
+    ) -> None:
         state = self._get_session_state(session_id)
         active_object = dict(state.get("active_object") or {})
         active_task = dict(active_object.get("active_task") or {})
@@ -1902,9 +1961,7 @@ class TaskHandler:
         record = self.task_ledger.get(task_id)
         return dict(record.artifacts or {}) if record is not None else {}
 
-    def _petri_judge_fn(
-        self, *, task_id: str
-    ) -> Callable[[str], DimensionRawResponse]:
+    def _petri_judge_fn(self, *, task_id: str) -> Callable[[str], DimensionRawResponse]:
         # Spec § 4.4: judge MUST run in a session that does not share
         # scratchpad with the target. Fresh session_id per invocation keeps
         # the cross-provider critic isolated from the target agent's brain
@@ -2119,7 +2176,6 @@ class TaskHandler:
         )
         return any(marker in normalized for marker in contradiction_markers)
 
-
     def _outcome_artifacts(
         self,
         *,
@@ -2245,7 +2301,11 @@ class TaskHandler:
                     "do not claim completion without verification evidence",
                 ],
                 assumptions=[],
-                allowed_actions=["coordinator.autonomous_task", "task_ledger.update", "job_service.update"],
+                allowed_actions=[
+                    "coordinator.autonomous_task",
+                    "task_ledger.update",
+                    "job_service.update",
+                ],
                 disallowed_actions=["force_push", "deploy_production_without_review"],
                 success_criteria=["task ledger records terminal or pending state with evidence"],
                 stop_conditions=["Hector asks to pause", "approval policy blocks the next action"],
@@ -2301,7 +2361,9 @@ class TaskHandler:
                 goal_id=goal_id,
                 claim_text=text,
                 claim_type="fact",
-                evidence_refs=[EvidenceRef(kind="tool_call", ref=f"task_handler:{task_id}:{status}")],
+                evidence_refs=[
+                    EvidenceRef(kind="tool_call", ref=f"task_handler:{task_id}:{status}")
+                ],
                 verification_status="verified",
                 confidence=1.0,
                 observe=self.observe,
@@ -2484,7 +2546,9 @@ class TaskHandler:
             return True
         record = self.job_service.get(job_id)
         if record is not None and record.status == "cancelled":
-            self._mark_cancelled_task_state(session_id, task_id, objective, reason=record.error or "job_cancelled")
+            self._mark_cancelled_task_state(
+                session_id, task_id, objective, reason=record.error or "job_cancelled"
+            )
             return False
         if record is not None and record.status in {"completed", "failed"}:
             self._emit(
@@ -2499,7 +2563,9 @@ class TaskHandler:
             return False
         return True
 
-    def _complete_autonomous_job(self, *, task_id: str, job_id: str | None, result: dict[str, Any]) -> None:
+    def _complete_autonomous_job(
+        self, *, task_id: str, job_id: str | None, result: dict[str, Any]
+    ) -> None:
         if self.job_service is None:
             return
         record_id = job_id or self._active_job_id_for_task(task_id)
@@ -2530,7 +2596,9 @@ class TaskHandler:
         job_id: str | None,
         exc: Any,
     ) -> None:
-        goal_id = self._p0_goal_id_for_task(task_id, session_id=session_id, objective=objective, mode=mode)
+        goal_id = self._p0_goal_id_for_task(
+            task_id, session_id=session_id, objective=objective, mode=mode
+        )
         partial = str(getattr(exc, "partial_output", "") or "")[:4000]
         reason = str(getattr(exc, "reason", "") or "stream_idle_timeout")
         error_msg = f"stream_interrupted: {reason}"
@@ -2644,7 +2712,9 @@ class TaskHandler:
                 checkpoint=checkpoint,
             )
 
-    def _cancel_autonomous_job(self, task_id: str, *, reason: str, job_id: str | None = None) -> None:
+    def _cancel_autonomous_job(
+        self, task_id: str, *, reason: str, job_id: str | None = None
+    ) -> None:
         if self.job_service is None:
             return
         record_id = job_id or self._active_job_id_for_task(task_id)
@@ -2699,25 +2769,40 @@ class TaskHandler:
         overrides = model_overrides_from_state(self._get_session_state(session_id))
         return {lane: override.to_dict() for lane, override in overrides.items()}
 
-    def _updated_pending_task_approvals(self, session_id: str, entry: dict[str, Any]) -> list[dict[str, Any]]:
+    def _updated_pending_task_approvals(
+        self, session_id: str, entry: dict[str, Any]
+    ) -> list[dict[str, Any]]:
         state = self._get_session_state(session_id)
-        pending = [item for item in (state.get("pending_approvals") or []) if item.get("approval_id") != entry.get("approval_id")]
+        pending = [
+            item
+            for item in (state.get("pending_approvals") or [])
+            if item.get("approval_id") != entry.get("approval_id")
+        ]
         pending.append(entry)
         return pending[-5:]
 
     def _remove_pending_task_approval(self, session_id: str, approval_id: str) -> None:
         state = self._get_session_state(session_id)
-        pending = [item for item in (state.get("pending_approvals") or []) if item.get("approval_id") != approval_id]
+        pending = [
+            item
+            for item in (state.get("pending_approvals") or [])
+            if item.get("approval_id") != approval_id
+        ]
         self._update_session_state(session_id, pending_approvals=pending)
 
-    def task_queue_transition_response(self, session_id: str, task_id: str, *, to_status: str) -> str:
+    def task_queue_transition_response(
+        self, session_id: str, task_id: str, *, to_status: str
+    ) -> str:
         from claw_v2.bot_helpers import _select_next_task_queue_item
+
         state = self._get_session_state(session_id)
         task_queue = state.get("task_queue") or []
         updated = self.set_task_queue_status(task_queue, task_id=task_id, to_status=to_status)
         if updated == task_queue:
             return f"task {task_id} not found"
-        next_pending = _select_next_task_queue_item(updated, preferred_mode=state.get("mode") or "chat")
+        next_pending = _select_next_task_queue_item(
+            updated, preferred_mode=state.get("mode") or "chat"
+        )
         self._update_session_state(
             session_id,
             task_queue=updated,
@@ -2743,7 +2828,11 @@ class TaskHandler:
         updated = [item for item in queue if item.get("summary") != compact]
         task_id = _stable_task_id(compact, mode=mode, source=source)
         effective_status = normalize_task_queue_status(status)
-        if existing is not None and effective_status == "pending" and existing.get("status") in {"in_progress", "done", "blocked"}:
+        if (
+            existing is not None
+            and effective_status == "pending"
+            and existing.get("status") in {"in_progress", "done", "blocked"}
+        ):
             effective_status = str(existing.get("status"))
         updated.append(
             {
@@ -2822,7 +2911,8 @@ class TaskHandler:
         compact = " ".join(summary.split()).strip()
         in_progress = next(
             (
-                item for item in queue
+                item
+                for item in queue
                 if item.get("status") == "in_progress"
                 and item.get("summary")
                 and item.get("summary") != compact

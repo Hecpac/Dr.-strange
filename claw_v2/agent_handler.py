@@ -59,7 +59,9 @@ class AgentHandler:
         if stripped.startswith("/agent_create "):
             parts = stripped.split(maxsplit=3)
             if len(parts) != 4:
-                return "usage: /agent_create <agent_name> <researcher|operator|deployer> <instruction>"
+                return (
+                    "usage: /agent_create <agent_name> <researcher|operator|deployer> <instruction>"
+                )
             return self._create_response(parts[1], parts[2], parts[3])
         if stripped.startswith("/agent_status "):
             parts = stripped.split(maxsplit=1)
@@ -89,11 +91,17 @@ class AgentHandler:
                 return "usage: /agent_history <agent_name> [limit]"
             return self._history_response(parts[1], limit=limit)
         if stripped.startswith("/agent_promote "):
-            return self._toggle_update(stripped, "promote_on_improvement", "usage: /agent_promote <agent_name> <on|off>")
+            return self._toggle_update(
+                stripped, "promote_on_improvement", "usage: /agent_promote <agent_name> <on|off>"
+            )
         if stripped.startswith("/agent_branch "):
-            return self._toggle_update(stripped, "branch_on_promotion", "usage: /agent_branch <agent_name> <on|off>")
+            return self._toggle_update(
+                stripped, "branch_on_promotion", "usage: /agent_branch <agent_name> <on|off>"
+            )
         if stripped.startswith("/agent_commit "):
-            return self._toggle_update(stripped, "commit_on_promotion", "usage: /agent_commit <agent_name> <on|off>")
+            return self._toggle_update(
+                stripped, "commit_on_promotion", "usage: /agent_commit <agent_name> <on|off>"
+            )
         if stripped.startswith("/agent_branch_name "):
             parts = stripped.split(maxsplit=2)
             if len(parts) != 3:
@@ -115,7 +123,9 @@ class AgentHandler:
                 max_experiments = _parse_positive_int(parts[3], field_name="max_experiments")
             except ValueError as exc:
                 return str(exc)
-            return self._run_until_response(parts[1], target_metric=target_metric, max_experiments=max_experiments)
+            return self._run_until_response(
+                parts[1], target_metric=target_metric, max_experiments=max_experiments
+            )
         if stripped.startswith("/agent_publish "):
             return self._run_command(stripped, "publish")
         if stripped.startswith("/agent_pr "):
@@ -136,7 +146,9 @@ class AgentHandler:
             state = self.auto_research.inspect(agent_name)
         except FileNotFoundError:
             return f"agent not found: {agent_name}"
-        return json.dumps(_agent_summary(agent_name, state, include_instruction=True), indent=2, sort_keys=True)
+        return json.dumps(
+            _agent_summary(agent_name, state, include_instruction=True), indent=2, sort_keys=True
+        )
 
     def _create_response(self, agent_name: str, agent_class: str, instruction: str) -> str:
         try:
@@ -151,7 +163,9 @@ class AgentHandler:
             return f"agent already exists: {agent_name}"
         except ValueError as exc:
             return str(exc)
-        return json.dumps(_agent_summary(agent_name, state, include_instruction=True), indent=2, sort_keys=True)
+        return json.dumps(
+            _agent_summary(agent_name, state, include_instruction=True), indent=2, sort_keys=True
+        )
 
     def _update_response(self, agent_name: str, **changes: object) -> str:
         try:
@@ -160,21 +174,27 @@ class AgentHandler:
             return f"agent not found: {agent_name}"
         except ValueError as exc:
             return str(exc)
-        return json.dumps(_agent_summary(agent_name, state, include_instruction=True), indent=2, sort_keys=True)
+        return json.dumps(
+            _agent_summary(agent_name, state, include_instruction=True), indent=2, sort_keys=True
+        )
 
     def _pause_response(self, agent_name: str) -> str:
         try:
             state = self.auto_research.pause(agent_name)
         except FileNotFoundError:
             return f"agent not found: {agent_name}"
-        return json.dumps(_agent_summary(agent_name, state, include_instruction=True), indent=2, sort_keys=True)
+        return json.dumps(
+            _agent_summary(agent_name, state, include_instruction=True), indent=2, sort_keys=True
+        )
 
     def _resume_response(self, agent_name: str) -> str:
         try:
             state = self.auto_research.resume(agent_name)
         except FileNotFoundError:
             return f"agent not found: {agent_name}"
-        return json.dumps(_agent_summary(agent_name, state, include_instruction=True), indent=2, sort_keys=True)
+        return json.dumps(
+            _agent_summary(agent_name, state, include_instruction=True), indent=2, sort_keys=True
+        )
 
     def _history_response(self, agent_name: str, *, limit: int) -> str:
         try:
@@ -195,13 +215,17 @@ class AgentHandler:
 
     def _run_response(self, agent_name: str, *, max_experiments: int) -> str:
         try:
-            result = self.auto_research.run_loop(agent_name, max_experiments=max_experiments, force=True)
+            result = self.auto_research.run_loop(
+                agent_name, max_experiments=max_experiments, force=True
+            )
             state = self.auto_research.inspect(agent_name)
         except FileNotFoundError:
             return f"agent not found: {agent_name}"
         return json.dumps(_run_summary(agent_name, state, result), indent=2, sort_keys=True)
 
-    def _run_until_response(self, agent_name: str, *, target_metric: float, max_experiments: int) -> str:
+    def _run_until_response(
+        self, agent_name: str, *, target_metric: float, max_experiments: int
+    ) -> str:
         try:
             result = self.auto_research.run_until(
                 agent_name,
@@ -236,7 +260,9 @@ class AgentHandler:
         if update_payload:
             self.auto_research.update_controls(agent_name, **update_payload)
 
-        result = self.auto_research.run_loop(agent_name, max_experiments=max_experiments, force=True)
+        result = self.auto_research.run_loop(
+            agent_name, max_experiments=max_experiments, force=True
+        )
         state = self.auto_research.inspect(agent_name)
         latest = self.auto_research.latest_result(agent_name)
         payload = _run_summary(agent_name, state, result)
@@ -262,7 +288,9 @@ class AgentHandler:
         branch_name = payload.get("published_branch_name")
         if not isinstance(branch_name, str) or not branch_name:
             payload["pull_request_created"] = False
-            payload["pull_request_error"] = "no published branch available for pull request creation"
+            payload["pull_request_error"] = (
+                "no published branch available for pull request creation"
+            )
             return json.dumps(payload, indent=2, sort_keys=True)
 
         title = _default_pull_request_title(agent_name, payload)

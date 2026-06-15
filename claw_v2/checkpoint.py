@@ -2,6 +2,7 @@
 
 See docs/superpowers/specs/2026-04-19-checkpointing-design.md.
 """
+
 from __future__ import annotations
 
 import logging
@@ -100,12 +101,14 @@ class CheckpointService:
             with self.memory._lock:
                 try:
                     self.memory._conn.execute(
-                        "DELETE FROM checkpoints WHERE ckpt_id = ?", (ckpt_id,),
+                        "DELETE FROM checkpoints WHERE ckpt_id = ?",
+                        (ckpt_id,),
                     )
                     self.memory._conn.commit()
                 except sqlite3.Error:
                     logger.warning(
-                        "Checkpoint rollback: DELETE failed for %s", ckpt_id,
+                        "Checkpoint rollback: DELETE failed for %s",
+                        ckpt_id,
                         exc_info=True,
                     )
             if target_conn is not None:
@@ -129,8 +132,7 @@ class CheckpointService:
             # Ring rotation (unchanged from CP3)
             try:
                 rows_to_purge = self.memory._conn.execute(
-                    "SELECT ckpt_id, file_path FROM checkpoints "
-                    "ORDER BY created_at ASC, id ASC"
+                    "SELECT ckpt_id, file_path FROM checkpoints ORDER BY created_at ASC, id ASC"
                 ).fetchall()
                 excess = len(rows_to_purge) - self.ring_size
                 if excess > 0:
@@ -140,7 +142,8 @@ class CheckpointService:
                         except OSError:
                             logger.warning(
                                 "Checkpoint rotation: failed to unlink %s",
-                                row["file_path"], exc_info=True,
+                                row["file_path"],
+                                exc_info=True,
                             )
                         try:
                             self.memory._conn.execute(
@@ -150,7 +153,8 @@ class CheckpointService:
                         except sqlite3.Error:
                             logger.warning(
                                 "Checkpoint rotation: failed to delete row %s",
-                                row["ckpt_id"], exc_info=True,
+                                row["ckpt_id"],
+                                exc_info=True,
                             )
                     self.memory._conn.commit()
             except Exception:
@@ -227,15 +231,16 @@ def apply_pending_restore_if_any(db_path: Path) -> str | None:
         return None
     try:
         probe.row_factory = sqlite3.Row
-        table_exists = probe.execute(
-            "SELECT name FROM sqlite_master "
-            "WHERE type='table' AND name='checkpoints'"
-        ).fetchone() is not None
+        table_exists = (
+            probe.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='checkpoints'"
+            ).fetchone()
+            is not None
+        )
         if not table_exists:
             return None
         row = probe.execute(
-            "SELECT ckpt_id, file_path FROM checkpoints "
-            "WHERE pending_restore = 1 LIMIT 1"
+            "SELECT ckpt_id, file_path FROM checkpoints WHERE pending_restore = 1 LIMIT 1"
         ).fetchone()
     finally:
         probe.close()

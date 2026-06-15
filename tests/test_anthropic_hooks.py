@@ -87,31 +87,21 @@ def _approval_pending() -> ApprovalPending:
 class PreToolUseBackstopTests(unittest.IsolatedAsyncioTestCase):
     async def test_brain_lane_denies_every_backstop_pattern(self) -> None:
         policy = _AllowAllPolicy()
-        hook = make_pre_tool_use_hook(
-            _request("brain"), runtime_policy=policy, observe=None
-        )
+        hook = make_pre_tool_use_hook(_request("brain"), runtime_policy=policy, observe=None)
         for command in BACKSTOP_COMMANDS:
             result = await hook(
                 {"tool_name": "Bash", "tool_input": {"command": command}}, "tu-1", None
             )
             decision = result.get("hookSpecificOutput", {})
             self.assertEqual(decision.get("permissionDecision"), "deny", command)
-            self.assertIn(
-                "delegate_task", decision.get("permissionDecisionReason", ""), command
-            )
-            self.assertIn(
-                "Tool invocation blocked", result.get("systemMessage", ""), command
-            )
-        self.assertEqual(
-            policy.calls, [], "denied calls must never reach runtime policy"
-        )
+            self.assertIn("delegate_task", decision.get("permissionDecisionReason", ""), command)
+            self.assertIn("Tool invocation blocked", result.get("systemMessage", ""), command)
+        self.assertEqual(policy.calls, [], "denied calls must never reach runtime policy")
 
     async def test_worker_lanes_allow_backstop_patterns(self) -> None:
         for lane in ("worker", "worker_heavy"):
             policy = _AllowAllPolicy()
-            hook = make_pre_tool_use_hook(
-                _request(lane), runtime_policy=policy, observe=None
-            )
+            hook = make_pre_tool_use_hook(_request(lane), runtime_policy=policy, observe=None)
             for command in BACKSTOP_COMMANDS:
                 result = await hook(
                     {"tool_name": "Bash", "tool_input": {"command": command}},
@@ -123,9 +113,7 @@ class PreToolUseBackstopTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_brain_lane_allows_benign_bash(self) -> None:
         policy = _AllowAllPolicy()
-        hook = make_pre_tool_use_hook(
-            _request("brain"), runtime_policy=policy, observe=None
-        )
+        hook = make_pre_tool_use_hook(_request("brain"), runtime_policy=policy, observe=None)
         result = await hook(
             {"tool_name": "Bash", "tool_input": {"command": "git status"}}, "tu-1", None
         )
@@ -162,21 +150,15 @@ class PreToolUsePolicyDenyTests(unittest.IsolatedAsyncioTestCase):
         decision = result["hookSpecificOutput"]
         self.assertEqual(decision["permissionDecision"], "deny")
         self.assertNotIn("whitelist", decision["permissionDecisionReason"])
-        self.assertIn(
-            "blocked by local execution policy", decision["permissionDecisionReason"]
-        )
+        self.assertIn("blocked by local execution policy", decision["permissionDecisionReason"])
         self.assertIn("Tool invocation blocked", result["systemMessage"])
 
 
 class CanUseToolDenyTests(unittest.IsolatedAsyncioTestCase):
     def _sdk_types(self) -> SimpleNamespace:
         return SimpleNamespace(
-            PermissionResultAllow=lambda **kwargs: SimpleNamespace(
-                kind="allow", **kwargs
-            ),
-            PermissionResultDeny=lambda **kwargs: SimpleNamespace(
-                kind="deny", **kwargs
-            ),
+            PermissionResultAllow=lambda **kwargs: SimpleNamespace(kind="allow", **kwargs),
+            PermissionResultDeny=lambda **kwargs: SimpleNamespace(kind="deny", **kwargs),
         )
 
     async def test_approval_pending_denies_with_interrupt(self) -> None:
@@ -204,9 +186,7 @@ class CanUseToolDenyTests(unittest.IsolatedAsyncioTestCase):
     async def test_allowlisted_tools_only(self) -> None:
         request = _request("worker")
         request.allowed_tools = ["Read"]
-        can_use = build_can_use_tool(
-            self._sdk_types(), request, runtime_policy=_AllowAllPolicy()
-        )
+        can_use = build_can_use_tool(self._sdk_types(), request, runtime_policy=_AllowAllPolicy())
         denied = await can_use("Bash", {"command": "ls"}, None)
         self.assertEqual(denied.kind, "deny")
         allowed = await can_use("Read", {"file_path": "/tmp/x"}, None)
@@ -252,13 +232,9 @@ class MutationTrackingTests(unittest.IsolatedAsyncioTestCase):
             mutation_tracker=mutating,
         )
         failure_hook = hooks["PostToolUseFailure"][0].hooks[0]
-        await failure_hook(
-            {"tool_name": "Read", "tool_response": {"is_error": True}}, "t", None
-        )
+        await failure_hook({"tool_name": "Read", "tool_response": {"is_error": True}}, "t", None)
         self.assertEqual(mutating, [], "read-only tools are never counted as mutations")
-        await failure_hook(
-            {"tool_name": "Bash", "tool_response": {"is_error": True}}, "t", None
-        )
+        await failure_hook({"tool_name": "Bash", "tool_response": {"is_error": True}}, "t", None)
         self.assertEqual(mutating, ["Bash"], "a failed Bash still counts as a mutation")
 
     async def test_advisory_lanes_get_no_tool_hooks(self) -> None:
@@ -299,14 +275,10 @@ class RecordToolsExecutedOnFailureTests(unittest.IsolatedAsyncioTestCase):
             timeout=timeout,
         )
 
-    def _executor_with_mutation(
-        self, config, *, mutated_tool: str = "Bash"
-    ) -> ClaudeSDKExecutor:
+    def _executor_with_mutation(self, config, *, mutated_tool: str = "Bash") -> ClaudeSDKExecutor:
         executor = ClaudeSDKExecutor(config)
 
-        def _build_options(
-            sdk, request, *, stderr_callback=None, mutation_tracker=None
-        ):
+        def _build_options(sdk, request, *, stderr_callback=None, mutation_tracker=None):
             # Simulate a turn where a mutating tool already executed before the
             # failure: the PostToolUse hook would have appended to the tracker.
             if mutation_tracker is not None:
@@ -389,9 +361,7 @@ class RecordToolsExecutedOnFailureTests(unittest.IsolatedAsyncioTestCase):
             config = make_config(Path(tmpdir))
             executor = ClaudeSDKExecutor(config)
 
-            def _build_options(
-                sdk, request, *, stderr_callback=None, mutation_tracker=None
-            ):
+            def _build_options(sdk, request, *, stderr_callback=None, mutation_tracker=None):
                 if mutation_tracker is not None:
                     mutation_tracker.append("Write")
                 if stderr_callback is not None:

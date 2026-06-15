@@ -11,6 +11,7 @@ Persistence is intentionally omitted at this layer: the runtime can
 hydrate the calibrator from the audit stream if it wants cross-restart
 state. For now the contract is "calibrate within a process".
 """
+
 from __future__ import annotations
 
 from collections import deque
@@ -117,7 +118,12 @@ class TrustCalibrator:
             "samples": samples,
         }
         if suggested == current_tier:
-            return {**base, "changed": False, "to_tier": current_tier, "reason": "no_change_suggested"}
+            return {
+                **base,
+                "changed": False,
+                "to_tier": current_tier,
+                "reason": "no_change_suggested",
+            }
         direction = "bump" if suggested > current_tier else "downgrade"
         if evaluator is not None:
             plan = (

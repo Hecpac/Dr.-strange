@@ -10,17 +10,27 @@ class ActionVerdict(Enum):
 
 
 class RiskLevel(Enum):
-    LOW = "low"          # Auto-approve, no log
-    MEDIUM = "medium"    # Auto-approve, log for audit
-    HIGH = "high"        # Requires explicit approval
+    LOW = "low"  # Auto-approve, no log
+    MEDIUM = "medium"  # Auto-approve, log for audit
+    HIGH = "high"  # Requires explicit approval
 
 
 CDP_READ_ACTIONS = frozenset({"screenshot", "goto", "wait_for"})
 DESKTOP_READ_ACTIONS = frozenset({"screenshot", "mouse_move", "scroll", "zoom", "wait"})
-DESKTOP_NAV_KEYS = frozenset({
-    "Escape", "Tab", "Up", "Down", "Left", "Right",
-    "Home", "End", "Page_Up", "Page_Down",
-})
+DESKTOP_NAV_KEYS = frozenset(
+    {
+        "Escape",
+        "Tab",
+        "Up",
+        "Down",
+        "Left",
+        "Right",
+        "Home",
+        "End",
+        "Page_Up",
+        "Page_Down",
+    }
+)
 CDP_ALWAYS_APPROVE = frozenset({"submit"})
 CDP_WRITE_ACTIONS = frozenset({"click", "fill", "select", "check", "uncheck"})
 BROWSER_USE_READ_ACTIONS = frozenset(
@@ -59,7 +69,9 @@ def verdict_for_risk(risk: RiskLevel) -> ActionVerdict:
 
 
 class ActionGate:
-    def __init__(self, sensitive_urls: list[str] | None = None, *, auto_approve: bool = False) -> None:
+    def __init__(
+        self, sensitive_urls: list[str] | None = None, *, auto_approve: bool = False
+    ) -> None:
         self.sensitive_urls = list(sensitive_urls or [])
         # When True, LOW + MEDIUM actions auto-execute without approval; only
         # HIGH risk (sensitive URLs, destructive hotkeys, CDP submit) still
@@ -108,7 +120,9 @@ class ActionGate:
             return RiskLevel.HIGH
         return RiskLevel.LOW
 
-    def risk_browser_use_action(self, action_name: str, params: dict | None = None, *, url: str | None) -> RiskLevel:
+    def risk_browser_use_action(
+        self, action_name: str, params: dict | None = None, *, url: str | None
+    ) -> RiskLevel:
         """Classify a browser-use action into LOW / MEDIUM / HIGH risk.
 
         browser_use exposes higher-level browser actions than the repo's CDP

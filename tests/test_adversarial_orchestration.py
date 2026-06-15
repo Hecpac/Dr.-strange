@@ -30,7 +30,9 @@ def test_missing_ack_blocks_coordinator_before_next_phase(tmp_path) -> None:
         "task-missing-ack",
         "coordinate safely",
         [WorkerTask(name="research", instruction="collect facts")],
-        implementation_tasks=[WorkerTask(name="implement", instruction="write patch", lane="worker")],
+        implementation_tasks=[
+            WorkerTask(name="implement", instruction="write patch", lane="worker")
+        ],
     )
 
     assert result.error
@@ -41,8 +43,7 @@ def test_missing_ack_blocks_coordinator_before_next_phase(tmp_path) -> None:
     report = store.audit_report("task-missing-ack")
     assert len(report["missing_acks"]) == 1
     recorded_artifacts = [
-        event for event in report["events"]
-        if event["event_type"] == "artifact_recorded"
+        event for event in report["events"] if event["event_type"] == "artifact_recorded"
     ]
     assert len(recorded_artifacts) == 1
     assert report["missing_acks"][0]["artifact_id"] == recorded_artifacts[0]["artifact_id"]
@@ -50,8 +51,7 @@ def test_missing_ack_blocks_coordinator_before_next_phase(tmp_path) -> None:
     assert report["missing_acks"][0]["consumer_role"] == "coordinator_synthesis"
     assert any(event["event_type"] == "orchestration_alarm" for event in report["events"])
     assert "synthesis" not in [
-        event["phase"] for event in report["events"]
-        if event["event_type"] == "phase_started"
+        event["phase"] for event in report["events"] if event["event_type"] == "phase_started"
     ]
 
 
@@ -90,10 +90,7 @@ def test_corrupted_payload_is_rejected_without_mutating_checkpoint(tmp_path) -> 
     assert after.version == before.version
     assert after.checkpoint_id == checkpoint_id
     report = store.audit_report(run.run_id)
-    assert not [
-        event for event in report["events"]
-        if event["event_type"] == "artifact_recorded"
-    ]
+    assert not [event for event in report["events"] if event["event_type"] == "artifact_recorded"]
 
 
 def test_repeated_needs_improvement_triggers_orchestration_alarm(tmp_path) -> None:
@@ -137,8 +134,7 @@ def test_repeated_needs_improvement_triggers_orchestration_alarm(tmp_path) -> No
     assert alarmed.status == "alarm"
     report = store.audit_report(run.run_id)
     alarm_events = [
-        event for event in report["events"]
-        if event["event_type"] == "orchestration_alarm"
+        event for event in report["events"] if event["event_type"] == "orchestration_alarm"
     ]
     assert len(alarm_events) == 1
     assert alarm_events[0]["payload"]["reason"] == "max_phase_attempts_exceeded"
@@ -174,13 +170,12 @@ def test_final_success_is_rejected_without_verification_evidence(tmp_path) -> No
     report = store.audit_report(run.run_id)
     assert report["run"]["status"] == "alarm"
     assert not [
-        event for event in report["events"]
-        if event["event_type"] == "run_completed"
-        and event["payload"].get("status") == "succeeded"
+        event
+        for event in report["events"]
+        if event["event_type"] == "run_completed" and event["payload"].get("status") == "succeeded"
     ]
     alarm_events = [
-        event for event in report["events"]
-        if event["event_type"] == "orchestration_alarm"
+        event for event in report["events"] if event["event_type"] == "orchestration_alarm"
     ]
     assert len(alarm_events) == 1
     assert alarm_events[0]["payload"]["missing_artifact_types"] == ["verification"]

@@ -245,10 +245,7 @@ class CapabilityGrantStore:
     def find_grants_for(
         self, *, kind: str, target: str, now: float | None = None
     ) -> list[CapabilityGrant]:
-        return [
-            g for g in self.list_active(now=now)
-            if g.scope.matches(kind=kind, target=target)
-        ]
+        return [g for g in self.list_active(now=now) if g.scope.matches(kind=kind, target=target)]
 
     # ----- internals ---------------------------------------------------
 

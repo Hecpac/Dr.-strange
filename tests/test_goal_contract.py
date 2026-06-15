@@ -52,7 +52,9 @@ class GoalContractTests(unittest.TestCase):
 
     def test_update_goal_appends_new_version_with_same_goal_id(self) -> None:
         goal = create_goal(self.root, objective="Old objective")
-        updated = update_goal(self.root, goal, objective="New objective", constraints=["stay local"])
+        updated = update_goal(
+            self.root, goal, objective="New objective", constraints=["stay local"]
+        )
 
         loaded = load_goals(self.root)
         self.assertEqual([item.goal_id for item in loaded], [goal.goal_id, goal.goal_id])
@@ -96,7 +98,9 @@ class GoalContractTests(unittest.TestCase):
         goal = create_goal(self.root, objective="Observable", observe=observe)
         update_goal(self.root, goal, objective="Still observable", observe=observe)
 
-        self.assertEqual([event[0] for event in observe.events], ["goal_initialized", "goal_updated"])
+        self.assertEqual(
+            [event[0] for event in observe.events], ["goal_initialized", "goal_updated"]
+        )
 
 
 if __name__ == "__main__":

@@ -44,7 +44,9 @@ def _write_session(
         "output_path": str(session_dir / "output.log"),
         "error_path": str(session_dir / "runner.stderr.log"),
     }
-    (session_dir / "meta.json").write_text(json.dumps(meta, indent=2, sort_keys=True), encoding="utf-8")
+    (session_dir / "meta.json").write_text(
+        json.dumps(meta, indent=2, sort_keys=True), encoding="utf-8"
+    )
     return session_dir
 
 
@@ -70,7 +72,9 @@ class TerminalBridgeServiceTests(unittest.TestCase):
                 )
                 return SimpleNamespace(pid=4321)
 
-            with mock.patch.dict(os.environ, {"CODEX_CLI_PATH": "/opt/homebrew/bin/codex"}, clear=False):
+            with mock.patch.dict(
+                os.environ, {"CODEX_CLI_PATH": "/opt/homebrew/bin/codex"}, clear=False
+            ):
                 service = TerminalBridgeService(root=root, popen_factory=popen_factory)
                 meta = service.open("codex", cwd=workspace)
 

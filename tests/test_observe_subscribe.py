@@ -20,9 +20,7 @@ class ObserveSubscribeTests(unittest.TestCase):
     def test_subscribe_callback_invoked_on_emit(self) -> None:
         received: list[dict] = []
         self.stream.subscribe("daemon_health_check_notification", received.append)
-        self.stream.emit(
-            "daemon_health_check_notification", payload={"status": "ok"}
-        )
+        self.stream.emit("daemon_health_check_notification", payload={"status": "ok"})
         self.assertEqual(received, [{"status": "ok"}])
 
     def test_subscribe_callback_not_invoked_for_other_events(self) -> None:
@@ -88,11 +86,15 @@ class ObserveSubscribeTests(unittest.TestCase):
     def test_job_events_filters_and_orders_by_job_id(self) -> None:
         self.stream.emit("other_started", job_id="job-2", payload={"step": 0})
         self.stream.emit("job_started", job_id="job-1", artifact_id="plan:1", payload={"step": 1})
-        self.stream.emit("job_completed", job_id="job-1", artifact_id="outcome:1", payload={"step": 2})
+        self.stream.emit(
+            "job_completed", job_id="job-1", artifact_id="outcome:1", payload={"step": 2}
+        )
 
         events = self.stream.job_events("job-1")
 
-        self.assertEqual([event["event_type"] for event in events], ["job_started", "job_completed"])
+        self.assertEqual(
+            [event["event_type"] for event in events], ["job_started", "job_completed"]
+        )
         self.assertEqual([event["payload"]["step"] for event in events], [1, 2])
         self.assertEqual(events[0]["artifact_id"], "plan:1")
 

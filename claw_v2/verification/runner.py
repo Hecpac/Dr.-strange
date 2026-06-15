@@ -18,6 +18,7 @@ consult :func:`should_use_petri_verifier` and dispatch accordingly is the
 job of commit #9, after we have observed Petri scores against real
 transcripts on a per-task opt-in basis.
 """
+
 from __future__ import annotations
 
 import logging
@@ -102,9 +103,7 @@ def run_petri_judge_for_task(
     """
     target_records = read_target_stream(telemetry_root, task_id)
     if not target_records:
-        raise ValueError(
-            f"target stream is empty for task_id={task_id!r}; cannot run judge"
-        )
+        raise ValueError(f"target stream is empty for task_id={task_id!r}; cannot run judge")
     dimensions = list(load_dimensions(dimensions_root))
     if extra_dimensions:
         dimensions.extend(extra_dimensions)

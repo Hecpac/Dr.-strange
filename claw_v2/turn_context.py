@@ -27,9 +27,7 @@ __all__ = [
 ]
 
 
-_TURN_ID_CONTEXT: ContextVar[str | None] = ContextVar(
-    "claw_turn_id_context", default=None
-)
+_TURN_ID_CONTEXT: ContextVar[str | None] = ContextVar("claw_turn_id_context", default=None)
 
 
 CRITICAL_OBSERVE_EVENTS_REQUIRING_TURN_ID: frozenset[str] = frozenset(

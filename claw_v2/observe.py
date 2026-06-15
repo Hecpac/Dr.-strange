@@ -294,7 +294,9 @@ class ObserveStream:
                 raise
         return False
 
-    def _spill_dropped_event(self, event_type: str, *, payload_json: str, **columns: str | None) -> None:
+    def _spill_dropped_event(
+        self, event_type: str, *, payload_json: str, **columns: str | None
+    ) -> None:
         """Append a dropped event as a JSONL line next to the DB.
 
         Best-effort: spilling must never raise into the emit path. The file
@@ -319,8 +321,7 @@ class ObserveStream:
 
     def _ensure_schema(self) -> None:
         existing = {
-            row[1]
-            for row in self._conn.execute("PRAGMA table_info(observe_stream)").fetchall()
+            row[1] for row in self._conn.execute("PRAGMA table_info(observe_stream)").fetchall()
         }
         for column in (
             "trace_id",
@@ -595,10 +596,7 @@ class ObserveStream:
             params = (limit,)
         with self._lock:
             rows = self._conn.execute(query, params).fetchall()
-        return [
-            _event_row_to_dict(row)
-            for row in rows
-        ]
+        return [_event_row_to_dict(row) for row in rows]
 
     def trace_events(self, trace_id: str, *, limit: int | None = None) -> list[dict]:
         query = """
@@ -615,10 +613,7 @@ class ObserveStream:
             params = (trace_id, limit)
         with self._lock:
             rows = self._conn.execute(query, params).fetchall()
-        return [
-            _event_row_to_dict(row)
-            for row in rows
-        ]
+        return [_event_row_to_dict(row) for row in rows]
 
     def job_events(self, job_id: str, *, limit: int | None = None) -> list[dict]:
         query = """

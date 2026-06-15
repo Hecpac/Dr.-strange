@@ -75,9 +75,13 @@ class LLMRouter:
         role: ProviderRole | None = None,
         delegation_handler: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     ) -> LLMResponse:
-        self._validate_lane_input(lane, evidence_pack, allowed_tools, agents, hooks, delegation_handler)
+        self._validate_lane_input(
+            lane, evidence_pack, allowed_tools, agents, hooks, delegation_handler
+        )
         configured_provider = self.config.provider_for_lane(lane)
-        selected_provider = provider or (self.config.provider_for_role(role) if role else configured_provider)
+        selected_provider = provider or (
+            self.config.provider_for_role(role) if role else configured_provider
+        )
         selected_model = (
             model
             or (self.config.model_for_role(role) if role and provider is None else None)
@@ -87,9 +91,17 @@ class LLMRouter:
                 else self.config.model_for_lane(lane)
             )
         )
-        selected_timeout = timeout if timeout is not None else self.config.timeout_for_role(role) if role else 300.0
+        selected_timeout = (
+            timeout
+            if timeout is not None
+            else self.config.timeout_for_role(role)
+            if role
+            else 300.0
+        )
         if role is not None:
-            self.config.validate_provider_role_policy(role, selected_provider, timeout=selected_timeout)
+            self.config.validate_provider_role_policy(
+                role, selected_provider, timeout=selected_timeout
+            )
         _validate_provider_model_pair(selected_provider, selected_model)
         selected_effort = effort or self.config.effort_for_lane(lane)
         selected_thinking = (
@@ -170,7 +182,10 @@ class LLMRouter:
             response = self._complete_with_circuit(adapter, request)
             _suppress_corrupt_provider_content(response)
         except AdapterError as exc:
-            if isinstance(exc.metadata, dict) and exc.metadata.get("reason") == "cost_metering_unknown":
+            if (
+                isinstance(exc.metadata, dict)
+                and exc.metadata.get("reason") == "cost_metering_unknown"
+            ):
                 # The aborted round was already billed at a rate we cannot price,
                 # but the abort means no llm_response will carry cost_unknown=1.
                 # Record the unpriced billable spend so the daily gate freezes
@@ -178,7 +193,11 @@ class LLMRouter:
                 self._audit_event(
                     "cost_metering_unknown",
                     request=request,
-                    metadata={"provider": request.provider, "model": request.model, "aborted": True},
+                    metadata={
+                        "provider": request.provider,
+                        "model": request.model,
+                        "aborted": True,
+                    },
                 )
             # AH8 (2026-06-11): an aborted billable turn already spent real
             # money (budget_exceeded carries cost_usd) but no llm_response
@@ -386,7 +405,11 @@ class LLMRouter:
         candidate = self._FALLBACK_MAP.get(failed_provider)
         if candidate and candidate in self.adapters:
             return candidate
-        if lane in self.NON_TOOL_LANES and failed_provider != "anthropic" and "anthropic" in self.adapters:
+        if (
+            lane in self.NON_TOOL_LANES
+            and failed_provider != "anthropic"
+            and "anthropic" in self.adapters
+        ):
             return "anthropic"
         return None
 
@@ -395,7 +418,14 @@ class LLMRouter:
             raise AdapterError(f"No adapter registered for provider '{provider}'.")
         return self.adapters[provider]
 
-    def _audit(self, action: str, response: LLMResponse, metadata: dict, *, request: LLMRequest | None = None) -> None:
+    def _audit(
+        self,
+        action: str,
+        response: LLMResponse,
+        metadata: dict,
+        *,
+        request: LLMRequest | None = None,
+    ) -> None:
         trace = (request.evidence_pack or {}) if request is not None else {}
         token_usage = _token_usage_metadata(response, request, metadata)
         event = {
@@ -434,7 +464,9 @@ class LLMRouter:
                 lane=request.lane,
                 provider=request.provider,
                 model=request.model,
-                estimated_input_tokens=_prompt_size_metadata(request)["estimated_total_input_tokens"],
+                estimated_input_tokens=_prompt_size_metadata(request)[
+                    "estimated_total_input_tokens"
+                ],
             )
         except PermissionError:
             raise
@@ -538,7 +570,9 @@ class LLMRouter:
         if lane in self.NON_TOOL_LANES:
             if evidence_pack is None:
                 raise ValueError(f"Lane '{lane}' requires an evidence_pack.")
-            if any(value is not None for value in (allowed_tools, agents, hooks, delegation_handler)):
+            if any(
+                value is not None for value in (allowed_tools, agents, hooks, delegation_handler)
+            ):
                 raise ValueError(f"Lane '{lane}' cannot receive tool-loop configuration.")
 
 
@@ -561,8 +595,13 @@ def _fallback_session_id(
 
 
 _INTERNAL_TOOL_TRACE_PATTERNS = (
-    re.compile(r"(?<!\w)to=(?:functions|multi_tool_use|web|image_gen|tool_search)\.", re.IGNORECASE),
-    re.compile(r'"recipient_name"\s*:\s*"(?:functions|multi_tool_use|web|image_gen|tool_search)\.', re.IGNORECASE),
+    re.compile(
+        r"(?<!\w)to=(?:functions|multi_tool_use|web|image_gen|tool_search)\.", re.IGNORECASE
+    ),
+    re.compile(
+        r'"recipient_name"\s*:\s*"(?:functions|multi_tool_use|web|image_gen|tool_search)\.',
+        re.IGNORECASE,
+    ),
     re.compile(r'"tool_uses"\s*:\s*\[', re.IGNORECASE),
 )
 _CORRUPT_PROVIDER_CONTENT = (
@@ -611,7 +650,9 @@ def _non_provider_fault_reason(exc: AdapterError) -> str | None:
     message = str(exc).lower()
     if "max_budget" in message or "budget exceeded" in message:
         return "budget_exceeded"
-    if "image" in message and ("could not be processed" in message or "could not process" in message):
+    if "image" in message and (
+        "could not be processed" in message or "could not process" in message
+    ):
         return "user_content_image"
     return None
 
@@ -642,10 +683,11 @@ def _prompt_size_metadata(request: LLMRequest) -> dict[str, int | str | bool | f
         "estimated_system_prompt_tokens": _estimated_tokens(len(request.system_prompt or "")),
         "estimated_evidence_pack_tokens": _estimated_tokens(raw_evidence_chars),
         "estimated_effective_input_tokens": _estimated_tokens(effective_input_chars),
-        "estimated_total_input_tokens": _estimated_tokens(effective_input_chars + effective_system_chars),
+        "estimated_total_input_tokens": _estimated_tokens(
+            effective_input_chars + effective_system_chars
+        ),
         "evidence_pack_truncated": (
-            raw_evidence_chars > ADVISORY_EVIDENCE_PACK_MAX_CHARS
-            and request.lane in ADVISORY_LANES
+            raw_evidence_chars > ADVISORY_EVIDENCE_PACK_MAX_CHARS and request.lane in ADVISORY_LANES
         ),
     }
 
@@ -705,7 +747,9 @@ def _token_usage_metadata(
             "source": source,
         }
 
-    prompt_size = metadata.get("prompt_size") if isinstance(metadata.get("prompt_size"), dict) else {}
+    prompt_size = (
+        metadata.get("prompt_size") if isinstance(metadata.get("prompt_size"), dict) else {}
+    )
     input_tokens = _coerce_int(prompt_size.get("estimated_total_input_tokens"), 0)
     output_tokens = _estimated_tokens(len(response.content or ""))
     total_tokens = input_tokens + output_tokens
@@ -723,7 +767,9 @@ def _token_usage_metadata(
 def _reported_token_total(usage: dict[str, object]) -> dict[str, int | bool]:
     reported_total = _sum_token_keys(usage, _TOTAL_TOKEN_KEYS)
     raw_input_tokens = _sum_token_keys(usage, _INPUT_TOKEN_KEYS)
-    output_tokens = _sum_token_keys(usage, _OUTPUT_TOKEN_KEYS) + _sum_token_keys(usage, _AUX_OUTPUT_TOKEN_KEYS)
+    output_tokens = _sum_token_keys(usage, _OUTPUT_TOKEN_KEYS) + _sum_token_keys(
+        usage, _AUX_OUTPUT_TOKEN_KEYS
+    )
     cache_read_tokens = _sum_token_keys(usage, _CACHE_READ_TOKEN_KEYS)
     cache_create_tokens = _sum_token_keys(usage, _CACHE_CREATE_TOKEN_KEYS)
     counted_input_tokens = raw_input_tokens + cache_create_tokens

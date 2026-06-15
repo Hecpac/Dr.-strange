@@ -6,6 +6,7 @@ opts in to raising :class:`SubAgentConfigError` when a SOUL.md cannot be
 parsed cleanly — typos in subagent specs no longer silently dispatch to
 the wrong model.
 """
+
 from __future__ import annotations
 
 import os

@@ -176,9 +176,7 @@ diff --git a/package-lock.json b/package-lock.json
             self.assertEqual(moved, 1)
             self.assertFalse(path.exists())
             self.assertTrue((Path(tmpdir) / "resolved" / f"{old.approval_id}.json").exists())
-            self.assertEqual(
-                {p["approval_id"] for p in m.list_pending()}, {fresh.approval_id}
-            )
+            self.assertEqual({p["approval_id"] for p in m.list_pending()}, {fresh.approval_id})
 
     # MED-2: approval tokens are single-use; a resolved record is immutable.
     def test_valid_token_approves_once(self) -> None:
@@ -398,7 +396,7 @@ diff --git a/package-lock.json b/package-lock.json
             m.approve(p.approval_id, p.token)
             path = m._path_for(p.approval_id)
             before = path.read_text(encoding="utf-8")
-            m.approve(p.approval_id, p.token)        # replay valid token
+            m.approve(p.approval_id, p.token)  # replay valid token
             m.approve(p.approval_id, "wrong-token")  # wrong token after approval
             after = path.read_text(encoding="utf-8")
             self.assertEqual(before, after)

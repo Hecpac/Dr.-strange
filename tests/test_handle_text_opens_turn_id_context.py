@@ -95,6 +95,7 @@ class HandleTextOpensTurnIdContextTests(unittest.TestCase):
                     "SELECT payload FROM observe_stream WHERE event_type='brain_turn_started' ORDER BY id DESC LIMIT 1"
                 ).fetchall()
                 import json
+
                 captured_event_payloads.extend(json.loads(r[0]) for r in rows)
                 raise _StopHere("done")
 

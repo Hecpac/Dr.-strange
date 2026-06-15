@@ -31,11 +31,7 @@ class RedactSensitiveTests(unittest.TestCase):
         self.assertIn("[REDACTED]", result)
 
     def test_strips_partially_redacted_jwt_residue(self) -> None:
-        token = (
-            "eyJhbGciOiJIUzI1NiJ9."
-            "[REDACTED]."
-            "AbcDefGhIjKlMnOpQrStUvWxYz1234567890"
-        )
+        token = "eyJhbGciOiJIUzI1NiJ9.[REDACTED].AbcDefGhIjKlMnOpQrStUvWxYz1234567890"
         result = redact_sensitive(f"token {token}")
         self.assertNotIn("eyJhbGciOiJIUzI1NiJ9", result)
         self.assertNotIn("AbcDefGhIjKl", result)
@@ -46,7 +42,9 @@ class RedactSensitiveTests(unittest.TestCase):
         # cleartext because the payload was sliced to 80 chars (cutting the 3rd
         # segment) BEFORE redaction, and the JWT pattern required 3 segments.
         # A 2-segment header.payload prefix is still a usable token.
-        truncated = "eyJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJyZWdyaWQuY29tIiwiaWF0IjoxNzgwOTQ0MjM5LCJleHAiOjE"
+        truncated = (
+            "eyJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJyZWdyaWQuY29tIiwiaWF0IjoxNzgwOTQ0MjM5LCJleHAiOjE"
+        )
         result = redact_sensitive(f"pegue este token {truncated}")
         self.assertNotIn("eyJhbGciOiJIUzI1NiJ9", result)
         self.assertNotIn("eyJpc3MiOiJyZWdyaWQ", result)
@@ -122,6 +120,7 @@ class RedactSensitiveTests(unittest.TestCase):
 class RecursiveRedactionTests(unittest.TestCase):
     def test_recursive_dict(self) -> None:
         import json
+
         payload = {
             "cmd": "/approve abc secret-token-xyz",
             "nested": {"key": "Bearer eyJhbGciOi.payload.sig123"},
@@ -149,6 +148,7 @@ class RecursiveRedactionTests(unittest.TestCase):
 
     def test_list_of_dicts(self) -> None:
         import json
+
         payload = [{"token": "abc-1234567890"}, {"safe": "hello"}]
         redacted = redact_sensitive(payload)
         as_text = json.dumps(redacted)

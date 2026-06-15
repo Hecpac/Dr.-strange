@@ -69,7 +69,11 @@ class TaskLedgerTests(unittest.TestCase):
                 route={"channel": "telegram"},
             )
             first = ledger.mark_terminal(
-                "task-1", status="failed", summary="broke", error="boom", verification_status="failed"
+                "task-1",
+                status="failed",
+                summary="broke",
+                error="boom",
+                verification_status="failed",
             )
             self.assertEqual(first.status, "failed")
 
@@ -142,7 +146,11 @@ class TaskLedgerTests(unittest.TestCase):
             self.assertEqual(result.status, "running")
             self.assertNotEqual(result.verification_status, "passed")
 
-            events = [e for e in observe.recent_events(limit=20) if e["event_type"] == "task_false_success_prevented"]
+            events = [
+                e
+                for e in observe.recent_events(limit=20)
+                if e["event_type"] == "task_false_success_prevented"
+            ]
             self.assertEqual(len(events), 1)
             self.assertEqual(events[0]["payload"]["task_id"], "task-fs")
             self.assertEqual(events[0]["payload"]["requested_status"], "succeeded")
@@ -181,9 +189,15 @@ class TaskLedgerTests(unittest.TestCase):
             self.assertEqual(result.status, "running")
             self.assertEqual(result.verification_status, "needs_verification")
             self.assertIn("outcome_manifest_has_pending_async_jobs", result.error)
-            events = [e for e in observe.recent_events(limit=20) if e["event_type"] == "task_false_success_prevented"]
+            events = [
+                e
+                for e in observe.recent_events(limit=20)
+                if e["event_type"] == "task_false_success_prevented"
+            ]
             self.assertEqual(len(events), 1)
-            self.assertEqual(events[0]["payload"]["reason"], "outcome_manifest_has_pending_async_jobs")
+            self.assertEqual(
+                events[0]["payload"]["reason"], "outcome_manifest_has_pending_async_jobs"
+            )
 
     def test_succeeded_with_evidence_and_passed_verification_persists(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -244,7 +258,13 @@ class TaskLedgerTests(unittest.TestCase):
                 status="completed_unverified",
                 summary="tool calls finished without verifier pass",
                 verification_status="needs_verification",
-                artifacts={"evidence_manifest": {"origin": "brain_fallback", "tools_run": ["Read"], "trace_id": "t"}},
+                artifacts={
+                    "evidence_manifest": {
+                        "origin": "brain_fallback",
+                        "tools_run": ["Read"],
+                        "trace_id": "t",
+                    }
+                },
             )
             self.assertEqual(terminal.status, "completed_unverified")
             with ledger._lock:
@@ -325,7 +345,11 @@ class TaskLedgerTests(unittest.TestCase):
             self.assertEqual(record.verification_status, "pending")
             self.assertTrue(record.metadata["reconciled_false_success"])
             self.assertEqual(record.metadata["reconciled_from_status"], "succeeded")
-            events = [e for e in observe.recent_events(limit=20) if e["event_type"] == "task_false_success_reconciled"]
+            events = [
+                e
+                for e in observe.recent_events(limit=20)
+                if e["event_type"] == "task_false_success_reconciled"
+            ]
             self.assertEqual(events[0]["payload"]["count"], 1)
 
     def test_reconcile_keeps_verified_succeeded_records(self) -> None:

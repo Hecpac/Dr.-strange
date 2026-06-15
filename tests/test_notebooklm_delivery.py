@@ -33,9 +33,14 @@ class NotebookLMDeliveryServiceTests(unittest.TestCase):
                 captured["url"] = req.full_url
                 return _fake_response({"ok": True, "result": {"message_id": 42}})
 
-            with patch.object(notebooklm_delivery, "_load_env",
-                              return_value={"TELEGRAM_BOT_TOKEN": "tok", "TELEGRAM_ALLOWED_USER_ID": "999"}), \
-                 patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            with (
+                patch.object(
+                    notebooklm_delivery,
+                    "_load_env",
+                    return_value={"TELEGRAM_BOT_TOKEN": "tok", "TELEGRAM_ALLOWED_USER_ID": "999"},
+                ),
+                patch("urllib.request.urlopen", side_effect=fake_urlopen),
+            ):
                 res = NotebookLMDeliveryService().send_to_telegram(audio, caption="hi")
 
             self.assertTrue(res.ok)
@@ -52,9 +57,14 @@ class NotebookLMDeliveryServiceTests(unittest.TestCase):
                 captured["url"] = req.full_url
                 return _fake_response({"ok": True, "result": {"message_id": 7}})
 
-            with patch.object(notebooklm_delivery, "_load_env",
-                              return_value={"TELEGRAM_BOT_TOKEN": "tok", "TELEGRAM_ALLOWED_USER_ID": "999"}), \
-                 patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            with (
+                patch.object(
+                    notebooklm_delivery,
+                    "_load_env",
+                    return_value={"TELEGRAM_BOT_TOKEN": "tok", "TELEGRAM_ALLOWED_USER_ID": "999"},
+                ),
+                patch("urllib.request.urlopen", side_effect=fake_urlopen),
+            ):
                 res = NotebookLMDeliveryService().send_to_telegram(doc)
 
             self.assertTrue(res.ok)
@@ -64,8 +74,10 @@ class NotebookLMDeliveryServiceTests(unittest.TestCase):
     def test_missing_token_returns_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             audio = self._write(tmp, "overview.m4a")
-            with patch.object(notebooklm_delivery, "_load_env", return_value={}), \
-                 patch.dict("os.environ", {}, clear=True):
+            with (
+                patch.object(notebooklm_delivery, "_load_env", return_value={}),
+                patch.dict("os.environ", {}, clear=True),
+            ):
                 res = NotebookLMDeliveryService().send_to_telegram(audio)
             self.assertFalse(res.ok)
             self.assertEqual(res.error, "missing_token_or_chat_id")
@@ -84,9 +96,14 @@ class NotebookLMDeliveryServiceTests(unittest.TestCase):
                 captured["body"] = req.data
                 return _fake_response({"ok": True, "result": {"message_id": 1}})
 
-            with patch.object(notebooklm_delivery, "_load_env",
-                              return_value={"TELEGRAM_BOT_TOKEN": "tok", "TELEGRAM_ALLOWED_USER_ID": "999"}), \
-                 patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            with (
+                patch.object(
+                    notebooklm_delivery,
+                    "_load_env",
+                    return_value={"TELEGRAM_BOT_TOKEN": "tok", "TELEGRAM_ALLOWED_USER_ID": "999"},
+                ),
+                patch("urllib.request.urlopen", side_effect=fake_urlopen),
+            ):
                 NotebookLMDeliveryService().send_to_telegram(audio, chat_id="12345")
 
             self.assertIn(b"12345", captured["body"])
@@ -108,16 +125,23 @@ class RenderReportHtmlTests(unittest.TestCase):
         self.assertIn("<h1>El fin de una era</h1>", doc)
         self.assertIn("<h2>Sección corta sin punto</h2>", doc)
         self.assertIn("<p>Un párrafo largo", doc)
-        self.assertIn("<table><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table>", doc)
+        self.assertIn(
+            "<table><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table>", doc
+        )
         self.assertIn('<meta charset="utf-8">', doc)
 
     def test_escapes_html_in_text(self) -> None:
         from claw_v2.notebooklm_delivery import render_report_html
 
-        _t, doc = render_report_html([
-            {"kind": "text", "text": "Title"},
-            {"kind": "text", "text": "riesgo <script>alert(1)</script> de inyección en el cuerpo."},
-        ])
+        _t, doc = render_report_html(
+            [
+                {"kind": "text", "text": "Title"},
+                {
+                    "kind": "text",
+                    "text": "riesgo <script>alert(1)</script> de inyección en el cuerpo.",
+                },
+            ]
+        )
         self.assertNotIn("<script>", doc)
         self.assertIn("&lt;script&gt;", doc)
 
@@ -140,7 +164,9 @@ class NotebookLMOrchestrationDeliveryTests(unittest.TestCase):
 
             def fake_send(path, *, chat_id=None, caption=None, title=None):
                 sent.append((str(path), chat_id, caption))
-                return FileDeliveryResult(ok=True, file_path=str(path), method="sendAudio", telegram_message_id=55)
+                return FileDeliveryResult(
+                    ok=True, file_path=str(path), method="sendAudio", telegram_message_id=55
+                )
 
             fake_delivery.send_to_telegram.side_effect = fake_send
             svc._delivery = fake_delivery
@@ -180,7 +206,9 @@ class NotebookLMOrchestrationDeliveryTests(unittest.TestCase):
             notify = MagicMock()
             job_service = JobService(Path(tmp) / "claw.db")
             svc = NotebookLMService(notify=notify, job_service=job_service)
-            svc._cdp_download_fn = lambda nb, kind: (_ for _ in ()).throw(AssertionError("should not download"))
+            svc._cdp_download_fn = lambda nb, kind: (_ for _ in ()).throw(
+                AssertionError("should not download")
+            )
 
             def fake_step(notebook_id, checkpoint, outputs):
                 return {"status": "completed", "stage": "outputs_ready", "summary": {}}
@@ -229,8 +257,11 @@ class NotebookLMOrchestrationDeliveryTests(unittest.TestCase):
             svc._cdp_download_fn = lambda nb, kind: None  # no artifact path
 
             def fake_step(notebook_id, checkpoint, outputs):
-                return {"status": "completed", "stage": "outputs_ready",
-                        "summary": {"audio_ready": True}}
+                return {
+                    "status": "completed",
+                    "stage": "outputs_ready",
+                    "summary": {"audio_ready": True},
+                }
 
             svc._cdp_orchestrate_step_fn = fake_step
             svc.start_orchestration("nb-full-id", session_id="tg-test", outputs=("podcast",))
@@ -238,8 +269,10 @@ class NotebookLMOrchestrationDeliveryTests(unittest.TestCase):
 
             job = job_service.list()[0]
             self.assertEqual(job.status, "completed")
-            self.assertEqual(job.result["deliveries"],
-                             [{"kind": "podcast", "ok": False, "error": "no_artifact_path"}])
+            self.assertEqual(
+                job.result["deliveries"],
+                [{"kind": "podcast", "ok": False, "error": "no_artifact_path"}],
+            )
             notify.assert_called_once()
 
 

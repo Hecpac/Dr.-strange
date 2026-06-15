@@ -1,4 +1,5 @@
 """Tests for the Petri verifier soak monitor (commit #9)."""
+
 from __future__ import annotations
 
 import unittest

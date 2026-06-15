@@ -6,6 +6,7 @@ Network and ffmpeg are mocked. Tests exercise the pipeline branches:
 - render still processing → poll loop continues
 - render failed → ok=False with error
 """
+
 from __future__ import annotations
 
 import json
@@ -52,8 +53,9 @@ def test_small_file_skips_compression(svc, tmp_path, monkeypatch):
     monkeypatch.setattr(svc, "download", _fake_download)
 
     compress_calls: list = []
-    monkeypatch.setattr(svc, "compress",
-                        lambda src, dest, crf=28: compress_calls.append(src) or dest)
+    monkeypatch.setattr(
+        svc, "compress", lambda src, dest, crf=28: compress_calls.append(src) or dest
+    )
 
     sent: list[dict] = []
 
@@ -116,7 +118,8 @@ def test_large_file_triggers_compression(svc, tmp_path, monkeypatch):
 
 def test_failed_render_returns_error(svc, monkeypatch):
     monkeypatch.setattr(
-        svc, "poll_until_done",
+        svc,
+        "poll_until_done",
         lambda vid: {"status": "failed", "error": "avatar_locked"},
     )
     result = svc.auto_deliver("vid_fail")
@@ -149,6 +152,7 @@ def test_brain_tool_registered_with_schema():
 def test_send_to_telegram_urlerror_does_not_leak_token(svc, monkeypatch, tmp_path):
     """URLError (DNS/socket) must not surface the bot token in the returned dict."""
     import urllib.error
+
     fake_token = "1234567890:AAH_secret_token_xyz"
     fake_chat = "9999"
     monkeypatch.setattr(
@@ -205,11 +209,13 @@ def test_telegram_send_failure_propagates(svc, tmp_path, monkeypatch):
     }
     monkeypatch.setattr(svc, "poll_until_done", lambda vid: completed)
     monkeypatch.setattr(
-        svc, "download",
+        svc,
+        "download",
         lambda url, dest: _make_video(dest, 5 * 1024 * 1024),
     )
     monkeypatch.setattr(
-        svc, "send_to_telegram",
+        svc,
+        "send_to_telegram",
         lambda *a, **kw: {"ok": False, "http_error": 413},
     )
     result = svc.auto_deliver("vid_tg_fail")

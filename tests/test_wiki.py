@@ -88,14 +88,27 @@ class DeepLintTests(unittest.TestCase):
         _write_page(svc.wiki_dir, "ai-tools", "AI Tools", "GPT-4 is the best model.")
         _write_page(svc.wiki_dir, "models", "Models", "Claude is the best model. See [[ai-tools]].")
 
-        llm_response = json.dumps({
-            "contradictions": [
-                {"pages": ["ai-tools", "models"], "description": "Both claim different models are 'the best'"}
-            ],
-            "stale": [],
-            "gaps": [{"topic": "benchmarks", "mentioned_in": ["models"], "description": "No benchmark page"}],
-            "suggestions": [{"action": "update", "target": "ai-tools", "reason": "Clarify ranking criteria"}],
-        })
+        llm_response = json.dumps(
+            {
+                "contradictions": [
+                    {
+                        "pages": ["ai-tools", "models"],
+                        "description": "Both claim different models are 'the best'",
+                    }
+                ],
+                "stale": [],
+                "gaps": [
+                    {
+                        "topic": "benchmarks",
+                        "mentioned_in": ["models"],
+                        "description": "No benchmark page",
+                    }
+                ],
+                "suggestions": [
+                    {"action": "update", "target": "ai-tools", "reason": "Clarify ranking criteria"}
+                ],
+            }
+        )
         router.ask.return_value = MagicMock(content=llm_response)
 
         result = svc.deep_lint()
@@ -120,9 +133,16 @@ class DeepLintTests(unittest.TestCase):
     def test_includes_structural_issues(self) -> None:
         svc, router, tmp = _make_wiki()
         _write_page(svc.wiki_dir, "orphan", "Orphan", "No links to me.")
-        router.ask.return_value = MagicMock(content=json.dumps({
-            "contradictions": [], "stale": [], "gaps": [], "suggestions": [],
-        }))
+        router.ask.return_value = MagicMock(
+            content=json.dumps(
+                {
+                    "contradictions": [],
+                    "stale": [],
+                    "gaps": [],
+                    "suggestions": [],
+                }
+            )
+        )
 
         result = svc.deep_lint()
 
@@ -132,9 +152,16 @@ class DeepLintTests(unittest.TestCase):
     def test_appends_to_log(self) -> None:
         svc, router, tmp = _make_wiki()
         _write_page(svc.wiki_dir, "page-a", "Page A", "Content.")
-        router.ask.return_value = MagicMock(content=json.dumps({
-            "contradictions": [], "stale": [], "gaps": [], "suggestions": [],
-        }))
+        router.ask.return_value = MagicMock(
+            content=json.dumps(
+                {
+                    "contradictions": [],
+                    "stale": [],
+                    "gaps": [],
+                    "suggestions": [],
+                }
+            )
+        )
 
         svc.deep_lint()
 
@@ -144,12 +171,22 @@ class DeepLintTests(unittest.TestCase):
     def test_auto_fix_creates_stub_without_auto_fill_query(self) -> None:
         svc, router, tmp = _make_wiki()
         _write_page(svc.wiki_dir, "models", "Models", "Mentions missing [[benchmarks]].")
-        router.ask.return_value = MagicMock(content=json.dumps({
-            "contradictions": [],
-            "stale": [],
-            "gaps": [{"topic": "benchmarks", "mentioned_in": ["models"], "description": "No benchmark page"}],
-            "suggestions": [],
-        }))
+        router.ask.return_value = MagicMock(
+            content=json.dumps(
+                {
+                    "contradictions": [],
+                    "stale": [],
+                    "gaps": [
+                        {
+                            "topic": "benchmarks",
+                            "mentioned_in": ["models"],
+                            "description": "No benchmark page",
+                        }
+                    ],
+                    "suggestions": [],
+                }
+            )
+        )
 
         result = svc.deep_lint(auto_fix=True)
 
@@ -177,8 +214,12 @@ class SearchTests(unittest.TestCase):
 
     def test_search_exact_keyword_can_win(self) -> None:
         svc, _, tmp = _make_wiki()
-        _write_page(svc.wiki_dir, "general-errors", "General Errors", "Generic troubleshooting guide.")
-        _write_page(svc.wiki_dir, "error-404", "HTTP Error", "The exact code Error 404 means not found.")
+        _write_page(
+            svc.wiki_dir, "general-errors", "General Errors", "Generic troubleshooting guide."
+        )
+        _write_page(
+            svc.wiki_dir, "error-404", "HTTP Error", "The exact code Error 404 means not found."
+        )
 
         results = svc.search("Error 404")
 
@@ -196,7 +237,9 @@ class StatsTests(unittest.TestCase):
         self.assertEqual(stats["wiki_pages"], 1)
         self.assertEqual(stats["raw_sources"], 1)
 
-    def test_quality_report_measures_retrieval_and_coverage_without_mutating_embeddings(self) -> None:
+    def test_quality_report_measures_retrieval_and_coverage_without_mutating_embeddings(
+        self,
+    ) -> None:
         svc, _, tmp = _make_wiki()
         _write_page(
             svc.wiki_dir,
@@ -274,7 +317,9 @@ class GraphTests(unittest.TestCase):
 
     def test_save_and_reload_graph(self) -> None:
         svc, router, tmp = _make_wiki()
-        svc._graph = {"a": [{"target": "b", "type": "relates_to", "weight": 0.5, "source_page": "x"}]}
+        svc._graph = {
+            "a": [{"target": "b", "type": "relates_to", "weight": 0.5, "source_page": "x"}]
+        }
         svc._save_graph()
         self.assertTrue(svc._graph_path.exists())
         # Reload
@@ -309,10 +354,18 @@ class DeleteTests(unittest.TestCase):
         _write_page(svc.wiki_dir, "test-page", "Test Page", "Content")
         svc._embeddings["test-page"] = [0.1] * 128
         svc._save_embeddings()
-        svc._graph = {"test-page": [{"target": "other", "type": "r", "weight": 1, "source_page": "test-page"}],
-                       "other": [{"target": "test-page", "type": "r", "weight": 0.5, "source_page": "test-page"}]}
+        svc._graph = {
+            "test-page": [
+                {"target": "other", "type": "r", "weight": 1, "source_page": "test-page"}
+            ],
+            "other": [
+                {"target": "test-page", "type": "r", "weight": 0.5, "source_page": "test-page"}
+            ],
+        }
         svc._save_graph()
-        svc.index_path.write_text("## Test\n- [[test-page]] — desc\n- [[other]] — keep\n", encoding="utf-8")
+        svc.index_path.write_text(
+            "## Test\n- [[test-page]] — desc\n- [[other]] — keep\n", encoding="utf-8"
+        )
 
         _result = svc.delete("test-page")
 
@@ -337,23 +390,31 @@ class IngestTests(unittest.TestCase):
     def test_two_step_ingest(self) -> None:
         svc, router, tmp = _make_wiki()
         # Step 1 response (analyze)
-        analyze_resp = json.dumps({
-            "entities": [{"name": "Test", "type": "concept", "description": "test entity"}],
-            "relations": [],
-            "key_facts": ["fact1"],
-            "category": "Research",
-            "tags": ["test"],
-            "pages_to_update": [],
-            "new_concepts": [],
-        })
+        analyze_resp = json.dumps(
+            {
+                "entities": [{"name": "Test", "type": "concept", "description": "test entity"}],
+                "relations": [],
+                "key_facts": ["fact1"],
+                "category": "Research",
+                "tags": ["test"],
+                "pages_to_update": [],
+                "new_concepts": [],
+            }
+        )
         # Step 2 response (generate)
-        generate_resp = json.dumps({
-            "summary_page": {"filename": "test-article.md",
-                             "content": "---\ntitle: Test Article\ntags: [test]\n---\n\n# Test Article\n\nContent."},
-            "updates": [],
-            "new_pages": [],
-            "index_entries": [{"category": "Research", "entry": "- [[test-article]] — Test Article"}],
-        })
+        generate_resp = json.dumps(
+            {
+                "summary_page": {
+                    "filename": "test-article.md",
+                    "content": "---\ntitle: Test Article\ntags: [test]\n---\n\n# Test Article\n\nContent.",
+                },
+                "updates": [],
+                "new_pages": [],
+                "index_entries": [
+                    {"category": "Research", "entry": "- [[test-article]] — Test Article"}
+                ],
+            }
+        )
         router.ask.side_effect = [
             MagicMock(content=analyze_resp),
             MagicMock(content=generate_resp),
@@ -374,14 +435,18 @@ class AutoResearchTests(unittest.TestCase):
     def test_auto_research_returns_candidates_without_writing_pages(self) -> None:
         svc, router, tmp = _make_wiki()
         _write_page(svc.wiki_dir, "existing", "Existing", "Content.")
-        router.ask.return_value = MagicMock(content=json.dumps([
-            {
-                "topic": "New Topic",
-                "category": "Research",
-                "reason": "Needs source research",
-                "source_queries": ["New Topic primary source"],
-            }
-        ]))
+        router.ask.return_value = MagicMock(
+            content=json.dumps(
+                [
+                    {
+                        "topic": "New Topic",
+                        "category": "Research",
+                        "reason": "Needs source research",
+                        "source_queries": ["New Topic primary source"],
+                    }
+                ]
+            )
+        )
 
         result = svc.auto_research(max_topics=1)
 
@@ -421,27 +486,37 @@ class AutoScrapeTests(unittest.TestCase):
     def test_auto_scrape_ingests_through_raw_pipeline(self) -> None:
         svc, router, tmp = _make_wiki()
         svc.WATCH_SOURCES = [("Test Source", "https://example.com/source")]
-        scrape_extract = json.dumps([
-            {"title": "Scraped Topic", "content": "Specific sourced fact with enough detail for ingestion.", "category": "Research"}
-        ])
-        analyze_resp = json.dumps({
-            "entities": [],
-            "relations": [],
-            "key_facts": ["fact"],
-            "category": "Research",
-            "tags": ["test"],
-            "pages_to_update": [],
-            "new_concepts": [],
-        })
-        generate_resp = json.dumps({
-            "summary_page": {
-                "filename": "scraped-topic.md",
-                "content": "---\ntitle: Scraped Topic\n---\n\n# Scraped Topic\n\nContent.",
-            },
-            "updates": [],
-            "new_pages": [],
-            "index_entries": [],
-        })
+        scrape_extract = json.dumps(
+            [
+                {
+                    "title": "Scraped Topic",
+                    "content": "Specific sourced fact with enough detail for ingestion.",
+                    "category": "Research",
+                }
+            ]
+        )
+        analyze_resp = json.dumps(
+            {
+                "entities": [],
+                "relations": [],
+                "key_facts": ["fact"],
+                "category": "Research",
+                "tags": ["test"],
+                "pages_to_update": [],
+                "new_concepts": [],
+            }
+        )
+        generate_resp = json.dumps(
+            {
+                "summary_page": {
+                    "filename": "scraped-topic.md",
+                    "content": "---\ntitle: Scraped Topic\n---\n\n# Scraped Topic\n\nContent.",
+                },
+                "updates": [],
+                "new_pages": [],
+                "index_entries": [],
+            }
+        )
         router.ask.side_effect = [
             MagicMock(content=scrape_extract),
             MagicMock(content=analyze_resp),

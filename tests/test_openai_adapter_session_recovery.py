@@ -47,10 +47,14 @@ class StalePreviousResponseRetryTests(unittest.TestCase):
             model="gpt-test",
             artifacts={"response_id": "resp_new"},
         )
-        transport = _RecordingTransport([
-            AdapterError("previous_response_not_found: previous_response_id cannot be resolved"),
-            ok,
-        ])
+        transport = _RecordingTransport(
+            [
+                AdapterError(
+                    "previous_response_not_found: previous_response_id cannot be resolved"
+                ),
+                ok,
+            ]
+        )
         adapter = OpenAIAdapter(transport=transport)
 
         response = adapter.complete(_make_request(session_id="resp_old"))
@@ -60,12 +64,17 @@ class StalePreviousResponseRetryTests(unittest.TestCase):
         self.assertEqual(response.artifacts["stale_session_id"], "resp_old")
         self.assertEqual(len(transport.calls), 2)
         self.assertIsNone(transport.calls[1].session_id)
-        self.assertEqual(transport.calls[1].evidence_pack["session_recovery"], "openai_previous_response_id_reset")
+        self.assertEqual(
+            transport.calls[1].evidence_pack["session_recovery"],
+            "openai_previous_response_id_reset",
+        )
 
     def test_does_not_retry_when_no_session_id(self) -> None:
-        transport = _RecordingTransport([
-            AdapterError("previous_response_not_found"),
-        ])
+        transport = _RecordingTransport(
+            [
+                AdapterError("previous_response_not_found"),
+            ]
+        )
         adapter = OpenAIAdapter(transport=transport)
 
         with self.assertRaises(AdapterError):
@@ -74,9 +83,11 @@ class StalePreviousResponseRetryTests(unittest.TestCase):
         self.assertEqual(len(transport.calls), 1)
 
     def test_unrelated_adapter_error_not_retried(self) -> None:
-        transport = _RecordingTransport([
-            AdapterError("rate limit exceeded"),
-        ])
+        transport = _RecordingTransport(
+            [
+                AdapterError("rate limit exceeded"),
+            ]
+        )
         adapter = OpenAIAdapter(transport=transport)
 
         with self.assertRaises(AdapterError):
@@ -85,10 +96,12 @@ class StalePreviousResponseRetryTests(unittest.TestCase):
         self.assertEqual(len(transport.calls), 1)
 
     def test_retry_failure_propagates(self) -> None:
-        transport = _RecordingTransport([
-            AdapterError("Invalid 'previous_response_id'"),
-            AdapterError("provider down"),
-        ])
+        transport = _RecordingTransport(
+            [
+                AdapterError("Invalid 'previous_response_id'"),
+                AdapterError("provider down"),
+            ]
+        )
         adapter = OpenAIAdapter(transport=transport)
 
         with self.assertRaises(AdapterError):

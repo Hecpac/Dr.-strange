@@ -84,7 +84,9 @@ def _json_response(
 
 
 class _QuietHandler(WSGIRequestHandler):
-    def log_message(self, format: str, *args: object) -> None:  # pragma: no cover - suppress stdlib noise
+    def log_message(
+        self, format: str, *args: object
+    ) -> None:  # pragma: no cover - suppress stdlib noise
         return
 
 
@@ -110,11 +112,7 @@ class WebTransport:
         self._started_at: float | None = None
 
     def is_serving(self) -> bool:
-        return (
-            self._server is not None
-            and self._thread is not None
-            and self._thread.is_alive()
-        )
+        return self._server is not None and self._thread is not None and self._thread.is_alive()
 
     @property
     def host(self) -> str:
@@ -134,7 +132,9 @@ class WebTransport:
         if self._server is not None:
             return
 
-        def _app(environ: dict[str, Any], start_response: Callable[[str, list[tuple[str, str]]], object]) -> list[bytes]:
+        def _app(
+            environ: dict[str, Any], start_response: Callable[[str, list[tuple[str, str]]], object]
+        ) -> list[bytes]:
             path = str(environ.get("PATH_INFO", "/"))
             if path == "/health":
                 now = time.time()
@@ -156,10 +156,10 @@ class WebTransport:
                 )
                 return [body]
             if path == "/observability" or path.startswith("/observability/"):
-                if not self._chat_api.is_authorized(
-                    LocalChatAPI._headers_from_environ(environ)
-                ):
-                    return _json_response(start_response, "401 Unauthorized", {"error": "unauthorized"})
+                if not self._chat_api.is_authorized(LocalChatAPI._headers_from_environ(environ)):
+                    return _json_response(
+                        start_response, "401 Unauthorized", {"error": "unauthorized"}
+                    )
                 if self._observability_dashboard is None:
                     return _json_response(
                         start_response,
@@ -171,7 +171,9 @@ class WebTransport:
                 return self._chat_api.wsgi_app(environ, start_response)
             file_path = _resolve_static_path(path)
             if file_path is None:
-                return _json_response(start_response, "404 Not Found", {"error": f"not found: {path}"})
+                return _json_response(
+                    start_response, "404 Not Found", {"error": f"not found: {path}"}
+                )
             body = file_path.read_bytes()
             start_response(
                 "200 OK",
@@ -199,7 +201,9 @@ class WebTransport:
                     raise
                 await asyncio.sleep(0.25 * (attempt + 1))
         if self._server is None:
-            raise OSError(f"Port {self._host}:{self._port} is still in use after retries") from last_error
+            raise OSError(
+                f"Port {self._host}:{self._port} is still in use after retries"
+            ) from last_error
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
         self._started_at = time.time()

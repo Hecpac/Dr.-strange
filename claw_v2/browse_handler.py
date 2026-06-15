@@ -75,7 +75,9 @@ class BrowseHandler:
             and self.managed_chrome is not None
             and self.browser is not None
         )
-        tweet_fallback = _tweet_fxtwitter_read(normalized_url) if _is_tweet_url(normalized_url) else ""
+        tweet_fallback = (
+            _tweet_fxtwitter_read(normalized_url) if _is_tweet_url(normalized_url) else ""
+        )
         navigation_strategy = _select_navigation_strategy(normalized_url)
         auth_required = navigation_strategy == "authenticated"
         started_at = time.perf_counter()
@@ -281,12 +283,16 @@ class BrowseHandler:
             "chrome_cdp",
             f"browse error: {url} requiere navegador autenticado y Chrome CDP no está disponible.",
         )
-        return degraded_message or f"browse error: {url} requiere navegador autenticado y Chrome CDP no está disponible.", {
-            "strategy": "authenticated",
-            "selected_backend": "none",
-            "status": "error",
-            "note": "no_authenticated_backend",
-        }
+        return (
+            degraded_message
+            or f"browse error: {url} requiere navegador autenticado y Chrome CDP no está disponible.",
+            {
+                "strategy": "authenticated",
+                "selected_backend": "none",
+                "status": "error",
+                "note": "no_authenticated_backend",
+            },
+        )
 
     def _browse_textual_fallback(
         self,
@@ -329,7 +335,11 @@ class BrowseHandler:
         return f"**{result.title}** ({result.url})\n\n{result.content[:6000]}"
 
     def _browserbase_browse_response(self, url: str) -> str:
-        if self.browser is None or self.config is None or not hasattr(self.browser, "browserbase_browse"):
+        if (
+            self.browser is None
+            or self.config is None
+            or not hasattr(self.browser, "browserbase_browse")
+        ):
             return ""
         api_key = getattr(self.config, "browserbase_api_key", None)
         project_id = getattr(self.config, "browserbase_project_id", None)
@@ -413,6 +423,7 @@ class BrowseHandler:
 
     def link_review_shortcut(self, text: str, url: str, *, session_id: str) -> object:
         from claw_v2.bot import _BrainShortcut
+
         try:
             normalized_url = _normalize_url(url)
         except ValueError:
@@ -434,17 +445,24 @@ class BrowseHandler:
         blocks: list[str] = []
         for nested_url in nested_urls:
             nested_content = self.browse_response(nested_url, session_id=None)
-            if nested_content and nested_content.strip() and not nested_content.lower().startswith("browse error"):
+            if (
+                nested_content
+                and nested_content.strip()
+                and not nested_content.lower().startswith("browse error")
+            ):
                 blocks.append(f"[URL anidada analizada]: {nested_url}\n{nested_content[:3000]}")
             else:
-                reason = nested_content.strip() if nested_content and nested_content.strip() else "No se pudo extraer contenido útil."
+                reason = (
+                    nested_content.strip()
+                    if nested_content and nested_content.strip()
+                    else "No se pudo extraer contenido útil."
+                )
                 blocks.append(f"[URL anidada intentada]: {nested_url}\n{reason[:1000]}")
         if not blocks:
             return fetched_content
         return (
             f"{fetched_content}\n\n---\n"
-            "[URLs anidadas revisadas autónomamente]\n"
-            + "\n\n---\n".join(blocks)
+            "[URLs anidadas revisadas autónomamente]\n" + "\n\n---\n".join(blocks)
         )
 
     def remember_recent_browse_url(self, session_id: str | None, url: str) -> None:

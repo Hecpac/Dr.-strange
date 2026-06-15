@@ -2,6 +2,7 @@
 
 Provides /rollback <ckpt_id|last> and /checkpoints list.
 """
+
 from __future__ import annotations
 
 import logging
@@ -47,10 +48,7 @@ class CheckpointHandler:
         parts = stripped.split(maxsplit=1)
         target = parts[1].strip() if len(parts) > 1 else ""
         if not target:
-            return (
-                "Uso: /rollback <ckpt_id|last>\n"
-                "Usa /checkpoints list para ver IDs disponibles."
-            )
+            return "Uso: /rollback <ckpt_id|last>\nUsa /checkpoints list para ver IDs disponibles."
         if target == "last":
             row = self.checkpoint.latest()
             if row is None:
@@ -64,24 +62,17 @@ class CheckpointHandler:
             return f"Checkpoint {ckpt_id} no encontrado."
         except FileNotFoundError:
             return f"Checkpoint {ckpt_id} tiene su archivo snapshot ausente del disco."
-        return (
-            f"Checkpoint {ckpt_id} marcado para rollback. "
-            "Ejecuta /restart para aplicar."
-        )
+        return f"Checkpoint {ckpt_id} marcado para rollback. Ejecuta /restart para aplicar."
 
     def _handle_checkpoints(self, stripped: str) -> str:
         parts = stripped.split(maxsplit=1)
         sub = parts[1].strip() if len(parts) > 1 else ""
         if sub != "list":
-            return (
-                "Uso: /checkpoints list — muestra los checkpoints disponibles."
-            )
+            return "Uso: /checkpoints list — muestra los checkpoints disponibles."
         rows = self.checkpoint.list()
         if not rows:
             return "Sin checkpoints registrados."
         lines = ["Checkpoints disponibles (más reciente primero):"]
         for r in rows:
-            lines.append(
-                f"· {r['ckpt_id']} — {r['created_at']} — {r['trigger_reason'][:60]}"
-            )
+            lines.append(f"· {r['ckpt_id']} — {r['created_at']} — {r['trigger_reason'][:60]}")
         return "\n".join(lines)

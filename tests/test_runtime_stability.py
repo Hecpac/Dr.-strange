@@ -88,7 +88,12 @@ class DailyCostLimitTests(unittest.TestCase):
         from claw_v2.main import build_runtime
 
         def fake(req: LLMRequest) -> LLMResponse:
-            return LLMResponse(content="<response>ok</response>", lane=req.lane, provider="anthropic", model=req.model)
+            return LLMResponse(
+                content="<response>ok</response>",
+                lane=req.lane,
+                provider="anthropic",
+                model=req.model,
+            )
 
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -113,7 +118,12 @@ class DailyCostLimitTests(unittest.TestCase):
         from claw_v2.main import build_runtime
 
         def fake(req: LLMRequest) -> LLMResponse:
-            return LLMResponse(content="<response>ok</response>", lane=req.lane, provider="anthropic", model=req.model)
+            return LLMResponse(
+                content="<response>ok</response>",
+                lane=req.lane,
+                provider="anthropic",
+                model=req.model,
+            )
 
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -136,7 +146,12 @@ class DailyCostLimitTests(unittest.TestCase):
         from claw_v2.main import build_runtime
 
         def fake(req: LLMRequest) -> LLMResponse:
-            return LLMResponse(content="<response>ok</response>", lane=req.lane, provider="anthropic", model=req.model)
+            return LLMResponse(
+                content="<response>ok</response>",
+                lane=req.lane,
+                provider="anthropic",
+                model=req.model,
+            )
 
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -161,7 +176,12 @@ class AutonomousMaintenanceFlagTests(unittest.TestCase):
         from claw_v2.main import build_runtime
 
         def fake(req: LLMRequest) -> LLMResponse:
-            return LLMResponse(content="<response>ok</response>", lane=req.lane, provider="anthropic", model=req.model)
+            return LLMResponse(
+                content="<response>ok</response>",
+                lane=req.lane,
+                provider="anthropic",
+                model=req.model,
+            )
 
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -213,7 +233,12 @@ class AutonomousMaintenanceFlagTests(unittest.TestCase):
         from claw_v2.main import build_runtime
 
         def fake(req: LLMRequest) -> LLMResponse:
-            return LLMResponse(content="<response>ok</response>", lane=req.lane, provider="anthropic", model=req.model)
+            return LLMResponse(
+                content="<response>ok</response>",
+                lane=req.lane,
+                provider="anthropic",
+                model=req.model,
+            )
 
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -236,7 +261,9 @@ class AutonomousMaintenanceFlagTests(unittest.TestCase):
                 ):
                     jobs["task_lifecycle_watchdog"].handler()
 
-                events = runtime.observe.recent_events(limit=20, event_type="task_lifecycle_watchdog")
+                events = runtime.observe.recent_events(
+                    limit=20, event_type="task_lifecycle_watchdog"
+                )
                 self.assertEqual(events[0]["payload"]["resumed_tasks"], 2)
                 self.assertEqual(events[0]["payload"]["reconciled_false_successes"], 1)
 

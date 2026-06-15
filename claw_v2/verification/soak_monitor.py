@@ -19,6 +19,7 @@ The actual env-flag flip is intentionally NOT performed here. Per the spec
 staging plan we need at least one week of soak data before we know whether
 default-on is safe. This module is the instrument that produces that data.
 """
+
 from __future__ import annotations
 
 import statistics

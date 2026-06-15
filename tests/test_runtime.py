@@ -51,12 +51,16 @@ class RuntimeTests(unittest.TestCase):
                 )
 
             with patch.dict(os.environ, env, clear=False):
-                runtime = build_runtime(anthropic_executor=fake_anthropic, ollama_transport=ollama_transport)
+                runtime = build_runtime(
+                    anthropic_executor=fake_anthropic, ollama_transport=ollama_transport
+                )
                 response = runtime.router.ask("classify", lane="judge", evidence_pack={"data": "x"})
                 self.assertEqual(response.provider, "ollama")
                 self.assertEqual(response.model, "gemma4")
 
-    def test_build_runtime_reuses_injected_executor_for_unprovided_secondary_transports(self) -> None:
+    def test_build_runtime_reuses_injected_executor_for_unprovided_secondary_transports(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             env = {
@@ -102,12 +106,16 @@ class RuntimeTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 runtime.brain.handle_message("session-1", "hello")
-                payload = runtime.bot.handle_text(user_id="123", session_id="session-1", text="/status")
+                payload = runtime.bot.handle_text(
+                    user_id="123", session_id="session-1", text="/status"
+                )
                 self.assertIn("Estoy vivo.", payload)
                 self.assertIn("Aprobaciones: 0 pendientes.", payload)
                 self.assertIn("Agentes:", payload)
                 self.assertIn("Uso hoy: 1 llamadas", payload)
-                self.assertIn("Más detalle: `/approvals`, `/jobs`, `/tasks`, `/budget_status`.", payload)
+                self.assertIn(
+                    "Más detalle: `/approvals`, `/jobs`, `/tasks`, `/budget_status`.", payload
+                )
                 self.assertNotIn('"lane_metrics"', payload)
                 self.assertNotIn("brain:anthropic:claude-opus-4-7", payload)
 
@@ -140,7 +148,9 @@ class RuntimeTests(unittest.TestCase):
                 hex_def = runtime.sub_agents.get_agent("hex")
                 eval_def = runtime.sub_agents.get_agent("eval")
                 self.assertEqual((hex_def.provider, hex_def.model), ("openai", "gpt-5.5"))
-                self.assertEqual((eval_def.provider, eval_def.model), ("anthropic", "claude-opus-4-7"))
+                self.assertEqual(
+                    (eval_def.provider, eval_def.model), ("anthropic", "claude-opus-4-7")
+                )
 
     def test_build_runtime_wires_coordinator_timeout_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -177,7 +187,11 @@ class RuntimeTests(unittest.TestCase):
                 "PIPELINE_STATE_ROOT": str(root / "pipeline"),
             }
             with patch.dict(os.environ, env, clear=False):
-                with patch.object(AgentWorkspace, "stable_context", side_effect=AssertionError("stable_context is not the boot path")):
+                with patch.object(
+                    AgentWorkspace,
+                    "stable_context",
+                    side_effect=AssertionError("stable_context is not the boot path"),
+                ):
                     runtime = build_runtime(anthropic_executor=fake_anthropic)
 
                 self.assertEqual(runtime.agent_workspace.root, root / "workspace")
@@ -188,9 +202,18 @@ class RuntimeTests(unittest.TestCase):
                 self.assertIn("startup_context_used=true", runtime.brain.system_prompt)
                 self.assertIn("stable_context_used=false", runtime.brain.system_prompt)
                 events = runtime.observe.recent_events(limit=50)
-                self.assertTrue(any(event["event_type"] == "agent_workspace_bootstrap" for event in events))
-                self.assertTrue(any(event["event_type"] == "provider_sessions_cleared_for_startup_context" for event in events))
-                startup_events = [event for event in events if event["event_type"] == "agent_startup_context"]
+                self.assertTrue(
+                    any(event["event_type"] == "agent_workspace_bootstrap" for event in events)
+                )
+                self.assertTrue(
+                    any(
+                        event["event_type"] == "provider_sessions_cleared_for_startup_context"
+                        for event in events
+                    )
+                )
+                startup_events = [
+                    event for event in events if event["event_type"] == "agent_startup_context"
+                ]
                 self.assertTrue(startup_events)
                 payload = startup_events[0]["payload"]
                 self.assertEqual(payload["boot_context_version"], "startup_context_v2")
@@ -260,7 +283,9 @@ class RuntimeTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
 
-                job = runtime.job_service.enqueue(kind="pipeline.issue", payload={"issue_id": "HEC-1"})
+                job = runtime.job_service.enqueue(
+                    kind="pipeline.issue", payload={"issue_id": "HEC-1"}
+                )
 
                 self.assertEqual(runtime.job_service.get(job.job_id).kind, "pipeline.issue")
                 self.assertEqual(runtime.bot.job_service.get(job.job_id).status, "queued")
@@ -310,7 +335,9 @@ class RuntimeTests(unittest.TestCase):
             }
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
-                self.assertTrue(runtime.bot._task_handler.wait_for_task("tg-123:interrupted", timeout=2))
+                self.assertTrue(
+                    runtime.bot._task_handler.wait_for_task("tg-123:interrupted", timeout=2)
+                )
 
                 record = runtime.task_ledger.get("tg-123:interrupted")
                 self.assertEqual(record.status, "running")
@@ -322,9 +349,13 @@ class RuntimeTests(unittest.TestCase):
                 self.assertEqual(recovered_job.status, "retrying")
                 self.assertEqual(recovered_job.worker_id, "coordinator")
                 self.assertEqual(recovered_job.attempts, 2)
-                self.assertEqual(record.artifacts["lifecycle"]["plan"]["objective"], "corrige el bug del login")
+                self.assertEqual(
+                    record.artifacts["lifecycle"]["plan"]["objective"], "corrige el bug del login"
+                )
                 self.assertEqual(record.artifacts["lifecycle"]["execution"]["status"], "resumed")
-                self.assertEqual(record.artifacts["lifecycle"]["job"]["lifecycle_status"], "pending")
+                self.assertEqual(
+                    record.artifacts["lifecycle"]["job"]["lifecycle_status"], "pending"
+                )
                 state = runtime.memory.get_session_state("tg-123")
                 self.assertEqual(state["active_object"]["active_task"]["status"], "pending")
 
@@ -358,9 +389,16 @@ class RuntimeTests(unittest.TestCase):
                 job_names = {job.name for job in runtime.scheduler.list_jobs()}
 
         self.assertTrue(any(name.startswith("site_monitor_status_page") for name in job_names))
-        self.assertTrue(any(name.startswith("alma_") and name.endswith(name) and "daily_brief" in name for name in job_names))
+        self.assertTrue(
+            any(
+                name.startswith("alma_") and name.endswith(name) and "daily_brief" in name
+                for name in job_names
+            )
+        )
         self.assertIn("learning_soul_suggestions", job_names)
-        self.assertFalse(any(name.startswith("site_monitor_premiumhome_design") for name in job_names))
+        self.assertFalse(
+            any(name.startswith("site_monitor_premiumhome_design") for name in job_names)
+        )
 
     def test_brain_persists_anthropic_provider_session_mapping(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -393,7 +431,9 @@ class RuntimeTests(unittest.TestCase):
                 runtime.brain.handle_message("session-1", "hello")
                 runtime.brain.handle_message("session-1", "hello again")
                 self.assertEqual(seen_session_ids, [None, "sdk-session-1"])
-                self.assertEqual(runtime.memory.get_provider_session("session-1", "anthropic"), "sdk-session-1")
+                self.assertEqual(
+                    runtime.memory.get_provider_session("session-1", "anthropic"), "sdk-session-1"
+                )
 
     def test_multimodal_message_is_forwarded_and_memory_stores_text_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -531,11 +571,19 @@ class RuntimeTests(unittest.TestCase):
                 runtime = build_runtime(anthropic_executor=capture_anthropic)
                 runtime.brain.wiki = MagicMock()
                 runtime.brain.wiki.search.return_value = [
-                    {"title": "Refund Policy", "similarity": 0.61, "snippet": "Refunds take 5 days."},
+                    {
+                        "title": "Refund Policy",
+                        "similarity": 0.61,
+                        "snippet": "Refunds take 5 days.",
+                    },
                 ]
-                runtime.brain.wiki.query.return_value = "Use [[refund-policy]] for the canonical answer."
+                runtime.brain.wiki.query.return_value = (
+                    "Use [[refund-policy]] for the canonical answer."
+                )
 
-                runtime.bot.handle_text(user_id="123", session_id="s1", text="¿Cuál es la política de refund?")
+                runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="¿Cuál es la política de refund?"
+                )
 
                 prompt = seen_prompts[-1]
                 self.assertIsInstance(prompt, str)
@@ -578,7 +626,9 @@ class RuntimeTests(unittest.TestCase):
 
                 for idx in range(4):
                     runtime.memory.store_message("session-1", "user", f"shortcut-user-{idx}")
-                    runtime.memory.store_message("session-1", "assistant", f"shortcut-assistant-{idx}")
+                    runtime.memory.store_message(
+                        "session-1", "assistant", f"shortcut-assistant-{idx}"
+                    )
 
                 runtime.brain.handle_message("session-1", "follow up")
 
@@ -589,7 +639,6 @@ class RuntimeTests(unittest.TestCase):
                 self.assertIn("shortcut-assistant-3", prompt)
                 self.assertNotIn("user: hello", prompt)
                 self.assertTrue(prompt.rstrip().endswith("follow up"))
-
 
     def test_cost_gate_blocks_when_limit_exceeded(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -625,7 +674,6 @@ class RuntimeTests(unittest.TestCase):
                 self.assertEqual(response2.artifacts.get("blocked_by"), "daily_cost_gate")
                 self.assertEqual(response2.provider, "none")
 
-
     def test_computer_service_wired_and_screen_command_works(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -642,7 +690,10 @@ class RuntimeTests(unittest.TestCase):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 self.assertIsNotNone(runtime.bot._computer_handler.computer)
                 # Mock the screenshot since we can't run screencapture in tests
-                runtime.bot._computer_handler.computer.capture_screenshot = lambda: {"data": "test_data", "media_type": "image/png"}
+                runtime.bot._computer_handler.computer.capture_screenshot = lambda: {
+                    "data": "test_data",
+                    "media_type": "image/png",
+                }
                 result = runtime.bot.handle_text(user_id="123", session_id="s1", text="/screen")
                 self.assertIn("screenshot_data", result)
 

@@ -13,6 +13,7 @@ from tests.helpers import make_config
 
 def _make_bot(**overrides):
     from claw_v2.bot import BotService
+
     tmpdir = tempfile.mkdtemp()
     config = make_config(Path(tmpdir))
     brain = MagicMock()
@@ -32,7 +33,9 @@ def _make_bot(**overrides):
 class BrowseJinaTests(unittest.TestCase):
     def test_url_extractor_handles_querystrings_and_local_ips(self) -> None:
         self.assertEqual(_extract_url_candidate("revisa example.com?q=ai"), "example.com?q=ai")
-        self.assertEqual(_extract_url_candidate("127.0.0.1:3000/dashboard"), "127.0.0.1:3000/dashboard")
+        self.assertEqual(
+            _extract_url_candidate("127.0.0.1:3000/dashboard"), "127.0.0.1:3000/dashboard"
+        )
 
     def test_short_content_is_not_treated_as_login_wall_without_signals(self) -> None:
         self.assertFalse(_is_login_wall("# OK\n\nDocumento corto pero valido."))
@@ -45,9 +48,13 @@ class BrowseJinaTests(unittest.TestCase):
 
     @patch("claw_v2.browse_handler._jina_read")
     def test_browse_jina_success(self, mock_jina) -> None:
-        mock_jina.return_value = "# Article Title\n\nThis is a long article about AI trends in 2026. " + "x" * 200
+        mock_jina.return_value = (
+            "# Article Title\n\nThis is a long article about AI trends in 2026. " + "x" * 200
+        )
         bot = _make_bot()
-        result = bot.handle_text(user_id="123", session_id="s1", text="/browse https://example.com/article")
+        result = bot.handle_text(
+            user_id="123", session_id="s1", text="/browse https://example.com/article"
+        )
         self.assertIn("Article Title", result)
         mock_jina.assert_called_once()
 
@@ -55,13 +62,17 @@ class BrowseJinaTests(unittest.TestCase):
     def test_browse_auth_domain_goes_to_cdp(self, mock_jina) -> None:
         browser = MagicMock()
         browser.chrome_navigate.return_value = BrowseResult(
-            url="https://x.com/post/123", title="Tweet", content="Hello world tweet content here " + "x" * 200,
+            url="https://x.com/post/123",
+            title="Tweet",
+            content="Hello world tweet content here " + "x" * 200,
         )
         chrome = MagicMock()
         chrome.cdp_url = "http://localhost:9250"
         bot = _make_bot(browser=browser)
         bot.managed_chrome = chrome
-        result = bot.handle_text(user_id="123", session_id="s1", text="/browse https://x.com/post/123")
+        result = bot.handle_text(
+            user_id="123", session_id="s1", text="/browse https://x.com/post/123"
+        )
         mock_jina.assert_not_called()
         browser.chrome_navigate.assert_called_once()
         self.assertIn("Tweet", result)
@@ -75,13 +86,17 @@ class BrowseJinaTests(unittest.TestCase):
         bot = _make_bot(browser=browser)
         bot.config.browse_backend = "chrome_cdp"
         bot.managed_chrome = chrome
-        result = bot.handle_text(user_id="123", session_id="s1", text="/browse https://x.com/post/123")
+        result = bot.handle_text(
+            user_id="123", session_id="s1", text="/browse https://x.com/post/123"
+        )
         mock_jina.assert_not_called()
         self.assertIn("error", result.lower())
 
     @patch("claw_v2.browse_handler._tweet_fxtwitter_read")
     @patch("claw_v2.browse_handler._jina_read")
-    def test_browse_tweet_login_wall_falls_back_to_tweet_reader(self, mock_jina, mock_tweet_read) -> None:
+    def test_browse_tweet_login_wall_falls_back_to_tweet_reader(
+        self, mock_jina, mock_tweet_read
+    ) -> None:
         tweet_url = "https://x.com/tendenciatuits/status/2039116558836936982?s=46"
         mock_tweet_read.return_value = f"**Autor on X** ({tweet_url})\n\nTexto limpio del tweet."
         browser = MagicMock()
@@ -105,7 +120,9 @@ class BrowseJinaTests(unittest.TestCase):
     def test_browse_jina_short_valid_content_is_accepted(self, mock_jina) -> None:
         mock_jina.return_value = "# OK\n\nDocumento corto pero valido."
         bot = _make_bot()
-        result = bot.handle_text(user_id="123", session_id="s1", text="/browse https://example.com/short")
+        result = bot.handle_text(
+            user_id="123", session_id="s1", text="/browse https://example.com/short"
+        )
         self.assertIn("Documento corto pero valido", result)
 
     @patch("claw_v2.browse_handler._jina_read")
@@ -113,7 +130,9 @@ class BrowseJinaTests(unittest.TestCase):
         mock_jina.return_value = ""  # empty = validation fail
         browser = MagicMock()
         browser.chrome_navigate.return_value = BrowseResult(
-            url="https://example.com", title="Example", content="Real content from CDP " + "x" * 200,
+            url="https://example.com",
+            title="Example",
+            content="Real content from CDP " + "x" * 200,
         )
         chrome = MagicMock()
         chrome.cdp_url = "http://localhost:9250"
@@ -125,7 +144,9 @@ class BrowseJinaTests(unittest.TestCase):
         browser.chrome_navigate.assert_called_once()
 
     @patch("claw_v2.browse_handler._jina_read")
-    def test_browse_playwright_local_backend_uses_browser_browse_before_cdp(self, mock_jina) -> None:
+    def test_browse_playwright_local_backend_uses_browser_browse_before_cdp(
+        self, mock_jina
+    ) -> None:
         mock_jina.return_value = ""
         browser = MagicMock()
         browser.browse.return_value = BrowseResult(
@@ -137,7 +158,9 @@ class BrowseJinaTests(unittest.TestCase):
         bot.config.browse_backend = "playwright_local"
         bot.managed_chrome = None
 
-        result = bot.handle_text(user_id="123", session_id="s1", text="/browse https://example.com/docs")
+        result = bot.handle_text(
+            user_id="123", session_id="s1", text="/browse https://example.com/docs"
+        )
 
         self.assertIn("Docs", result)
         browser.browse.assert_called_once_with("https://example.com/docs")
@@ -158,7 +181,9 @@ class BrowseJinaTests(unittest.TestCase):
         bot.config.browserbase_project_id = "proj-123"
         bot.managed_chrome = None
 
-        result = bot.handle_text(user_id="123", session_id="s1", text="/browse https://example.com/pricing")
+        result = bot.handle_text(
+            user_id="123", session_id="s1", text="/browse https://example.com/pricing"
+        )
 
         self.assertIn("Pricing", result)
         browser.browserbase_browse.assert_called_once_with(
@@ -182,7 +207,9 @@ class BrowseJinaTests(unittest.TestCase):
         bot = _make_bot(browser=browser)
         bot.config.browse_backend = "auto"
 
-        result = bot.handle_text(user_id="123", session_id="s1", text="/browse https://github.com/acme/repo")
+        result = bot.handle_text(
+            user_id="123", session_id="s1", text="/browse https://github.com/acme/repo"
+        )
 
         self.assertIn("Repo", result)
         browser.browse.assert_called_once_with("https://github.com/acme/repo")
@@ -194,7 +221,9 @@ class BrowseJinaTests(unittest.TestCase):
         mock_jina.return_value = "# Some Content\n\n" + "x" * 200
         bot = _make_bot()
         bot.managed_chrome = None
-        result = bot.handle_text(user_id="123", session_id="s1", text="/browse https://x.com/post/123")
+        result = bot.handle_text(
+            user_id="123", session_id="s1", text="/browse https://x.com/post/123"
+        )
         mock_jina.assert_called_once()
         self.assertIn("Some Content", result)
 
@@ -273,6 +302,7 @@ class BrowserPoolTests(unittest.TestCase):
 
     def test_max_sessions_enforced(self):
         from claw_v2.browser import BrowserError
+
         pool, mock_browser, _, _ = self._make_mock_pool()
         pool._max_sessions = 2
         # Each acquire creates a new mock context
@@ -350,7 +380,9 @@ class OpenSiteCdpRoutingTests(unittest.TestCase):
 
     def test_open_multiple_scheme_urls_hands_full_request_to_brain(self) -> None:
         bot = self._bot()
-        reply = bot._maybe_handle_shortcut("abre https://heygen.com y https://fal.ai", session_id="s1")
+        reply = bot._maybe_handle_shortcut(
+            "abre https://heygen.com y https://fal.ai", session_id="s1"
+        )
         self.assertIsInstance(reply, _BrainShortcut)
         bot._chrome_handler.browse_response.assert_not_called()
 

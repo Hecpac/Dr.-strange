@@ -81,12 +81,19 @@ class SynthesizeTests(unittest.IsolatedAsyncioTestCase):
 
         try:
             with (
-                patch("claw_v2.voice._synthesize_xai", new=AsyncMock(side_effect=RuntimeError("xai down"))) as xai,
-                patch("claw_v2.voice.synthesize", new=AsyncMock(return_value=mp3_path)) as openai_tts,
+                patch(
+                    "claw_v2.voice._synthesize_xai",
+                    new=AsyncMock(side_effect=RuntimeError("xai down")),
+                ) as xai,
+                patch(
+                    "claw_v2.voice.synthesize", new=AsyncMock(return_value=mp3_path)
+                ) as openai_tts,
                 patch("claw_v2.voice._synthesize_edge", new=AsyncMock()) as edge_tts,
                 patch("claw_v2.voice._mp3_to_ogg", new=AsyncMock(return_value=ogg_path)),
             ):
-                result = await synthesize_voice_note("hola", api_key="openai-key", xai_api_key="xai-key")
+                result = await synthesize_voice_note(
+                    "hola", api_key="openai-key", xai_api_key="xai-key"
+                )
         finally:
             mp3_path.unlink(missing_ok=True)
             ogg_path.unlink(missing_ok=True)

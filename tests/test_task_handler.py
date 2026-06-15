@@ -25,7 +25,16 @@ class _BlockingCoordinator:
         self.started = threading.Event()
         self.release = threading.Event()
 
-    def run(self, task_id, objective, research_tasks, implementation_tasks=None, verification_tasks=None, lane_overrides=None, **kwargs):
+    def run(
+        self,
+        task_id,
+        objective,
+        research_tasks,
+        implementation_tasks=None,
+        verification_tasks=None,
+        lane_overrides=None,
+        **kwargs,
+    ):
         self.started.set()
         self.release.wait(timeout=2)
         return CoordinatorResult(
@@ -130,7 +139,9 @@ class TaskHandlerTests(unittest.TestCase):
             (workspace / "MEMORY.md").write_text("# MEMORY.md\n\n", encoding="utf-8")
             subprocess.run(["git", "-C", str(workspace), "add", "MEMORY.md"], check=True)
             subprocess.run(["git", "-C", str(workspace), "commit", "-q", "-m", "init"], check=True)
-            (workspace / "MEMORY.md").write_text("# MEMORY.md\n\n- durable note\n", encoding="utf-8")
+            (workspace / "MEMORY.md").write_text(
+                "# MEMORY.md\n\n- durable note\n", encoding="utf-8"
+            )
             (workspace / "memory").mkdir()
             (workspace / "memory" / "2026-06-04.md").write_text("# 2026-06-04\n", encoding="utf-8")
             observe = ObserveStream(root / "observe.db")
@@ -166,10 +177,14 @@ class TaskHandlerTests(unittest.TestCase):
             subprocess.run(["git", "-C", str(workspace), "config", "user.name", "t"], check=True)
             (workspace / "README.md").write_text("clean\n", encoding="utf-8")
             (workspace / "MEMORY.md").write_text("# MEMORY.md\n\n", encoding="utf-8")
-            subprocess.run(["git", "-C", str(workspace), "add", "README.md", "MEMORY.md"], check=True)
+            subprocess.run(
+                ["git", "-C", str(workspace), "add", "README.md", "MEMORY.md"], check=True
+            )
             subprocess.run(["git", "-C", str(workspace), "commit", "-q", "-m", "init"], check=True)
             (workspace / "README.md").write_text("dirty code\n", encoding="utf-8")
-            (workspace / "MEMORY.md").write_text("# MEMORY.md\n\n- durable note\n", encoding="utf-8")
+            (workspace / "MEMORY.md").write_text(
+                "# MEMORY.md\n\n- durable note\n", encoding="utf-8"
+            )
             (workspace / "memory").mkdir()
             (workspace / "memory" / "2026-06-04.md").write_text("# 2026-06-04\n", encoding="utf-8")
             observe = ObserveStream(root / "observe.db")
@@ -386,9 +401,7 @@ class TaskHandlerTests(unittest.TestCase):
 
             state = memory.get_session_state("tg-1")
             active_task = state["active_object"]["active_task"]
-            self.assertEqual(
-                active_task["delegation_metadata"]["origin"], "brain_delegate_tool"
-            )
+            self.assertEqual(active_task["delegation_metadata"]["origin"], "brain_delegate_tool")
             events = [event["event_type"] for event in observe.recent_events(limit=50)]
             self.assertIn("autonomous_task_started", events)
 
@@ -567,9 +580,7 @@ class BrowserExecutorRoutingTests(unittest.TestCase):
         self.assertFalse(
             _should_use_browser_executor("research", "investiga la historia de Twitter")
         )
-        self.assertTrue(
-            _should_use_browser_executor("research", "Haz un repaso por X")
-        )
+        self.assertTrue(_should_use_browser_executor("research", "Haz un repaso por X"))
 
     def test_blocked_profile_gate_message_classifies_as_failure(self) -> None:
         # A named-profile gate that blocks (needs_login / challenge) returns a
@@ -591,9 +602,7 @@ class BrowserExecutorRoutingTests(unittest.TestCase):
             )
         )
         self.assertTrue(
-            _browser_output_indicates_failure(
-                "LIMITACIÓN CRÍTICA - No puedo ejecutar esta tarea"
-            )
+            _browser_output_indicates_failure("LIMITACIÓN CRÍTICA - No puedo ejecutar esta tarea")
         )
         self.assertTrue(
             _browser_output_indicates_failure(
@@ -731,9 +740,7 @@ class BrowserExecutorRoutingTests(unittest.TestCase):
             )
             # Blocked: returns the policy block and never runs the coordinator.
             self.assertIsNotNone(result)
-            self.assertEqual(
-                memory.get_session_state("tg-1").get("verification_status"), "blocked"
-            )
+            self.assertEqual(memory.get_session_state("tg-1").get("verification_status"), "blocked")
             self.assertNotIn("coordinator_ran", recorded)
 
     def test_browser_use_repo_review_uses_coordinator_not_browser_executor(self) -> None:
@@ -897,8 +904,7 @@ class BrowserExecutorRoutingTests(unittest.TestCase):
             self.assertIn("browser_executor_started", event_types)
             self.assertNotIn("browser_executor_failed", event_types)
             failures = [
-                event for event in events
-                if event["event_type"] == "autonomous_task_failed"
+                event for event in events if event["event_type"] == "autonomous_task_failed"
             ]
             self.assertTrue(failures)
             error = failures[-1]["payload"].get("error", "")
@@ -933,11 +939,22 @@ class BrowserExecutorRoutingTests(unittest.TestCase):
     def _run_autonomous_browser(self, handler, ledger, jobs, *, task_id, objective):
         job = jobs.enqueue(
             kind="coordinator.autonomous_task",
-            payload={"task_id": task_id, "session_id": "tg-1", "objective": objective, "mode": "browse"},
+            payload={
+                "task_id": task_id,
+                "session_id": "tg-1",
+                "objective": objective,
+                "mode": "browse",
+            },
         )
         ledger.create(
-            task_id=task_id, session_id="tg-1", objective=objective, mode="browse",
-            runtime="coordinator", provider="codex", model="gpt", status="running",
+            task_id=task_id,
+            session_id="tg-1",
+            objective=objective,
+            mode="browse",
+            runtime="coordinator",
+            provider="codex",
+            model="gpt",
+            status="running",
         )
         handler._run_autonomous_task("tg-1", task_id, objective, "browse", job_id=job.job_id)
 

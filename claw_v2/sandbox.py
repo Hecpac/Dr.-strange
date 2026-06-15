@@ -65,7 +65,9 @@ OPERATIONAL_ALLOWED_BINARIES = frozenset(
 
 CAPABILITY_PROFILES = {
     "surgical": SURGICAL_ALLOWED_BINARIES,
-    "engineer": SURGICAL_ALLOWED_BINARIES | DEVELOPMENT_ALLOWED_BINARIES | OPERATIONAL_ALLOWED_BINARIES,
+    "engineer": SURGICAL_ALLOWED_BINARIES
+    | DEVELOPMENT_ALLOWED_BINARIES
+    | OPERATIONAL_ALLOWED_BINARIES,
     "admin": SURGICAL_ALLOWED_BINARIES
     | DEVELOPMENT_ALLOWED_BINARIES
     | OPERATIONAL_ALLOWED_BINARIES
@@ -118,7 +120,16 @@ GIT_CONFIG_EXEC_SINK_KEYS = frozenset(
 # `<tool>.cmd` and `<tool>.path` (difftool/mergetool/man/browser/guitool),
 # `filter.<d>.process/.clean/.smudge`, `credential[.<url>].helper`,
 # `diff.<d>.command`/`trailer.<t>.command`, `merge.<d>.driver`.
-GIT_CONFIG_EXEC_SINK_SUFFIXES = (".cmd", ".process", ".helper", ".command", ".driver", ".clean", ".smudge", ".path")
+GIT_CONFIG_EXEC_SINK_SUFFIXES = (
+    ".cmd",
+    ".process",
+    ".helper",
+    ".command",
+    ".driver",
+    ".clean",
+    ".smudge",
+    ".path",
+)
 # git reads these from the environment straight into runtime config / exec
 # hooks, so an `env VAR=val git ...` (or inline-prefixed) call is the same
 # exec-sink escape as `git -c`/`git config`, just routed through the shell env
@@ -195,7 +206,11 @@ def _unwrap_command_tokens(tokens: list[str]) -> list[str]:
             else:
                 while idx < len(remaining) and remaining[idx].startswith("-"):
                     idx += 1
-                    if base_cmd == "sudo" and idx < len(remaining) and remaining[idx - 1] in {"-u", "-g", "-h", "-p"}:
+                    if (
+                        base_cmd == "sudo"
+                        and idx < len(remaining)
+                        and remaining[idx - 1] in {"-u", "-g", "-h", "-p"}
+                    ):
                         idx += 1
                     if base_cmd == "nice" and idx < len(remaining) and remaining[idx - 1] == "-n":
                         idx += 1
@@ -296,7 +311,9 @@ def check_command(command: str, policy: SandboxPolicy) -> str | None:
     return None
 
 
-def _check_interpreter_invocation(base_cmd: str, tokens: list[str], policy: SandboxPolicy) -> str | None:
+def _check_interpreter_invocation(
+    base_cmd: str, tokens: list[str], policy: SandboxPolicy
+) -> str | None:
     if base_cmd in PYTHON_INTERPRETERS:
         return _check_python_invocation(tokens, policy)
     if base_cmd in NODE_INTERPRETERS:
@@ -332,7 +349,9 @@ def _check_python_invocation(tokens: list[str], policy: SandboxPolicy) -> str | 
     return None
 
 
-def _check_python_module(module_name: str, module_args: list[str], policy: SandboxPolicy) -> str | None:
+def _check_python_module(
+    module_name: str, module_args: list[str], policy: SandboxPolicy
+) -> str | None:
     normalized = module_name.strip()
     if normalized not in PYTHON_SAFE_MODULES:
         return f"python module '{normalized or '<missing>'}' is not in the safe module allowlist"
@@ -492,7 +511,12 @@ def _network_disabled(policy: SandboxPolicy) -> bool:
 
 
 def _path_roots(policy: SandboxPolicy, system_roots: list[Path] | None = None) -> list[Path]:
-    return [policy.workspace_root, *policy.allowed_paths, *policy.writable_paths, *(system_roots or [])]
+    return [
+        policy.workspace_root,
+        *policy.allowed_paths,
+        *policy.writable_paths,
+        *(system_roots or []),
+    ]
 
 
 def _resolve_path_for_policy(path: Path, policy: SandboxPolicy) -> Path:

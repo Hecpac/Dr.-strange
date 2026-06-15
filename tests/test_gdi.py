@@ -87,7 +87,9 @@ class GDITests(unittest.TestCase):
             )
         ]
 
-        snapshot = calculate_gdi_snapshot(self.goal, session_id="tg-1", recent_events=events, claims=claims)
+        snapshot = calculate_gdi_snapshot(
+            self.goal, session_id="tg-1", recent_events=events, claims=claims
+        )
 
         names = {signal.name for signal in snapshot.signals}
         self.assertIn("consecutive_failures", names)
@@ -127,7 +129,9 @@ class GDITests(unittest.TestCase):
             computed_at=now_iso(),
         )
 
-        decision = gate_gdi_action(snapshot, action_tier="tier_3", risk_level="critical", calibrated=False)
+        decision = gate_gdi_action(
+            snapshot, action_tier="tier_3", risk_level="critical", calibrated=False
+        )
 
         self.assertTrue(decision.allowed)
         self.assertEqual(decision.action, "log")
@@ -142,7 +146,9 @@ class GDITests(unittest.TestCase):
             computed_at=now_iso(),
         )
 
-        decision = gate_gdi_action(snapshot, action_tier="tier_3", risk_level="critical", calibrated=True)
+        decision = gate_gdi_action(
+            snapshot, action_tier="tier_3", risk_level="critical", calibrated=True
+        )
 
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.action, "block")
@@ -150,4 +156,3 @@ class GDITests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -8,7 +8,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from claw_v2.adapters.base import LLMRequest, PreLLMHook, PostLLMHook
-from claw_v2.hooks import make_anti_distillation_hook, make_daily_cost_gate, make_decision_logger, _select_decoys, _DECOY_POOL
+from claw_v2.hooks import (
+    make_anti_distillation_hook,
+    make_daily_cost_gate,
+    make_decision_logger,
+    _select_decoys,
+    _DECOY_POOL,
+)
 from claw_v2.llm import LLMRouter
 from claw_v2.observe import ObserveStream
 from claw_v2.pricing import estimate_cost_usd
@@ -144,10 +150,28 @@ class TotalCostTodayTests(unittest.TestCase):
     def test_sums_cost_from_todays_llm_response_events(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             observe = ObserveStream(Path(tmpdir) / "test.db")
-            observe.emit("llm_response", lane="brain", provider="anthropic", model="opus", payload={"cost_estimate": 1.5})
-            observe.emit("llm_response", lane="worker", provider="anthropic", model="sonnet", payload={"cost_estimate": 0.3})
+            observe.emit(
+                "llm_response",
+                lane="brain",
+                provider="anthropic",
+                model="opus",
+                payload={"cost_estimate": 1.5},
+            )
+            observe.emit(
+                "llm_response",
+                lane="worker",
+                provider="anthropic",
+                model="sonnet",
+                payload={"cost_estimate": 0.3},
+            )
             # This event has a different type — should NOT be counted
-            observe.emit("llm_decision", lane="brain", provider="anthropic", model="opus", payload={"cost_estimate": 1.5})
+            observe.emit(
+                "llm_decision",
+                lane="brain",
+                provider="anthropic",
+                model="opus",
+                payload={"cost_estimate": 1.5},
+            )
             self.assertAlmostEqual(observe.total_cost_today(), 1.8)
 
     def test_ignores_events_from_previous_days(self) -> None:
@@ -156,19 +180,56 @@ class TotalCostTodayTests(unittest.TestCase):
             # Insert an old event directly with a past timestamp
             observe._conn.execute(
                 "INSERT INTO observe_stream (event_type, lane, provider, model, payload, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
-                ("llm_response", "brain", "anthropic", "opus", '{"cost_estimate": 99.0}', "2020-01-01 00:00:00"),
+                (
+                    "llm_response",
+                    "brain",
+                    "anthropic",
+                    "opus",
+                    '{"cost_estimate": 99.0}',
+                    "2020-01-01 00:00:00",
+                ),
             )
             observe._conn.commit()
-            observe.emit("llm_response", lane="brain", provider="anthropic", model="opus", payload={"cost_estimate": 2.0})
+            observe.emit(
+                "llm_response",
+                lane="brain",
+                provider="anthropic",
+                model="opus",
+                payload={"cost_estimate": 2.0},
+            )
             self.assertAlmostEqual(observe.total_cost_today(), 2.0)
 
     def test_spending_today_groups_llm_decisions(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             observe = ObserveStream(Path(tmpdir) / "test.db")
-            observe.emit("llm_decision", lane="brain", provider="anthropic", model="opus", payload={"cost_estimate": 1.5})
-            observe.emit("llm_decision", lane="brain", provider="anthropic", model="opus", payload={"cost_estimate": 0.5})
-            observe.emit("llm_decision", lane="worker", provider="openai", model="gpt-5.4-mini", payload={"cost_estimate": 0.25})
-            observe.emit("llm_response", lane="worker", provider="openai", model="gpt-5.4-mini", payload={"cost_estimate": 99.0})
+            observe.emit(
+                "llm_decision",
+                lane="brain",
+                provider="anthropic",
+                model="opus",
+                payload={"cost_estimate": 1.5},
+            )
+            observe.emit(
+                "llm_decision",
+                lane="brain",
+                provider="anthropic",
+                model="opus",
+                payload={"cost_estimate": 0.5},
+            )
+            observe.emit(
+                "llm_decision",
+                lane="worker",
+                provider="openai",
+                model="gpt-5.4-mini",
+                payload={"cost_estimate": 0.25},
+            )
+            observe.emit(
+                "llm_response",
+                lane="worker",
+                provider="openai",
+                model="gpt-5.4-mini",
+                payload={"cost_estimate": 99.0},
+            )
 
             spending = observe.spending_today()
 
@@ -183,7 +244,13 @@ class TotalCostTodayTests(unittest.TestCase):
         # daily ledger instead of leaking up to MAX_BUDGET_USD per abort.
         with tempfile.TemporaryDirectory() as tmpdir:
             observe = ObserveStream(Path(tmpdir) / "test.db")
-            observe.emit("llm_response", lane="brain", provider="openai", model="gpt-5.4", payload={"cost_estimate": 1.0})
+            observe.emit(
+                "llm_response",
+                lane="brain",
+                provider="openai",
+                model="gpt-5.4",
+                payload={"cost_estimate": 1.0},
+            )
             observe.emit(
                 "llm_failed_spend",
                 lane="worker",
@@ -202,12 +269,31 @@ class TotalCostTodayTests(unittest.TestCase):
             observe = ObserveStream(Path(tmpdir) / "test.db")
             observe._conn.execute(
                 "INSERT INTO observe_stream (event_type, lane, provider, model, payload, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
-                ("llm_response", "worker", "openai", "gpt-5.4", '{"cost_estimate": 99.0}', "2020-01-01 00:00:00"),
+                (
+                    "llm_response",
+                    "worker",
+                    "openai",
+                    "gpt-5.4",
+                    '{"cost_estimate": 99.0}',
+                    "2020-01-01 00:00:00",
+                ),
             )
             observe._conn.commit()
             anchor = time.time() - 60
-            observe.emit("llm_response", lane="worker", provider="openai", model="gpt-5.4", payload={"cost_estimate": 1.5})
-            observe.emit("llm_failed_spend", lane="worker", provider="openai", model="gpt-5.4", payload={"cost_estimate": 0.5})
+            observe.emit(
+                "llm_response",
+                lane="worker",
+                provider="openai",
+                model="gpt-5.4",
+                payload={"cost_estimate": 1.5},
+            )
+            observe.emit(
+                "llm_failed_spend",
+                lane="worker",
+                provider="openai",
+                model="gpt-5.4",
+                payload={"cost_estimate": 0.5},
+            )
 
             self.assertAlmostEqual(observe.cost_since(anchor), 2.0)
             self.assertAlmostEqual(observe.cost_since(0.0), 101.0)
@@ -215,8 +301,20 @@ class TotalCostTodayTests(unittest.TestCase):
     def test_total_cost_today_can_filter_providers(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             observe = ObserveStream(Path(tmpdir) / "test.db")
-            observe.emit("llm_response", lane="worker_heavy", provider="codex", model="gpt-5.5", payload={"cost_estimate": 99.0})
-            observe.emit("llm_response", lane="brain", provider="anthropic", model="opus", payload={"cost_estimate": 2.0})
+            observe.emit(
+                "llm_response",
+                lane="worker_heavy",
+                provider="codex",
+                model="gpt-5.5",
+                payload={"cost_estimate": 99.0},
+            )
+            observe.emit(
+                "llm_response",
+                lane="brain",
+                provider="anthropic",
+                model="opus",
+                payload={"cost_estimate": 2.0},
+            )
             self.assertEqual(observe.total_cost_today(providers={"anthropic"}), 2.0)
             self.assertEqual(observe.total_cost_today(providers={"openai"}), 0.0)
 
@@ -263,7 +361,10 @@ class DailyCostGateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             observe = ObserveStream(Path(tmpdir) / "test.db")
             observe.emit(
-                "llm_response", lane="worker", provider="openai", model="gpt-9-ultra",
+                "llm_response",
+                lane="worker",
+                provider="openai",
+                model="gpt-9-ultra",
                 payload={"cost_estimate": 0.0, "cost_unknown": True},
             )
             gate = make_daily_cost_gate(
@@ -278,19 +379,29 @@ class DailyCostGateTests(unittest.TestCase):
     def test_known_openai_cost_flows_into_observe_total_today(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             observe = ObserveStream(Path(tmpdir) / "test.db")
-            est = estimate_cost_usd("openai", "gpt-5.5", {"input_tokens": 100_000, "output_tokens": 100_000})
+            est = estimate_cost_usd(
+                "openai", "gpt-5.5", {"input_tokens": 100_000, "output_tokens": 100_000}
+            )
             observe.emit(
-                "llm_response", lane="worker", provider="openai", model="gpt-5.5",
+                "llm_response",
+                lane="worker",
+                provider="openai",
+                model="gpt-5.5",
                 payload={"cost_estimate": est.amount_usd, "cost_unknown": est.unknown},
             )
             self.assertAlmostEqual(observe.total_cost_today(providers={"openai"}), 3.5)
-            self.assertFalse(observe.has_unknown_billable_cost_today(providers={"openai", "google"}))
+            self.assertFalse(
+                observe.has_unknown_billable_cost_today(providers={"openai", "google"})
+            )
 
     def test_anthropic_existing_cost_not_double_counted(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             observe = ObserveStream(Path(tmpdir) / "test.db")
             observe.emit(
-                "llm_response", lane="brain", provider="anthropic", model="opus",
+                "llm_response",
+                lane="brain",
+                provider="anthropic",
+                model="opus",
                 payload={"cost_estimate": 2.0, "cost_unknown": False},
             )
             self.assertAlmostEqual(
@@ -300,7 +411,13 @@ class DailyCostGateTests(unittest.TestCase):
     def test_allows_request_when_under_limit(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             observe = ObserveStream(Path(tmpdir) / "test.db")
-            observe.emit("llm_response", lane="brain", provider="anthropic", model="opus", payload={"cost_estimate": 5.0})
+            observe.emit(
+                "llm_response",
+                lane="brain",
+                provider="anthropic",
+                model="opus",
+                payload={"cost_estimate": 5.0},
+            )
             gate = make_daily_cost_gate(observe, daily_limit=10.0)
             request = self._make_request()
             result = gate(request)
@@ -310,7 +427,13 @@ class DailyCostGateTests(unittest.TestCase):
     def test_blocks_request_when_at_limit(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             observe = ObserveStream(Path(tmpdir) / "test.db")
-            observe.emit("llm_response", lane="brain", provider="anthropic", model="opus", payload={"cost_estimate": 10.0})
+            observe.emit(
+                "llm_response",
+                lane="brain",
+                provider="anthropic",
+                model="opus",
+                payload={"cost_estimate": 10.0},
+            )
             gate = make_daily_cost_gate(observe, daily_limit=10.0)
             result = gate(self._make_request())
             self.assertIsNone(result)
@@ -318,7 +441,13 @@ class DailyCostGateTests(unittest.TestCase):
     def test_blocks_request_when_over_limit(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             observe = ObserveStream(Path(tmpdir) / "test.db")
-            observe.emit("llm_response", lane="brain", provider="anthropic", model="opus", payload={"cost_estimate": 12.0})
+            observe.emit(
+                "llm_response",
+                lane="brain",
+                provider="anthropic",
+                model="opus",
+                payload={"cost_estimate": 12.0},
+            )
             gate = make_daily_cost_gate(observe, daily_limit=10.0)
             result = gate(self._make_request())
             self.assertIsNone(result)
@@ -525,9 +654,7 @@ class DecisionLoggerTests(unittest.TestCase):
         # persisted whole into observe_stream on every LLM call.
         big = "x" * 50_000
         payload = self._emit_and_read_payload(
-            self._bounded_request(
-                prompt=big, system_prompt=big, evidence_pack={"diff": big}
-            )
+            self._bounded_request(prompt=big, system_prompt=big, evidence_pack={"diff": big})
         )
         self.assertLess(len(payload["prompt_snapshot"]), 5_000)
         self.assertIn("[truncated", payload["prompt_snapshot"])
@@ -555,7 +682,11 @@ class DecisionLoggerTests(unittest.TestCase):
                     {"type": "text", "text": "que ves?"},
                     {
                         "type": "image",
-                        "source": {"type": "base64", "media_type": "image/png", "data": "A" * 100_000},
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": "A" * 100_000,
+                        },
                     },
                 ],
             )
@@ -593,17 +724,29 @@ class DecisionLoggerTests(unittest.TestCase):
             )
 
             events = observe.recent_events(limit=5)
-            response_event = next(event for event in events if event["event_type"] == "llm_response")
-            decision_event = next(event for event in events if event["event_type"] == "llm_decision")
+            response_event = next(
+                event for event in events if event["event_type"] == "llm_response"
+            )
+            decision_event = next(
+                event for event in events if event["event_type"] == "llm_decision"
+            )
             self.assertEqual(response_event["trace_id"], decision_event["trace_id"])
             self.assertEqual(response_event["span_id"], decision_event["span_id"])
             self.assertEqual(response_event["artifact_id"], "brain-turn")
             replay = observe.trace_events(response_event["trace_id"])
-            self.assertEqual([event["event_type"] for event in replay], ["llm_decision", "llm_response"])
+            self.assertEqual(
+                [event["event_type"] for event in replay], ["llm_decision", "llm_response"]
+            )
 
 
 class AntiDistillationTests(unittest.TestCase):
-    def _make_request(self, *, lane: str = "brain", session_id: str | None = None, system_prompt: str | None = None) -> LLMRequest:
+    def _make_request(
+        self,
+        *,
+        lane: str = "brain",
+        session_id: str | None = None,
+        system_prompt: str | None = None,
+    ) -> LLMRequest:
         return LLMRequest(
             prompt="test",
             system_prompt=system_prompt,

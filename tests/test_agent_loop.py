@@ -1,4 +1,5 @@
 """Tests for claw_v2.agent_loop (brain-bypass refactor commit #7)."""
+
 from __future__ import annotations
 
 import unittest

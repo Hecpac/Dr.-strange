@@ -146,11 +146,7 @@ def verify_profile_evidence(
         )
 
     coordinates = verification_coordinates_for(task_kind=task_kind, evidence=evidence)
-    missing = [
-        key
-        for key in profile.required_evidence
-        if not _evidence_has_key(evidence, key)
-    ]
+    missing = [key for key in profile.required_evidence if not _evidence_has_key(evidence, key)]
 
     if missing:
         return ProfileVerificationDecision(
@@ -208,7 +204,9 @@ def verify_profile_evidence(
     )
 
 
-def verification_coordinates_for(*, task_kind: str, evidence: dict[str, Any]) -> list[dict[str, Any]]:
+def verification_coordinates_for(
+    *, task_kind: str, evidence: dict[str, Any]
+) -> list[dict[str, Any]]:
     profile = PROFILES.get(task_kind)
     if profile is None:
         return [
@@ -273,11 +271,7 @@ def _required_evidence_coordinate(
     profile: VerificationProfile,
     evidence: dict[str, Any],
 ) -> dict[str, Any]:
-    missing = [
-        key
-        for key in profile.required_evidence
-        if not _evidence_has_key(evidence, key)
-    ]
+    missing = [key for key in profile.required_evidence if not _evidence_has_key(evidence, key)]
     return {
         "dimension": "required_evidence",
         "status": "missing" if missing else "passed",

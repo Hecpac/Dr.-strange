@@ -5,6 +5,7 @@ spending, recent events, observation window state, and projects. Each
 returns 503 when its backing service is missing so the chat API stays
 operational without observability wired in.
 """
+
 from __future__ import annotations
 
 import json
@@ -113,7 +114,9 @@ class ThinkProjectsTests(unittest.TestCase):
         bot_service.allowed_user_id = "1"
         with tempfile.TemporaryDirectory() as tmp:
             board = TaskBoard(board_root=Path(tmp))
-            project = board.publish_project("Land $10K MRR", success_criteria=["3 paying customers"])
+            project = board.publish_project(
+                "Land $10K MRR", success_criteria=["3 paying customers"]
+            )
             board.publish("step 1", "do step 1", project_id=project.id)
             board.publish("step 2", "do step 2", project_id=project.id)
             api = LocalChatAPI(bot_service=bot_service, task_board=board)
