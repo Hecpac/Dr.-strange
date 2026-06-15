@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import re
+import secrets
 import signal
 import sys
 import time
@@ -11,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from claw_v2 import liveness
 from claw_v2.chrome import ManagedChrome
 from claw_v2.chat_api import LocalChatAPI
 from claw_v2.main import build_runtime, build_runtime_policy_engine
@@ -188,6 +190,66 @@ def _normalize_chat_id(value: object) -> str:
     if isinstance(value, (str, int)):
         return str(value).strip()
     return ""
+
+
+# F0.3: the scheduled lifecycle heartbeat is the SOLE writer of the liveness
+# sink (it alone knows web_transport_serving). It mirrors the high-frequency
+# signal into observe_stream only 1-in-K to keep the audit log readable.
+LIVENESS_OBSERVE_EMIT_SAMPLE = 15
+
+
+def write_liveness_heartbeat_record(
+    *,
+    sink_path: Path,
+    boot_id: str,
+    web_transport: Any,
+    web_chat_enabled: bool,
+) -> dict[str, Any]:
+    """Write the authoritative liveness record (with web_transport_serving).
+
+    Probes ``web_transport.is_serving()`` only when web chat is enabled
+    (otherwise the field is ``None``), then atomically overwrites the sink.
+    Returns the payload so the caller can mirror it into observe_stream.
+    """
+    web_serving = web_transport.is_serving() if web_chat_enabled else None
+    payload: dict[str, Any] = {
+        "pid": os.getpid(),
+        "ts": time.time(),
+        "boot_id": boot_id,
+        "web_transport_serving": web_serving,
+        "source": "lifecycle",
+    }
+    liveness.write_liveness(sink_path, payload)
+    return payload
+
+
+def seed_liveness_heartbeat_record(
+    *,
+    sink_path: Path,
+    boot_id: str,
+    web_transport: Any,
+    web_chat_enabled: bool,
+) -> dict[str, Any]:
+    """Write the first-boot liveness seed.
+
+    Deliberately records ``web_transport_serving=None`` WITHOUT calling
+    ``is_serving()`` — the web transport may not be up yet, and a probed
+    ``False`` here would surface a spurious ``web_thread_dead`` at startup. The
+    seed exists so a restart immediately replaces an old/stale sink left by a
+    previous boot, before the first scheduled heartbeat runs. ``web_transport``
+    and ``web_chat_enabled`` are accepted for signature symmetry with
+    ``write_liveness_heartbeat_record`` but are intentionally not probed.
+    """
+    del web_transport, web_chat_enabled
+    payload: dict[str, Any] = {
+        "pid": os.getpid(),
+        "ts": time.time(),
+        "boot_id": boot_id,
+        "web_transport_serving": None,
+        "source": "lifecycle",
+    }
+    liveness.write_liveness(sink_path, payload)
+    return payload
 
 
 class PidLock:
@@ -614,16 +676,52 @@ async def run() -> int:
         # architecture-invariant sweep covers them. Only the notification
         # consumer lives here.
 
+        # F0.3 liveness sink: the scheduled heartbeat is the SOLE writer of the
+        # atomic JSON sink (it alone carries web_transport_serving). It mirrors
+        # the signal into observe_stream only 1-in-K so the audit log stops
+        # being flooded by high-frequency liveness rows.
+        _liveness_boot_id = secrets.token_hex(8)
+        _liveness_sink_path = liveness.liveness_sink_path(Path(runtime.observe.db_path).parent)
+        _liveness_emit_counter = 0
+
         def _emit_daemon_heartbeat() -> None:
-            web_serving = web_transport.is_serving() if runtime.config.web_chat_enabled else None
-            runtime.observe.emit(
-                "daemon_heartbeat",
-                payload={
+            nonlocal _liveness_emit_counter
+            try:
+                payload = write_liveness_heartbeat_record(
+                    sink_path=_liveness_sink_path,
+                    boot_id=_liveness_boot_id,
+                    web_transport=web_transport,
+                    web_chat_enabled=runtime.config.web_chat_enabled,
+                )
+            except OSError:
+                # A sink write failure must never break the heartbeat job; the
+                # watchdog still has the (sampled) observe_stream signal.
+                logger.warning("liveness sink write failed", exc_info=True)
+                payload = {
                     "pid": os.getpid(),
                     "ts": time.time(),
-                    "web_transport_serving": web_serving,
-                },
+                    "boot_id": _liveness_boot_id,
+                    "web_transport_serving": (
+                        web_transport.is_serving() if runtime.config.web_chat_enabled else None
+                    ),
+                    "source": "lifecycle",
+                }
+            _liveness_emit_counter += 1
+            if (_liveness_emit_counter - 1) % LIVENESS_OBSERVE_EMIT_SAMPLE == 0:
+                runtime.observe.emit("daemon_heartbeat", payload=payload)
+
+        # SEED: write one fresh sink record (web_transport_serving=None, NOT
+        # probing is_serving) so a restart immediately replaces any stale sink
+        # left by a previous boot, before the first scheduled heartbeat fires.
+        try:
+            seed_liveness_heartbeat_record(
+                sink_path=_liveness_sink_path,
+                boot_id=_liveness_boot_id,
+                web_transport=web_transport,
+                web_chat_enabled=runtime.config.web_chat_enabled,
             )
+        except OSError:
+            logger.warning("liveness sink seed write failed", exc_info=True)
 
         runtime.scheduler.register(
             _SJ(

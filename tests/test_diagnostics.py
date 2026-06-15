@@ -349,6 +349,141 @@ class HeartbeatTests(unittest.TestCase):
             self.assertFalse(report["checks"]["heartbeat_stale"])
 
 
+class HeartbeatSinkTests(unittest.TestCase):
+    """F0.3: diagnostics reads the daemon liveness signal from the atomic JSON
+    sink (single source of truth) when present, and only falls back to the
+    observe_stream query when the sink is missing/unreadable."""
+
+    def _write_sink(self, db_path: Path, payload: dict[str, object]) -> None:
+        from claw_v2 import liveness
+
+        liveness.write_liveness(liveness.liveness_sink_path(db_path.parent), payload)
+
+    def test_fresh_sink_keeps_status_healthy_from_sink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            # observe_stream must exist for the heartbeat block to run.
+            ObserveStream(db_path).emit("noop_marker", payload={})
+            self._write_sink(
+                db_path,
+                {
+                    "pid": 99,
+                    "ts": time.time(),
+                    "boot_id": "b1",
+                    "web_transport_serving": True,
+                    "source": "lifecycle",
+                },
+            )
+
+            report = collect_diagnostics(db_path=db_path, port=8765, runner=_healthy_runner)
+
+            self.assertEqual(report["checks"]["status"], "healthy")
+            self.assertTrue(report["checks"]["heartbeat_present"])
+            self.assertFalse(report["checks"]["heartbeat_stale"])
+            self.assertEqual(report["checks"]["web_transport_serving"], True)
+            self.assertEqual(report["database"]["heartbeat"]["source"], "liveness_sink")
+
+    def test_stale_sink_flags_critical_from_sink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            ObserveStream(db_path).emit("noop_marker", payload={})
+            self._write_sink(
+                db_path,
+                {
+                    "pid": 99,
+                    "ts": time.time() - 600,
+                    "boot_id": "b1",
+                    "web_transport_serving": True,
+                    "source": "lifecycle",
+                },
+            )
+
+            report = collect_diagnostics(db_path=db_path, port=8765, runner=_healthy_runner)
+
+            self.assertEqual(report["checks"]["status"], "critical")
+            self.assertTrue(report["checks"]["heartbeat_stale"])
+            self.assertEqual(report["database"]["heartbeat"]["source"], "liveness_sink")
+
+    def test_web_thread_dead_from_sink_flags_critical(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            ObserveStream(db_path).emit("noop_marker", payload={})
+            self._write_sink(
+                db_path,
+                {
+                    "pid": 99,
+                    "ts": time.time(),
+                    "boot_id": "b1",
+                    "web_transport_serving": False,
+                    "source": "lifecycle",
+                },
+            )
+
+            report = collect_diagnostics(db_path=db_path, port=8765, runner=_healthy_runner)
+
+            self.assertEqual(report["checks"]["status"], "critical")
+            self.assertEqual(report["checks"]["web_transport_serving"], False)
+
+    def test_sink_is_authoritative_over_observe_stream(self) -> None:
+        # observe_stream carries a STALE daemon_heartbeat, but a fresh sink must
+        # win: do not combine ts-from-sink with web-from-observe.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            observe = ObserveStream(db_path)
+            observe.emit(
+                "daemon_heartbeat",
+                payload={"pid": 1, "ts": time.time() - 9000, "web_transport_serving": False},
+            )
+            self._write_sink(
+                db_path,
+                {
+                    "pid": 99,
+                    "ts": time.time(),
+                    "boot_id": "b1",
+                    "web_transport_serving": True,
+                    "source": "lifecycle",
+                },
+            )
+
+            report = collect_diagnostics(db_path=db_path, port=8765, runner=_healthy_runner)
+
+            self.assertFalse(report["checks"]["heartbeat_stale"])
+            self.assertEqual(report["checks"]["web_transport_serving"], True)
+            self.assertEqual(report["database"]["heartbeat"]["source"], "liveness_sink")
+
+    def test_missing_sink_falls_back_to_observe_stream(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            observe = ObserveStream(db_path)
+            observe.emit(
+                "daemon_heartbeat",
+                payload={"pid": 1, "ts": time.time(), "web_transport_serving": True},
+            )
+            # No sink file written → fallback path.
+            report = collect_diagnostics(db_path=db_path, port=8765, runner=_healthy_runner)
+
+            self.assertTrue(report["checks"]["heartbeat_present"])
+            self.assertFalse(report["checks"]["heartbeat_stale"])
+            self.assertEqual(report["database"]["heartbeat"]["source"], "observe_stream")
+
+    def test_no_sink_no_heartbeat_does_not_penalize_status(self) -> None:
+        # Criterion 5 (first-boot safety): NO sink file and no heartbeat row →
+        # present False → not stale.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            observe = ObserveStream(db_path)
+            observe.emit("nlm_research_degraded", payload={"reason": "rate"})
+            with sqlite3.connect(db_path) as conn:
+                conn.execute("UPDATE observe_stream SET timestamp = datetime('now', '-3 days')")
+                conn.commit()
+
+            report = collect_diagnostics(db_path=db_path, port=8765, runner=_healthy_runner)
+
+            self.assertEqual(report["checks"]["status"], "healthy")
+            self.assertFalse(report["checks"]["heartbeat_present"])
+            self.assertFalse(report["checks"]["heartbeat_stale"])
+
+
 class AcknowledgementConcurrencyTests(unittest.TestCase):
     def test_parallel_acknowledge_events_does_not_lose_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
