@@ -9,6 +9,7 @@ that it actually shrinks the file.
 from __future__ import annotations
 
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -46,6 +47,38 @@ class ObserveMaintenanceVacuumTests(unittest.TestCase):
         # The data is intact (cap kept the 10 highest ids).
         count = observe._conn.execute("SELECT COUNT(*) FROM observe_stream").fetchone()[0]
         self.assertEqual(count, 10)
+
+    def test_maintenance_vacuum_does_not_hold_store_lock(self) -> None:
+        # Review #115-1: VACUUM must run on a dedicated connection and NEVER
+        # acquire self._lock, so emit() is never blocked for the rewrite
+        # duration. We hold self._lock here and confirm maintenance_vacuum
+        # still completes — a lock-acquiring implementation would block until
+        # we release (detected via the wait timeout).
+        observe = ObserveStream(Path(tempfile.mkdtemp()) / "observe.db")
+        observe.emit("e", payload={"n": 1})
+
+        done = threading.Event()
+        errors: list[BaseException] = []
+
+        def run() -> None:
+            try:
+                observe.maintenance_vacuum()
+            except BaseException as exc:  # noqa: BLE001 - surface to assertion
+                errors.append(exc)
+            finally:
+                done.set()
+
+        with observe._lock:  # hold the store lock that emit() uses
+            worker = threading.Thread(target=run)
+            worker.start()
+            completed = done.wait(timeout=10)
+
+        worker.join(timeout=5)
+        self.assertTrue(
+            completed,
+            "maintenance_vacuum blocked on self._lock — it would block emit()",
+        )
+        self.assertEqual(errors, [])
 
 
 if __name__ == "__main__":  # pragma: no cover

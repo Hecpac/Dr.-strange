@@ -31,6 +31,10 @@ EventCallback = Callable[[dict], None]
 OBSERVE_LOCKED_RETRY_ATTEMPTS = 3
 OBSERVE_LOCKED_RETRY_DELAY_SECONDS = 0.1
 OBSERVE_SQLITE_BUSY_TIMEOUT_MS = 250
+# The off-tick maintenance VACUUM runs on a dedicated connection and SHOULD
+# wait for any in-flight emit to finish (rather than drop-fast like emits do),
+# so it gets a much longer busy timeout.
+OBSERVE_MAINTENANCE_BUSY_TIMEOUT_MS = 30_000
 
 
 OBSERVE_SCHEMA = """
@@ -389,16 +393,23 @@ class ObserveStream:
         VACUUM is blocking and needs ~2x free disk, and it cannot run inside
         a transaction, so it MUST run off-tick (background runner /
         maintenance window) — never inline in ``daemon.tick``. The AST
-        tripwire ``test_vacuum_only_runs_off_tick`` enforces that. A WAL
-        checkpoint first flushes pending pages so the rewrite is effective.
+        tripwire ``test_vacuum_only_runs_off_tick`` enforces that.
+
+        Review #115-1: runs on a DEDICATED short-lived connection so it never
+        holds ``self._lock``, which ``emit`` needs. A multi-second rewrite on a
+        large DB must not block the chat/event loop; SQLite serializes VACUUM's
+        write lock against in-flight emits via ``busy_timeout`` (emits drop
+        fast on contention, by design). In WAL mode VACUUM writes the rewritten
+        pages to the WAL, so a checkpoint(TRUNCATE) afterwards flushes them into
+        the main file and truncates the WAL.
         """
-        with self._lock:
-            self._conn.commit()
-            self._conn.execute("VACUUM")
-            self._conn.commit()
-            # In WAL mode VACUUM writes the rewritten pages to the WAL; only a
-            # checkpoint flushes them into the main file and truncates it.
-            self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn = connect_runtime_sqlite(self.db_path, row_factory=False)
+        try:
+            conn.execute(f"PRAGMA busy_timeout={OBSERVE_MAINTENANCE_BUSY_TIMEOUT_MS}")
+            conn.execute("VACUUM")
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            conn.close()
 
     def cache_summary(self, hours: int = 24) -> dict:
         """Return prompt cache stats for the last N hours."""
