@@ -69,7 +69,12 @@ from claw_v2.bot_helpers import (
     _is_secret_shaped_token,
     verify_brain_tooluse,
 )  # explicit: private helper + B1 verifier seam
-from claw_v2.turn_context import current_turn_id, turn_id_context
+from claw_v2.turn_context import (
+    current_dispatch_accumulator,
+    current_turn_id,
+    dispatch_decision_accumulator,
+    turn_id_context,
+)
 from claw_v2.turn_receipt import emit_turn_receipt
 
 if TYPE_CHECKING:
@@ -1689,37 +1694,100 @@ class BotService:
         reason: str | None = None,
         matched_pattern: str | None = None,
     ) -> None:
-        # Telemetry for the brain-bypass refactor: emit one event per
-        # pre-brain handler decision so we can audit which route fires
-        # for which message and detect false positives without guessing.
-        #
-        # Schema (commit #4 of the brain-bypass refactor):
-        #   handler:     name of the pre-brain handler that ran
-        #   route:       "intercepted" | "fall_through" | "explicit_command"
-        #                (legacy callers pre-#4 still pass the handler name as
-        #                `route` plus a `captured` bool; we preserve those
-        #                fields for back-compat and synthesize the new ones.)
-        #   reason:      short tag explaining the decision
-        #   text_len:    full length of the message (uncapped)
-        #   text_preview: first 80 chars only — never the full message
-        if self.observe is None:
+        """F0.3c: record (not emit) one pre-brain handler decision.
+
+        Historically this emitted one ``dispatch_decision`` observe event per
+        pre-brain handler (~15 rows/turn, ~99% fall-through plumbing). It now
+        APPENDS the decision to a turn-scoped accumulator; a single
+        consolidated event is flushed once per turn by
+        :meth:`_flush_dispatch_decision`. The call-site arguments are
+        unchanged so the ~15 call sites stay untouched.
+
+        Back-compat normalization (preserved from the per-call emitter):
+          handler:     name of the pre-brain handler that ran
+          route:       "intercepted" | "fall_through" | "brain_shortcut" |
+                       "explicit_command" (legacy callers pass the handler
+                       name as ``route`` + a ``captured`` bool; we synthesize
+                       the modern fields here).
+          reason:      short tag explaining the decision
+          matched_pattern: canonical label of the sub-pattern that fired.
+        """
+        acc = current_dispatch_accumulator()
+        if acc is None:
+            # Outside a turn context (e.g. ``handle_multimodal``) we still want
+            # the single-event behavior. Fall back to a one-shot emit so audit
+            # coverage is not lost.
+            self._emit_single_dispatch_decision(
+                route=route,
+                session_id=session_id,
+                text=text,
+                captured=captured,
+                handler=handler,
+                reason=reason,
+                matched_pattern=matched_pattern,
+            )
             return
-        # Back-compat: when callers still use the legacy positional shape
-        # (route=<handler_name>, captured=bool), promote it to the new schema
-        # so the audit stream is uniform.
+        handler, route, reason, matched_pattern = self._normalize_dispatch_decision(
+            handler=handler,
+            route=route,
+            captured=captured,
+            reason=reason,
+            matched_pattern=matched_pattern,
+        )
+        acc.record(
+            handler=handler,
+            route=route,
+            reason=reason,
+            captured=captured,
+            matched_pattern=matched_pattern,
+        )
+
+    @staticmethod
+    def _normalize_dispatch_decision(
+        *,
+        handler: str | None,
+        route: str,
+        captured: bool,
+        reason: str | None,
+        matched_pattern: str | None,
+    ) -> tuple[str | None, str, str | None, str | None]:
+        """Promote the legacy ``route=<handler_name>`` shape to the modern
+        (handler, route, reason, matched_pattern) tuple. Pure; no I/O."""
         legacy_route_values = {"intercepted", "fall_through", "explicit_command"}
         if handler is None and route not in legacy_route_values:
             handler = route
             route = "intercepted" if captured else "fall_through"
         if reason is None:
             reason = f"{handler or 'unknown'}_{'matched' if captured else 'fall_through'}"
-        # matched_pattern: canonical label of the sub-pattern that fired
-        # (e.g. "task_intent.resume_previous_es", "shortcut.url_extract",
-        # "proceed_class.pending_action"). Default: handler name when matched,
-        # None on fall_through. Lets `claw think tail --type dispatch_decision`
-        # show *why* it matched, not just *which* handler ran.
+        # matched_pattern defaults to the handler name on a capture so
+        # `claw think tail` can show *why* it matched, not just *which* ran.
         if matched_pattern is None and captured and handler:
             matched_pattern = handler
+        return handler, route, reason, matched_pattern
+
+    def _emit_single_dispatch_decision(
+        self,
+        *,
+        route: str,
+        session_id: str,
+        text: str,
+        captured: bool,
+        handler: str | None = None,
+        reason: str | None = None,
+        matched_pattern: str | None = None,
+    ) -> None:
+        """Emit a one-handler ``dispatch_decision`` event (legacy single-event
+        shape) for entry points with no turn accumulator open. Used only by
+        ``handle_multimodal`` today."""
+        if self.observe is None:
+            return
+        handler, route, reason, matched_pattern = self._normalize_dispatch_decision(
+            handler=handler,
+            route=route,
+            captured=captured,
+            reason=reason,
+            matched_pattern=matched_pattern,
+        )
         try:
             self.observe.emit(
                 "dispatch_decision",
@@ -1741,6 +1809,76 @@ class BotService:
                 "failed to emit dispatch_decision handler=%s route=%s",
                 handler,
                 route,
+            )
+
+    def _flush_dispatch_decision(self, session_id: str, text: str) -> None:
+        """Emit exactly ONE consolidated ``dispatch_decision`` event for the
+        turn, draining the accumulator. Idempotent: the accumulator's
+        ``flushed`` flag guarantees at-most-once even if called repeatedly
+        (the dispatch→brain boundary may flush explicitly for ordering, and a
+        ``try/finally`` backstop flushes again).
+
+        The payload carries ``tried_handlers[]`` (every handler considered,
+        each entry small and bounded — no prompt/system/evidence blobs) plus
+        the selected winner, and back-compat TOP-LEVEL fields so existing
+        parsers (``cli.think``, ``turn_receipt``, diagnostics) keep working.
+        """
+        acc = current_dispatch_accumulator()
+        if acc is None or acc.flushed:
+            return
+        acc.flushed = True
+        if self.observe is None:
+            return
+        tried = acc.entries
+        # The ``explicit_command`` entry is a MARKER ("user typed a slash/
+        # task-id command"), recorded captured=True even when the turn then
+        # falls through to the brain — it is NOT a real interception. Exclude
+        # it from the winner/captured verdict so an unrecognized slash command
+        # is not mislabeled as captured, and so the real intercepting handler
+        # (not the marker) is reported as the winner. It stays in
+        # ``tried_handlers[]`` and is surfaced via the ``explicit_command`` flag
+        # so the audit still distinguishes "user typed a command".
+        winner = next(
+            (e for e in tried if e.get("captured") and e.get("route") != "explicit_command"),
+            None,
+        )
+        explicit_command = any(e.get("route") == "explicit_command" for e in tried)
+        if winner is not None:
+            selected_handler = winner.get("handler")
+            selected_route = winner.get("route") or "intercepted"
+            winner_reason = winner.get("reason")
+            winner_pattern = winner.get("matched_pattern")
+        else:
+            selected_handler = None
+            selected_route = "fall_through"
+            winner_reason = f"fall_through_all_{len(tried)}" if tried else "no_handlers"
+            winner_pattern = None
+        any_captured = winner is not None
+        try:
+            self.observe.emit(
+                "dispatch_decision",
+                payload={
+                    "session_id": session_id,
+                    "tried_handlers": tried,
+                    "selected_handler": selected_handler,
+                    "selected_route": selected_route,
+                    "explicit_command": explicit_command,
+                    # Back-compat top-level fields (mirror the selected winner)
+                    # so existing parsers/dashboards keep working unchanged.
+                    "handler": selected_handler,
+                    "route": selected_route,
+                    "reason": winner_reason,
+                    "captured": any_captured,
+                    "matched_pattern": winner_pattern,
+                    "text_preview": text[:80],
+                    "text_len": len(text),
+                    "text_length": len(text),
+                },
+            )
+        except Exception:
+            logger.exception(
+                "failed to flush consolidated dispatch_decision (%d tried)",
+                len(tried),
             )
 
     def _emit_semantic_turn_trace(
@@ -3401,7 +3539,14 @@ class BotService:
         # claw_v2/turn_context.py and INTERNAL_WIRING.md §1.
         turn_id = new_turn_id()
         started_at = time.time()
-        with turn_id_context(turn_id):
+        # F0.3c: open a fresh per-turn dispatch accumulator so the ~15
+        # pre-brain handlers record their decisions into ONE consolidated
+        # ``dispatch_decision`` event instead of emitting one row each. The
+        # ``finally`` backstop flushes exactly once (idempotent guard) —
+        # covering captured early-returns, the fall-through-to-brain path, and
+        # exceptions — BEFORE the turn receipt query runs so the receipt sees
+        # the consolidated event. See claw_v2/turn_context.py.
+        with turn_id_context(turn_id), dispatch_decision_accumulator():
             try:
                 return self._handle_text_body(
                     user_id=user_id,
@@ -3411,6 +3556,12 @@ class BotService:
                     context_metadata=context_metadata,
                 )
             finally:
+                # Flush the single consolidated dispatch_decision first so the
+                # turn receipt's turn_id-scoped query picks it up.
+                try:
+                    self._flush_dispatch_decision(session_id, text)
+                except Exception:
+                    logger.debug("dispatch_decision flush failed", exc_info=True)
                 # Post-merge wave: emit a behavior_turn_receipt summarising
                 # the turn — intent, tools, approvals, ledger status — so
                 # post-mortem queries get one row per turn instead of
@@ -4055,10 +4206,12 @@ class BotService:
         if command_response is not None:
             return command_response
 
-        # No dispatch_decision emit here — the spec is "pre-brain decision
-        # boundary only". By construction, reaching this line means every
-        # pre-brain handler emitted route="fall_through", and the brain's
-        # own observability covers what happens next.
+        # F0.3c: at the dispatch→brain boundary, flush the consolidated
+        # dispatch_decision so it lands BEFORE the brain's own events (nicer
+        # ordering in `claw think replay`). The flush is idempotent — the
+        # handle_text finally backstop is a no-op after this. By construction,
+        # reaching this line means every pre-brain handler fell through.
+        self._flush_dispatch_decision(session_id, stripped)
         return self._brain_text_response(session_id, stripped, runtime_channel=runtime_channel)
 
     def _build_pre_state_commands(self) -> list[BotCommand]:

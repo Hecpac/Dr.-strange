@@ -65,6 +65,44 @@ class AggregateObserveEventsTests(unittest.TestCase):
         self.assertEqual(agg["task_ids"], ["brain-tooluse:tg-x:1"])
         self.assertAlmostEqual(agg["cost_estimate"], 0.0125, places=6)
 
+    def test_handlers_matched_reads_consolidated_tried_handlers(self) -> None:
+        # F0.3c: a turn now emits ONE dispatch_decision whose tried_handlers[]
+        # array records every handler considered. The receipt aggregator must
+        # extract the captured handler(s) from that array — even when the
+        # top-level handler/captured fields are absent (array is canonical).
+        rows = [
+            _evt(
+                "dispatch_decision",
+                selected_handler="task_intent",
+                selected_route="intercepted",
+                tried_handlers=[
+                    {"handler": "operational_alert", "route": "fall_through", "captured": False},
+                    {"handler": "operational_status", "route": "fall_through", "captured": False},
+                    {"handler": "task_intent", "route": "intercepted", "captured": True},
+                ],
+            ),
+        ]
+        agg = aggregate_observe_events(rows)
+        self.assertEqual(agg["handlers_matched"], ["task_intent"])
+
+    def test_handlers_matched_empty_for_consolidated_fall_through(self) -> None:
+        rows = [
+            _evt(
+                "dispatch_decision",
+                selected_handler=None,
+                selected_route="fall_through",
+                handler=None,
+                route="fall_through",
+                captured=False,
+                tried_handlers=[
+                    {"handler": "operational_alert", "route": "fall_through", "captured": False},
+                    {"handler": "task_intent", "route": "fall_through", "captured": False},
+                ],
+            ),
+        ]
+        agg = aggregate_observe_events(rows)
+        self.assertEqual(agg["handlers_matched"], [])
+
 
 class BuildTurnReceiptPayloadTests(unittest.TestCase):
     def test_payload_has_required_fields(self) -> None:

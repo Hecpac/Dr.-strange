@@ -84,9 +84,22 @@ def aggregate_observe_events(
     for row in rows:
         event_type, payload = _row_event_type_and_payload(row)
         if event_type == "dispatch_decision":
-            handler = str(payload.get("handler") or "")
-            if handler and payload.get("captured") is True:
-                handlers.append(handler)
+            # F0.3c: a turn now emits ONE consolidated dispatch_decision whose
+            # tried_handlers[] array is canonical. Collect every captured
+            # handler from it; fall back to the legacy single-handler shape
+            # for events emitted before consolidation.
+            tried = payload.get("tried_handlers")
+            if isinstance(tried, list):
+                for entry in tried:
+                    if not isinstance(entry, dict) or entry.get("captured") is not True:
+                        continue
+                    handler = str(entry.get("handler") or "")
+                    if handler:
+                        handlers.append(handler)
+            else:
+                handler = str(payload.get("handler") or "")
+                if handler and payload.get("captured") is True:
+                    handlers.append(handler)
         elif event_type == "semantic_turn_trace":
             intent = str(payload.get("semantic_intent") or "")
             if intent:
