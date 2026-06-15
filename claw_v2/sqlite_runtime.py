@@ -118,6 +118,24 @@ def register_wal_heal(db_path: Path | str, handle: "StoreWalHealHandle") -> None
         bucket.append(handle)
 
 
+def unregister_wal_heal(db_path: Path | str, handle: "StoreWalHealHandle") -> None:
+    """Drop a previously registered heal handle (clean owner teardown).
+
+    Additive counterpart to :func:`register_wal_heal`: an owner (e.g.
+    ``RuntimeDb``) removes its handle on ``close()`` so the registry does not
+    accumulate live handles across many construct/close cycles (tests). Heal
+    behavior for every other registered handle is unchanged.
+    """
+    key = _registry_key(db_path)
+    with _WAL_HEAL_REGISTRY_LOCK:
+        bucket = _WAL_HEAL_REGISTRY.get(key)
+        if not bucket:
+            return
+        bucket[:] = [h for h in bucket if h is not handle and h.alive]
+        if not bucket:
+            _WAL_HEAL_REGISTRY.pop(key, None)
+
+
 def sqlite_error_details(exc: BaseException) -> str:
     """Return sqlite extended error metadata when Python exposes it."""
     details: list[str] = []
@@ -551,3 +569,165 @@ def _verify_sqlite_file_header(db_path: Path) -> None:
             f"Runtime database is not a SQLite database: {db_path}. "
             "The file was left untouched; restore from backup before restarting the daemon."
         )
+
+
+# Sentinel: "use the connection's configured row_factory" (vs. an explicit
+# per-cursor override). Distinct from None, which means "tuple rows".
+_RUNTIME_DB_DEFAULT_ROW_FACTORY = object()
+
+
+class RuntimeDb:
+    """Single owner of a runtime SQLite connection + a shared re-entrant lock.
+
+    Foundation for the single-writer collapse of ``claw.db`` (F1.1a0, RAÍZ #1).
+    In F1.1a0 this is deliberately NOT constructed in ``main.py`` and NOT
+    injected into any store — it exists and is exercised only in isolation by
+    tests. Production stores keep their own connections, locks, and per-store
+    WAL-heal registrations until F1.1a1 wires them onto this.
+
+    The connection is owned privately: callers serialize through
+    :meth:`cursor` / :meth:`transaction` / :meth:`try_cursor` (all under the
+    shared lock) and must NOT cache a raw connection — a WAL-heal reopen that
+    swaps the connection is then invisible to them. There is intentionally no
+    public ``.conn`` accessor; tests use :meth:`current_connection_id` /
+    :meth:`_current_connection_for_tests`.
+
+    The lock is an :class:`threading.RLock` because runtime read paths (e.g.
+    ``MemoryStore``'s ``@_synchronized`` methods) can nest under an
+    already-held lock. Row shape is selected per cursor (``cur.row_factory``);
+    the shared connection's ``row_factory`` is never mutated, so concurrent
+    callers wanting different shapes never race on global connection state.
+    """
+
+    def __init__(self, db_path: Path | str, *, row_factory: bool = True) -> None:
+        self.db_path = Path(db_path)
+        self._row_factory = row_factory
+        self._lock = threading.RLock()
+        self._in_transaction = False
+        self._closed = False
+        # Opened through the shared connect/configure path so the durable
+        # runtime pragmas (WAL, synchronous=FULL, busy_timeout, foreign_keys)
+        # are preserved unchanged.
+        self._conn = connect_runtime_sqlite(self.db_path, row_factory=row_factory)
+        # One heal handle for the single connection. StoreWalHealHandle reopens
+        # via ``self.db_path`` and swaps ``self._conn`` under ``self._lock`` —
+        # exactly the conventional store shape, reused as-is. Reopen leaves
+        # later access pointed at the new connection automatically.
+        self._heal_handle = make_store_wal_heal(self, row_factory=row_factory)
+        register_wal_heal(self.db_path, self._heal_handle)
+
+    # -- identity / test seams (no public .conn for stores to cache) ----------
+    def current_connection_id(self) -> int:
+        """Identity of the current connection (for tests asserting a reopen
+        swapped it). Not a handle stores may cache."""
+        with self._lock:
+            return id(self._conn)
+
+    def _current_connection_for_tests(self) -> sqlite3.Connection:
+        with self._lock:
+            return self._conn
+
+    def _simulate_wal_heal_reopen_for_tests(self) -> None:
+        """Run the owned heal handle's reopen (the same swap the real
+        ``heal_orphaned_wal`` path performs on this registered handle)."""
+        self._heal_handle.reopen()
+
+    # -- access ---------------------------------------------------------------
+    @contextlib.contextmanager
+    def cursor(self, *, row_factory=_RUNTIME_DB_DEFAULT_ROW_FACTORY):
+        """Yield a cursor under the shared lock. No implicit transaction
+        control — for reads or caller-managed writes; ``cursor()`` never commits
+        on its own. It MAY be nested inside :meth:`transaction` (the re-entrant
+        lock allows it): the cursor then shares that open transaction, so its
+        writes commit or roll back atomically with the enclosing
+        ``transaction()``. ``row_factory`` shapes rows for THIS cursor only
+        (``None`` -> tuples); the shared connection's factory is never mutated."""
+        with self._lock:
+            cur = self._conn.cursor()
+            if row_factory is not _RUNTIME_DB_DEFAULT_ROW_FACTORY:
+                cur.row_factory = row_factory
+            try:
+                yield cur
+            finally:
+                cur.close()
+
+    @contextlib.contextmanager
+    def transaction(self, *, row_factory=_RUNTIME_DB_DEFAULT_ROW_FACTORY):
+        """Yield a cursor under the shared lock, committing on success and
+        rolling back on any exception. Nested transactions on the same
+        RuntimeDb are rejected: one connection has a single transaction scope,
+        so an inner commit would silently commit the outer's writes."""
+        with self._lock:
+            if self._in_transaction:
+                raise RuntimeError(
+                    "nested RuntimeDb.transaction() is not supported "
+                    "(one connection has a single transaction scope)"
+                )
+            self._in_transaction = True
+            cur = self._conn.cursor()
+            if row_factory is not _RUNTIME_DB_DEFAULT_ROW_FACTORY:
+                cur.row_factory = row_factory
+            try:
+                yield cur
+                self._conn.commit()
+            except BaseException:
+                self._conn.rollback()
+                raise
+            finally:
+                cur.close()
+                self._in_transaction = False
+
+    @contextlib.contextmanager
+    def try_acquire(self):
+        """Non-blocking lock acquire. Yields ``True`` if acquired (released on
+        exit), else yields ``False`` immediately without blocking. The
+        primitive F1.1a1 uses to preserve observe's fast-drop-on-contention
+        emit semantics."""
+        acquired = self._lock.acquire(blocking=False)
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                self._lock.release()
+
+    @contextlib.contextmanager
+    def try_cursor(self, *, row_factory=_RUNTIME_DB_DEFAULT_ROW_FACTORY):
+        """Non-blocking cursor: yields a cursor if the lock is immediately
+        available, else yields ``None`` (caller drops the work). Built on
+        :meth:`try_acquire`."""
+        acquired = self._lock.acquire(blocking=False)
+        if not acquired:
+            yield None
+            return
+        try:
+            cur = self._conn.cursor()
+            if row_factory is not _RUNTIME_DB_DEFAULT_ROW_FACTORY:
+                cur.row_factory = row_factory
+            try:
+                yield cur
+            finally:
+                cur.close()
+        finally:
+            self._lock.release()
+
+    # -- lifecycle ------------------------------------------------------------
+    def health(self) -> bool:
+        """Lightweight liveness probe: ``True`` if a trivial query succeeds."""
+        try:
+            with self.cursor() as cur:
+                cur.execute("SELECT 1").fetchone()
+            return True
+        except sqlite3.Error:
+            return False
+
+    def close(self) -> None:
+        """Close the connection and unregister the heal handle. Idempotent."""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            unregister_wal_heal(self.db_path, self._heal_handle)
+            try:
+                self._conn.close()
+            except Exception:
+                logger.debug("RuntimeDb connection close failed", exc_info=True)
