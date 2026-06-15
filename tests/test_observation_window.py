@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from claw_v2.observation_window import (
     LOCAL_READ_ONLY_TIER,
@@ -697,6 +700,56 @@ class CostBreakerTierSplitTests(unittest.TestCase):
         self.assertFalse(_is_cost_breaker_reason("circuit_breaker:tool_calls_per_minute"))
         self.assertFalse(_is_cost_breaker_reason("manual_telegram"))
         self.assertFalse(_is_cost_breaker_reason(""))
+
+
+class ObservationWindowAtomicWriteTests(unittest.TestCase):
+    """F0.4: the circuit/budget freeze state file must be persisted atomically.
+    A crash mid-write must leave the previous complete state, never a truncated
+    JSON file that would fail to load on the next boot."""
+
+    def test_persist_crash_at_rename_leaves_previous_complete_json(self) -> None:
+        # TDD #3: a crash at the atomic-commit point of a freeze-state write
+        # must leave the old complete state on disk (here: reason == "v1"),
+        # never the half-written new one.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "window.json"
+            window = ObservationWindowState(state_path=state_path)
+            window.freeze(reason="v1", actor="test")
+            self.assertEqual(json.loads(state_path.read_text(encoding="utf-8"))["reason"], "v1")
+
+            real_replace = os.replace
+
+            def crash_replace(src, dst, *args, **kwargs):
+                if Path(dst).name == state_path.name:
+                    raise OSError("simulated power loss at rename")
+                return real_replace(src, dst, *args, **kwargs)
+
+            with patch("os.replace", side_effect=crash_replace):
+                with contextlib.suppress(OSError):
+                    window.freeze(reason="v2", actor="test")
+
+            data = json.loads(state_path.read_text(encoding="utf-8"))  # must not raise
+            self.assertEqual(data["reason"], "v1")
+
+    def test_short_os_write_still_persists_complete_state(self) -> None:
+        # F0.4 blocker (#119 review): a single unchecked os.write may short-write.
+        # The helper must keep writing until the whole payload lands so the
+        # committed freeze state is COMPLETE valid JSON, never a truncated prefix
+        # that fails the next boot's circuit/budget restore.
+        real_write = os.write
+
+        def fragmented_write(fd, data):  # write at most 8 bytes per call
+            return real_write(fd, bytes(data[:8]))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "window.json"
+            window = ObservationWindowState(state_path=state_path)
+            with patch("os.write", side_effect=fragmented_write):
+                window.freeze(reason="frozen-with-short-writes", actor="test")
+
+            data = json.loads(state_path.read_text(encoding="utf-8"))  # must parse fully
+            self.assertTrue(data["frozen"])
+            self.assertEqual(data["reason"], "frozen-with-short-writes")
 
 
 if __name__ == "__main__":
