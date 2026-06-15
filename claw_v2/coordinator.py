@@ -3,6 +3,8 @@ from __future__ import annotations
 import contextvars
 import json
 import logging
+import os
+import secrets
 import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1318,7 +1320,7 @@ class CoordinatorService:
             return
 
     def _write_scratch(self, scratch: Path, phase: str, results: list[WorkerResult]) -> None:
-        """Write worker results to scratch directory as JSON."""
+        """Write worker results to scratch directory as JSON (atomically)."""
         phase_dir = scratch / phase
         phase_dir.mkdir(parents=True, exist_ok=True)
         for r in results:
@@ -1329,14 +1331,49 @@ class CoordinatorService:
                 "error": r.error,
                 "degraded_compaction": r.degraded_compaction,
             }
-            (phase_dir / f"{r.task_name}.json").write_text(
-                json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+            _atomic_write_text(
+                phase_dir / f"{r.task_name}.json",
+                json.dumps(data, indent=2, ensure_ascii=False),
             )
 
     @staticmethod
     def _write_scratch_text(scratch: Path, filename: str, content: str) -> None:
-        """Write a text file to the scratch directory."""
-        (scratch / filename).write_text(content, encoding="utf-8")
+        """Write a text file to the scratch directory (atomically)."""
+        _atomic_write_text(scratch / filename, content)
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` atomically and durably.
+
+    Mirrors ``approval.py:_atomic_write_json`` (unique dot-prefixed tmp →
+    fsync → ``os.replace``) and adds the parent-directory fsync that helper
+    omits, so the rename itself survives a crash. Readers never observe a
+    partial file: a crash between temp-write and rename leaves the target
+    absent or intact, never half-written. The dot prefix keeps the tmp out
+    of the ``*.json`` listing glob. On error the tmp is removed best-effort.
+    """
+    data = text.encode("utf-8")
+    tmp = path.parent / f".{path.name}.{secrets.token_hex(4)}.tmp"
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(fd, data)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    try:
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+    # fsync the directory so the rename is durable across power loss.
+    dir_fd = os.open(str(path.parent), os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
 
 
 def _worker_result_payload(result: WorkerResult) -> dict[str, Any]:
